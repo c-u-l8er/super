@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-hold-end"
+description = "Enables the hold_end command without any pre-configured scope."
+commands.allow = ["hold_end"]
+
+[[permission]]
+identifier = "deny-hold-end"
+description = "Denies the hold_end command without any pre-configured scope."
+commands.deny = ["hold_end"]

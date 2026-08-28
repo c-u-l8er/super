@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bind-frame-stream"
+description = "Enables the bind_frame_stream command without any pre-configured scope."
+commands.allow = ["bind_frame_stream"]
+
+[[permission]]
+identifier = "deny-bind-frame-stream"
+description = "Denies the bind_frame_stream command without any pre-configured scope."
+commands.deny = ["bind_frame_stream"]

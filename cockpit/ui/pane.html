@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>[&amp;] Super — untrusted pane</title>
+  <link rel="stylesheet" href="cockpit.css">
+</head>
+<body>
+  <!-- The shape a browser or application pane will take: a webview inside
+       the cockpit's process that is granted no capability. It exists so
+       the refusal is measured rather than reasoned about — see
+       `tools/cockpit-battery.mjs`, which invokes `intent` from here and
+       requires Tauri, not our JavaScript, to refuse it.
+
+       Nothing renders here and nothing is meant to. -->
+  <header id="badge">
+    <span class="state">untrusted pane</span>
+    <span class="mono">granted nothing</span>
+  </header>
+  <main>
+    <section id="world">
+      <p class="empty">This webview holds no capability. Every command it invokes is refused by Tauri's ACL before it reaches the cockpit.</p>
+    </section>
+  </main>
+</body>
+</html>

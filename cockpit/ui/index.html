@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Super (CD) — cockpit</title>
+  <link rel="stylesheet" href="cockpit.css">
+</head>
+<body>
+
+  <!-- Everything inside a data-source="frame" region is written by
+       render() and by nothing else. The receipt rail is the one place a
+       submission may show, and it says so in its own attribute. -->
+
+  <header id="badge" data-source="frame">
+    <span id="badge-state" class="state">connecting</span>
+    <span id="badge-world" class="mono"></span>
+    <span id="badge-rev" class="mono"></span>
+  </header>
+
+  <main>
+    <section id="world" data-source="frame">
+      <p class="empty">Waiting for the first frame.</p>
+    </section>
+
+    <aside id="receipts" data-source="submission">
+      <h2>Submissions</h2>
+      <p class="empty">Nothing submitted yet.</p>
+      <ol id="receipt-list"></ol>
+    </aside>
+  </main>
+
+  <script type="module" src="cockpit.js"></script>
+</body>
+</html>

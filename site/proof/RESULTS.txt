@@ -1,0 +1,40 @@
+TRVM governance review pack — replayed 2026-08-20T20:15Z on node v25.2.1
+
+── manifest ──────────────────────────────────────────────────────────
+MANIFEST: all 68 files verify
+
+── replayed gates (every number below was produced by this run) ───────
+PASS  law kernel — VERDICT: PASS — conformant; every asserted law holds; every by-design falsification still fails; certificate emitted.
+PASS  invariant grid — GRID-CONSISTENCY-2: PASS — registry valid (90 entries), 380 citations resolved across 16 artifacts, no banned stale claims, structure coherent with v1.43.0. [root /tmp/claude-1000/-home-travis-ProjectAmp2/d12952f2-a981-4fd7-90f9-43097e865d22/scratchpad/b51-review/governance]
+PASS  World — VERDICT: PASS — the WORLD layer's warrant machinery holds; receipt emitted.
+PASS  World receipt — RECEIPT-CHECK: PASS — world rebuilt from committed spec; ground and composite REPLAYED with support equality; commitment recomputed.
+PASS  negative battery — NEGATIVE BATTERY: 307/307 forgeries caught
+PASS  harness self-test — HARNESS SELFTEST: 9/9 known apparatus failure species caught
+PASS  runner contract — RUNNER CONTRACT: 3/3 — the runner hears success, failure and crash
+PASS  derive battery — DERIVE-BATTERY: PASS — 45/45. The program is data and its id commits the frozen core's semantics, not just its syntax; the grant is what the authority made available and the footprint is what the program consumed — a canonical dependency SET whose access order is a separate trace, outside semantics; the executor asserts its own identity; containment is historical and freshness is temporal; and issuance binds the whole request to the authority that cut it, which no caller can supply on its behalf.
+PASS  realm battery — DERIVE-REALM: PASS — 24/24. Object authority does not cross the boundary, the realm reads only its grant, and an implementation identity is an EXECUTION EVENT THE AUTHORITY DROVE — where both the entrypoint and the transport are consequences of one immutable catalog entry, so there is no field left in which a caller may supply an action beside the evidence. Determinism, host confinement and TOCTOU-free artifact identity are SEPARATE scopes and are not claimed here.
+PASS  probe_derivegrant_v02_repro — DERIVE-GRANT-v0.2 REPRO: 2/2 reproduce against the frozen v0.1.0 · 2/2 confined against live
+PASS  probe_coresem_v03_repro — CORE-SEM-v0.3 REPRO: 4/4 reproduce against the frozen v0.2.0 · 5/5 confined against live
+PASS  probe_stalegrant_v03_repro — STALE-GRANT v0.3 WITNESS: 5/5 hold; the three containment-era checks pass on a stale result BY DESIGN, which is the finding
+PASS  probe_issuebind_v05_repro — ISSUE-BIND v0.5 REPRO: 3/3 reproduce against the frozen draft · 4/4 confined against live
+PASS  probe_traceforge_v06_repro — TRACE-FORGE v0.6 REPRO: 1/1 reproduce against the frozen v0.5.0 · 4/4 confined against live
+PASS  probe_execclaim_v07_repro — EXEC-CLAIM v0.7 REPRO: 1/1 reproduce against the frozen v0.6.0 · 6/6 confined against live
+PASS  probe_execreg_v08_repro — EXEC-REG v0.8 REPRO: 2/2 reproduce against the frozen v0.7.0 · 5/5 confined against live
+PASS  probe_execlaunch_v09_repro — EXEC-LAUNCH v0.9 REPRO: 2/2 reproduce against the frozen v0.8.0 · 5/5 confined against live
+PASS  probe_semoracle_v10_repro — SEM-ORACLE v0.10 REPRO: 2/2 reproduce against the frozen v0.9.0 · 5/5 confined against live
+PASS  probe_hostown_v11_repro — HOST-OWN v0.11 REPRO: 2/2 reproduce against the frozen v0.10.0 · 4/4 confined against live
+PASS  probe_snapshot_v12_repro — SNAPSHOT v0.12 REPRO: 2/2 reproduce against the frozen v0.11.0 · 5/5 confined against live
+PASS  probe_reread_v13_repro — REREAD v0.13 REPRO: 3/3 reproduce against the frozen v0.12.0 · 6/6 confined against live
+note  10 further probe_*_repro.mjs freeze DECLARED-OPEN boundaries and exit nonzero by
+      design; they are witnesses, not gates, and are not run here. artifacts.json says which.
+PASS  cross-plane bridge — BRIDGE-CHECK: PASS — 48/48 states byte-identical across implementations (24 vectors x {initial, normal form}); C packed-word heap and JS node graph reach the same canonical signature STRING, not merely the same digest.
+PASS  native semantic film — FILM-CHECK: PASS — 45/45. The native ic32 runtime ORIGINATED semantic-film evidence for the DUP/SUP interaction-net dynamics themselves: church_exp_2_2 emits 21 chained frames covering APP-LAM, APP-SUP, DUP-APP, DUP-LAM, DUP-SUP!, DUP-SUP=, DUP-VAR across locus families d: t: v: and both semantic planes, and the law kernel's own replaySemFilm accepted the whole chain on two runtime classes without translation. Every field forged individually is refused — including a locus naming a DIFFERENT LIVE ENABLED REDEX, which gets past enabledness and dies on the post-state — and the film's provenance is an execution the host drove rather than a label anyone may attach. The two ERA rules now have their own minimal witnesses — (* x)  and  !{a,b} = *; λz.a  and  !{a,b} = *; (a b) — so of the 9 declared rules EVERY ONE has a positive native witness. BOTH TERMINAL CLASSES ARE NOW NATIVE: 6 budgets over the same 21-frame computation seal 5 partial films and 1 complete one(s), every one replayed on both runtime classes with its remaining_work RE-DERIVED — the first count, as opposed to state, that C's enumeration has had to agree with the oracle about. The zero-frame film the round-6B audit forged against the v1 terminal is now generated honestly and refused when forged, and a computation finishing exactly on its budget is a NORMAL_FORM. SCOPE: C→JS only; a canonical-locus alias is refused rather than resolved; and film-too-many-frames has no positive witness among the terms measured, because MAXPATH binds first on every one of them — the guard is witnessed instead by a -DMAXFRAMES=4 limits build, with production limits reported by the binary and asserted unchanged.
+PASS  lowering refinement — LOWERING-CHECK: PASS — 23/23. REFINEMENT WITNESSED, AND FILM-EVIDENCED: add(const 2, const 3) with inputs={} lowers to one canonical ic32 term; the native runtime the host launched emits SIX chained semantic-film frames that the law kernel's own replaySemFilm accepts on two runtime classes, and reduces it to a canonical normal form; that form decodes structurally to {status:"value",value:5}; and its outcome identity EQUALS the source evaluator's. 11 of the chain's 11 identities are exercised here and stay distinct, every one of them. STILL NOT CLAIMED, and PROBED rather than typed: no rule of the declared pool; every one has a native handler. The inputs model is DECIDED and IMPLEMENTED: `input` lowers to a structural port and instantiate() closes it, the three port falsifiers are WITNESSED with I-4c carried end to end through native execution, and the refinement claim above holds over canonical, fully bound input environments — every port the template declares has a value in canonical_inputs, and instantiation succeeds. DECLARED OPEN: SOURCE-REFUSAL <-> INSTANTIATION-REFUSAL.
+PASS  measurement (non-gating) —   This is a MEASUREMENT, not a conformance claim: nothing here is committed, replayed or signed.
+
+checks attempted 25
+         passed  25
+         failed  0
+         skipped 0
+REVIEW PACK: every gate replayed green
+Counts above are from THIS run. Nothing in this pack transcribes a number.

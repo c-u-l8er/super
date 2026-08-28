@@ -1,0 +1,1200 @@
+{
+  "schema": "authority-vectors@1",
+  "source": "frozen JS simulator (app-prototype.html)",
+  "generated_at": "2026-08-27T18:21:58.156Z",
+  "params": {
+    "pr.draft": {
+      "repo": "traaviis/trvm",
+      "branch": "lane-a",
+      "title": "close the argv boundary"
+    },
+    "pr.create": {
+      "repo": "traaviis/trvm",
+      "branch": "lane-a",
+      "title": "close the argv boundary"
+    }
+  },
+  "digest_env": {
+    "schema": "approval-intent@1",
+    "effect_key": "sha256:fixedeffectkey",
+    "pack": "github@1.4.2",
+    "capability": "github.pr.create",
+    "actor": "kestrel",
+    "resource": "traaviis/trvm",
+    "grant": "gr_fixed",
+    "authority_snapshot": "sha256:fixed",
+    "placement": "local",
+    "request_id": "er-github.pr.create",
+    "request_revision": 1,
+    "request": {
+      "repo": "traaviis/trvm",
+      "branch": "lane-a",
+      "title": "close the argv boundary"
+    }
+  },
+  "effect_env": {
+    "capability": "github.pr.create",
+    "resource": "traaviis/trvm",
+    "request_id": "er-github.pr.create",
+    "request_revision": 1,
+    "request": {
+      "repo": "traaviis/trvm",
+      "branch": "lane-a",
+      "title": "close the argv boundary"
+    }
+  },
+  "snap_list": [
+    {
+      "id": "gr_9001",
+      "actor": "kestrel",
+      "capability": "github.repo.read",
+      "resource": "traaviis/trvm",
+      "duration": "workspace",
+      "placement": [
+        "local",
+        "fleet"
+      ],
+      "workspace": "trvm",
+      "run": "run-b51",
+      "uses_remaining": null
+    },
+    {
+      "id": "gr_9002",
+      "actor": "kestrel",
+      "capability": "github.pr.create",
+      "resource": "traaviis/trvm",
+      "duration": "once",
+      "placement": [
+        "local",
+        "fleet"
+      ],
+      "workspace": "trvm",
+      "run": "run-b51",
+      "uses_remaining": 1
+    }
+  ],
+  "vectors": [
+    {
+      "name": "install grants nothing",
+      "steps": [
+        [
+          "install_pack",
+          "postgres"
+        ],
+        [
+          "auth",
+          {
+            "cap": "postgres.schema.read",
+            "resource": "db-main"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "authority-missing"
+      }
+    },
+    {
+      "name": "wrong actor refuses by name",
+      "steps": [
+        [
+          "auth",
+          {
+            "cap": "github.repo.read",
+            "resource": "traaviis/trvm",
+            "ctx": {
+              "actor": "evil"
+            }
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "actor-mismatch"
+      }
+    },
+    {
+      "name": "wrong resource refuses by name",
+      "steps": [
+        [
+          "auth",
+          {
+            "cap": "github.repo.read",
+            "resource": "other/repo"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "scope-mismatch"
+      }
+    },
+    {
+      "name": "wrong workspace refuses by name",
+      "steps": [
+        [
+          "world",
+          "pricing"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.repo.read",
+            "resource": "traaviis/trvm"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "workspace-mismatch"
+      }
+    },
+    {
+      "name": "run grant dies with the run",
+      "steps": [
+        [
+          "revoke_domain",
+          "github.pr.draft"
+        ],
+        [
+          "dur",
+          "run"
+        ],
+        [
+          "draft",
+          "pr.draft",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "end_run"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.draft",
+            "resource": "traaviis/trvm"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "run-expired"
+      }
+    },
+    {
+      "name": "retired run id refuses even forged",
+      "steps": [
+        [
+          "revoke_domain",
+          "github.pr.draft"
+        ],
+        [
+          "dur",
+          "run"
+        ],
+        [
+          "draft",
+          "pr.draft",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "end_run"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.draft",
+            "resource": "traaviis/trvm",
+            "ctx": {
+              "run": "RETIRED"
+            }
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false
+      }
+    },
+    {
+      "name": "one-shot consumes and refuses retry",
+      "steps": [
+        [
+          "revoke_domain",
+          "github.pr.draft"
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.draft",
+            "duration": "once"
+          }
+        ],
+        [
+          "exercise",
+          "pr.draft"
+        ],
+        [
+          "exercise",
+          "pr.draft"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "reason_last": "one-shot-consumed|authority-missing"
+      }
+    },
+    {
+      "name": "destructive class is denied by default",
+      "steps": [
+        [
+          "auth",
+          {
+            "cap": "github.pr.merge",
+            "resource": "traaviis/trvm"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "denied-by-default|destructive"
+      }
+    },
+    {
+      "name": "unknown pack is undeclared",
+      "steps": [
+        [
+          "auth",
+          {
+            "cap": "nosuchpack.thing",
+            "resource": "x"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "capability-undeclared"
+      }
+    },
+    {
+      "name": "a discovered pack confers nothing",
+      "steps": [
+        [
+          "mint",
+          {
+            "cap": "postgres.schema.read",
+            "resource": "db-main"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "postgres.schema.read",
+            "resource": "db-main"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "pack-not-installed"
+      }
+    },
+    {
+      "name": "installing after a refused mint still grants nothing",
+      "steps": [
+        [
+          "mint",
+          {
+            "cap": "postgres.schema.read",
+            "resource": "db-main"
+          }
+        ],
+        [
+          "install_pack",
+          "postgres"
+        ],
+        [
+          "auth",
+          {
+            "cap": "postgres.schema.read",
+            "resource": "db-main"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "authority-missing"
+      }
+    },
+    {
+      "name": "an unenforceable duration is never minted",
+      "steps": [
+        [
+          "revoke_domain",
+          "github.pr.draft"
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.draft",
+            "duration": "forever"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.draft",
+            "resource": "traaviis/trvm"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "authority-missing"
+      }
+    },
+    {
+      "name": "approval-class refuses an empty intent",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "request-missing",
+        "pending": 0
+      }
+    },
+    {
+      "name": "granted-but-unapproved is held without receipt",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ]
+      ],
+      "expect": {
+        "held": true,
+        "receipts": 0,
+        "pending": 1
+      }
+    },
+    {
+      "name": "exact-intent approval commits once",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "approve_last"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "last_approval": "consumed"
+      }
+    },
+    {
+      "name": "consumed approval does not authorize again",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "approve_last"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "pending": 1
+      }
+    },
+    {
+      "name": "forged approval: wrong capability",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "forge_pr_create",
+          {
+            "capability": "github.issue.write"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": "PR_CREATE"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false
+      }
+    },
+    {
+      "name": "forged approval: wrong actor",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "forge_pr_create",
+          {
+            "actor": "other-agent"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": "PR_CREATE"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false
+      }
+    },
+    {
+      "name": "forged approval: wrong grant",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "forge_pr_create",
+          {
+            "grant_ref": "gr_wrong"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": "PR_CREATE"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false
+      }
+    },
+    {
+      "name": "forged approval: older pack version",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "forge_pr_create",
+          {
+            "pack_version": "1.3.9"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": "PR_CREATE"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false
+      }
+    },
+    {
+      "name": "forged approval: older snapshot",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "forge_pr_create",
+          {
+            "snapshot": "sha256:old"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": "PR_CREATE"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false
+      }
+    },
+    {
+      "name": "changed parameter stales the approval",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "forge_pr_create",
+          {}
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": {
+              "repo": "traaviis/trvm",
+              "branch": "lane-a",
+              "title": "completely different PR"
+            }
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "has_stale": true
+      }
+    },
+    {
+      "name": "placement derives to local and cites constraints",
+      "steps": [
+        [
+          "auth",
+          {
+            "cap": "github.repo.read",
+            "resource": "traaviis/trvm",
+            "ctx": {
+              "placement": null
+            }
+          }
+        ]
+      ],
+      "expect": {
+        "allow": true,
+        "placement_site": "local",
+        "cited": "private|residency"
+      }
+    },
+    {
+      "name": "cloud refusal names the data policy",
+      "steps": [
+        [
+          "auth",
+          {
+            "cap": "github.repo.read",
+            "resource": "traaviis/trvm",
+            "ctx": {
+              "placement": "cloud"
+            }
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "placement-denied",
+        "reason_also": "private|residency"
+      }
+    },
+    {
+      "name": "consent executes in its held context",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "world",
+          "pricing"
+        ],
+        [
+          "approve_last"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "last_approval": "consumed"
+      }
+    },
+    {
+      "name": "dead-grant approval surfaces as stale",
+      "steps": [
+        [
+          "revoke_domain",
+          "github.pr.create"
+        ],
+        [
+          "dur",
+          "run"
+        ],
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "end_run"
+        ],
+        [
+          "approve_last"
+        ]
+      ],
+      "expect": {
+        "receipts": 0,
+        "last_approval": "stale",
+        "stale_reason": "run-expired|authority-missing"
+      }
+    },
+    {
+      "name": "update expands surface, grants nothing",
+      "steps": [
+        [
+          "update_github"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.issue.write",
+            "resource": "traaviis/trvm"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "authority-missing"
+      }
+    },
+    {
+      "name": "independent proposals hold independent consent",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "approve_hold"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": {
+              "er": "er_B",
+              "rev": 1,
+              "params": {
+                "repo": "traaviis/trvm",
+                "branch": "lane-b",
+                "title": "proposal B"
+              }
+            }
+          }
+        ]
+      ],
+      "expect": {
+        "has_stale": false,
+        "granted_count": 1,
+        "pending": 1
+      }
+    },
+    {
+      "name": "revising a proposal stales only that proposal",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "approve_hold"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": {
+              "er": "er-github.pr.create",
+              "rev": 2,
+              "params": {
+                "repo": "traaviis/trvm",
+                "branch": "lane-a",
+                "title": "edited after consent"
+              }
+            }
+          }
+        ]
+      ],
+      "expect": {
+        "has_stale": true,
+        "granted_count": 0
+      }
+    },
+    {
+      "name": "authority snapshot is a content commitment",
+      "steps": [
+        [
+          "snap",
+          "A"
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.draft",
+            "duration": "once"
+          }
+        ],
+        [
+          "snap",
+          "B"
+        ]
+      ],
+      "expect": {
+        "snap_hex": "A",
+        "snap_neq": [
+          "A",
+          "B"
+        ]
+      }
+    },
+    {
+      "name": "idempotent commit leaves the snapshot byte-identical",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "snap",
+          "A"
+        ],
+        [
+          "commit"
+        ],
+        [
+          "snap",
+          "B"
+        ]
+      ],
+      "expect": {
+        "snap_eq": [
+          "A",
+          "B"
+        ]
+      }
+    },
+    {
+      "name": "draft revoke clears the whole grant domain",
+      "steps": [
+        [
+          "mint",
+          {
+            "cap": "github.pr.create",
+            "duration": "workspace"
+          }
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.create",
+            "duration": "run"
+          }
+        ],
+        [
+          "draft",
+          "pr.create",
+          false
+        ],
+        [
+          "commit"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": "PR_CREATE"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "reason": "authority-missing"
+      }
+    },
+    {
+      "name": "duration edit replaces the grant identity",
+      "steps": [
+        [
+          "dur",
+          "run"
+        ],
+        [
+          "commit"
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.repo.read",
+            "resource": "traaviis/trvm"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": true,
+        "active": {
+          "cap": "github.repo.read",
+          "n": 1,
+          "duration": "run"
+        }
+      }
+    },
+    {
+      "name": "one-shot receipt cites the pre-consumption snapshot",
+      "steps": [
+        [
+          "revoke_domain",
+          "github.pr.draft"
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.draft",
+            "duration": "once"
+          }
+        ],
+        [
+          "snap",
+          "X"
+        ],
+        [
+          "exercise",
+          "pr.draft"
+        ],
+        [
+          "snap",
+          "Y"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "snap_neq": [
+          "X",
+          "Y"
+        ],
+        "receipt_at_entry": "X",
+        "receipt_after": "Y"
+      }
+    },
+    {
+      "name": "approval receipt cites the snapshot consent was bound to",
+      "steps": [
+        [
+          "revoke_domain",
+          "github.pr.create"
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.create",
+            "duration": "once"
+          }
+        ],
+        [
+          "snap",
+          "X"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "approve_last"
+        ],
+        [
+          "snap",
+          "Y"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "snap_neq": [
+          "X",
+          "Y"
+        ],
+        "receipt_at_entry": "X",
+        "receipt_after": "Y"
+      }
+    },
+    {
+      "name": "a workspace grant leaves entry and after identical",
+      "steps": [
+        [
+          "snap",
+          "X"
+        ],
+        [
+          "exercise",
+          "pr.draft"
+        ],
+        [
+          "snap",
+          "Y"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "snap_eq": [
+          "X",
+          "Y"
+        ],
+        "receipt_at_entry": "X",
+        "receipt_after": "Y"
+      }
+    },
+    {
+      "name": "the effect key is stable across authority change",
+      "steps": [
+        [
+          "snap",
+          "X"
+        ],
+        [
+          "effect_key",
+          "A"
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.merge",
+            "duration": "once"
+          }
+        ],
+        [
+          "snap",
+          "Y"
+        ],
+        [
+          "effect_key",
+          "B"
+        ]
+      ],
+      "expect": {
+        "snap_neq": [
+          "X",
+          "Y"
+        ],
+        "ek_eq": [
+          "A",
+          "B"
+        ]
+      }
+    },
+    {
+      "name": "the approval digest does NOT survive authority change",
+      "steps": [
+        [
+          "draft",
+          "pr.create",
+          true
+        ],
+        [
+          "commit"
+        ],
+        [
+          "exercise",
+          "pr.create"
+        ],
+        [
+          "approve_hold"
+        ],
+        [
+          "mint",
+          {
+            "cap": "github.pr.merge",
+            "duration": "once"
+          }
+        ],
+        [
+          "auth",
+          {
+            "cap": "github.pr.create",
+            "resource": "traaviis/trvm",
+            "params": "PR_CREATE"
+          }
+        ]
+      ],
+      "expect": {
+        "allow": false,
+        "has_stale": true
+      }
+    },
+    {
+      "name": "a receipt carries the effect key as its idempotency key",
+      "steps": [
+        [
+          "exercise",
+          "pr.draft"
+        ]
+      ],
+      "expect": {
+        "receipts": 1,
+        "receipt_key_is_effect_key": true
+      }
+    },
+    {
+      "name": "effect key parity across languages",
+      "steps": [
+        [
+          "effect_key_of",
+          "FIXED"
+        ]
+      ],
+      "expect": {
+        "effect_key": "sha256:69fb7bcc02dd31fe84252455242b992490fbf3b437b834753e5b8b9aa5d875d8"
+      }
+    },
+    {
+      "name": "authority snapshot parity across languages",
+      "steps": [
+        [
+          "snapshot_of",
+          "FIXED"
+        ]
+      ],
+      "expect": {
+        "snapshot": "sha256:240942bddbdc7c1fa77a56740cdf86c299688d2ccbaf66525951528758c7e586"
+      }
+    },
+    {
+      "name": "sha256 intent digest parity",
+      "steps": [
+        [
+          "digest",
+          "ENV"
+        ]
+      ],
+      "expect": {
+        "digest": "sha256:53784b537dcd0c355161e848657cd16bf8728afbb6240fdf5defe6e869daf9c3"
+      }
+    }
+  ]
+}

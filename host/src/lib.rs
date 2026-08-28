@@ -1,0 +1,1477 @@
+//! The [&] Super host.
+//!
+//! It owns the human capability and nothing else owns any:
+//!
+//! ```text
+//!   super-host
+//!     ├─ socketpair(SEQPACKET)   → keeps A, spawns ampd with B as fd 3
+//!     │                            ampd adopts fd 3: THE BRIDGE
+//!     ├─ bind the control channel over the bridge  ← THIS is the person
+//!     └─ per engine:
+//!          socketpair(STREAM)    → one end to ampd over the bridge,
+//!                                  labelled; the other inherited by the
+//!                                  engine at spawn
+//! ```
+//!
+//! # Possession is the capability
+//!
+//! There is no socket file and no path. A channel is a descriptor, and a
+//! descriptor cannot be guessed, enumerated, or opened by name — it can
+//! only be given. The first version of this host asked the runtime for a
+//! *path* and connected to it, which meant the identity law was really
+//! "first connector wins" against every other process running as the same
+//! user. `fdpass.rs` is the correction, written out by hand because the
+//! whole trust model rests on those four syscalls.
+//!
+//! The host is trusted for exactly one thing — deciding which process gets
+//! which descriptor — instead of being trusted on every message. It cannot
+//! forge a message on a channel it did not create, and nothing else can
+//! obtain one at all.
+
+pub mod fdpass;
+
+use std::collections::HashMap;
+use std::io;
+use std::os::unix::fs::PermissionsExt;
+use std::os::unix::io::RawFd;
+use std::os::unix::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use serde_json::{json, Value};
+
+const MAX_FRAME: usize = 256 * 1024;
+
+// ============================================================== framing
+//
+// Four-byte big-endian length, then the body. The length is checked before
+// the body is read — on both sides — because a length-prefixed protocol
+// that allocates first has made the attack cheaper rather than more
+// expensive.
+fn read_exact(fd: RawFd, n: usize) -> io::Result<Vec<u8>> {
+    extern "C" {
+        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+    }
+
+    let mut buf = vec![0u8; n];
+    let mut got = 0;
+    while got < n {
+        let r = unsafe { read(fd, buf.as_mut_ptr().add(got), n - got) };
+        if r == 0 {
+            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"));
+        }
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        got += r as usize;
+    }
+    Ok(buf)
+}
+
+fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
+    extern "C" {
+        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+    }
+
+    let mut sent = 0;
+    while sent < buf.len() {
+        let r = unsafe { write(fd, buf.as_ptr().add(sent), buf.len() - sent) };
+        if r <= 0 {
+            return Err(io::Error::last_os_error());
+        }
+        sent += r as usize;
+    }
+    Ok(())
+}
+
+fn read_frame(fd: RawFd) -> io::Result<Value> {
+    let len = read_exact(fd, 4)?;
+    let n = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
+    if n > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("runtime announced a {n} byte frame"),
+        ));
+    }
+    let body = read_exact(fd, n)?;
+    serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
+
+fn write_frame(fd: RawFd, v: &Value) -> io::Result<()> {
+    let body = serde_json::to_vec(v)?;
+    if body.len() > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("frame of {} bytes exceeds the {MAX_FRAME} byte limit", body.len()),
+        ));
+    }
+    write_all(fd, &(body.len() as u32).to_be_bytes())?;
+    write_all(fd, &body)
+}
+
+// ========================================================= demultiplexer
+//
+//                    ONE SOCKET
+//                        │
+//                   reader thread
+//                        │
+//             ┌──────────┴──────────┐
+//         replies                projections
+//     by client_request_id      latest snapshot
+//             │                     │
+//        oneshot waiter        revision-gated wait
+//
+// **Once a channel subscribes, the reply to a command is not the next
+// frame on the socket.** The first version of this host wrote a command
+// and read one frame; a projection pushed in between was read as the
+// answer, so `operator_projection` returned a map with a `projection` key
+// where `grants` was expected, the id list came out empty, and a bulk
+// revocation "passed" its check by confirming nothing. A check that passes
+// for the wrong reason is worse than one that fails.
+//
+// Correlation is not left to each caller. One reader owns the socket and
+// routes: replies to the waiter that asked, projections into a slot.
+//
+// **Projections supersede rather than queue.** A newer snapshot makes an
+// older one worthless — it is the whole world, not an event — so a FIFO of
+// 256 would drop the *newest* under load, which is precisely backwards.
+struct Shared {
+    waiters: Mutex<HashMap<String, SyncSender<Value>>>,
+    latest: Mutex<Option<Value>>,
+    // `hello@1` is neither a reply nor a projection: it is unprompted, it
+    // arrives exactly once, and it is what tells a client what it is
+    // before it has asked anything. A third slot, rather than pretending
+    // it is one of the other two.
+    hello: Mutex<Option<Value>>,
+    // Replies that correlate to no waiter. A frame-level refusal carries
+    // no `client_request_id` — the frame it refused was never decoded — so
+    // when nothing is in flight it would otherwise be dropped silently,
+    // and "the runtime said nothing" and "the runtime refused" are not the
+    // same fact.
+    unmatched: Mutex<Vec<Value>>,
+    cv: Condvar,
+    closed: AtomicBool,
+}
+
+impl Shared {
+    fn new() -> Arc<Shared> {
+        Arc::new(Shared {
+            waiters: Mutex::new(HashMap::new()),
+            latest: Mutex::new(None),
+            hello: Mutex::new(None),
+            unmatched: Mutex::new(Vec::new()),
+            cv: Condvar::new(),
+            closed: AtomicBool::new(false),
+        })
+    }
+}
+
+pub struct Chan {
+    fd: RawFd,
+    shared: Arc<Shared>,
+    seq: AtomicU64,
+    /// **One writer.** `write_frame` is a 4-byte header followed by a
+    /// body, and two threads doing that concurrently on one stream can
+    /// produce `header A · header B · body A · body B` — a corrupt stream
+    /// the runtime cannot resynchronise from.
+    ///
+    /// The reader was already single; this makes the pair explicit:
+    /// **one reader, one writer, many logical callers.** `super-host
+    /// verify` is nearly sequential and would never have shown this; a
+    /// WebView issuing concurrent commands would have shown it immediately
+    /// and intermittently, which is the worst way to find it.
+    writer: Mutex<()>,
+}
+
+impl Chan {
+    pub fn adopt(fd: RawFd) -> Chan {
+        let shared = Shared::new();
+        let s = Arc::clone(&shared);
+
+        std::thread::spawn(move || loop {
+            match read_frame(fd) {
+                Ok(f) => {
+                    let schema = f["schema"].as_str().unwrap_or("");
+
+                    if schema == "hello@1" {
+                        *s.hello.lock().unwrap() = Some(f);
+                        s.cv.notify_all();
+                        continue;
+                    }
+
+                    if schema == "projection-snapshot@1" {
+                        let mut slot = s.latest.lock().unwrap();
+                        *slot = Some(f);
+                        s.cv.notify_all();
+                        continue;
+                    }
+
+                    if schema == "reply@1" {
+                        let id = f["client_request_id"].as_str().map(String::from);
+                        let mut w = s.waiters.lock().unwrap();
+
+                        // A frame-level refusal cannot echo an id: the
+                        // frame it refused was never decoded. With one
+                        // command in flight per waiter, it belongs to
+                        // whoever is waiting.
+                        let key = match id {
+                            Some(k) if w.contains_key(&k) => Some(k),
+                            _ if w.len() == 1 => w.keys().next().cloned(),
+                            _ => None,
+                        };
+
+                        match key.and_then(|k| w.remove(&k)) {
+                            Some(tx) => {
+                                let _ = tx.send(f);
+                            }
+                            None => {
+                                drop(w);
+                                let mut u = s.unmatched.lock().unwrap();
+                                u.push(f);
+                                if u.len() > 64 {
+                                    u.remove(0);
+                                }
+                                s.cv.notify_all();
+                            }
+                        }
+                    }
+                }
+                Err(_) => {
+                    s.closed.store(true, Ordering::SeqCst);
+                    s.waiters.lock().unwrap().clear();
+                    s.cv.notify_all();
+                    return;
+                }
+            }
+        });
+
+        Chan { fd, shared, seq: AtomicU64::new(0), writer: Mutex::new(()) }
+    }
+
+    pub fn closed(&self) -> bool {
+        self.shared.closed.load(Ordering::SeqCst)
+    }
+
+    /// The descriptor this channel is served over. Exposed so a battery
+    /// can `shutdown(2)` it without closing it — see `fdpass::shutdown_fd`.
+    pub fn fd(&self) -> RawFd {
+        self.fd
+    }
+
+    /// One command, one reply, routed by id. Note what is absent from the
+    /// frame: any statement about who is sending it.
+    pub fn call(&self, command: &str, args: Value) -> io::Result<Value> {
+        let id = format!("h{}", self.seq.fetch_add(1, Ordering::SeqCst));
+        let (tx, rx): (SyncSender<Value>, Receiver<Value>) = sync_channel(1);
+        self.shared.waiters.lock().unwrap().insert(id.clone(), tx);
+
+        {
+            let _w = self.writer.lock().unwrap();
+            write_frame(
+                self.fd,
+                &json!({
+                    "schema": "command@1",
+                    "command": command,
+                    "args": args,
+                    "client_request_id": id,
+                }),
+            )?;
+        }
+
+        rx.recv_timeout(Duration::from_secs(10)).map_err(|_| {
+            self.shared.waiters.lock().unwrap().remove(&id);
+            io::Error::new(io::ErrorKind::TimedOut, format!("no reply to {command}"))
+        })
+    }
+
+    /// Send raw bytes as one frame — for driving hostile input at the
+    /// protocol rather than through it.
+    pub fn send_raw(&self, bytes: &[u8]) -> io::Result<()> {
+        let _w = self.writer.lock().unwrap();
+        write_all(self.fd, &(bytes.len() as u32).to_be_bytes())?;
+        write_all(self.fd, bytes)
+    }
+
+    /// The next projection *newer* than `cursor`, or a timeout.
+    ///
+    /// Newer is not "a bigger revision". The runtime sends all four
+    /// continuity fields and the client must apply the rule, or the server
+    /// knows continuity changed and the client does not. (This said
+    /// *"triple"* for two revisions after `world_incarnation` was added and
+    /// made the leading field — see `ProjectionCursor`.)
+    ///
+    /// ```text
+    /// generation 8 · epoch A · revision 137
+    ///   AuthorityCoordinator restarts
+    /// generation 8 · epoch B · revision 0
+    /// ```
+    ///
+    /// A client comparing revisions alone waits for epoch B to climb past
+    /// 137, ignoring every projection of the live world until then. The
+    /// rule belongs here, in the dispatcher, so a WebView never has to
+    /// reinvent it.
+    pub fn projection_after(&self, cursor: &ProjectionCursor, wait: Duration) -> Option<Value> {
+        let deadline = Instant::now() + wait;
+        let mut slot = self.shared.latest.lock().unwrap();
+
+        loop {
+            if let Some(v) = slot.as_ref() {
+                if cursor.superseded_by(v) {
+                    return slot.clone();
+                }
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return None;
+            }
+            let (g, t) = self.shared.cv.wait_timeout(slot, left).unwrap();
+            slot = g;
+            if t.timed_out() {
+                return None;
+            }
+        }
+    }
+
+    pub fn latest(&self) -> Option<Value> {
+        self.shared.latest.lock().unwrap().clone()
+    }
+
+    pub fn hello(&self) -> Option<Value> {
+        self.shared.hello.lock().unwrap().clone()
+    }
+
+    /// The oldest reply that correlated to nothing, consumed.
+    pub fn last_reply(&self) -> Option<Value> {
+        let mut u = self.shared.unmatched.lock().unwrap();
+        if u.is_empty() { None } else { Some(u.remove(0)) }
+    }
+}
+
+impl Drop for Chan {
+    fn drop(&mut self) {
+        // `shutdown` before `close` — see `fdpass::release_fd`. A blocked
+        // reader keeps the open file description alive past `close`, so
+        // the peer never sees EOF and the channel is never released.
+        fdpass::release_fd(self.fd);
+    }
+}
+
+/// Where a client is in a world's history.
+///
+/// All four fields, because none of them means anything alone — see
+/// `Ampd.Projection.continuity/0`, which is where the rule is stated.
+///
+/// **`world_incarnation` leads, and it is the one that is an identity.**
+/// This held three fields and could not tell a factory reset from an
+/// ordinary advance. A reset destroys the manifest and initializes again,
+/// which mints a new installation and sets `generation` back to 1 — while
+/// the coordinator survives, so `projection_epoch` does not move and
+/// `revision` merely increments. Measured on the runtime:
+///
+/// ```text
+/// before  w-0d840f34…  gen 1  epoch cf7320ae  rev 3
+/// after   w-0e2b4559…  gen 1  epoch cf7320ae  rev 4
+/// ```
+///
+/// Two different worlds, which this classified as *same world, next
+/// revision*. ABA, and it would have been the ground under LIVE LOCAL.
+/// **Two revisions, because the cockpit renders more than authority.**
+///
+/// `authority_revision` (`revision` on the wire) counts ordered authority
+/// mutations and is carried as evidence: *which durable authority state is
+/// this frame based on*. `view_revision` counts everything a projection can
+/// show — authority, plus peers, channels and refusals, which are not
+/// authority at all — and is the one that decides whether a frame is new.
+///
+/// They were one number, and the difference was a product bug. An agent
+/// channel opening changes `peers` and `channels` in `operator-projection@2`
+/// and performs no authority transaction, so the runtime pushed nothing and
+/// the cockpit rendered a channel topology that was no longer true, with
+/// every field it could compare unchanged. Measured on the runtime.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ProjectionCursor {
+    pub world_incarnation: Option<String>,
+    pub world_generation: Option<u64>,
+    pub projection_epoch: Option<String>,
+    pub authority_revision: u64,
+    pub view_revision: u64,
+}
+
+impl ProjectionCursor {
+    /// Lenient: absent numbers read as zero.
+    ///
+    /// Kept for comparing against frames whose completeness has already
+    /// been established. **Anything that will be handed to a UI must use
+    /// `try_of` instead** — inventing a zero for a missing revision is a
+    /// cursor that claims to know something it was never told.
+    pub fn of(v: &Value) -> ProjectionCursor {
+        ProjectionCursor {
+            world_incarnation: v["world_incarnation"].as_str().map(String::from),
+            world_generation: v["world_generation"].as_u64(),
+            projection_epoch: v["projection_epoch"].as_str().map(String::from),
+            authority_revision: v["revision"].as_u64().unwrap_or(0),
+            view_revision: v["view_revision"].as_u64().unwrap_or(0),
+        }
+    }
+
+    /// **Fail closed.** Every field present and of the right type, or
+    /// nothing.
+    ///
+    /// `CockpitFrame.world` claims to carry both clocks, and `of` would
+    /// happily produce one carrying `authority_revision: 0` from a frame
+    /// that never mentioned a revision — a value a WebView would render as
+    /// fact. A frame that cannot produce a complete cursor is a frame this
+    /// host does not understand, and saying so is cheaper than a zero.
+    pub fn try_of(v: &Value) -> Option<ProjectionCursor> {
+        Some(ProjectionCursor {
+            world_incarnation: Some(v["world_incarnation"].as_str()?.to_string()),
+            world_generation: Some(v["world_generation"].as_u64()?),
+            projection_epoch: Some(v["projection_epoch"].as_str()?.to_string()),
+            authority_revision: v["revision"].as_u64()?,
+            view_revision: v["view_revision"].as_u64()?,
+        })
+    }
+
+    /// Whether `v` is something this cursor has not seen.
+    ///
+    /// Kept as the thin predicate the dispatcher needs; `classify` is what
+    /// a client acts on, and this is defined in terms of it so the two can
+    /// never disagree.
+    pub fn superseded_by(&self, v: &Value) -> bool {
+        self.classify(v) != Continuity::Seen
+    }
+
+    /// **What a client must DO about `v`, which a boolean cannot say.**
+    ///
+    /// `superseded_by` answers "is this new", and every one of the three
+    /// ways a frame can be new demands a different action. Collapsing them
+    /// into one bit pushed the decision into whatever called it, which for
+    /// the cockpit means the decision would have been made in TypeScript,
+    /// separately, from a comment.
+    ///
+    /// ```text
+    /// view_revision increases      → apply the snapshot · stay LIVE LOCAL
+    /// projection_epoch changes     → same world, new runtime · resnapshot
+    /// world_incarnation changes    → the authority you hold is not valid here
+    ///                                · discard the projection
+    ///                                · reacquire human control
+    ///                                · resubscribe
+    /// lower or equal view_revision → already seen · ignore
+    /// ```
+    ///
+    /// **`view_revision`, not `revision`.** Comparing the authority
+    /// revision ignores every frame in which only the runtime changed — a
+    /// channel opening, a channel dying, a refusal landing — all of which
+    /// `operator-projection@2` shows.
+    ///
+    /// This is `Ampd.Projection.continuity/0`'s hierarchy, executable. The
+    /// ordering is load-bearing: incarnation is checked before epoch, and
+    /// epoch before revision, because a restore moves all three and only
+    /// the outermost answer is the correct one.
+    pub fn classify(&self, v: &Value) -> Continuity {
+        let i = v["world_incarnation"].as_str().map(String::from);
+        let e = v["projection_epoch"].as_str().map(String::from);
+        let r = v["view_revision"].as_u64().unwrap_or(0);
+
+        // A cursor that has never held anything accepts the first frame as
+        // the world it is now in, not as an incarnation change — there is
+        // nothing to discard and no authority to reacquire.
+        if self.world_incarnation.is_none() && self.projection_epoch.is_none() {
+            return Continuity::Fresh;
+        }
+
+        if i != self.world_incarnation {
+            return Continuity::NewIncarnation;
+        }
+
+        if e != self.projection_epoch {
+            return Continuity::NewRuntime;
+        }
+
+        if r > self.view_revision {
+            Continuity::Advance
+        } else {
+            Continuity::Seen
+        }
+    }
+}
+
+/// What the WebView renders: one state, both cursors, and the projection
+/// they describe — together, because they are only meaningful together.
+///
+/// Handing the UI a state and letting it fetch the projection separately
+/// would take a **second sample** and undo the whole of W.1: the frame the
+/// cursor was validated against would not be the frame on screen.
+#[derive(Clone, Debug)]
+pub struct CockpitFrame {
+    pub state: Cockpit,
+    /// Which durable world, and which authority state within it.
+    pub world: ProjectionCursor,
+    /// What this view is of — the projection itself.
+    pub projection: Option<Value>,
+}
+
+/// What changed between a held cursor and an arriving frame.
+///
+/// Named for the action rather than the comparison: the host's state
+/// machine matches on this, and `Ampd.Projection.continuity/0` is the
+/// authority for what each one means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Continuity {
+    /// Nothing held yet. Adopt the frame.
+    Fresh,
+    /// A newer revision of the same world and the same runtime. Apply it.
+    Advance,
+    /// Same world, new runtime incarnation. The revision restarted at
+    /// zero, so what is held is not comparable — resnapshot, but the
+    /// authority the host holds is still valid.
+    NewRuntime,
+    /// A different world incarnation. **Everything held is invalid**,
+    /// including the human control channel: F.8.2.5 closes it at the
+    /// runtime, so the socket is already at EOF or about to be. Discard,
+    /// reacquire, resubscribe.
+    NewIncarnation,
+    /// Already seen. Ignore rather than re-render.
+    Seen,
+}
+
+impl Continuity {
+    /// Whether the projection the client is holding must be thrown away.
+    pub fn discards_projection(self) -> bool {
+        matches!(self, Continuity::NewRuntime | Continuity::NewIncarnation)
+    }
+
+    /// Whether the *authority* the client holds must be re-established —
+    /// the distinction that is the whole of F.8.2.5, on the host side.
+    /// A new runtime is a reconnect; a new incarnation is a reacquisition.
+    pub fn reacquires_authority(self) -> bool {
+        matches!(self, Continuity::NewIncarnation)
+    }
+}
+
+// ============================================================== cockpit
+/// What the host believes about the world right now.
+///
+/// This is the state a WebView renders, and it is derived from the
+/// continuity hierarchy rather than asserted anywhere. F.8.2.5 left the
+/// host with `UnexpectedEof` and no reconnect, because there was no loop
+/// to reconnect *in*; this is that loop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Cockpit {
+    /// No control channel yet, or the last one died. The host is trying to
+    /// take one.
+    Acquiring,
+    /// Control held, subscribed, and holding a projection that names the
+    /// incarnation it was assembled in.
+    LiveLocal,
+    /// The runtime restarted under us. The world is the same and the
+    /// authority is still ours; the projection is not comparable.
+    Resnapshot,
+    /// The world incarnation ended. Everything held is invalid — the
+    /// projection *and* the human control channel. This is the state that
+    /// exists because "state moves, authority does not" is a product rule
+    /// rather than a slogan.
+    Reacquire,
+}
+
+/// The host's own loop: hold human control, hold one coherent projection,
+/// and re-establish both when the world says they are no longer valid.
+///
+/// **The one thing F.8.2.5 could not deliver, and said so.** A restore
+/// closes every channel bound to the ending incarnation, so the host's
+/// control socket reaches EOF — and the host's answer to EOF was to return
+/// an `io::Error` to whoever called last. There was nothing to reacquire
+/// *with*. A reacquisition is not a retry: the old capability is gone, and
+/// a new one is taken by the same route it was taken the first time.
+pub struct CockpitLoop<'a> {
+    rt: &'a Runtime,
+    chan: Option<Chan>,
+    cursor: ProjectionCursor,
+    /// **The view itself, and W.1 did not have this field.**
+    ///
+    /// `Cockpit::LiveLocal` was documented as "control held, subscribed,
+    /// and holding a projection" while `acquire` read the cursor out of the
+    /// subscribe reply and dropped `result["projection"]` on the floor;
+    /// `turn` did the same to every pushed frame. So LIVE LOCAL meant *I
+    /// received a cursor from a coherent snapshot*, not *I hold the
+    /// snapshot*. The next step would have been a WebView calling
+    /// `operator_projection` again to get something to draw — a second
+    /// sample, and the exact cursor/content relation W.1 exists to
+    /// establish, broken at the last hop.
+    projection: Option<Value>,
+    state: Cockpit,
+    /// How many times authority has had to be re-established. The cockpit
+    /// shows it; a number that climbs on its own is a runtime restarting
+    /// in a loop, which is worth seeing.
+    pub reacquisitions: u64,
+}
+
+impl<'a> CockpitLoop<'a> {
+    pub fn new(rt: &'a Runtime) -> CockpitLoop<'a> {
+        CockpitLoop {
+            rt,
+            chan: None,
+            cursor: ProjectionCursor::default(),
+            projection: None,
+            state: Cockpit::Acquiring,
+            reacquisitions: 0,
+        }
+    }
+
+    pub fn state(&self) -> &Cockpit {
+        &self.state
+    }
+
+    pub fn cursor(&self) -> &ProjectionCursor {
+        &self.cursor
+    }
+
+    pub fn projection(&self) -> Option<&Value> {
+        self.projection.as_ref()
+    }
+
+    /// The render object. One call, one coherent answer.
+    pub fn frame(&self) -> CockpitFrame {
+        CockpitFrame {
+            state: self.state.clone(),
+            world: self.cursor.clone(),
+            projection: self.projection.clone(),
+        }
+    }
+
+    /// **`LiveLocal` is not reachable without a view.**
+    ///
+    /// The state machine only enters it through `go_live`, and this is the
+    /// property a battery can check from outside: a cockpit claiming to be
+    /// live while holding no projection is a badge that means nothing.
+    pub fn invariant_holds(&self) -> bool {
+        match self.state {
+            Cockpit::LiveLocal => {
+                self.projection.is_some()
+                    && self.chan.is_some()
+                    && self.cursor.world_incarnation.is_some()
+                    && self.cursor.projection_epoch.is_some()
+            }
+            _ => true,
+        }
+    }
+
+    /// Adopt a whole frame. The only way into `LiveLocal`.
+    ///
+    /// A frame missing its projection, its incarnation or its epoch is not
+    /// something to render, so it does not produce a live cockpit — it
+    /// leaves the loop `Acquiring`, which is honest and is what the next
+    /// turn will act on.
+    fn go_live(&mut self, frame: &Value) -> bool {
+        // `try_of` is the completeness check for **every** cursor field,
+        // including the authority revision — which the first version of
+        // this validated `view_revision` and forgot, while `CockpitFrame`
+        // went on claiming to carry both clocks. A missing revision became
+        // a zero, and a zero is a number a UI renders.
+        let cursor = match ProjectionCursor::try_of(frame) {
+            Some(c) if frame["schema"].as_str() == Some("projection-snapshot@1")
+                && frame["projection"].is_object() => c,
+            _ => {
+                self.projection = None;
+                self.state = Cockpit::Acquiring;
+                return false;
+            }
+        };
+
+        if self.chan.is_none() {
+            self.projection = None;
+            self.state = Cockpit::Acquiring;
+            return false;
+        }
+
+        self.cursor = cursor;
+        self.projection = Some(frame["projection"].clone());
+        self.state = Cockpit::LiveLocal;
+        true
+    }
+
+    /// Drop everything held about the world. Called before any
+    /// reacquisition, so a stale view is never on screen across one.
+    fn discard(&mut self) {
+        self.projection = None;
+        self.cursor = ProjectionCursor::default();
+    }
+
+    pub fn channel(&self) -> Option<&Chan> {
+        self.chan.as_ref()
+    }
+
+    /// Hand the channel out so a caller can drop it — the only way to make
+    /// the runtime see EOF on demand, since `advance_lineage/2` is on no
+    /// channel and a restore therefore cannot be driven from the host.
+    pub fn take_channel(&mut self) -> Option<Chan> {
+        self.chan.take()
+    }
+
+    /// Take human control and subscribe. **Both, or neither** — a host
+    /// holding a control channel it never subscribed on renders nothing
+    /// and looks live, which is the failure mode the whole projection
+    /// pipeline exists to remove.
+    pub fn acquire(&mut self) -> Result<(), String> {
+        self.state = Cockpit::Acquiring;
+        // Dropped first, explicitly. The runtime allows exactly one active
+        // human control channel, so holding the dead one open while asking
+        // for a new one is refused `control-channel-already-claimed` — by
+        // us, on our own behalf.
+        self.chan = None;
+        self.discard();
+
+        let chan = self.rt.control_channel()?;
+        let snap = chan
+            .call("subscribe", json!({}))
+            .map_err(|e| format!("subscribe failed: {e}"))?;
+
+        let result = &snap["result"];
+        if let Some(code) = result["refusal"]["code"].as_str() {
+            return Err(format!("subscribe refused: {code}"));
+        }
+
+        self.chan = Some(chan);
+
+        // **Validated, not assumed.** A subscribe that answered with
+        // something other than a complete `projection-snapshot@1` is not a
+        // subscription this loop can render, and saying LIVE LOCAL about
+        // it would be the same lie in a different place.
+        if self.go_live(result) {
+            Ok(())
+        } else {
+            self.chan = None;
+            Err(format!(
+                "subscribe returned no renderable snapshot: schema={:?} projection={}",
+                result["schema"].as_str(),
+                result["projection"].is_object()
+            ))
+        }
+    }
+
+    /// One turn of the loop. Returns the state it settled in.
+    ///
+    /// The ordering here is the whole point: EOF is checked first, because
+    /// a closed channel cannot deliver the frame that would have explained
+    /// why it closed. A restore closes the socket and *then* the world is
+    /// different — the host learns the second fact by reacquiring, not by
+    /// being told.
+    pub fn turn(&mut self, wait: Duration) -> Cockpit {
+        let dead = match &self.chan {
+            None => true,
+            Some(c) => c.closed(),
+        };
+
+        if dead {
+            // Discard before reacquiring, always: whatever is on screen
+            // describes a world this host can no longer speak for.
+            self.reacquisitions += 1;
+            self.state = Cockpit::Reacquire;
+            self.discard();
+            let _ = self.acquire();
+            return self.state.clone();
+        }
+
+        let chan = self.chan.as_ref().unwrap();
+        let Some(frame) = chan.projection_after(&self.cursor, wait) else {
+            return self.state.clone();
+        };
+
+        self.feed(&frame)
+    }
+
+    /// Apply one frame. Split out of `turn` because *receiving* a frame and
+    /// *deciding what it means* are separable, and only the second half is
+    /// the state machine — a Tauri worker fed from elsewhere runs the same
+    /// code, and a battery can drive the branches without a special path
+    /// through the loop.
+    pub fn feed(&mut self, frame: &Value) -> Cockpit {
+        match self.cursor.classify(frame) {
+            Continuity::Seen => {}
+
+            // Adopt the **whole frame**, not merely its cursor. W.1 took
+            // the cursor and dropped the projection here, which is how
+            // LIVE LOCAL came to mean something weaker than it said.
+            Continuity::Fresh | Continuity::Advance => {
+                self.go_live(frame);
+            }
+
+            Continuity::NewRuntime => {
+                // Same world, new runtime. The authority is still ours, so
+                // the channel stands; only the view is not comparable, and
+                // this frame is the resnapshot.
+                self.state = Cockpit::Resnapshot;
+                self.discard();
+                self.go_live(frame);
+            }
+
+            Continuity::NewIncarnation => {
+                // The world this channel belongs to has ended. Do not
+                // reconcile, do not keep the capability, and do not keep
+                // the view — take all of it again.
+                self.reacquisitions += 1;
+                self.state = Cockpit::Reacquire;
+                self.discard();
+                let _ = self.acquire();
+            }
+        }
+
+        self.state.clone()
+    }
+
+    /// Turn until `f` is satisfied or the deadline passes. Returns whether
+    /// it settled, so a caller never mistakes a timeout for a state.
+    pub fn settle(&mut self, limit: Duration, f: impl Fn(&CockpitLoop) -> bool) -> bool {
+        let deadline = Instant::now() + limit;
+        loop {
+            if f(self) {
+                return true;
+            }
+            if Instant::now() >= deadline {
+                return false;
+            }
+            self.turn(Duration::from_millis(120));
+        }
+    }
+}
+
+// ============================================================== runtime
+/// Where a world's stores live, and who is allowed to delete them.
+///
+/// **The verification rule was being used as the production rule.**
+/// `Runtime::start` made a directory named for the pid and the clock,
+/// pointed `AMPD_DATA_DIR` at it, and `shutdown` removed it — so a clean
+/// exit *deleted the world* and an unclean one orphaned a directory the
+/// next host would never look at. The isolation was right for a battery
+/// that must not inherit state, and exactly wrong for a product whose
+/// whole claim is that the world is durable.
+#[derive(Clone, Debug)]
+pub enum WorldDir {
+    /// A battery's world: unique, and destroyed on shutdown. A test that
+    /// passes on state it did not set up is not a test.
+    Ephemeral(PathBuf),
+    /// The user's world: stable across host restarts, and never deleted by
+    /// this program.
+    Persistent(PathBuf),
+}
+
+impl WorldDir {
+    pub fn path(&self) -> &Path {
+        match self {
+            WorldDir::Ephemeral(p) | WorldDir::Persistent(p) => p,
+        }
+    }
+
+    /// `$XDG_STATE_HOME/super/worlds/<name>`, falling back to
+    /// `~/.local/state`. State, not cache and not runtime: a world is
+    /// neither reconstructible nor ephemeral.
+    pub fn product(name: &str) -> WorldDir {
+        let base = std::env::var("XDG_STATE_HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| {
+                PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+                    .join(".local/state")
+            });
+
+        WorldDir::Persistent(base.join("super").join("worlds").join(name))
+    }
+
+    pub fn ephemeral(under: &Path) -> WorldDir {
+        WorldDir::Ephemeral(under.join("world"))
+    }
+}
+
+pub struct Runtime {
+    dir: PathBuf,
+    world: WorldDir,
+    /// Held for the host's lifetime — an advisory lock lives on the open
+    /// file description, so releasing this descriptor releases the world.
+    world_lock: RawFd,
+    child: Child,
+    bridge: RawFd,
+    /// The bridge is one descriptor carrying send/recv transactions with
+    /// no correlation ids, so two concurrent channel creations would read
+    /// each other's replies. Channel creation is rare; a lock is the right
+    /// size of answer.
+    bridge_lock: Mutex<()>,
+    /// Every channel descriptor this host has created, so descriptor
+    /// confinement is something the battery can check rather than trust.
+    channels: Mutex<Vec<RawFd>>,
+}
+
+impl Runtime {
+    /// Spawn `ampd` holding one end of a sequenced-packet pair.
+    ///
+    /// The bridge exists before the runtime has executed an instruction,
+    /// so "the privileged connection" is a fact established at `fork`
+    /// rather than a race anything can enter.
+    pub fn start(ampd_dir: &Path, world: WorldDir) -> Result<Runtime, String> {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+
+        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+        let dir = PathBuf::from(base).join(format!("ampd-{}-{}", std::process::id(), stamp));
+        std::fs::create_dir_all(&dir).map_err(|e| format!("runtime dir: {e}"))?;
+
+        let world_path = world.path().to_path_buf();
+        std::fs::create_dir_all(&world_path).map_err(|e| format!("world dir: {e}"))?;
+        std::fs::set_permissions(&world_path, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("world dir mode: {e}"))?;
+
+        // Before anything opens a store. Two hosts on one world is a
+        // corruption path DETS would not report.
+        let world_lock = fdpass::lock_world(&world_path.join("world.lock"))?;
+
+        let fdpass::Pair(ours, theirs) =
+            fdpass::pair_seqpacket().map_err(|e| format!("bridge socketpair: {e}"))?;
+
+        let child = unsafe {
+            Command::new("mix")
+                .args(["run", "--no-halt"])
+                .current_dir(ampd_dir)
+                .env("AMPD_BRIDGE_FD", "3")
+                // A verification run must start from a world it created.
+                // This battery once inherited a 5 MB grant request from
+                // `priv/data` and watched every projection come back
+                // `frame-too-large` — a real refusal, for a reason that had
+                // nothing to do with the code under test.
+                .env("AMPD_DATA_DIR", &world_path)
+                .env("MIX_ENV", "dev")
+                .stdin(Stdio::null())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .pre_exec(move || {
+                    // Order matters: 0, 1 and 2 must be occupied before
+                    // the bridge is placed, or `dup2(theirs, 3)` could be
+                    // handing the bridge a number the runtime will later
+                    // treat as a standard stream.
+                    fdpass::ensure_std_fds()?;
+                    fdpass::dup_onto(theirs, 3)
+                })
+                .spawn()
+        }
+        .map_err(|e| format!("spawning ampd: {e}"))?;
+
+        // Our copy of the child's end is dead weight the moment it is
+        // inherited; holding it would keep the channel alive after the
+        // child died, which is a channel with nobody on it.
+        fdpass::close_fd(theirs);
+
+        let rt = Runtime {
+            dir,
+            world,
+            world_lock,
+            child,
+            bridge: ours,
+            bridge_lock: Mutex::new(()),
+            channels: Mutex::new(Vec::new()),
+        };
+        rt.await_ready(Duration::from_secs(90))?;
+        Ok(rt)
+    }
+
+    /// The runtime answers a bridge command when it is up. Nothing appears
+    /// in the filesystem to poll for, so readiness is asked rather than
+    /// watched.
+    pub fn await_ready(&self, limit: Duration) -> Result<(), String> {
+        let start = Instant::now();
+        let mut last = String::from("no answer");
+
+        while start.elapsed() < limit {
+            match self.bridge_call(&json!({
+                "schema": "bridge-command@1",
+                "command": "runtime_status"
+            })) {
+                Ok(v) if v["ok"] == true => return Ok(()),
+                Ok(v) => last = format!("{v}"),
+                Err(e) => last = e,
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Err(format!("the runtime never became ready: {last}"))
+    }
+
+    pub fn bridge_call(&self, v: &Value) -> Result<Value, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
+        fdpass::send_plain(self.bridge, &bytes).map_err(|e| format!("bridge send: {e}"))?;
+        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
+    }
+
+    /// Send `raw` — which need not be a valid command — carrying `n`
+    /// descriptors the runtime has no use for.
+    ///
+    /// The point is the descriptors, not the reply. A command the runtime
+    /// rejects still arrived with rights attached, and those rights are in
+    /// the runtime's descriptor table from the moment `recvmsg` returns.
+    /// Whether they are still there afterwards is the measurement.
+    pub fn bridge_call_with_rights(&self, raw: &[u8], n: usize) -> Result<Value, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let mut spares = Vec::new();
+        for _ in 0..n {
+            spares.push(fdpass::spare_fd().map_err(|e| format!("spare fd: {e}"))?);
+        }
+
+        let sent = fdpass::send_with_fds(self.bridge, raw, &spares);
+        for fd in &spares {
+            fdpass::close_fd(*fd);
+        }
+        sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+
+        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
+    }
+
+    /// A *valid* bind, with `surplus` extra descriptors in the same
+    /// control message.
+    ///
+    /// The runtime binds the first and discards the rest. One channel
+    /// should remain; `surplus` descriptors should not.
+    pub fn agent_channel_with_surplus(&self, actor: &str, surplus: usize) -> Result<Chan, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let fdpass::Pair(ours, theirs) =
+            fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
+
+        let mut all = vec![theirs];
+        for _ in 0..surplus {
+            all.push(fdpass::spare_fd().map_err(|e| format!("spare fd: {e}"))?);
+        }
+
+        let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
+        let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let sent = fdpass::send_with_fds(self.bridge, &bytes, &all);
+        for fd in &all {
+            fdpass::close_fd(*fd);
+        }
+        sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+
+        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
+
+        if v["ok"] != true {
+            fdpass::close_fd(ours);
+            return Err(format!("refused: {}", v["refusal"]["code"]));
+        }
+
+        self.channels.lock().unwrap().push(ours);
+        Ok(Chan::adopt(ours))
+    }
+
+    /// Hand the runtime one end of a new pair, labelled. The label and the
+    /// capability travel in the same message.
+    pub fn bind_channel(&self, command: &str, actor: Option<&str>) -> Result<Chan, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let fdpass::Pair(ours, theirs) =
+            fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
+
+        let mut cmd = json!({"schema": "bridge-command@1", "command": command});
+        if let Some(a) = actor {
+            cmd["actor"] = json!(a);
+        }
+
+        let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        fdpass::close_fd(theirs);
+        sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+
+        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
+
+        if v["ok"] != true {
+            fdpass::close_fd(ours);
+            return Err(format!(
+                "the runtime refused the channel: {}",
+                v["refusal"]["code"]
+            ));
+        }
+
+        self.channels.lock().unwrap().push(ours);
+        let chan = Chan::adopt(ours);
+        let hello = read_hello(&chan)?;
+
+        if let Some(a) = actor {
+            if hello["actor"] != a {
+                return Err(format!("a channel for {a} greeted as {}", hello["actor"]));
+            }
+        }
+        Ok(chan)
+    }
+
+    pub fn control_channel(&self) -> Result<Chan, String> {
+        self.bind_channel("bind_control_channel", None)
+    }
+
+    pub fn agent_channel(&self, actor: &str) -> Result<Chan, String> {
+        self.bind_channel("bind_agent_channel", Some(actor))
+    }
+
+    /// A descriptor for an engine: the runtime end is bound and adopted,
+    /// and the raw client end is returned to be inherited by a child.
+    pub fn agent_fd(&self, actor: &str) -> Result<RawFd, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let fdpass::Pair(ours, theirs) =
+            fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
+
+        let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
+        let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        fdpass::close_fd(theirs);
+        sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+
+        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let v: Value = serde_json::from_slice(&reply).map_err(|e| e.to_string())?;
+
+        if v["ok"] != true {
+            fdpass::close_fd(ours);
+            return Err(format!("refused: {}", v["refusal"]["code"]));
+        }
+        self.channels.lock().unwrap().push(ours);
+        Ok(ours)
+    }
+
+    /// Every descriptor this host holds, and whether it would survive an
+    /// `exec`. The channels are tracked as they are created so this can be
+    /// asserted rather than assumed.
+    /// `Some(n)` when all `n` still-open descriptors are close-on-exec;
+    /// `None` when any of them would survive an `exec`. Released
+    /// descriptors are skipped — they cannot leak — but counted separately
+    /// so a vacuous pass is visible.
+    pub fn live_cloexec(&self) -> Option<usize> {
+        let mut live = 0;
+        let mut all = vec![self.bridge];
+        all.extend(self.channels.lock().unwrap().iter().copied());
+
+        for fd in all {
+            match fdpass::fd_state(fd) {
+                fdpass::FdState::Closed => {}
+                fdpass::FdState::Cloexec => live += 1,
+                fdpass::FdState::Inheritable => return None,
+            }
+        }
+        Some(live)
+    }
+
+    /// Stop the runtime. **Only an ephemeral world is deleted** — the
+    /// user's world outliving the program that opened it is the entire
+    /// point of it being durable.
+    pub fn shutdown(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        fdpass::close_fd(self.bridge);
+        // Releases the advisory lock with it.
+        fdpass::close_fd(self.world_lock);
+        let _ = std::fs::remove_dir_all(&self.dir);
+
+        if let WorldDir::Ephemeral(p) = &self.world {
+            let _ = std::fs::remove_dir_all(p);
+        }
+    }
+
+    /// Stop the runtime and leave the world alone, whatever kind it is.
+    /// The durability check needs a first host to exit the way a user
+    /// quitting the app does, and then a second one to find the world.
+    pub fn stop_keeping_world(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+        fdpass::close_fd(self.bridge);
+        fdpass::close_fd(self.world_lock);
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+
+    /// How many descriptors the runtime process is holding.
+    ///
+    /// Descriptor ownership can only be measured here: the `dup` question
+    /// arises on the integer path, and the only thing that reaches it is
+    /// an `SCM_RIGHTS` receive from this host. Counting `/proc/<ampd>/fd`
+    /// across real binds is the measurement; an in-BEAM test cannot
+    /// construct the case at all.
+    pub fn child_pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    pub fn runtime_fd_count(&self) -> usize {
+        self.runtime_socket_count()
+    }
+
+    /// Poll until the runtime holds exactly `target` sockets, or give up.
+    ///
+    /// **What it converges to, not what it is at an arbitrary instant.**
+    /// The runtime tears each connection down in its own process, so a
+    /// count taken right after a close is a race. Returns the final count
+    /// either way — a check that fails should report the number it saw,
+    /// not the word "timeout".
+    pub fn settle_sockets(&self, target: usize, limit: Duration) -> usize {
+        let deadline = Instant::now() + limit;
+        loop {
+            let n = self.runtime_socket_count();
+            if n == target || Instant::now() >= deadline {
+                return n;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+    }
+
+    /// Sockets only. The BEAM holds a couple of dozen descriptors that are
+    /// nothing to do with us — epoll, eventfd, the DETS stores — and they
+    /// move for their own reasons. Counting all of them measures the VM;
+    /// counting sockets measures channels.
+    pub fn runtime_socket_count(&self) -> usize {
+        std::fs::read_dir(format!("/proc/{}/fd", self.child.id()))
+            .map(|d| {
+                d.flatten()
+                    .filter(|e| {
+                        std::fs::read_link(e.path())
+                            .map(|t| t.to_string_lossy().contains("socket:"))
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0)
+    }
+
+    /// Of the sockets the runtime holds, how many would survive an `exec`.
+    ///
+    /// **This is readable from here and from nowhere else.** `fcntl` asks
+    /// about *this* process's table; `/proc/<ampd>/fdinfo/<n>` reports the
+    /// other one's, and its octal `flags` field carries `O_CLOEXEC`
+    /// (`02000000`) alongside the access mode. The runtime cannot check
+    /// this about itself — `Ampd.NativeFd.state/1` answers for a
+    /// descriptor the caller already names, and the interesting question
+    /// is whether *every* descriptor it holds is confined.
+    ///
+    /// Every unix-domain socket the runtime holds, and whether it would
+    /// survive an `exec`.
+    ///
+    /// **Unix-domain only, and taken as a set so it can be differenced.**
+    /// Two restrictions, each for a measured reason:
+    ///
+    /// *Unix-domain*, because the BEAM holds sockets of its own and OTP
+    /// creates an `inet` socket inheritable. The first version of this
+    /// check counted all sockets and failed on the VM rather than on us.
+    /// Every descriptor that reaches the runtime from this host is
+    /// `AF_UNIX`, and `/proc/net/unix` names their inodes, so the
+    /// population can be selected by what it *is*.
+    ///
+    /// *A set*, because even among unix sockets the BEAM has one of its
+    /// own — a `u_str` pair to `erl_child_setup`, inheritable, and not
+    /// ours to police. Asserting against the sockets that **appear** when
+    /// a channel is bound measures our adoption and nothing else. A check
+    /// that has to reason about which of the VM's descriptors to forgive
+    /// is a check that will forgive one of ours.
+    pub fn runtime_unix_fds(&self) -> std::collections::BTreeMap<String, bool> {
+        const O_CLOEXEC: u32 = 0o2000000;
+        let pid = self.child.id();
+        let mut out = std::collections::BTreeMap::new();
+
+        let unix_inodes: std::collections::HashSet<String> =
+            std::fs::read_to_string("/proc/net/unix")
+                .map(|s| {
+                    s.lines()
+                        .skip(1)
+                        .filter_map(|l| l.split_whitespace().nth(6).map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+        let Ok(dir) = std::fs::read_dir(format!("/proc/{pid}/fd")) else {
+            return out;
+        };
+
+        for e in dir.flatten() {
+            let Ok(target) = std::fs::read_link(e.path()) else {
+                continue;
+            };
+            let target = target.to_string_lossy().to_string();
+            let Some(ino) = target
+                .strip_prefix("socket:[")
+                .and_then(|s| s.strip_suffix(']'))
+            else {
+                continue;
+            };
+            if !unix_inodes.contains(ino) {
+                continue;
+            }
+
+            let fd = e.file_name().to_string_lossy().to_string();
+            let Ok(info) = std::fs::read_to_string(format!("/proc/{pid}/fdinfo/{fd}")) else {
+                continue;
+            };
+            for line in info.lines() {
+                if let Some(v) = line.strip_prefix("flags:") {
+                    if let Ok(f) = u32::from_str_radix(v.trim(), 8) {
+                        out.insert(format!("{fd} ({ino})"), f & O_CLOEXEC != 0);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Is descriptor `n` open in the runtime at all?
+    ///
+    /// Asked about fd 3, this is the shortest proof that the inherited
+    /// bridge descriptor was disposed of: the host `dup2`s the bridge onto
+    /// 3 before `exec`, so 3 is where it lands, and after adoption there
+    /// should be nothing there.
+    pub fn runtime_fd_open(&self, n: RawFd) -> bool {
+        std::fs::read_link(format!("/proc/{}/fd/{}", self.child.id(), n)).is_ok()
+    }
+
+    /// What the runtime has on descriptor `n`, for a failure message that
+    /// says something.
+    pub fn runtime_fd_target(&self, n: RawFd) -> String {
+        std::fs::read_link(format!("/proc/{}/fd/{}", self.child.id(), n))
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| "closed".into())
+    }
+
+    pub fn world(&self) -> WorldDir {
+        self.world.clone()
+    }
+}
+
+/// `hello@1` arrives unprompted, before anything is asked — so a client
+/// never has to make "what am I, and how current am I?" its first command.
+fn read_hello(chan: &Chan) -> Result<Value, String> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while Instant::now() < deadline {
+        if let Some(h) = chan.hello() {
+            return Ok(h);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    Err("the channel never greeted".into())
+}
+
+/// The binary's whole body, in the library, so `super-host` and the
+/// cockpit are one program with two entry points rather than two programs
+/// that agree by inspection.
+pub fn cli() -> i32 {
+    let args: Vec<String> = std::env::args().collect();
+
+    let ampd_dir = std::env::var("AMPD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("ampd")
+        });
+
+    if !ampd_dir.join("mix.exs").exists() {
+        eprintln!(
+            "no ampd/ at {} — run from the release root, or set AMPD_DIR",
+            ampd_dir.display()
+        );
+        return 2;
+    }
+
+    let code = match args.get(1).map(String::as_str) {
+        Some("verify") => verify::run(&ampd_dir),
+        Some("run") | None => run_host(&ampd_dir, args.iter().skip(2).cloned().collect()),
+        Some("world") => {
+            println!("{}", WorldDir::product("default").path().display());
+            0
+        }
+        Some(other) => {
+            eprintln!("usage: super-host [verify | run <actor> [-- <command>...]]");
+            eprintln!("  unknown subcommand: {other}");
+            2
+        }
+    };
+
+    code
+}
+
+// ================================================================== run
+fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
+    let world = WorldDir::product(&std::env::var("SUPER_WORLD").unwrap_or_else(|_| "default".into()));
+    println!("[&] Super host");
+    println!("  world            {}", world.path().display());
+
+    let rt = match Runtime::start(ampd_dir, world) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("could not start the runtime: {e}");
+            return 1;
+        }
+    };
+
+    let human = match rt.control_channel() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            rt.shutdown();
+            return 1;
+        }
+    };
+
+    println!("  bridge           inherited descriptor (no path)");
+    println!("  control channel  active");
+
+    let mut children: Vec<Child> = Vec::new();
+
+    if let Some(split) = rest.iter().position(|a| a == "--") {
+        let actor = rest[..split].join("");
+        let argv = rest[split + 1..].to_vec();
+
+        if !actor.is_empty() && !argv.is_empty() {
+            match rt.agent_fd(&actor) {
+                Ok(fd) => {
+                    println!("  channel          {actor} → inherited as fd 3");
+                    match unsafe {
+                        Command::new(&argv[0])
+                            .args(&argv[1..])
+                            .env("AMPD_CHANNEL_FD", "3")
+                            .env("AMPD_ACTOR", &actor)
+                            .pre_exec(move || fdpass::dup_onto(fd, 3))
+                            .spawn()
+                    } {
+                        Ok(c) => children.push(c),
+                        Err(e) => eprintln!("  could not spawn {actor}: {e}"),
+                    }
+                    fdpass::close_fd(fd);
+                }
+                Err(e) => eprintln!("  {e}"),
+            }
+        }
+    }
+
+    let _ = human.call("subscribe", json!({}));
+    println!("\n  ctrl-c to stop");
+
+    let mut seen = ProjectionCursor::default();
+    loop {
+        if human.closed() {
+            eprintln!("  control channel closed");
+            break;
+        }
+        if let Some(p) = human.projection_after(&seen, Duration::from_secs(30)) {
+            let next = ProjectionCursor::of(&p);
+            if next.world_generation != seen.world_generation
+                || next.projection_epoch != seen.projection_epoch
+            {
+                println!("  continuity       world changed — discarding the held projection");
+            }
+            seen = next;
+            println!(
+                "  projection       revision {} · epoch {} · generation {}",
+                p["revision"], p["projection_epoch"], p["world_generation"]
+            );
+        }
+    }
+
+    for mut c in children {
+        let _ = c.kill();
+    }
+    rt.shutdown();
+    0
+}
+
+pub mod verify;

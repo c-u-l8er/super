@@ -1,0 +1,23 @@
+# Rust build output. cockpit/target alone is 1.2 GB against ~10 MB of real
+# source, and this directory had no .gitignore of its own until 2026-08-28 —
+# a single `git add -A` would have carried all of it permanently.
+target/
+
+# Elixir (ampd)
+_build/
+deps/
+*.beam
+*.ez
+erl_crash.dump
+
+# Node
+node_modules/
+
+# Packaged revision bundles — regenerable release freight, not history.
+and-super-rev-*.zip
+*.tar.gz
+
+# OS/editor
+.DS_Store
+*.swp
+*~

@@ -1,0 +1,23 @@
+[package]
+name = "super-cockpit"
+version = "0.1.0"
+edition = "2021"
+description = "The [&] Super cockpit: a desktop surface that renders the runtime's truth and is never a second source of it."
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# `unstable` is what gates `Window::add_child` and `WebviewBuilder` — the
+# multi-webview-per-window primitive. Super's browser, Motor and game panes
+# are that primitive, so the ACL boundary in `capabilities/default.json` has
+# to be measured against it rather than against a second desktop window,
+# which is a topology this product will not have. It is the only reason the
+# feature is on.
+tauri = { version = "2", features = ["unstable"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+super-host = { path = "../host" }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]

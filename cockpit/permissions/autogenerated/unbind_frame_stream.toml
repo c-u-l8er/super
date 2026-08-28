@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-unbind-frame-stream"
+description = "Enables the unbind_frame_stream command without any pre-configured scope."
+commands.allow = ["unbind_frame_stream"]
+
+[[permission]]
+identifier = "deny-unbind-frame-stream"
+description = "Denies the unbind_frame_stream command without any pre-configured scope."
+commands.deny = ["unbind_frame_stream"]

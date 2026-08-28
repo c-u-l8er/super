@@ -1,0 +1,38 @@
+{
+  "schema": "proof@1",
+  "generated_at": "2026-08-27T18:21:52.659Z",
+  "source": "proof/RESULTS.txt",
+  "sha256": "628436fb8709af3ac75a66bfbcad95d0e28a74dd74194ebf8160c734154d8529",
+  "run": {
+    "id": "b5.1-628436fb",
+    "grid_version": "1.43.0",
+    "cert_hash": "a08ee15d",
+    "cert_streak": 39,
+    "cert_source": "proof/BRIEF.md",
+    "replayed_at": "2026-08-20T20:15Z",
+    "verifier": "v25.2.1"
+  },
+  "upstream": {
+    "repo": null,
+    "commit": null,
+    "note": "repo+commit not recorded in RESULTS.txt — the upstream emitter should add them"
+  },
+  "gates": {
+    "negative_battery": "307/307",
+    "harness_self_test": "9/9",
+    "runner_contract": "3/3",
+    "derive_battery": "45/45",
+    "realm_battery": "24/24",
+    "cross_plane_bridge": "48/48",
+    "semantic_film": "45/45",
+    "lowering": "23/23",
+    "grid_entries": 90,
+    "grid_citations": 380
+  },
+  "totals": {
+    "attempted": 25,
+    "passed": 25,
+    "failed": 0,
+    "skipped": 0
+  }
+}

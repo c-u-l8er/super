@@ -1,0 +1,1821 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Super (CD) — the compute surface · super.computedriven.com</title>
+<meta name="description" content="Direct agents across your machines and the cloud — while Super records what they did, what they proved, and what they're allowed to change.">
+<meta property="og:title" content="Super (CD) — the compute surface">
+<meta property="og:description" content="Direct agents across your machines and the cloud — while Super records what they did, what they proved, and what they're allowed to change.">
+<meta property="og:image" content="preview/hero-light-preview.png">
+<meta name="twitter:card" content="summary_large_image">
+<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Schibsted+Grotesk:wght@500;700;800&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<script type="module" src="/amp-nav.js"></script>
+<style>
+:root{
+  --bg:#05070C; --panel:#0B1019; --panel2:#0E1524;
+  --ink:#EDF1F9; --mut:#93A1BB; --dim:#5E6C86;
+  --hair:rgba(148,170,210,.14); --hair2:rgba(148,170,210,.26);
+  --acc:#F0623B; --acc-ink:#FFD9CC;
+  --ok:#46D39A; --warn:#F0B44C; --err:#E5645A; --ice:#8FB8E8; --violet:#A18FFF;
+  --sans:'Schibsted Grotesk',system-ui,sans-serif; --mono:'Space Mono',ui-monospace,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html{scroll-behavior:smooth}
+body{background:var(--bg);color:var(--ink);font-family:var(--sans);font-size:15.5px;line-height:1.65;-webkit-font-smoothing:antialiased}
+a{color:inherit;text-decoration:none}
+.wrap{max-width:1120px;margin:0 auto;padding:0 26px}
+.mono{font-family:var(--mono)}
+::selection{background:rgba(240,98,59,.35)}
+
+#sky{position:fixed;inset:0;z-index:-1;background:
+  radial-gradient(900px 480px at 50% -8%, rgba(28,52,96,.55), transparent 62%),
+  radial-gradient(720px 420px at 82% 4%, rgba(240,98,59,.10), transparent 60%), var(--bg)}
+#sky::after{content:"";position:absolute;inset:0;
+  background:linear-gradient(rgba(150,180,230,.028) 1px,transparent 1px),linear-gradient(90deg,rgba(150,180,230,.028) 1px,transparent 1px);
+  background-size:56px 56px;
+  -webkit-mask-image:radial-gradient(900px 560px at 50% 0%,#000 26%,transparent 74%);
+          mask-image:radial-gradient(900px 560px at 50% 0%,#000 26%,transparent 74%)}
+
+#gridreveal{position:fixed;inset:0;z-index:-1;pointer-events:none;opacity:0;transition:opacity .5s;
+  background:
+    radial-gradient(240px 240px at var(--mx,-999px) var(--my,-999px), rgba(120,170,255,.10), transparent 70%),
+    linear-gradient(rgba(160,196,255,.13) 1px,transparent 1px),
+    linear-gradient(90deg,rgba(160,196,255,.13) 1px,transparent 1px);
+  background-size:100% 100%,56px 56px,56px 56px;
+  -webkit-mask-image:radial-gradient(circle 340px at var(--mx,-999px) var(--my,-999px), #000 0%, rgba(0,0,0,.5) 45%, transparent 72%);
+          mask-image:radial-gradient(circle 340px at var(--mx,-999px) var(--my,-999px), #000 0%, rgba(0,0,0,.5) 45%, transparent 72%)}
+#nav{position:sticky;top:0;z-index:50;backdrop-filter:blur(10px);background:rgba(5,7,12,.72);border-bottom:1px solid var(--hair)}
+/* The bar's items scroll inside it on a narrow screen rather than pushing the
+   document sideways. Measured at 390px: 733px of content in a 390px viewport, so
+   the whole page scrolled horizontally — pre-existing, and 25px of it is the
+   logo's destination suffix added the same day. Same fix cloud.computedriven.com
+   uses on .site-links. flex:none on the items or they squash instead of scroll. */
+#nav .wrap{display:flex;align-items:center;gap:22px;height:58px;max-width:1240px;overflow-x:auto;scrollbar-width:none}
+#nav .wrap::-webkit-scrollbar{display:none}
+#nav .logo,#nav .nl,#nav .navdl{flex:none}
+/* The logo points at the root domain, not at #hero — the three product sites
+   funnel back to the studio. The suffix is what keeps the visible label honest
+   about that; the aria-label carries it at every width, because the suffix
+   collapses on narrow screens and an accessible name reading "Super (CD)" on a
+   link that leaves the domain is the actual defect. */
+.logo{font-family:var(--mono);font-weight:700;font-size:15px;display:inline-flex;align-items:center;gap:8px}
+.logo b{color:var(--acc)}
+.logo .bto{font-weight:400;font-size:10.5px;letter-spacing:.08em;color:var(--dim);transition:color .18s ease}
+.logo:hover .bto{color:var(--acc)}
+@media(max-width:860px){.logo .bto-w{display:none}}
+.nl{font-family:var(--mono);font-size:11px;letter-spacing:.14em;color:var(--mut)}
+.nl:hover{color:var(--ink)}
+.spacer{flex:1}
+.navdl{font-family:var(--mono);font-size:11px;letter-spacing:.1em;border:1px solid var(--hair2);padding:8px 14px;border-radius:8px}
+.navdl:hover{border-color:var(--acc);color:var(--acc-ink)}
+
+#hero{position:relative;padding:64px 0 0;overflow:hidden}
+#beamfx{position:absolute;inset:0;z-index:0;pointer-events:none;mix-blend-mode:screen}
+.heroGrid{position:relative;z-index:1;display:grid;grid-template-columns:minmax(0,600px) 1fr;gap:40px;align-items:start}
+.copy{text-align:left}
+@media(max-width:900px){.heroGrid{grid-template-columns:1fr}.copy{text-align:center}.copy .ctas{justify-content:center}.sub{margin-left:auto;margin-right:auto}}
+.eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.22em;color:var(--dim);text-transform:uppercase}
+.thesis{font-weight:800;font-size:clamp(46px,6.4vw,84px);line-height:1;letter-spacing:-.034em;margin:18px 0 0;max-width:12ch}
+.thesis .acc{color:var(--acc)}
+.sub{color:var(--mut);max-width:52ch;margin:22px 0 0;font-size:17.5px}
+.ctas{display:flex;gap:12px;justify-content:center;margin-top:28px;flex-wrap:wrap}
+.copy .ctas{justify-content:flex-start}
+.btn{font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;padding:13px 22px;border-radius:10px;border:1px solid var(--hair2);transition:.15s}
+.btn.pri{background:var(--acc);border-color:var(--acc);color:#160503;font-weight:700}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.ghost:hover{border-color:var(--ink)}
+.heronote{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:14px}
+.heronote b{color:var(--warn);font-weight:400}
+
+/* ---------- the stage: beam + smoke + the actual app ---------- */
+#stagewrap{position:relative;z-index:1;max-width:1280px;margin:26px auto 0;padding:0 18px;
+  --breath:.8;   /* 0..1, driven per-frame by the beam script; .8 = resting state before JS / reduced motion */
+  --stageH:min(72vh,740px); --stageMinH:480px}  /* one source of truth: #stage and #stageglow are the same box */
+#stage{position:relative;border:1px solid var(--hair2);border-radius:16px;overflow:hidden;
+  background:#04060A;
+  height:var(--stageH);min-height:var(--stageMinH);
+  --bx:56%;
+  box-shadow:0 0 0 6px rgba(148,170,210,.04),
+             0 60px 160px -50px rgba(0,0,0,.9)}
+/* the breathing halo — the colored glow lives on its own layer behind the stage so it
+   can swell with the beam (opacity+scale only: compositor-cheap) */
+#stageglow{position:absolute;top:0;left:18px;right:18px;height:var(--stageH);min-height:var(--stageMinH);
+  border-radius:16px;pointer-events:none;
+  box-shadow:0 -30px 96px -12px rgba(84,152,255,.55),
+             -30px 26px 110px -30px rgba(70,132,255,.38),
+              30px 26px 110px -30px rgba(96,170,255,.40),
+              0 30px 96px -26px rgba(60,112,232,.28),
+              0 0 150px -30px rgba(122,186,255,.34);
+  opacity:calc(.30 + .70*var(--breath));
+  transform:scale(calc(.996 + .008*var(--breath)));
+  will-change:opacity,transform}
+/* orbiting energy — two comets (cool + ember) counter-rotating along the frame's edge,
+   masked to a 2px band so they read as charge running around the border */
+@property --spin{syntax:'<angle>';inherits:false;initial-value:0deg}
+#ringrun{position:absolute;inset:-1px;border-radius:17px;padding:2px;z-index:8;pointer-events:none;
+  opacity:calc(.40 + .60*var(--breath));
+  background:
+    conic-gradient(from var(--spin),
+      rgba(160,205,255,0) 0turn, rgba(160,205,255,0) .80turn,
+      rgba(140,195,255,.20) .89turn, rgba(170,215,255,.55) .95turn,
+      rgba(238,248,255,.95) .985turn, rgba(255,255,255,1) .997turn,
+      rgba(160,205,255,0) 1turn),
+    conic-gradient(from calc(180deg - var(--spin)*1.35),
+      rgba(140,200,255,0) 0turn, rgba(140,200,255,0) .85turn,
+      rgba(140,200,255,.14) .92turn, rgba(176,220,255,.40) .965turn,
+      rgba(230,244,255,.80) .993turn,
+      rgba(140,200,255,0) 1turn);
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;
+          mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          mask-composite:exclude;
+  animation:orbit 7.5s linear infinite}
+@keyframes orbit{to{--spin:360deg}}
+@media (prefers-reduced-motion:reduce){#ringrun{animation:none}}
+#stage::before{content:"";position:absolute;inset:-1px;border-radius:17px;padding:1.5px;z-index:7;pointer-events:none;
+  background:
+    linear-gradient(90deg, rgba(120,186,255,.40), rgba(120,186,255,0) 26%, rgba(120,200,255,0) 74%, rgba(120,200,255,.40)),
+    linear-gradient(180deg, rgba(230,244,255,.95), rgba(120,185,255,.45) 26%, rgba(92,152,250,.22) 60%, rgba(82,140,255,.40) 100%);
+  -webkit-mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite:xor;
+          mask:linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+          mask-composite:exclude;
+  opacity:calc(.68 + .40*var(--breath))}
+#stage::after{content:"";position:absolute;inset:0;z-index:6;pointer-events:none;border-radius:16px;
+  background:
+    radial-gradient(150px 6px at var(--bx) 1px, rgba(242,250,255,.95), rgba(162,212,255,.45) 55%, rgba(162,212,255,0)),
+    linear-gradient(180deg, rgba(202,230,255,.85), rgba(140,190,255,.30) 28%, rgba(150,200,255,.16) 60%, rgba(118,180,255,.40) 100%),
+    linear-gradient(180deg, rgba(202,230,255,.70), rgba(140,190,255,.24) 28%, rgba(148,178,228,.14) 60%, rgba(110,172,255,.42) 100%),
+    linear-gradient(90deg, rgba(110,172,255,.35), rgba(142,178,232,.18) 52%, rgba(120,192,255,.35));
+  background-repeat:no-repeat;
+  background-size:100% 10px, 2px 100%, 2px 100%, 100% 2px;
+  background-position:left top, right top, left top, left bottom;
+  opacity:calc(.62 + .46*var(--breath))}
+.fbar{position:relative;z-index:3;display:flex;align-items:center;gap:14px;padding:10px 16px;border-bottom:1px solid var(--hair);
+  font-family:var(--mono);font-size:11.5px;color:var(--mut);background:rgba(5,8,13,.85)}
+.fbar .wm{font-weight:700;color:var(--ink)}.fbar .wm b{color:var(--ice)}
+.fbar .gg{color:var(--ok)}
+.fbar>span{white-space:nowrap}
+.fbar .live{margin-left:auto;display:flex;align-items:center;gap:7px;color:var(--dim);font-size:10.5px;letter-spacing:.12em}
+.fbar .live i{width:7px;height:7px;border-radius:50%;background:var(--ok);box-shadow:0 0 8px rgba(70,211,154,.8)}
+/* the bar's five items need ~490px; below that they wrapped and the last one clipped.
+   Shed the middle three — the app's own topbar states all of them anyway. */
+@media(max-width:640px){.fbar>span:not(.wm):not(.live){display:none}}
+/* --fbarH is measured from the real frame bar at runtime; 40px is the pre-JS estimate.
+   It used to be a hardcoded 41px against a bar that measures 39.97 — a 2px seam that
+   moved whenever the bar's font did. */
+#appport{position:absolute;inset:var(--fbarH,40px) 0 0 0;overflow:hidden}
+#appframe{position:absolute;top:0;left:0;width:100%;height:100%;border:0;background:#0B101B;
+  transform-origin:0 0;pointer-events:none;opacity:0;transition:opacity .7s ease}
+#appframe.ready{opacity:1}
+/* interaction is opt-in: an always-live iframe in mid-page eats the wheel, so the page
+   stops scrolling whenever the pointer crosses it. .live is added on click-in. */
+#appframe.live{pointer-events:auto}
+#stage.armed{box-shadow:0 0 0 6px rgba(148,170,210,.04),
+             0 0 0 1px rgba(240,98,59,.34) inset,
+             0 60px 160px -50px rgba(0,0,0,.9)}
+#appmock{position:absolute;inset:0;display:grid;grid-template-columns:168px 1fr 200px;background:#0B101B;transition:opacity .6s;font-family:var(--mono)}
+#appmock.gone{opacity:0;pointer-events:none}
+.mrail{border-right:1px solid var(--hair);padding:14px 12px;font-size:10.5px;line-height:2.05;color:var(--dim);white-space:pre}
+.mrail b{color:var(--mut);font-weight:400}.mrail .on{color:var(--ice)}
+.mmain{padding:16px 18px;display:flex;flex-direction:column;gap:11px;min-width:0}
+.mgoal{border:1px solid var(--hair2);border-radius:10px;padding:13px 15px;background:rgba(14,21,36,.6)}
+.mgoal .gn{font-weight:700;font-size:13.5px;color:var(--ink)}
+.mgoal .gd{color:var(--mut);font-size:11.5px;margin-top:3px;font-family:var(--sans)}
+.mep{display:inline-block;font-size:9px;letter-spacing:.05em;padding:1.5px 6px;border-radius:4px;border:1px solid var(--hair2);color:var(--dim);margin:8px 5px 0 0}
+.mep.s{color:var(--violet)}.mep.t{color:var(--ice)}.mep.l{color:var(--ok)}
+.mlane{display:flex;align-items:center;gap:9px;border:1px solid var(--hair);border-radius:8px;padding:8px 11px;font-size:10.5px;color:var(--mut)}
+.mlane .hb{width:6px;height:6px;border-radius:50%;background:var(--ok);box-shadow:0 0 7px rgba(70,211,154,.7)}
+.mlane b{color:var(--ink)}
+.mlane .meter{flex:1;max-width:90px;height:3px;border-radius:2px;background:rgba(148,170,210,.15);margin-left:auto;overflow:hidden}
+.mlane .meter i{display:block;height:100%;background:var(--ice)}
+.mev{border-top:1px dashed var(--hair);padding-top:9px;font-size:10px;color:var(--dim);display:flex;flex-direction:column;gap:5px}
+.mk{border:1px solid var(--hair2);border-radius:4px;padding:0 5px;font-size:8.5px}
+.mk.c{color:var(--ok)}.mk.o{color:var(--warn)}.mk.r{color:var(--violet)}
+.mside{border-left:1px solid var(--hair);padding:14px;font-size:10px;color:var(--dim);line-height:2}
+.mside h5{font-size:8.5px;letter-spacing:.18em;margin:0 0 4px;font-weight:400}
+.mside .nd{display:flex;justify-content:space-between;color:var(--mut)}
+.mside .ok{color:var(--ok)}.mside .cl{color:var(--violet)}
+@media(max-width:880px){#appmock{grid-template-columns:1fr}.mrail,.mside{display:none}}
+/* pointer-events:none is load-bearing — this is a label sitting over the app, and it
+   used to be left at opacity:0 with clicks still landing on it. */
+#stagehint{position:absolute;z-index:5;left:50%;bottom:14px;transform:translateX(-50%);pointer-events:none;
+  font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;color:var(--dim);
+  background:rgba(5,8,13,.7);border:1px solid var(--hair);border-radius:20px;padding:7px 14px;transition:opacity .5s,color .3s}
+#stage.armed #stagehint{color:var(--acc-ink);border-color:rgba(240,98,59,.4)}
+#stagehint b{color:var(--acc-ink);font-weight:400}
+#stagefallback{position:absolute;inset:41px 0 0 0;display:none;align-items:center;justify-content:center;
+  font-family:var(--mono);font-size:12px;color:var(--dim);text-align:center;padding:30px;line-height:2.2}
+#pvrow{display:flex;gap:8px;justify-content:center;flex-wrap:wrap;margin-top:14px}
+.pvb{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;color:var(--dim);border:1px solid var(--hair2);border-radius:20px;padding:7px 14px;background:transparent;cursor:pointer;transition:.14s}
+.pvb:hover,.pvb.on{color:var(--acc-ink);border-color:var(--acc)}
+.pvb:focus-visible{outline:1px solid var(--acc);outline-offset:2px}
+.stagecap{font-family:var(--mono);font-size:11px;color:var(--dim);text-align:center;margin-top:12px}
+.stagecap b{color:var(--mut);font-weight:400}
+
+/* proof bar */
+#proofbar{border-top:1px solid var(--hair);border-bottom:1px solid var(--hair);padding:16px 0 12px;margin-top:60px}
+#proofbar .row{display:flex;gap:26px;justify-content:center;flex-wrap:wrap;font-family:var(--mono);font-size:11.5px;color:var(--mut)}
+#proofbar a b{color:var(--ok);font-weight:400;border-bottom:1px dashed rgba(70,211,154,.4)}
+#proofbar a:hover b{color:var(--ink)}
+#prooflabel{font-family:var(--mono);font-size:10px;color:var(--dim);text-align:center;margin-top:9px;letter-spacing:.04em}
+#prooflabel a{color:var(--dim);border-bottom:1px dotted var(--dim)}
+#prooflabel a:hover{color:var(--mut)}
+
+section{padding:96px 0;border-top:1px solid var(--hair)}
+.sec-eyebrow{font-family:var(--mono);font-size:10.5px;letter-spacing:.24em;color:var(--acc);text-transform:uppercase}
+h2{font-weight:800;font-size:clamp(28px,3.6vw,44px);letter-spacing:-.025em;line-height:1.08;margin-top:14px;max-width:26ch}
+.lede{color:var(--mut);max-width:62ch;margin-top:16px}
+.g2{display:grid;grid-template-columns:1fr 1fr;gap:26px}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:18px}
+.g4{display:grid;grid-template-columns:repeat(4,1fr);gap:16px}
+@media(max-width:880px){.g2,.g3,.g4{grid-template-columns:1fr}}
+.card{border:1px solid var(--hair);border-radius:12px;padding:20px;background:rgba(11,16,25,.55)}
+.card h3{font-size:16.5px}
+/* A linked card heading stays a heading — the global `a{color:inherit}` makes it
+   indistinguishable from a plain one, so the affordance has to come from hover. */
+.card h3 a{border-bottom:1px solid var(--hair2);transition:color .15s ease,border-color .15s ease}
+.card h3 a:hover{color:var(--acc);border-color:var(--acc)}
+.card p{color:var(--mut);font-size:13.5px;margin-top:8px}
+.mline{font-family:var(--mono);font-size:12px;color:var(--dim)}
+
+/* The family band. The same three cards, in the same order and the same words,
+   ship on all three product sites and in the root's funnel figure, so a reader
+   crossing between them recognises the shape rather than re-learning it. Note the
+   wording is the root's ("the desktop application"), not this page's own — the
+   band's job is to speak the studio's vocabulary, and a card that renamed itself
+   per site would defeat the point of shipping the same card three times. The card
+   for the site you are on is a <div>, not an <a>: a link to the page you are on is
+   a link that does nothing. */
+.fam{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:26px}
+@media(max-width:880px){.fam{grid-template-columns:1fr}}
+.fam-card{display:block;border:1px solid var(--hair);border-radius:12px;padding:20px;background:rgba(11,16,25,.55);transition:border-color .18s ease,background .18s ease}
+a.fam-card:hover{border-color:var(--acc);background:var(--panel2)}
+.fam-card .fc-n{display:flex;align-items:baseline;flex-wrap:wrap;gap:9px;font-size:16.5px;font-weight:700;color:var(--ink)}
+.fam-card .fc-d{display:block;font-family:var(--mono);font-size:12px;color:var(--mut);margin-top:6px}
+.fam-card .fc-h{display:block;font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:10px}
+.fam-card.here{border-color:rgba(240,98,59,.5);background:var(--panel2)}
+.fam-card.here .fc-n{color:var(--acc)}
+.fc-you{font-family:var(--mono);font-size:9.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--acc);border:1px solid rgba(240,98,59,.45);border-radius:5px;padding:2px 6px}
+.fam-foot{display:flex;flex-wrap:wrap;align-items:baseline;gap:7px 16px;margin-top:22px;padding-top:16px;border-top:1px solid var(--hair);font-family:var(--mono);font-size:12px;color:var(--dim)}
+.fam-foot a{color:var(--acc)}
+.fam-foot a:hover{color:var(--acc-ink)}
+
+.q{border-left:2px solid var(--hair2);padding:6px 0 6px 22px}
+.q .who{font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;color:var(--dim);text-transform:uppercase}
+.q .what{font-size:clamp(19px,2.2vw,25px);font-weight:700;margin-top:8px;line-height:1.3}
+.q.them .what{color:var(--dim)}
+.q.us{border-color:var(--acc)}
+.q.us .what em{font-style:normal;color:var(--acc)}
+
+/* everyday goal */
+.daycard{border:1px solid var(--hair2);border-radius:14px;background:rgba(14,21,36,.55);padding:22px 24px}
+.daycard .gname{font-family:var(--mono);font-weight:700;font-size:15px}
+.dayrows{margin-top:14px;display:flex;flex-direction:column;gap:8px}
+.dayrow{display:flex;align-items:center;gap:12px;font-family:var(--mono);font-size:11.5px;color:var(--mut);border:1px solid var(--hair);border-radius:8px;padding:8px 12px}
+.dayrow .st{color:var(--ink)}
+.pl{border:1px solid var(--hair2);border-radius:4px;padding:1.5px 7px;font-size:9.5px;letter-spacing:.06em;margin-left:auto}
+.pl.local{color:var(--ok);border-color:rgba(70,211,154,.4)}
+.pl.fleet{color:var(--ice);border-color:rgba(143,184,232,.4)}
+.pl.cloud{color:var(--violet);border-color:rgba(161,143,255,.4)}
+.pl.hold{color:var(--warn);border-color:rgba(240,180,76,.4)}
+.daylists{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:16px}
+@media(max-width:700px){.daylists{grid-template-columns:1fr}}
+.daylists h5{font-family:var(--mono);font-size:9.5px;letter-spacing:.2em;color:var(--dim);font-weight:400}
+.daylists ul{list-style:none;margin-top:8px}
+.daylists li{font-family:var(--mono);font-size:11.5px;color:var(--mut);padding:4px 0}
+.daylists .ok{color:var(--ok)}.daylists .o{color:var(--warn)}
+
+.ladder{display:flex;align-items:center;margin-top:34px;flex-wrap:wrap}
+.rung{font-family:var(--mono);font-size:11px;letter-spacing:.08em;border:1px solid var(--hair2);border-radius:8px;padding:9px 14px;color:var(--mut)}
+.rung.hit{color:var(--ok);border-color:rgba(70,211,154,.45)}
+.rarr{color:var(--dim);padding:0 10px;font-family:var(--mono)}
+.ledger{font-family:var(--mono);font-size:11.5px;line-height:2.15;color:var(--mut);border:1px solid var(--hair);border-radius:12px;padding:16px 20px;margin-top:26px;background:rgba(11,16,25,.55);overflow-x:auto}
+.ledger .p{color:var(--ok)}
+.refuse{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}
+.rf{font-family:var(--mono);font-size:10.8px;border:1px solid var(--hair);border-radius:7px;padding:7px 11px;color:var(--dim)}
+.rf b{color:var(--err);font-weight:400}
+
+.world{margin-top:40px}
+.wbase{border:1px solid var(--hair2);border-radius:10px;padding:12px;text-align:center;font-family:var(--mono);font-size:11.5px;color:var(--mut);margin-top:18px;background:rgba(14,21,36,.5)}
+.wbase b{color:var(--ice);font-weight:400}
+.wlink{height:18px;border-left:1px solid var(--hair2);width:0;margin:0 auto}
+
+.sites{display:flex;gap:10px;flex-wrap:wrap;margin-top:22px}
+.site{font-family:var(--mono);font-size:11px;letter-spacing:.1em;border:1px solid var(--hair2);border-radius:8px;padding:8px 14px;color:var(--mut)}
+.site b{font-weight:400}
+.site.l b{color:var(--ok)}.site.f b{color:var(--ice)}.site.c b{color:var(--violet)}
+.spec{font-family:var(--mono);font-size:12px;line-height:2;color:var(--mut);border:1px solid var(--hair2);border-radius:12px;padding:18px 20px;background:rgba(14,21,36,.6);white-space:pre-wrap}
+.spec .deny{color:var(--err)}.spec .drv{color:var(--ok)}.spec .cm{color:var(--dim)}
+
+/* capability packs */
+.capdemo{font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--warn);border:1px solid rgba(240,180,76,.4);border-radius:6px;padding:4px 10px;display:inline-block;margin-top:14px}
+.captiles{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-top:26px}
+@media(max-width:960px){.captiles{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:560px){.captiles{grid-template-columns:1fr}}
+.captile{border:1px solid var(--hair);border-radius:12px;padding:16px;background:rgba(11,16,25,.55);font-family:var(--mono)}
+.captile h4{font-size:12.5px;letter-spacing:.08em;display:flex;align-items:center;gap:8px}
+.captile .st{margin-left:auto;font-size:8.5px;letter-spacing:.12em;border:1px solid var(--hair2);border-radius:4px;padding:2px 6px;color:var(--dim)}
+.captile .st.in{color:var(--ok);border-color:rgba(70,211,154,.4)}
+.captile .st.av{color:var(--ice);border-color:rgba(143,184,232,.4)}
+.captile .kindln{font-size:9.5px;color:var(--dim);margin-top:4px}
+.captile .auth{font-size:10.5px;color:var(--mut);margin-top:10px;line-height:1.9}
+.captile .auth b{color:var(--ink);font-weight:400}
+.captile .auth .note{color:var(--warn)}
+.captile .auth .deny{color:var(--err)}
+.captile .pl{margin:10px 0 0;display:inline-block}
+.capfoot{font-family:var(--mono);font-size:10px;color:var(--dim);margin-top:12px}
+.diffcard{border:1px solid rgba(240,180,76,.45);border-radius:14px;background:rgba(14,21,36,.6);padding:20px 22px;font-family:var(--mono);font-size:12px;line-height:2;color:var(--mut)}
+.diffcard .hd{color:var(--ink);font-size:13px}
+.diffcard .add{color:var(--warn)}
+.diffcard .tag{font-size:9px;letter-spacing:.1em;border:1px solid rgba(240,180,76,.5);border-radius:4px;padding:1px 6px;margin-left:8px;color:var(--warn)}
+.diffcard .held{margin-top:10px;color:var(--warn);letter-spacing:.08em}
+.diffcard .held.ok{color:var(--ok)}
+.diffbtns{display:flex;gap:10px;margin-top:14px;flex-wrap:wrap}
+.dbtn{font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;border:1px solid var(--hair2);border-radius:8px;padding:8px 13px;background:transparent;color:var(--mut);cursor:pointer}
+.dbtn:hover{border-color:var(--acc);color:var(--acc-ink)}
+.diffcap{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:14px}
+.diffcap b{color:var(--ink);font-weight:400}
+.lawline{font-family:var(--mono);font-size:12px;letter-spacing:.06em;color:var(--mut);text-align:center;margin-top:46px;padding-top:26px;border-top:1px dashed var(--hair)}
+.lawline b{color:var(--ink);font-weight:400}
+.idcard{font-family:var(--mono);font-size:12px;line-height:2.1;color:var(--mut);border:1px solid var(--hair2);border-radius:12px;padding:18px 20px;background:rgba(14,21,36,.6);white-space:pre-line}
+.idcard b{color:var(--ink)}
+.eng{display:flex;align-items:center;gap:10px;margin-top:12px;flex-wrap:wrap}
+.eng .e{font-family:var(--mono);font-size:11px;border:1px dashed var(--hair2);border-radius:8px;padding:8px 13px;color:var(--dim)}
+.eng .e.live{border-style:solid;color:var(--ok);border-color:rgba(70,211,154,.45)}
+.eng .sw{font-family:var(--mono);font-size:10px;color:var(--dim);letter-spacing:.1em}
+
+.stack{margin-top:34px;border:1px solid var(--hair);border-radius:12px;overflow:hidden}
+.stratum{display:grid;grid-template-columns:150px 1fr;border-bottom:1px solid var(--hair);padding:14px 20px;gap:16px;background:rgba(11,16,25,.5)}
+.stratum:last-child{border-bottom:0}
+.stratum .r{font-family:var(--mono);font-size:10.5px;letter-spacing:.2em;color:var(--acc);padding-top:3px}
+.stratum b{font-size:14.5px}
+.stratum .w{color:var(--mut);font-size:12.5px;margin-top:2px}
+.short{font-family:var(--mono);font-size:12.5px;line-height:2.1;color:var(--mut);margin-top:26px;border-left:2px solid var(--acc);padding-left:18px}
+.short b{color:var(--ink);font-weight:400}
+
+.plannote{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.12em;color:var(--warn);border:1px solid rgba(240,180,76,.4);border-radius:6px;padding:4px 10px;margin-top:14px}
+.tier h3{font-family:var(--mono);font-size:13px;letter-spacing:.12em}
+.tier .pr{font-family:var(--mono);font-size:10.5px;color:var(--dim);letter-spacing:.14em;margin-top:2px}
+.tier ul{list-style:none;margin-top:12px}
+.tier li{color:var(--mut);font-size:12.8px;padding:5px 0;border-top:1px dashed var(--hair)}
+.tier.hot{border-color:rgba(240,98,59,.5)}
+.tier.hot h3{color:var(--acc)}
+
+.phases{columns:2;column-gap:40px;margin-top:30px}
+@media(max-width:760px){.phases{columns:1}}
+.ph{break-inside:avoid;display:flex;gap:14px;padding:11px 0;border-top:1px solid var(--hair);font-size:13.5px;color:var(--mut)}
+.ph .n{font-family:var(--mono);color:var(--acc);font-size:11.5px;padding-top:2px;min-width:16px}
+.ph b{color:var(--ink)}
+.ph .now{font-family:var(--mono);font-size:9.5px;color:var(--ok);border:1px solid rgba(70,211,154,.4);border-radius:4px;padding:1px 6px;margin-left:8px;letter-spacing:.08em}
+
+#close{text-align:center}
+#close .thesis{font-size:clamp(30px,4.4vw,52px);max-width:22ch}
+.north{font-family:var(--mono);font-size:12.5px;color:var(--dim);max-width:70ch;margin:26px auto 0;line-height:2}
+footer{border-top:1px solid var(--hair);padding:34px 0 60px;font-family:var(--mono);font-size:11px;color:var(--dim)}
+footer .wrap{display:flex;gap:18px;flex-wrap:wrap;justify-content:space-between}
+/* The same four-way row is in the footer of all three product sites and the root,
+   so the way out is in the same place wherever a reader stops. The property you are
+   on is a <b>, not an <a> — see the note on .fam-card. */
+.foot-fam{margin-top:18px;padding-top:16px;border-top:1px solid var(--hair)}
+.foot-fam .ff-links{display:flex;flex-wrap:wrap;gap:5px 16px}
+.foot-fam .ff-links b{font-weight:400;color:var(--acc)}
+.foot-fam .ff-links a{color:var(--mut)}
+.foot-fam .ff-links a:hover{color:var(--acc)}
+</style>
+</head>
+<body>
+<amp-nav property="super"></amp-nav>
+<div id="sky"></div>
+<div id="gridreveal" aria-hidden="true"></div>
+
+<nav id="nav">
+  <div class="wrap">
+    <a class="logo" href="https://computedriven.com" aria-label="ComputeDriven — the studio Super (CD) is one of three properties of">Super <b>(CD)</b><span class="bto" aria-hidden="true">↗</span><span class="bto bto-w" aria-hidden="true">computedriven.com</span></a>
+    <a class="nl" href="#why">WHY</a>
+    <a class="nl" href="#capabilities">CAPABILITIES</a>
+    <a class="nl" href="#evidence">EVIDENCE</a>
+    <a class="nl" href="#world">ONE WORLD</a>
+    <a class="nl" href="#placement">PLACEMENT</a>
+    <a class="nl" href="#tiers">PLANS</a>
+    <span class="spacer"></span>
+    <a class="navdl" href="app-prototype.html">PROTOTYPE</a>
+  </div>
+</nav>
+
+<header id="hero">
+  <canvas id="beamfx" aria-hidden="true"></canvas>
+  <div class="wrap heroGrid">
+    <div class="copy">
+    <div class="eyebrow">super.computedriven.com · local-first · byo engines</div>
+    <h1 class="thesis">The compute <span class="acc">surface.</span></h1>
+    <p class="sub">Agents don't run in a chat window here — they occupy a world. Direct them across your machines and the cloud, where each one holds a position with an inspectable state, explicitly scoped authority, and a record of what it did, what it proved, and what it was permitted to change.</p>
+    <div class="ctas">
+      <a class="btn pri" href="app-prototype.html">Open the live prototype</a>
+      <a class="btn ghost" href="AGENT_SUPER_APP_BLUEPRINT.md">Read the blueprint</a>
+    </div>
+    <div class="heronote"><b>In the open:</b> Phases 1–2 (Tauri shell · Elixir runtime) are in progress. The Tauri cockpit builds and runs against the real runtime — there is no installer, so there is still nothing to download. Everything under the light is the real, clickable prototype.</div>
+    </div>
+    <div class="runway" aria-hidden="true"></div>
+  </div>
+
+  <div id="stagewrap">
+    <div id="stageglow" aria-hidden="true"></div>
+    <div id="stage">
+      <div id="ringrun" aria-hidden="true"></div>
+      <div class="fbar"><span class="wm">Super <b>(CD)</b></span><span>workspace/trvm</span><span class="gg">gates <span data-proof="passfrac">—</span></span><span>cert ×<span data-proof="streak">—</span></span><span class="live"><i></i>LIVE PROTOTYPE</span></div>
+      <div id="appport">
+        <div id="appmock" aria-hidden="true">
+          <div class="mrail"><b>WorkspaceSupervisor</b>
+├─ GoalServer
+├─ EvidenceLedger
+├─ ObligationRegistry
+├─ <span class="on">LaneSupervisor</span>
+│  ├─ lane-a
+│  ├─ lane-b
+│  └─ lane-c
+└─ Fleet/Presence</div>
+          <div class="mmain">
+            <div class="mgoal">
+              <div class="gn">GOAL · EMISSION_CONFORMANCE-v1</div>
+              <div class="gd">Seal the argument boundary. Merge waits on obligations, not on optimism.</div>
+              <div><span class="mep s">spec ✓</span><span class="mep t">in_tree ✓</span><span class="mep l">live_local ✓</span><span class="mep">live_deployed —</span><span class="mep">external —</span></div>
+            </div>
+            <div class="mlane"><span class="hb"></span><b>lane-a</b><span>kestrel · claude-code</span><span class="pl local">LOCAL · travis-desktop</span><span class="meter"><i style="width:62%"></i></span></div>
+            <div class="mlane"><span class="hb"></span><b>lane-b</b><span>magpie · codex</span><span class="pl fleet">FLEET · ms02</span><span class="meter"><i style="width:84%"></i></span></div>
+            <div class="mlane"><span class="hb"></span><b>browser-research</b><span class="pl cloud">CLOUD · cd-west</span><span style="font-size:9px">authority: net.allowlist · <span style="color:var(--warn)">source_data: denied_remote</span></span><span class="meter"><i style="width:23%"></i></span></div>
+            <div class="mev">
+              <div><span class="mk c">claim</span> overflow refuses as <span style="color:var(--err)">film-budget-invalid</span> — established in_tree</div>
+              <div><span class="mk o">obligation</span> confirm negative/invalid split before merge · 1 open</div>
+              <div><span class="mk r">ruling</span> argv is a transport type, not a capability type · §326</div>
+            </div>
+          </div>
+          <div class="mside">
+            <h5>FLEET</h5>
+            <div class="nd">travis-desktop <span>41%</span></div>
+            <div class="nd">ms02 <span>66%</span></div>
+            <div class="nd">gpu01 <span>12%</span></div>
+            <div class="nd"><span class="cl">cd-west ☁</span> <span>23%</span></div>
+            <div class="nd">laptop <span>asleep</span></div>
+            <h5 style="margin-top:14px">RECEIPTS</h5>
+            <div>negative <span data-proof="negatives">—</span> <span class="ok">✓</span></div>
+            <div>film <span data-proof="film">—</span> <span class="ok">✓</span></div>
+            <div>bridge <span data-proof="bridge">—</span> <span class="ok">✓</span></div>
+          </div>
+        </div>
+        <!-- ?v= must be bumped whenever app-prototype.html changes. Without it the iframe is
+             a plain subresource: a dev server that sends only Last-Modified (python's
+             http.server does) lets Chrome heuristically cache it, so index.html re-fetches
+             and the embedded app keeps rendering an old build. Keep this in the markup, not
+             in JS — the pill channel captures baseSrc from this attribute, and stamping the
+             token at runtime would reload the frame out from under it. -->
+        <iframe id="appframe" src="app-prototype.html?v=w12" title="Super (CD) — live prototype" loading="eager"></iframe>
+      </div>
+      <div id="stagehint">live prototype — <b>click in</b></div>
+    </div>
+    <div id="pvrow" role="group" aria-label="preview a surface">
+      <button class="pvb on" data-screen="mission">MISSION</button>
+      <button class="pvb" data-screen="lanes">LANES</button>
+      <button class="pvb" data-screen="agents">AGENTS</button>
+      <button class="pvb" data-screen="fleet">FLEET</button>
+      <button class="pvb" data-screen="evidence">EVIDENCE</button>
+      <button class="pvb" data-screen="gates">GATES</button>
+      <button class="pvb" data-screen="rulings">RULINGS</button>
+    </div>
+    <div class="stagecap">Not a screenshot — this is <b>app-prototype.html</b> embedded live (simulated runtime state; Phase 2 projects it from OTP). Click in.</div>
+  </div>
+
+  <div id="proofbar">
+    <div class="row">
+      <a href="proof/RESULTS.txt" title="open the receipt"><span>negative battery </span><b data-proof="negatives">—</b></a>
+      <a href="proof/RESULTS.txt" title="open the receipt"><span>semantic film </span><b data-proof="film">—</b></a>
+      <a href="proof/RESULTS.txt" title="open the receipt"><span>cross-plane bridge </span><b data-proof="bridge">—</b></a>
+      <a href="proof/BRIEF.md" title="open the receipt"><span>cert </span><b><span data-proof="certhash">—</span>… byte-identical ×<span data-proof="streak2">—</span></b></a>
+    </div>
+    <div id="prooflabel">loading proof artifact…</div>
+  </div>
+</header>
+
+<!-- ============ WHY ============ -->
+<section id="why">
+  <div class="wrap">
+    <div class="sec-eyebrow">Why this exists</div>
+    <h2>Agent panes are table stakes. Accountability isn't.</h2>
+    <div class="g2" style="margin-top:44px">
+      <div class="q them">
+        <div class="who">Everyone else answers</div>
+        <div class="what">"How do I get agents to do the work?"</div>
+      </div>
+      <div class="q us">
+        <div class="who">Super (CD) answers</div>
+        <div class="what">"What exactly did the work <em>establish</em>, what was it <em>allowed</em> to change, <em>where</em> did it run — and why may the result be committed?"</div>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:40px">A super-surface above interchangeable engines and below you. Claude Code, Codex, whatever comes next — engines run the turns; Super owns the identity, the placement, the budget, and the receipts.</p>
+  </div>
+</section>
+
+<!-- ============ EVERYDAY ============ -->
+<section id="everyday">
+  <div class="wrap">
+    <div class="sec-eyebrow">An ordinary Tuesday</div>
+    <h2>You don't need formal methods to want receipts.</h2>
+    <p class="lede">Here's the same machinery on a completely mundane goal — one page, four placements, three claims, one obligation standing between the work and production.</p>
+    <div class="g2" style="margin-top:38px;align-items:start">
+      <div class="daycard">
+        <div class="gname">GOAL · SHIP_PRICING_PAGE-v2</div>
+        <div class="dayrows">
+          <div class="dayrow"><span class="st">research</span><span>competitor teardown, finch</span><span class="pl cloud">CLOUD · cd-west</span></div>
+          <div class="dayrow"><span class="st">implementation</span><span>wren · claude-code</span><span class="pl local">LOCAL · your desk</span></div>
+          <div class="dayrow"><span class="st">browser test</span><span>harrier · 390 / 768 / 1440</span><span class="pl fleet">FLEET · ms02</span></div>
+          <div class="dayrow"><span class="st">deploy</span><span>waiting on the obligation below</span><span class="pl hold">HELD</span></div>
+        </div>
+        <div class="daylists">
+          <div><h5>CLAIMS</h5><ul>
+            <li><span class="ok">✓</span> responsive at 390 / 768 / 1440</li>
+            <li><span class="ok">✓</span> checkout regression 18/18</li>
+            <li><span class="o">○</span> deployed commit = tested commit — <span style="color:var(--dim)">pending · deploy held</span></li>
+          </ul></div>
+          <div><h5>OBLIGATIONS</h5><ul>
+            <li><span class="o">○</span> human approval before production</li>
+            <li class="mline" style="padding-top:8px">the merge is inexpressible until this closes</li>
+          </ul></div>
+        </div>
+      </div>
+      <div>
+        <p class="lede" style="margin-top:0">Nothing exotic happened here. An agent researched in the cloud because the data was public; another implemented locally because your source stays home; a third proved the page on a fleet box — and the deploy is <i>held</i>, not "probably fine," until a human closes the obligation.</p>
+        <p class="lede">The system never asked you to learn its cosmology. It just refused to confuse <b style="color:var(--ink)">done</b> with <b style="color:var(--ink)">proved</b>.</p>
+        <p class="mline" style="margin-top:22px">And when a goal needs it to go all the way down — it goes all the way down. ↓</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ EVIDENCE ============ -->
+<section id="evidence">
+  <div class="wrap">
+    <div class="sec-eyebrow">Evidence &amp; epistemics · the deep end</div>
+    <h2>Green means measured. And it says where it was earned.</h2>
+    <p class="lede">This is the same product dogfooded on our formal-verification work: claims carry receipts, obligations gate merges, and every claim wears its rung on the ladder — never a higher one. Every figure below is read from <span class="mono">proof/latest.json</span>, which the verifier generated. Click one; the receipt opens.</p>
+    <div class="ladder">
+      <span class="rung hit">spec</span><span class="rarr">→</span>
+      <span class="rung hit">in_tree</span><span class="rarr">→</span>
+      <span class="rung hit">live_local</span><span class="rarr">→</span>
+      <span class="rung">live_deployed</span><span class="rarr">→</span>
+      <span class="rung">external</span>
+    </div>
+    <div class="ledger">$ ./verify.sh
+<span class="p">PASS</span>  negative battery   <a href="proof/RESULTS.txt" data-proof="negatives">—</a> forgeries caught
+<span class="p">PASS</span>  cross-plane bridge <a href="proof/RESULTS.txt" data-proof="bridge">—</a> states byte-identical across implementations
+<span class="p">PASS</span>  semantic film      <a href="proof/RESULTS.txt" data-proof="film">—</a> · both terminal classes native
+<span class="p">PASS</span>  invariant grid     <a href="proof/RESULTS.txt" data-proof="grid">—</a>
+checks attempted <span data-proof="attempted">—</span> · passed <span data-proof="passed">—</span> · failed <span data-proof="failed">—</span> · skipped <span data-proof="skipped">—</span> — <span class="p">every gate replayed green</span></div>
+    <div class="refuse">
+      <span class="rf"><b>film-budget-negative</b> · fix a value</span>
+      <span class="rf"><b>film-unknown-flag</b> · fix a spelling</span>
+      <span class="rf"><b>authority-revoked</b> · fix a permission</span>
+      <span class="rf" style="border-style:dashed">refusals name themselves — you always know which one to fix</span>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ONE WORLD ============ -->
+<section id="world">
+  <div class="wrap">
+    <div class="sec-eyebrow">One world · three surfaces</div>
+    <h2>Not integrations. Projections.</h2>
+    <p class="lede">The desktop, the cloud, and the OS are views of the same running world — a lane shown in Super and a lane shown in T&amp;R aren't two synced records. They're one object, seen twice.</p>
+    <div class="world">
+      <div class="g3">
+        <div class="card"><h3 class="mono">SUPER (CD)</h3><p>The desktop cockpit. Goals, lanes, agents, diffs, evidence, fleet placement, runtime state — your hands on the world.</p></div>
+        <!-- Named COMPUTEDRIVEN until 2026-08-25, which put the studio where a product
+             belongs: computedriven.com is the root that publishes all three, and the
+             surface described here — identity, membership, sync, restore, hosted
+             capacity — is [World] Cloud. The old label contradicted the family band
+             further down this same page. -->
+        <div class="card"><h3 class="mono"><a href="https://cloud.computedriven.com">[WORLD] CLOUD</a></h3><p>The control plane. Identity, node membership, encrypted selective sync, presence, restore, hosted capacity, billing.</p></div>
+        <div class="card"><h3 class="mono"><a href="https://tr.computedriven.com/">T&amp;R</a></h3><p>The native OS environment, where the same world becomes spatial — machines, roads, tracks, agents, dashboards.</p></div>
+      </div>
+      <div class="wlink"></div>
+      <div class="wbase"><b>WRL</b> — the shared, inspectable world &nbsp;·&nbsp; <b>TRVM</b> — the law that makes its transitions verifiable &nbsp;·&nbsp; <span class="mline">TRAAVIIS carries the provenance · RuneFort draws the topology</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PLACEMENT ============ -->
+<section id="placement">
+  <div class="wrap">
+    <div class="sec-eyebrow">Governed placement</div>
+    <h2>Local, cloud, and fleet are sites — not copies.</h2>
+    <div class="g2" style="margin-top:8px;align-items:start">
+      <div>
+        <p class="lede">Attach the machines you already own — desktops, mini PCs, GPU boxes, cloud VMs — and extend with ComputeDriven capacity when you want burst. Moving work is placement, not migration: same supervision tree, different floor.</p>
+        <div class="sites">
+          <span class="site l"><b>LOCAL</b> — source and secrets stay put</span>
+          <span class="site f"><b>FLEET</b> — an eligible node you own</span>
+          <span class="site c"><b>CLOUD</b> — ComputeDriven-hosted burst</span>
+        </div>
+        <p class="lede" style="margin-top:22px;font-size:14px">Eligibility is computed from capability, hardware, cost, and data policy — and the derivation is citable. A future TRVM layer can verify <i>why</i> a site was allowed.</p>
+      </div>
+      <div class="spec">task: synthesizer-training
+requires: gpu.cuda
+may_run_on: [gpu01, computedriven-gpu]
+source_data: <span class="deny">denied_remote</span>
+artifacts: allowed · max_cost: $5.00
+
+<span class="drv">derived placement → gpu01</span> <span class="cm">// source policy excludes cloud</span>
+
+<span class="cm">// more interesting than a "Run in Cloud" button</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ IDENTITY ============ -->
+<section id="identity">
+  <div class="wrap g2" style="align-items:center">
+    <div>
+      <div class="sec-eyebrow">Engine ≠ identity</div>
+      <h2>The agent is bigger than its engine.</h2>
+      <p class="lede">An agent is not the model animating it. It is an <b>active locus</b> — an established state, the explicit scoped grants whose policy preconditions that state satisfies, and the evidence connecting one state to the next. Identity, memory, worktree, budget, authority and obligations live under a supervisor; the engine is one replaceable child, a reasoning motor the locus thinks with rather than the thing that is thinking. That is what makes <em>swap Claude Code for Codex mid-task</em> a coherent question instead of a category error: the motor changed, and the locus is what would have to continue.</p>
+      <div class="heronote"><b>What is built, and what this claim still owes:</b> the supervisor, the ledger and the authority runtime are real Elixir/OTP — <span class="mono">ampd/</span>, not simulated. The swap is prototype behaviour. No run in this tree has yet carried a locus across an engine substitution and shown the successor re-established the predecessor's state, so <b>surviving an engine is the design here and not a measurement.</b> The part already true is narrower and still worth having: what the engine was permitted to do never lived inside the engine. That is why this section no longer promises an agent that cannot die — it claims the smaller thing it can show, and leaves continuity as the open experiment it is.</div>
+    </div>
+    <div>
+      <div class="idcard"><b>ag_kestrel</b> — what the engine does not own
+goal &nbsp;&nbsp;&nbsp;&nbsp;&nbsp; EMISSION_CONFORMANCE-v1
+memory &nbsp;&nbsp;&nbsp; 214 claims, citable
+worktree &nbsp; wt/lane-a @ 4f21c99
+budget &nbsp;&nbsp;&nbsp; 24.8k / 40k · authority · obligations</div>
+      <div class="eng"><span class="e live">claude-code</span><span class="sw">◂ SWAP ▸</span><span class="e">codex</span><span class="e">anything with a harness</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ CAPABILITIES ============ -->
+<section id="capabilities">
+  <div class="wrap">
+    <div class="sec-eyebrow">Capability packs · install ≠ authorize</div>
+    <h2>Plugins, without ambient authority.</h2>
+    <p class="lede">Install a skill, connector, UI, or MCP server once. Then grant only the typed capabilities each agent or workspace may exercise. Secrets stay outside the engine, placement stays governed, and meaningful effects leave receipts.</p>
+    <div class="g3" style="margin-top:34px">
+      <div class="card"><h3 class="mono">INSTALL</h3><p>A pack can bundle skills, MCP, UI, hooks, adapters, and tests. Installation gives it zero authority.</p></div>
+      <div class="card"><h3 class="mono">GRANT</h3><p><span class="mono">github.repo.read</span> is not <span class="mono">github.pr.merge</span>. Scope abilities by agent, workspace, resource, budget, node, and duration.</p></div>
+      <div class="card"><h3 class="mono">RECEIPT</h3><p>Every committed effect names the pack/version, capability, authority snapshot, placement, approval, and result.</p></div>
+    </div>
+
+    <span class="capdemo">PROTOTYPE CATALOG · NO PACK EXECUTES YET · STATES SIMULATED</span>
+    <div class="captiles">
+      <div class="captile"><h4>GITHUB<span class="st in">INSTALLED</span></h4>
+        <div class="kindln">MCP · Skill · UI</div>
+        <div class="auth">READ <b>3</b> · WRITE <b>1</b> · ADMIN <b>0</b><br>secret: <b>gateway-only</b></div>
+        <span class="pl fleet" style="margin-right:6px">LOCAL</span><span class="pl fleet">FLEET</span>
+        <div class="capfoot">conformance 42/42 · <span style="color:var(--warn)">simulated</span></div></div>
+      <div class="captile"><h4>BROWSER<span class="st in">INSTALLED</span></h4>
+        <div class="kindln">Native · MCP App</div>
+        <div class="auth">READ <b>3</b> · PUBLISH <b>1</b><span class="note">*</span><br><span class="note">* approval required</span></div>
+        <span class="pl local" style="margin-right:6px">LOCAL</span><span class="pl fleet" style="margin-right:6px">FLEET</span><span class="pl cloud">CLOUD</span>
+        <div class="capfoot">egress: allowlist only</div></div>
+      <div class="captile"><h4>POSTGRES<span class="st av">AVAILABLE</span></h4>
+        <div class="kindln">Native adapter</div>
+        <div class="auth">READ <b>2</b> · WRITE <b>1</b><span class="deny">*</span><br><span class="deny">* denied by default</span></div>
+        <span class="pl local" style="margin-right:6px">LOCAL</span><span class="pl fleet">FLEET</span>
+        <div class="capfoot">destructive SQL refuses by name</div></div>
+      <div class="captile"><h4>MCP IMPORT<span class="st">BUILT-IN</span></h4>
+        <div class="kindln">Any MCP server</div>
+        <div class="auth">Tools become <b>requested</b> typed capabilities.<br>UI renders sandboxed.</div>
+        <div class="capfoot" style="margin-top:14px">Super supplies the authority.</div></div>
+    </div>
+
+    <div class="g2" style="margin-top:40px;align-items:start">
+      <div>
+        <p class="lede" style="margin-top:0">Installed is a fact about disk. Authorized is a fact about the world. Between them sit six inspectable states — <span class="mono" style="font-size:12.5px">available → installed → requested → authorized → exercised → committed → receipted</span> — and the receipt feeds the same evidence ledger as everything else. No second audit system.</p>
+        <p class="lede">When an agent lacks authority, the refusal names itself — <span class="mono" style="font-size:12.5px;color:var(--err)">authority-missing · mail.send</span> — with the scope, the reason, and the grant it does hold. Never a vague "permission denied."</p>
+      </div>
+      <div class="diffcard" id="authdiff">
+        <div class="hd">github 1.4.2 → 1.5.0</div>
+        <div style="margin-top:8px">code / skill changes&nbsp;&nbsp;<b style="color:var(--ink)">14 files</b></div>
+        <div><span class="add">+ github.issue.write</span><span class="tag">NEW AUTHORITY</span></div>
+        <div><span class="add">+ api.linear.app</span><span class="tag">NEW EGRESS</span></div>
+        <div><span class="add">+ CLOUD</span><span class="tag">PLACEMENT WIDENED</span></div>
+        <div class="held" id="diffstatus">STATUS: UPDATE HELD — authority surface widened</div>
+        <div class="diffbtns">
+          <button class="dbtn" onclick="var d=document.getElementById('diffstatus');d.textContent='UPDATED TO 1.5.0 — old grants preserved · new authority remains ungranted';d.classList.add('ok');this.parentNode.style.display='none'">update, keep old grants</button>
+          <button class="dbtn" onclick="var d=document.getElementById('diffstatus');d.textContent='HELD — review the three requests in the grant matrix before anything widens';">review new authority</button>
+        </div>
+        <div class="diffcap"><b>Updates can change code. They cannot silently change authority.</b></div>
+      </div>
+    </div>
+    <div class="lawline"><b>Identity ≠ engine.</b> &nbsp;<b>Installation ≠ authority.</b> &nbsp;<b>Authority ≠ approval.</b> &nbsp;<b>Attempt ≠ effect.</b> &nbsp;<b>Effect ≠ proof.</b></div>
+  </div>
+</section>
+
+<!-- ============ STACK ============ -->
+<section id="stack">
+  <div class="wrap">
+    <div class="sec-eyebrow">Architecture</div>
+    <h2>Built like it means it.</h2>
+    <p class="lede">The runtime is authoritative; every surface is a projection that can crash and resynchronize — it was never the truth. The CLI (<span class="mono">amp</span>) and the desktop call the same daemon (<span class="mono">ampd</span>); logic exists once.</p>
+    <div class="stack">
+      <div class="stratum"><span class="r">SHELL</span><div><b>Tauri 2 · TypeScript</b><div class="w">the projection — a lightweight desktop over the runtime</div></div></div>
+      <div class="stratum"><span class="r">BRAIN</span><div><b>Elixir / OTP</b><div class="w">the society — supervisors, lanes, agents, ledger, routines, presence</div></div></div>
+      <div class="stratum"><span class="r">BODY</span><div><b>Rust</b><div class="w">the machine — PTY, git, filesystem, hashing, sandbox, OS authority</div></div></div>
+      <div class="stratum"><span class="r">WORLD</span><div><b>WRL</b><div class="w">the description — topology, intent, capability as inspectable records</div></div></div>
+      <div class="stratum"><span class="r">LAW</span><div><b>TRVM</b><div class="w">the enforcement — gates, films, receipts, byte-identical certs</div></div></div>
+      <div class="stratum"><span class="r">PERSISTENCE</span><div><b>ComputeDriven</b><div class="w">the continuity — identity, sync, restore, fleet, hosted capacity</div></div></div>
+    </div>
+    <div class="short"><b>Elixir runs the society. Rust runs the machine. WRL describes the world. TRVM enforces its laws.</b><br>ComputeDriven makes that world persistent and distributed.</div>
+  </div>
+</section>
+
+<!-- ============ TIERS ============ -->
+<section id="tiers">
+  <div class="wrap">
+    <div class="sec-eyebrow">Plans</div>
+    <h2>One platform. Useful before you pay.</h2>
+    <p class="lede">The local client will be genuinely useful with the cloud off. ComputeDriven sells coordination, persistence, visibility, and elastic overflow — over compute you already own.</p>
+    <span class="plannote">PLANNED SHAPE · NOTHING IS FOR SALE YET — THIS IS THE PHASE 5 DESIGN</span>
+    <div class="g4" style="margin-top:26px">
+      <div class="card tier"><h3>LOCAL</h3><div class="pr">FREE · FOREVER</div><ul><li>Super (CD) desktop</li><li>Local agents &amp; WRL world</li><li>Local receipts &amp; ledger</li><li>BYO Claude / Codex / engines</li></ul></div>
+      <div class="card tier"><h3>DRIVER</h3><div class="pr">ACCOUNT</div><ul><li>Identity &amp; encrypted sync</li><li>Restore anywhere</li><li>Modest cloud storage</li><li>Modest hosted execution</li></ul></div>
+      <div class="card tier hot"><h3>FLEET</h3><div class="pr">MULTI-MACHINE</div><ul><li>Attach machines you own</li><li>Distributed execution</li><li>Remote runners</li><li>Richer scheduling</li></ul></div>
+      <div class="card tier"><h3>FACTORY</h3><div class="pr">TEAMS</div><ul><li>Orgs &amp; governance</li><li>Larger fleets &amp; automation</li><li>Hosted compute</li><li>Policy controls</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ PATH ============ -->
+<section id="path">
+  <div class="wrap">
+    <div class="sec-eyebrow">The path</div>
+    <h2>Commercially useful at every phase.</h2>
+    <div class="phases">
+      <div class="ph"><span class="n">0</span><div><b>Freeze the reference</b> — the Python/HTML draft becomes the behavioral oracle: fixtures, transcripts, conformance.</div></div>
+      <div class="ph"><span class="n">1</span><div><b>Desktop shell</b> — Tauri wrap, stable behavior, IPC boundary. The cockpit renders one ordered frame stream and submits intents; a successful intent moves nothing on screen until a frame says so. No installer yet.<span class="now">NOW</span></div></div>
+      <div class="ph"><span class="n">2</span><div><b>Elixir runtime</b> — workspace, goal, lane, worker, evidence, obligation, routine, presence supervisors.<span class="now">NOW</span></div></div>
+      <div class="ph"><span class="n">3</span><div><b>Rust native core</b> — git, worktree, PTY, filesystem, hashing, sandbox authority.</div></div>
+      <div class="ph"><span class="n">4</span><div><b>Local ledger</b> — durable, replayable; actions bound to receipts and explicit authority.</div></div>
+      <div class="ph"><span class="n">5</span><div><b>ComputeDriven account + sync</b> — identity, device membership, encrypted world sync, restore.</div></div>
+      <div class="ph"><span class="n">6</span><div><b>Remote / fleet execution</b> — eligible-node placement across local, owned, and hosted machines.</div></div>
+      <div class="ph"><span class="n">7</span><div><b>WRL authority</b> — topology, capability, and placement live in WRL, not framework config.</div></div>
+      <div class="ph"><span class="n">8</span><div><b>TRVM integration</b> — execution semantics under TRVM, differential-tested against OTP.</div></div>
+      <div class="ph"><span class="n">9</span><div><b>T&amp;R</b> — the same world rendered natively in the OS. No second data model.</div></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ONE SYSTEM, THREE WAYS IN ============ -->
+<section id="family">
+  <div class="wrap">
+    <div class="sec-eyebrow">One system, three ways in</div>
+    <h2>Super is one of three.</h2>
+    <p class="lede">This is a product page, and the product has a studio behind it. ComputeDriven publishes <b>one destination and two ways in</b>: Super (CD) is the way in that leaves your machine as it is, T&amp;R is the way in that replaces what you boot, and [World] Cloud is where a world goes when it is not on your desk. They are not tiers, and neither entry is a trial of the other.</p>
+    <div class="fam">
+      <a class="fam-card" href="https://tr.computedriven.com/">
+        <span class="fc-n">T&amp;R <span aria-hidden="true">&#8599;</span></span>
+        <span class="fc-d">the operating system</span>
+        <span class="fc-h">download &amp; boot &middot; v0.3</span>
+      </a>
+      <div class="fam-card here">
+        <div class="fc-n">Super (CD) <span class="fc-you">you are here</span></div>
+        <span class="fc-d">the desktop application</span>
+        <span class="fc-h">download &amp; install &middot; in dev</span>
+      </div>
+      <a class="fam-card" href="https://cloud.computedriven.com">
+        <span class="fc-n">[World] Cloud <span aria-hidden="true">&#8599;</span></span>
+        <span class="fc-d">one world, any machine</span>
+        <span class="fc-h">hosted &middot; forked &middot; restored &middot; in dev</span>
+      </a>
+    </div>
+    <p class="fam-foot">
+      <a href="https://computedriven.com">computedriven.com <span aria-hidden="true">&#8599;</span></a>
+      <span>the studio, and the one page that holds the three together</span>
+    </p>
+  </div>
+</section>
+
+<!-- ============ CLOSE ============ -->
+<section id="close">
+  <div class="wrap">
+    <h2 class="thesis" style="margin:0 auto">Direct the work.<br>Own the <span class="acc">world.</span></h2>
+    <div class="ctas" style="margin-top:34px">
+      <a class="btn pri" href="app-prototype.html">Open the live prototype</a>
+      <a class="btn ghost" href="AGENT_SUPER_APP_BLUEPRINT.md">Read the blueprint</a>
+    </div>
+    <p class="north">Super (CD) is the local-first compute surface for a persistent ComputeDriven world: Elixir supervises its living actors, Rust owns machine authority, WRL describes its topology, and TRVM progressively makes its execution verifiable.</p>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>Super <b style="color:var(--acc)">(CD)</b> — super.computedriven.com</span>
+    <span>amp · ampd — CLI &amp; daemon</span>
+    <span>[World] Cloud — control plane</span>
+    <span>T&amp;R — native world</span>
+    <span id="footproof">© 2026 · figures on this page are read from proof/latest.json</span> · <span id="revlabel">rev W.2.3.3</span>
+  </div>
+  <div class="wrap foot-fam">
+    <span>One system, three ways in</span>
+    <span class="ff-links">
+      <a href="https://tr.computedriven.com/">T&amp;R</a>
+      <b>Super (CD)</b>
+      <a href="https://cloud.computedriven.com">[World] Cloud</a>
+      <a href="https://computedriven.com">computedriven.com <span aria-hidden="true">&#8599;</span></a>
+    </span>
+  </div>
+</footer>
+
+<script type="application/json" id="proofEmbed">{
+  "schema": "proof@1",
+  "generated_at": "2026-08-27T18:21:52.659Z",
+  "source": "proof/RESULTS.txt",
+  "sha256": "628436fb8709af3ac75a66bfbcad95d0e28a74dd74194ebf8160c734154d8529",
+  "run": {
+    "id": "b5.1-628436fb",
+    "grid_version": "1.43.0",
+    "cert_hash": "a08ee15d",
+    "cert_streak": 39,
+    "cert_source": "proof/BRIEF.md",
+    "replayed_at": "2026-08-20T20:15Z",
+    "verifier": "v25.2.1"
+  },
+  "upstream": {
+    "repo": null,
+    "commit": null,
+    "note": "repo+commit not recorded in RESULTS.txt — the upstream emitter should add them"
+  },
+  "gates": {
+    "negative_battery": "307/307",
+    "harness_self_test": "9/9",
+    "runner_contract": "3/3",
+    "derive_battery": "45/45",
+    "realm_battery": "24/24",
+    "cross_plane_bridge": "48/48",
+    "semantic_film": "45/45",
+    "lowering": "23/23",
+    "grid_entries": 90,
+    "grid_citations": 380
+  },
+  "totals": {
+    "attempted": 25,
+    "passed": 25,
+    "failed": 0,
+    "skipped": 0
+  }
+}</script>
+<script>
+/* =========================================================
+   1) PROOF BINDING — the page renders figures only from the
+      verifier's artifact. No count is typed into markup.
+   ========================================================= */
+(function(){
+  const $$ = s => [...document.querySelectorAll(s)];
+  const hide = el => { const t = el.closest('a') || el; t.style.display='none'; };
+
+  function bind(p, srcLabel){
+    const g = p.gates || {}, r = p.run || {}, t = p.totals || {};
+    const map = {
+      negatives: g.negative_battery, film: g.semantic_film, bridge: g.cross_plane_bridge,
+      grid: (g.grid_entries && g.grid_citations) ? `${g.grid_entries} entries · ${g.grid_citations} citations · v${r.grid_version||'?'}` : null,
+      attempted: t.attempted, passed: t.passed, failed: t.failed, skipped: t.skipped,
+      passfrac: (t.passed!=null && t.attempted!=null) ? `${t.passed}/${t.attempted}` : null,
+      streak: r.cert_streak, streak2: r.cert_streak, certhash: r.cert_hash,
+    };
+    $$('[data-proof]').forEach(el=>{
+      const v = map[el.dataset.proof];
+      if (v==null) hide(el); else el.textContent = v;
+    });
+    const sha8 = (p.sha256||'').slice(0,8);
+    const when = (p.generated_at||'').slice(0,10);
+    const certNote = r.cert_source ? ` · cert fields from ${r.cert_source}` : '';
+    const lbl = document.getElementById('prooflabel');
+    lbl.innerHTML = `figures read from ${srcLabel} · run <b style="color:var(--mut)">${r.id||'?'}</b> · sha256 ${sha8}… · generated ${when}${certNote} — <a href="proof/latest.json">latest.json</a> · <a href="proof/RESULTS.txt">RESULTS.txt</a>`;
+    const fp = document.getElementById('footproof');
+    if (fp) fp.textContent = `© 2026 · figures read from proof/latest.json · run ${r.id||'?'}`;
+  }
+
+  fetch('proof/latest.json', {cache:'no-store'})
+    .then(r => { if(!r.ok) throw 0; return r.json(); })
+    .then(p => bind(p, '<b style="color:var(--mut)">proof/latest.json</b>'))
+    .catch(() => {
+      try {
+        const p = JSON.parse(document.getElementById('proofEmbed').textContent);
+        bind(p, 'the build-embedded copy of proof/latest.json <span style="opacity:.7">(fetch blocked — serve over http for the live read)</span>');
+      } catch(e) {
+        document.getElementById('prooflabel').textContent = 'proof artifact unavailable — figures withheld';
+      }
+    });
+})();
+
+/* =========================================================
+   2) THE STAGE — inline mock shows instantly; the moment the
+      real prototype phones home (postMessage handshake) it
+      fades in over the mock. A 404 or blocked iframe can
+      never be what you see.
+   ========================================================= */
+(function(){
+  var wrap  = document.getElementById('stagewrap');
+  var stage = document.getElementById('stage');
+  var port  = document.getElementById('appport');
+  var frame = document.getElementById('appframe');
+  var mock  = document.getElementById('appmock');
+  var hint  = document.getElementById('stagehint');
+  var bar   = document.querySelector('#stage .fbar');
+  var cap   = document.querySelector('.stagecap');
+  var ready = false, armed = false;
+
+  /* --- 2a. the app port sits exactly under the frame bar, measured rather than assumed --- */
+  function measureBar(){
+    if (!bar) return;
+    wrap.style.setProperty('--fbarH', Math.round(bar.getBoundingClientRect().height) + 'px');
+  }
+
+  /* --- 2b. scale-to-fit.
+     app-prototype.html is a desktop shell: a 52px topbar, a 36px ticker and a 224px rail
+     around a 100vh grid. Handed the stage's ~440px-tall box at 1:1 it clipped two thirds
+     of itself behind inner scrollbars (measured: 726px of canvas and 408px of rail
+     hidden) — the preview read as a cut-off screenshot, not as an app. So give the frame
+     a real desktop viewport and scale that down, the way a device mock does: at ~860
+     logical pixels the rail fits whole and the canvas overflow drops to ~219px.
+     Layout is unaffected — the transform is purely visual and clicks map straight
+     through it. --- */
+  var TARGET_H = 860,      /* logical viewport height the app is comfortable in       */
+      MIN_SCALE = .62,     /* below this the type stops being legible; letterbox instead */
+      MAX_W = 1920,        /* don't hand it an absurdly wide viewport on short screens  */
+      MIN_PORT_W = 760;    /* narrower than this the app uses its own ≤840px layout     */
+  function fit(){
+    var r = port.getBoundingClientRect();
+    if (!r.width || !r.height) return;
+    if (r.width < MIN_PORT_W){
+      frame.style.width = ''; frame.style.height = ''; frame.style.transform = '';
+      return;
+    }
+    var k = Math.min(1, Math.max(MIN_SCALE, r.height / TARGET_H));
+    var w = Math.min(MAX_W, Math.round(r.width / k));
+    var h = Math.round(r.height / k);
+    var x = Math.round((r.width - w * k) / 2);   /* only non-zero once MAX_W bites */
+    frame.style.width = w + 'px';
+    frame.style.height = h + 'px';
+    frame.style.transform = 'translateX(' + x + 'px) scale(' + k.toFixed(4) + ')';
+  }
+  function relayout(){ measureBar(); fit(); }
+  relayout();
+  addEventListener('resize', relayout);
+  if (window.ResizeObserver) new ResizeObserver(relayout).observe(stage);
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(relayout);
+
+  /* --- 2c. surface pills: hover/focus/click to drive the embedded app --- */
+  var pending = null, baseSrc = frame.getAttribute('src').split('#')[0];
+  function sendScreen(sc){
+    if (!ready){ pending = sc; return; }
+    var sent = false;
+    try { frame.contentWindow.postMessage({amp:'goto', screen:sc}, '*'); sent = true; } catch(err){}
+    /* fragment fallback for an origin split. location.replace, never frame.src: an iframe
+       navigation joins the *parent's* session history, so a mouse sweeping this row used
+       to push one Back entry per pill (measured: 7 hovers, history.length 3 → 10) and the
+       Back button walked hover states instead of leaving the page. */
+    try { frame.contentWindow.location.replace(baseSrc + '#screen=' + sc); }
+    catch(err){ if (!sent) frame.src = baseSrc + '#screen=' + sc; }
+  }
+  var pvbs = [].slice.call(document.querySelectorAll('#pvrow .pvb'));
+  pvbs.forEach(function(b){
+    function act(){ pvbs.forEach(function(x){ x.classList.toggle('on', x===b); }); sendScreen(b.dataset.screen); }
+    b.addEventListener('mouseenter', act);
+    b.addEventListener('focus', act);
+    b.addEventListener('click', act);
+  });
+
+  /* --- 2d. the handshake. The inline mock shows instantly; the moment the real
+     prototype phones home it fades in over it. A 404 or a blocked iframe can never be
+     what you see. --- */
+  addEventListener('message', function(e){
+    var d = e && e.data;
+    if (d && d.amp === 'release'){ release(); return; }   /* esc pressed inside the frame */
+    if (!d || d.amp !== 'proto-ready') return;
+    if (!ready){
+      ready = true;
+      frame.classList.add('ready');
+      mock.classList.add('gone');
+      setTimeout(function(){ mock.style.display = 'none'; relayout(); }, 700);
+    }
+    if (pending){ sendScreen(pending); pending = null; }
+  });
+  setTimeout(function(){ if(!ready){
+    hint.style.display = 'none';
+    if (cap) cap.innerHTML = 'inline preview — the <b>live prototype</b> ships beside this file: open <b>app-prototype.html</b>';
+  }}, 3500);
+
+  /* --- 2e. click in / release. The hint is the affordance, so it stays put instead of
+     fading to opacity:0 while still swallowing clicks over the app's ticker. --- */
+  var HINT_IDLE = 'live prototype — <b>click in</b>',
+      HINT_LIVE = 'interactive — <b>esc</b> or click away to release';
+  function arm(){
+    if (armed || !ready) return;
+    armed = true;
+    frame.classList.add('live');
+    stage.classList.add('armed');
+    hint.innerHTML = HINT_LIVE;
+    try { frame.contentWindow.focus(); } catch(err){}
+  }
+  function release(){
+    if (!armed) return;
+    armed = false;
+    frame.classList.remove('live');
+    stage.classList.remove('armed');
+    hint.innerHTML = HINT_IDLE;
+  }
+  stage.addEventListener('mousedown', arm);
+  stage.addEventListener('touchstart', arm, {passive:true});
+  document.addEventListener('mousedown', function(e){ if (!stage.contains(e.target)) release(); });
+  addEventListener('keydown', function(e){ if (e.key === 'Escape') release(); });
+  /* never leave it armed on a section the reader has scrolled past */
+  if (window.IntersectionObserver){
+    new IntersectionObserver(function(en){
+      if (en[0] && !en[0].isIntersecting) release();
+    }, {threshold:.15}).observe(stage);
+  }
+})();
+
+/* =========================================================
+   3) THE LIGHT — React Bits' "Laser Flow" (reactbits.dev),
+      ported 1:1 from the original three.js component to raw
+      WebGL so this file stays dependency-free. Same GLSL,
+      same uniforms, same adaptive-DPR governor, same fade-in
+      and mouse fog-tilt; color re-tuned to the ice blue this
+      site uses. License: MIT + Commons Clause (c) David Haz.
+      A slow breath rides on uFade and is exported to CSS as
+      --breath so the frame's halo/ring pulse stays in sync.
+      If WebGL or the shader fails, the hand-built Canvas2D
+      beam below takes over on a fresh canvas.
+      Reduced motion = still lit, just not animated.
+   ========================================================= */
+(function(){
+  var hero  = document.getElementById('hero');
+  var stage = document.getElementById('stage');
+  var wrap  = document.getElementById('stagewrap');
+  var canvas= document.getElementById('beamfx');
+  if (!hero || !stage || !canvas) return;
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  var VERT = `
+precision highp float;
+attribute vec3 position;
+void main(){
+  gl_Position = vec4(position, 1.0);
+}
+`;
+
+  var FRAG = `
+#ifdef GL_ES
+#extension GL_OES_standard_derivatives : enable
+#endif
+precision highp float;
+precision mediump int;
+
+uniform float iTime;
+uniform vec3 iResolution;
+uniform vec4 iMouse;
+uniform float uWispDensity;
+uniform float uTiltScale;
+uniform float uFlowTime;
+uniform float uFogTime;
+uniform float uBeamXFrac;
+uniform float uBeamYFrac;
+uniform float uFlowSpeed;
+uniform float uVLenFactor;
+uniform float uHLenFactor;
+uniform float uFogIntensity;
+uniform float uFogScale;
+uniform float uWSpeed;
+uniform float uWIntensity;
+uniform float uFlowStrength;
+uniform float uDecay;
+uniform float uFalloffStart;
+uniform float uFogFallSpeed;
+uniform vec3 uColor;
+uniform float uFade;
+
+// Core beam/flare shaping and dynamics
+#define PI 3.14159265359
+#define TWO_PI 6.28318530718
+#define EPS 1e-6
+#define EDGE_SOFT (DT_LOCAL*4.0)
+#define DT_LOCAL 0.0038
+#define TAP_RADIUS 6
+#define R_H 150.0
+#define R_V 150.0
+#define FLARE_HEIGHT 16.0
+#define FLARE_AMOUNT 8.0
+#define FLARE_EXP 2.0
+#define TOP_FADE_START 0.1
+#define TOP_FADE_EXP 1.0
+#define FLOW_PERIOD 0.5
+#define FLOW_SHARPNESS 1.5
+
+// Wisps (animated micro-streaks) that travel along the beam
+#define W_BASE_X 1.5
+#define W_LAYER_GAP 0.25
+#define W_LANES 10
+#define W_SIDE_DECAY 0.5
+#define W_HALF 0.01
+#define W_AA 0.15
+#define W_CELL 20.0
+#define W_SEG_MIN 0.01
+#define W_SEG_MAX 0.55
+#define W_CURVE_AMOUNT 15.0
+#define W_CURVE_RANGE (FLARE_HEIGHT - 3.0)
+#define W_BOTTOM_EXP 10.0
+
+// Volumetric fog controls
+#define FOG_ON 1
+#define FOG_CONTRAST 1.2
+#define FOG_SPEED_U 0.1
+#define FOG_SPEED_V -0.1
+#define FOG_OCTAVES 5
+#define FOG_BOTTOM_BIAS 0.8
+#define FOG_TILT_TO_MOUSE 0.05
+#define FOG_TILT_DEADZONE 0.01
+#define FOG_TILT_MAX_X 0.35
+#define FOG_TILT_SHAPE 1.5
+#define FOG_BEAM_MIN 0.0
+#define FOG_BEAM_MAX 0.75
+#define FOG_MASK_GAMMA 0.5
+#define FOG_EXPAND_SHAPE 12.2
+#define FOG_EDGE_MIX 0.5
+
+// Horizontal vignette for the fog volume
+#define HFOG_EDGE_START 0.20
+#define HFOG_EDGE_END 0.98
+#define HFOG_EDGE_GAMMA 1.4
+#define HFOG_Y_RADIUS 25.0
+#define HFOG_Y_SOFT 60.0
+
+// Beam extents and edge masking
+#define EDGE_X0 0.22
+#define EDGE_X1 0.995
+#define EDGE_X_GAMMA 1.25
+#define EDGE_LUMA_T0 0.0
+#define EDGE_LUMA_T1 2.0
+#define DITHER_STRENGTH 1.0
+
+    float g(float x){return x<=0.00031308?12.92*x:1.055*pow(x,1.0/2.4)-0.055;}
+    float bs(vec2 p,vec2 q,float powr){
+        float d=distance(p,q),f=powr*uFalloffStart,r=(f*f)/(d*d+EPS);
+        return powr*min(1.0,r);
+    }
+    float bsa(vec2 p,vec2 q,float powr,vec2 s){
+        vec2 d=p-q; float dd=(d.x*d.x)/(s.x*s.x)+(d.y*d.y)/(s.y*s.y),f=powr*uFalloffStart,r=(f*f)/(dd+EPS);
+        return powr*min(1.0,r);
+    }
+    float tri01(float x){float f=fract(x);return 1.0-abs(f*2.0-1.0);}
+    float tauWf(float t,float tmin,float tmax){float a=smoothstep(tmin,tmin+EDGE_SOFT,t),b=1.0-smoothstep(tmax-EDGE_SOFT,tmax,t);return max(0.0,a*b);} 
+    float h21(vec2 p){p=fract(p*vec2(123.34,456.21));p+=dot(p,p+34.123);return fract(p.x*p.y);}
+    float vnoise(vec2 p){
+        vec2 i=floor(p),f=fract(p);
+        float a=h21(i),b=h21(i+vec2(1,0)),c=h21(i+vec2(0,1)),d=h21(i+vec2(1,1));
+        vec2 u=f*f*(3.0-2.0*f);
+        return mix(mix(a,b,u.x),mix(c,d,u.x),u.y);
+    }
+    float fbm2(vec2 p){
+        float v=0.0,amp=0.6; mat2 m=mat2(0.86,0.5,-0.5,0.86);
+        for(int i=0;i<FOG_OCTAVES;++i){v+=amp*vnoise(p); p=m*p*2.03+17.1; amp*=0.52;}
+        return v;
+    }
+    float rGate(float x,float l){float a=smoothstep(0.0,W_AA,x),b=1.0-smoothstep(l,l+W_AA,x);return max(0.0,a*b);}
+    float flareY(float y){float t=clamp(1.0-(clamp(y,0.0,FLARE_HEIGHT)/max(FLARE_HEIGHT,EPS)),0.0,1.0);return pow(t,FLARE_EXP);}
+
+    float vWisps(vec2 uv,float topF){
+    float y=uv.y,yf=(y+uFlowTime*uWSpeed)/W_CELL;
+    float dRaw=clamp(uWispDensity,0.0,2.0),d=dRaw<=0.0?1.0:dRaw;
+    float lanesF=floor(float(W_LANES)*min(d,1.0)+0.5); // WebGL1-safe
+    int lanes=int(max(1.0,lanesF));
+    float sp=min(d,1.0),ep=max(d-1.0,0.0);
+    float fm=flareY(max(y,0.0)),rm=clamp(1.0-(y/max(W_CURVE_RANGE,EPS)),0.0,1.0),cm=fm*rm;
+    const float G=0.05; float xS=1.0+(FLARE_AMOUNT*W_CURVE_AMOUNT*G)*cm;
+    float sPix=clamp(y/R_V,0.0,1.0),bGain=pow(1.0-sPix,W_BOTTOM_EXP),sum=0.0;
+    for(int s=0;s<2;++s){
+        float sgn=s==0?-1.0:1.0;
+        for(int i=0;i<W_LANES;++i){
+            if(i>=lanes) break;
+            float off=W_BASE_X+float(i)*W_LAYER_GAP,xc=sgn*(off*xS);
+            float dx=abs(uv.x-xc),lat=1.0-smoothstep(W_HALF,W_HALF+W_AA,dx),amp=exp(-off*W_SIDE_DECAY);
+            float seed=h21(vec2(off,sgn*17.0)),yf2=yf+seed*7.0,ci=floor(yf2),fy=fract(yf2);
+            float seg=mix(W_SEG_MIN,W_SEG_MAX,h21(vec2(ci,off*2.3)));
+            float spR=h21(vec2(ci,off+sgn*31.0)),seg1=rGate(fy,seg)*step(spR,sp);
+            if(ep>0.0){float spR2=h21(vec2(ci*3.1+7.0,off*5.3+sgn*13.0)); float f2=fract(fy+0.5); seg1+=rGate(f2,seg*0.9)*step(spR2,ep);}
+            sum+=amp*lat*seg1;
+        }
+    }
+    float span=smoothstep(-3.0,0.0,y)*(1.0-smoothstep(R_V-6.0,R_V,y));
+    return uWIntensity*sum*topF*bGain*span;
+}
+
+void mainImage(out vec4 fc,in vec2 frag){
+    vec2 C=iResolution.xy*.5; float invW=1.0/max(C.x,1.0);
+    vec2 sc=(512.0/iResolution.xy)*.4;
+    vec2 uv=(frag-C)*sc,off=vec2(uBeamXFrac*iResolution.x*sc.x,uBeamYFrac*iResolution.y*sc.y);
+    vec2 uvc = uv - off;
+    float a=0.0,b=0.0;
+    float basePhase=1.5*PI+uDecay*.5; float tauMin=basePhase-uDecay; float tauMax=basePhase;
+    float cx=clamp(uvc.x/(R_H*uHLenFactor),-1.0,1.0),tH=clamp(TWO_PI-acos(cx),tauMin,tauMax);
+    for(int k=-TAP_RADIUS;k<=TAP_RADIUS;++k){
+        float tu=tH+float(k)*DT_LOCAL,wt=tauWf(tu,tauMin,tauMax); if(wt<=0.0) continue;
+        float spd=max(abs(sin(tu)),0.02),u=clamp((basePhase-tu)/max(uDecay,EPS),0.0,1.0),env=pow(1.0-abs(u*2.0-1.0),0.8);
+        vec2 p=vec2((R_H*uHLenFactor)*cos(tu),0.0);
+        a+=wt*bs(uvc,p,env*spd);
+    }
+    float yPix=uvc.y,cy=clamp(-yPix/(R_V*uVLenFactor),-1.0,1.0),tV=clamp(TWO_PI-acos(cy),tauMin,tauMax);
+    for(int k=-TAP_RADIUS;k<=TAP_RADIUS;++k){
+        float tu=tV+float(k)*DT_LOCAL,wt=tauWf(tu,tauMin,tauMax); if(wt<=0.0) continue;
+        float yb=(-R_V)*cos(tu),s=clamp(yb/R_V,0.0,1.0),spd=max(abs(sin(tu)),0.02);
+        float env=pow(1.0-s,0.6)*spd;
+        float cap=1.0-smoothstep(TOP_FADE_START,1.0,s); cap=pow(cap,TOP_FADE_EXP); env*=cap;
+        float ph=s/max(FLOW_PERIOD,EPS)+uFlowTime*uFlowSpeed;
+        float fl=pow(tri01(ph),FLOW_SHARPNESS);
+        env*=mix(1.0-uFlowStrength,1.0,fl);
+        float yp=(-R_V*uVLenFactor)*cos(tu),m=pow(smoothstep(FLARE_HEIGHT,0.0,yp),FLARE_EXP),wx=1.0+FLARE_AMOUNT*m;
+        vec2 sig=vec2(wx,1.0),p=vec2(0.0,yp);
+        float mask=step(0.0,yp);
+        b+=wt*bsa(uvc,p,mask*env,sig);
+    }
+    float sPix=clamp(yPix/R_V,0.0,1.0),topA=pow(1.0-smoothstep(TOP_FADE_START,1.0,sPix),TOP_FADE_EXP);
+    float L=a+b*topA;
+    float w=vWisps(vec2(uvc.x,yPix),topA);
+    float fog=0.0;
+#if FOG_ON
+    vec2 fuv=uvc*uFogScale;
+    float mAct=step(1.0,length(iMouse.xy)),nx=((iMouse.x-C.x)*invW)*mAct;
+    float ax = abs(nx);
+    float stMag = mix(ax, pow(ax, FOG_TILT_SHAPE), 0.35);
+    float st = sign(nx) * stMag * uTiltScale;
+    st = clamp(st, -FOG_TILT_MAX_X, FOG_TILT_MAX_X);
+    vec2 dir=normalize(vec2(st,1.0));
+    fuv+=uFogTime*uFogFallSpeed*dir;
+    vec2 prp=vec2(-dir.y,dir.x);
+    fuv+=prp*(0.08*sin(dot(uvc,prp)*0.08+uFogTime*0.9));
+    float n=fbm2(fuv+vec2(fbm2(fuv+vec2(7.3,2.1)),fbm2(fuv+vec2(-3.7,5.9)))*0.6);
+    n=pow(clamp(n,0.0,1.0),FOG_CONTRAST);
+    float pixW = 1.0 / max(iResolution.y, 1.0);
+#ifdef GL_OES_standard_derivatives
+    float wL = max(fwidth(L), pixW);
+#else
+    float wL = pixW;
+#endif
+    float m0=pow(smoothstep(FOG_BEAM_MIN - wL, FOG_BEAM_MAX + wL, L),FOG_MASK_GAMMA);
+    float bm=1.0-pow(1.0-m0,FOG_EXPAND_SHAPE); bm=mix(bm*m0,bm,FOG_EDGE_MIX);
+    float yP=1.0-smoothstep(HFOG_Y_RADIUS,HFOG_Y_RADIUS+HFOG_Y_SOFT,abs(yPix));
+    float nxF=abs((frag.x-C.x)*invW),hE=1.0-smoothstep(HFOG_EDGE_START,HFOG_EDGE_END,nxF); hE=pow(clamp(hE,0.0,1.0),HFOG_EDGE_GAMMA);
+    float hW=mix(1.0,hE,clamp(yP,0.0,1.0));
+    float bBias=mix(1.0,1.0-sPix,FOG_BOTTOM_BIAS);
+    float browserFogIntensity = uFogIntensity;
+    browserFogIntensity *= 1.8;
+    float radialFade = 1.0 - smoothstep(0.0, 0.7, length(uvc) / 120.0);
+    float safariFog = n * browserFogIntensity * bBias * bm * hW * radialFade;
+    fog = safariFog;
+#endif
+    float LF=L+fog;
+    float dith=(h21(frag)-0.5)*(DITHER_STRENGTH/255.0);
+    float tone=g(LF+w);
+    vec3 col=tone*uColor+dith;
+    float alpha=clamp(g(L+w*0.6)+dith*0.6,0.0,1.0);
+    float nxE=abs((frag.x-C.x)*invW),xF=pow(clamp(1.0-smoothstep(EDGE_X0,EDGE_X1,nxE),0.0,1.0),EDGE_X_GAMMA);
+    float scene=LF+max(0.0,w)*0.5,hi=smoothstep(EDGE_LUMA_T0,EDGE_LUMA_T1,scene);
+    float eM=mix(xF,1.0,hi);
+    col*=eM; alpha*=eM;
+    col*=uFade; alpha*=uFade;
+    fc=vec4(col,alpha);
+}
+
+void main(){
+  vec4 fc;
+  mainImage(fc, gl_FragCoord.xy);
+  gl_FragColor = fc;
+}
+`;
+
+  var COLOR = '#4D9FFF';                 /* the one knob: BridgeMind-style beam blue */
+  var P = {                              /* LaserFlow props (component defaults)     */
+    wispDensity: 1,
+    mouseTiltStrength: .01,
+    mouseSmoothTime: .05,
+    flowSpeed: .35,
+    verticalSizing: 2.0,
+    horizontalSizing: .5,
+    fogIntensity: .45,
+    fogScale: .3,
+    wispSpeed: 15.0,
+    wispIntensity: 5.0,
+    flowStrength: .25,
+    decay: 1.1,
+    falloffStart: 1.2,
+    fogFallSpeed: .6
+  };
+
+  function fail(){
+    /* hand the Canvas2D fallback a fresh, context-free canvas */
+    try {
+      var fresh = canvas.cloneNode(false);
+      canvas.parentNode.replaceChild(fresh, canvas);
+    } catch(e){}
+    window.__laserMode = 'fallback2d';
+  }
+
+  var gl = null;
+  try {
+    gl = canvas.getContext('webgl', { alpha:false, antialias:false, depth:false, stencil:false,
+      premultipliedAlpha:false, preserveDrawingBuffer:false, powerPreference:'high-performance' });
+  } catch(e){ gl = null; }
+  if (!gl){ fail(); return; }
+  gl.getExtension('OES_standard_derivatives');
+
+  function sh(type, srcTxt){
+    var s = gl.createShader(type);
+    gl.shaderSource(s, srcTxt); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s) || 'shader');
+    return s;
+  }
+  var prog;
+  try {
+    prog = gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, VERT));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FRAG));
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog) || 'link');
+  } catch(err){ fail(); return; }
+  window.__laserMode = 'webgl';
+
+  gl.useProgram(prog);
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+  gl.clearColor(0, 0, 0, 1);
+
+  /* fullscreen triangle, exactly as the original's BufferGeometry */
+  var buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1,0, 3,-1,0, -1,3,0]), gl.STATIC_DRAW);
+  var posLoc = gl.getAttribLocation(prog, 'position');
+  gl.enableVertexAttribArray(posLoc);
+  gl.vertexAttribPointer(posLoc, 3, gl.FLOAT, false, 0, 0);
+
+  var U = {};
+  ['iTime','iResolution','iMouse','uWispDensity','uTiltScale','uFlowTime','uFogTime',
+   'uBeamXFrac','uBeamYFrac','uFlowSpeed','uVLenFactor','uHLenFactor','uFogIntensity',
+   'uFogScale','uWSpeed','uWIntensity','uFlowStrength','uDecay','uFalloffStart',
+   'uFogFallSpeed','uColor','uFade'].forEach(function(n){ U[n] = gl.getUniformLocation(prog, n); });
+
+  function hexRGB(hex){
+    var c = hex.replace('#','');
+    if (c.length === 3) c = c.split('').map(function(x){ return x + x; }).join('');
+    var n = parseInt(c.slice(0,6), 16) || 0xffffff;
+    return [((n>>16)&255)/255, ((n>>8)&255)/255, (n&255)/255];
+  }
+
+  gl.uniform1f(U.uWispDensity,  P.wispDensity);
+  gl.uniform1f(U.uTiltScale,    P.mouseTiltStrength);
+  gl.uniform1f(U.uFlowSpeed,    P.flowSpeed);
+  gl.uniform1f(U.uVLenFactor,   P.verticalSizing);
+  gl.uniform1f(U.uHLenFactor,   P.horizontalSizing);
+  gl.uniform1f(U.uFogIntensity, P.fogIntensity);
+  gl.uniform1f(U.uFogScale,     P.fogScale);
+  gl.uniform1f(U.uWSpeed,       P.wispSpeed);
+  gl.uniform1f(U.uWIntensity,   P.wispIntensity);
+  gl.uniform1f(U.uFlowStrength, P.flowStrength);
+  gl.uniform1f(U.uDecay,        P.decay);
+  gl.uniform1f(U.uFalloffStart, P.falloffStart);
+  gl.uniform1f(U.uFogFallSpeed, P.fogFallSpeed);
+  var rgb = hexRGB(COLOR);
+  gl.uniform3f(U.uColor, rgb[0], rgb[1], rgb[2]);
+
+  var baseDpr = Math.min(window.devicePixelRatio || 1, 2), curDpr = baseDpr;
+  var w = 1, h = 1;
+
+  var lastW = 0, lastH = 0, lastDpr = 0;
+  function size(){
+    var hr = hero.getBoundingClientRect(), sr = stage.getBoundingClientRect();
+    w = Math.max(1, hr.width); h = Math.max(1, hr.height);
+    var bx = (sr.left - hr.left) + sr.width * .56;      /* beam lands at 56% across the stage */
+    var cy = sr.top - hr.top + 1;
+    stage.style.setProperty('--bx', (((bx - (sr.left - hr.left)) / sr.width) * 100).toFixed(2) + '%');
+    gl.uniform1f(U.uBeamXFrac, (bx - w/2) / w);          /* fraction-of-width from canvas centre */
+    gl.uniform1f(U.uBeamYFrac, .5 - cy / h);             /* flare base sits on the stage top edge */
+    /* the original's setSizeNow: skip the buffer resize when nothing changed —
+       assigning canvas.width always clears the drawing buffer */
+    var changed = Math.abs(w - lastW) > .5 || Math.abs(h - lastH) > .5 || Math.abs(curDpr - lastDpr) > .01;
+    if (!changed) return;
+    lastW = w; lastH = h; lastDpr = curDpr;
+    canvas.width  = Math.max(2, Math.round(w * curDpr));
+    canvas.height = Math.max(2, Math.round(h * curDpr));
+    canvas.style.width = w + 'px'; canvas.style.height = h + 'px';
+    gl.viewport(0, 0, canvas.width, canvas.height);
+    gl.uniform3f(U.iResolution, w * curDpr, h * curDpr, curDpr);
+    /* the resize just wiped the buffer — repaint the current frame immediately so
+       there is never a blank flash (the original re-renders inside setSizeNow too) */
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  /* mouse fog-tilt: listen on the hero (the canvas itself is pointer-events:none) */
+  var mtx = 0, mty = 0, msx = 0, msy = 0;
+  hero.addEventListener('pointermove', function(e){
+    var r = canvas.getBoundingClientRect();
+    mtx = (e.clientX - r.left) * curDpr;
+    mty = (r.height * curDpr) - (e.clientY - r.top) * curDpr;
+  }, {passive:true});
+  hero.addEventListener('pointerleave', function(){ mtx = 0; mty = 0; }, {passive:true});
+
+  var start = performance.now(), prev = 0, flowT = 0, fogT = 0, fade = 0, lastBr = '';
+  var running = true, seen = !('IntersectionObserver' in window), paused = false;
+  if ('IntersectionObserver' in window){
+    new IntersectionObserver(function(es){ es.forEach(function(e){
+      running = e.isIntersecting; if (e.isIntersecting) seen = true;
+    }); }, {threshold: 0}).observe(hero);
+  }
+  document.addEventListener('visibilitychange', function(){ paused = document.hidden; }, {passive:true});
+  canvas.addEventListener('webglcontextlost', function(e){ e.preventDefault(); paused = true; }, false);
+  canvas.addEventListener('webglcontextrestored', function(){ paused = false; size(); }, false);
+
+  /* adaptive DPR governor, as in the original component */
+  var ema = 16.7, samples = [], lastFps = performance.now(), lastDprChange = 0;
+  function governDpr(now){
+    if (now - lastFps < 750) return;
+    if (samples.length){
+      var avg = samples.reduce(function(a,b){ return a + b; }, 0) / samples.length, next = curDpr;
+      if (avg < 50) next = Math.max(.6, Math.min(baseDpr, curDpr * .85));
+      else if (avg > 58 && curDpr < baseDpr) next = Math.max(.6, Math.min(baseDpr, curDpr * 1.1));
+      if (Math.abs(next - curDpr) > .01 && now - lastDprChange > 2000){
+        curDpr = next; lastDprChange = now; size();
+      }
+    }
+    samples.length = 0; lastFps = now;
+  }
+
+  function render(tSec){
+    var dt  = Math.max(0, tSec - prev); prev = tSec;
+    var cdt = Math.min(.033, Math.max(.001, dt));
+    flowT += cdt; fogT += cdt;
+    fade = Math.min(1, fade + cdt);                       /* 1s fade-in, as original */
+    /* the breath: rides gently on uFade, and drives the frame's synced pulse */
+    var ph = .5 + .5 * Math.sin(tSec * 1.35); ph = ph * ph * (3 - 2 * ph);
+    var bs = (fade * (.15 + .85 * ph)).toFixed(2);
+    if (wrap && bs !== lastBr){ lastBr = bs; wrap.style.setProperty('--breath', bs); }
+    var a = 1 - Math.exp(-cdt / Math.max(1e-3, P.mouseSmoothTime));
+    msx += (mtx - msx) * a; msy += (mty - msy) * a;
+    gl.uniform1f(U.iTime, tSec);
+    gl.uniform1f(U.uFlowTime, flowT);
+    gl.uniform1f(U.uFogTime, fogT);
+    gl.uniform1f(U.uFade, fade * (.94 + .06 * ph));
+    gl.uniform4f(U.iMouse, msx, msy, 0, 0);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+  }
+
+  size();
+  addEventListener('resize', function(){ size(); if (reduce){ prev = 9; render(9.4); } });
+  addEventListener('load',   function(){ size(); if (reduce){ prev = 9; render(9.4); } });
+
+  if (reduce){
+    fade = 1; prev = 9; render(9.4);
+    if (wrap) wrap.style.setProperty('--breath', '.85');
+    return;
+  }
+
+  function frame(now){
+    requestAnimationFrame(frame);
+    if (paused || !running || !seen) return;
+    var t = (now - start) / 1000;
+    var dtMs = (t - prev) * 1000;
+    /* only count sane deltas — a return from a hidden tab or a one-off stall
+       shouldn't read as "3 fps" and shove the DPR governor around */
+    if (dtMs > 0 && dtMs < 250){ ema = ema * .9 + dtMs * .1; samples.push(1000 / Math.max(1, ema)); }
+    render(t);
+    governDpr(now);
+  }
+  requestAnimationFrame(frame);
+})();
+
+/* ---------------------------------------------------------
+   3b) Canvas2D fallback — the previous hand-built beam.
+       Runs only if the WebGL Laser Flow above bailed out.
+   --------------------------------------------------------- */
+(function(){
+  if (window.__laserMode === 'webgl') return;   /* Laser Flow is running — don't touch its canvas */
+  var hero  = document.getElementById('hero');
+  var stage = document.getElementById('stage');
+  var wrap  = document.getElementById('stagewrap');
+  var canvas= document.getElementById('beamfx');
+  if (!hero || !stage || !canvas) return;
+  var ctx; try { ctx = canvas.getContext('2d', {alpha:true}); } catch(e){ ctx = null; }
+  if (!ctx){ canvas.style.display='none'; return; }
+  var reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+  var stopped = false;
+  window.__beamStop = function(){ stopped = true; canvas.style.display='none'; };
+
+  var w=1,h=1,dpr=1,bx=300,cy=420,sb=900,stageLeft=0,stageW=1;
+  var LM=null, ENV=null, SCR=null, sctx=null;
+
+  function softG(g,x,y,rx,ry,col,a,pw){
+    g.save(); g.translate(x,y); g.scale(rx/100,ry/100);
+    var rg=g.createRadialGradient(0,0,0,0,0,100), i,r;
+    for(i=0;i<=16;i++){ r=i/16; rg.addColorStop(r,'rgba('+col+','+(a*Math.pow(1-r,pw)).toFixed(4)+')'); }
+    g.fillStyle=rg; g.beginPath(); g.arc(0,0,100,0,6.284); g.fill(); g.restore();
+  }
+  function stripG(g,sig,col,aT,aB){
+    var wd=Math.ceil(sig*7), sc=document.createElement('canvas');
+    sc.width=Math.max(2,wd*dpr); sc.height=Math.max(2,cy*dpr);
+    var c2=sc.getContext('2d'); c2.setTransform(dpr,0,0,dpr,0,0);
+    var hg=c2.createLinearGradient(0,0,wd,0), i,u,dx,a;
+    for(i=0;i<=32;i++){ u=i/32; dx=(u-.5)*wd;
+      a=Math.exp(-dx*dx/(2*sig*sig));
+      var edge=Math.min(1, (0.5-Math.abs(u-.5))/0.10);      /* fade to a hard 0 in the last 10% */
+      a*=Math.max(0,edge); if(i===0||i===32) a=0;
+      hg.addColorStop(u,'rgba('+col+','+a.toFixed(4)+')'); }
+    c2.fillStyle=hg; c2.fillRect(0,0,wd,cy);
+    c2.globalCompositeOperation='destination-in';
+    var vg=c2.createLinearGradient(0,0,0,cy), t;
+    for(i=0;i<=16;i++){ t=i/16; vg.addColorStop(t,'rgba(0,0,0,'+(aT+(aB-aT)*Math.pow(t,1.1)).toFixed(4)+')'); }
+    c2.fillStyle=vg; c2.fillRect(0,0,wd,cy);
+    g.drawImage(sc,0,0,sc.width,sc.height, bx-wd/2,0,wd,cy);
+  }
+  function LMH(){ return Math.min(h, sb+110); }
+  function buildLightmap(){
+    LM=document.createElement('canvas');
+    LM.width=Math.max(2,Math.round(w*dpr)); LM.height=Math.max(2,Math.round(LMH()*dpr));
+    var g=LM.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    g.globalCompositeOperation='lighter';
+    softG(g,bx,cy*.55,420,cy*.80,'46,84,170',.16,2.0);   /* volumetric envelope */
+    softG(g,bx,-10,90,70,'140,180,255',.25,1.8);          /* entry glow          */
+    stripG(g,100,'38,96,210', .06,.22);
+    stripG(g, 52,'74,146,255',.10,.36);
+    stripG(g, 22,'150,196,255',.16,.58);
+    stripG(g,  6,'240,248,255',.22,.95);
+    softG(g,bx,cy-90,180,260,'60,120,235',.14,2.0);       /* base fan            */
+    softG(g,bx,cy-34,120,170,'74,146,255',.20,1.8);
+    softG(g,bx,cy- 8,240, 90,'130,185,255',.26,1.8);
+    g.save(); g.beginPath(); g.rect(0,0,w,cy+2); g.clip();
+    softG(g,bx,cy-2,420,54,'200,226,255',.38,1.7);        /* edge bloom          */
+    softG(g,bx,cy-2,900,30,'140,190,255',.16,1.7);
+    softG(g,bx,cy-2,110,26,'255,196,140',.50,1.6);        /* the warm kiss       */
+    softG(g,bx,cy-2, 40,12,'255,238,214',.70,1.5);
+    g.restore();
+    dither(g, w, cy+2, .05, 37, 61);      /* break the 8-bit contour lines */
+  }
+  function buildEnv(){
+    ENV=document.createElement('canvas');
+    ENV.width=Math.max(2,Math.round(w*dpr)); ENV.height=Math.max(2,Math.round(cy*dpr));
+    var g=ENV.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    g.fillStyle='#fff'; g.fillRect(0,0,w,cy);
+    g.globalCompositeOperation='destination-in';
+    var vg=g.createLinearGradient(0,0,0,cy), i,t,a,fade;
+    for(i=0;i<=24;i++){ t=i/24;
+      a=Math.pow(Math.min(Math.max((t-.15)/.85,0),1),1.5);
+      fade=Math.pow(Math.min(Math.max((1-t)/.10,0),1),1.2);   /* dissolve before the edge */
+      vg.addColorStop(t,'rgba(0,0,0,'+(a*fade).toFixed(4)+')'); }
+    g.fillStyle=vg; g.fillRect(0,0,w,cy);
+    var sig=stageW*.38, hg=g.createLinearGradient(0,0,w,0), u,dx;
+    for(i=0;i<=24;i++){ u=i/24; dx=u*w-bx;
+      hg.addColorStop(u,'rgba(0,0,0,'+(.35+.65*Math.exp(-dx*dx/(2*sig*sig))).toFixed(4)+')'); }
+    g.fillStyle=hg; g.fillRect(0,0,w,cy);
+    SCR=document.createElement('canvas'); SCR.width=ENV.width; SCR.height=ENV.height;
+    sctx=SCR.getContext('2d');
+  }
+  function fogTex(seed){
+    var c=document.createElement('canvas'); c.width=c.height=512;
+    var g=c.getContext('2d'), r=mulberry(seed), i;
+    for(i=0;i<150;i++){
+      var px=r()*512, py=r()*512, pr=30+r()*66, a=.10+r()*.16;
+      for(var oy=-512;oy<=512;oy+=512) for(var ox=-512;ox<=512;ox+=512){
+        var qx=px+ox, qy=py+oy;
+        if (qx<-pr||qx>512+pr||qy<-pr||qy>512+pr) continue;
+        var rg=g.createRadialGradient(qx,qy,2,qx,qy,pr);
+        rg.addColorStop(0,'rgba(150,172,210,'+a.toFixed(3)+')');
+        rg.addColorStop(.55,'rgba(150,172,210,'+(a*.4).toFixed(3)+')');
+        rg.addColorStop(1,'rgba(150,172,210,0)');
+        g.fillStyle=rg; g.beginPath(); g.arc(qx,qy,pr,0,6.284); g.fill();
+      }
+    }
+    return ctx.createPattern(c,'repeat');
+  }
+  var NOISE=null;
+  function noisePat(g2){
+    if(!NOISE){
+      var n=document.createElement('canvas'); n.width=n.height=192;
+      var nc=n.getContext('2d'), im=nc.createImageData(192,192), r2=mulberry(51), j;
+      for(j=0;j<im.data.length;j+=4){ im.data[j]=255; im.data[j+1]=255; im.data[j+2]=255;
+        im.data[j+3]=(r2()*255)|0; }
+      nc.putImageData(im,0,0); NOISE=n;
+    }
+    return g2.createPattern(NOISE,'repeat');
+  }
+  function dither(g2,ww,hh,amt,ox,oy){
+    g2.save();
+    g2.globalCompositeOperation='destination-out';
+    g2.globalAlpha=amt;
+    g2.translate(-(ox%192),-(oy%192));
+    g2.fillStyle=noisePat(g2);
+    g2.fillRect(0,0,ww+192,hh+192);
+    g2.restore();
+  }
+  function mulberry(a){ return function(){ a|=0; a=a+0x6D2B79F5|0;
+    var t=Math.imul(a^a>>>15,1|a); t=t+Math.imul(t^t>>>7,61|t)^t;
+    return ((t^t>>>14)>>>0)/4294967296; }; }
+  var PAT1=fogTex(31), PAT2=fogTex(97);
+  var fogJit=0;
+  function fogLayer(pat, off, alpha){
+    sctx.setTransform(dpr,0,0,dpr,0,0);
+    sctx.globalCompositeOperation='source-over';
+    sctx.clearRect(0,0,w,cy);
+    sctx.save(); sctx.scale(2.6,2.6); sctx.translate(-(off%512),0);
+    sctx.fillStyle=pat; sctx.fillRect(0,0,w/2.6+512,cy/2.6); sctx.restore();
+    sctx.globalCompositeOperation='destination-in';
+    sctx.drawImage(ENV,0,0,ENV.width,ENV.height,0,0,w,cy);
+    sctx.globalCompositeOperation='source-over';
+    dither(sctx, w, cy, .07, (fogJit*53)|0, (fogJit*29)|0);
+    ctx.globalAlpha=alpha;
+    ctx.drawImage(SCR,0,0,SCR.width,SCR.height,0,0,w,cy);
+    ctx.globalAlpha=1;
+  }
+  function wispSprite(seed){
+    var c=document.createElement('canvas'); c.width=c.height=340;
+    var g=c.getContext('2d'), r=mulberry(seed), n=3+Math.floor(r()*3), i;
+    for(i=0;i<n;i++){
+      var px=120+r()*100, py=120+r()*100, pr=50+r()*60;
+      var rg=g.createRadialGradient(px,py,4,px,py,pr);
+      rg.addColorStop(0,'rgba(168,190,225,.30)');
+      rg.addColorStop(.55,'rgba(150,172,210,.11)');
+      rg.addColorStop(1,'rgba(150,172,210,0)');
+      g.fillStyle=rg; g.beginPath(); g.arc(px,py,pr,0,6.284); g.fill();
+    }
+    return c;
+  }
+  /* streak texture for the flow (toroidally wrapped, cool-tinted) */
+  function streakPat(seed){
+    var c=document.createElement('canvas'); c.width=c.height=384;
+    var g=c.getContext('2d'), r=mulberry(seed), i;
+    for(i=0;i<70;i++){
+      var px=r()*384, py=r()*384, rx=5+r()*12, ry=50+r()*120, a=.05+r()*.10;
+      for(var oy=-384;oy<=384;oy+=384) for(var ox=-384;ox<=384;ox+=384){
+        g.save(); g.translate(px+ox,py+oy); g.scale(rx/100,ry/100);
+        var rg=g.createRadialGradient(0,0,0,0,0,100);
+        rg.addColorStop(0,'rgba(200,226,255,'+a.toFixed(3)+')');
+        rg.addColorStop(.6,'rgba(180,210,255,'+(a*.35).toFixed(3)+')');
+        rg.addColorStop(1,'rgba(180,210,255,0)');
+        g.fillStyle=rg; g.beginPath(); g.arc(0,0,100,0,6.284); g.fill(); g.restore();
+      }
+    }
+    return ctx.createPattern(c,'repeat');
+  }
+  var FLOW1=streakPat(211), FLOW2=streakPat(487);
+  var FM=null, FMW=0, FMX=0, SC3=null, s3=null;
+  function buildFlowMask(){
+    var sig0=56; FMW=Math.ceil(sig0*(1+.9)*7); FMX=bx-FMW/2;
+    FM=document.createElement('canvas');
+    FM.width=Math.max(2,Math.round(FMW*dpr)); FM.height=Math.max(2,Math.round(cy*dpr));
+    var g=FM.getContext('2d'); g.setTransform(dpr,0,0,dpr,0,0);
+    for(var y=0;y<cy;y+=4){
+      var tt=y/cy, sg=sig0*(1+.9*tt), ra=.10+.65*Math.pow(tt,1.2);
+      var hg=g.createLinearGradient(0,0,FMW,0);
+      for(var i=0;i<=16;i++){ var u=i/16, dx=(u-.5)*FMW;
+        var a=ra*Math.exp(-dx*dx/(2*sg*sg));
+        if(i===0||i===16) a=0;
+        hg.addColorStop(u,'rgba(0,0,0,'+a.toFixed(4)+')'); }
+      g.fillStyle=hg; g.fillRect(0,y,FMW,4);
+    }
+    SC3=document.createElement('canvas'); SC3.width=FM.width; SC3.height=FM.height;
+    s3=SC3.getContext('2d');
+  }
+  function flowLayer(pat, spd, wob, sc, alpha, t){
+    s3.setTransform(dpr,0,0,dpr,0,0);
+    s3.globalCompositeOperation='source-over';
+    s3.clearRect(0,0,FMW,cy);
+    s3.save(); s3.scale(sc,sc);
+    s3.translate(wob/sc, ((t*spd)%384));
+    s3.fillStyle=pat; s3.fillRect(-384,-768, FMW/sc+768, cy/sc+1152);
+    s3.restore();
+    s3.globalCompositeOperation='destination-in';
+    s3.drawImage(FM,0,0,FM.width,FM.height,0,0,FMW,cy);
+    ctx.globalAlpha=alpha;
+    ctx.drawImage(SC3,0,0,SC3.width,SC3.height,FMX,0,FMW,cy);
+    ctx.globalAlpha=1;
+  }
+
+  var sprites=[], wisps=[], i, rr=mulberry(7);
+  for(i=0;i<6;i++) sprites.push(wispSprite(i*97+13));
+  for(i=0;i<14;i++) wisps.push({ sp:sprites[i%6], x:rr(), y:.12+rr()*.78,
+    s:.8+rr()*1.4, o:.05, vx:(rr()-.5)*.00016, ph:rr()*6.283, rot:(rr()-.5)*.6 });
+
+  function size(){
+    var hr=hero.getBoundingClientRect(), sr=stage.getBoundingClientRect();
+    dpr=Math.min(devicePixelRatio||1,2);
+    canvas.width=Math.max(2,Math.round(hr.width*dpr));
+    canvas.height=Math.max(2,Math.round(hr.height*dpr));
+    canvas.style.width=hr.width+'px'; canvas.style.height=hr.height+'px';
+    ctx.setTransform(dpr,0,0,dpr,0,0);
+    w=hr.width; h=hr.height;
+    stageLeft=sr.left-hr.left; stageW=sr.width;
+    bx=stageLeft+stageW*.56;
+    cy=sr.top-hr.top+1;
+    sb=sr.bottom-hr.top;
+    stage.style.setProperty('--bx', ((bx-stageLeft)/stageW*100).toFixed(2)+'%');
+    buildLightmap(); buildEnv(); buildFlowMask();
+  }
+
+  function draw(t, I){
+    /* the breath: smoothstepped ~4.7s inhale/exhale, plus a slow ~27s
+       secondary swell at an incommensurate frequency so it never loops */
+    var br = .5+.5*Math.sin(t*1.35);
+    br = br*br*(3-2*br);                                   /* dwell at rest and at peak */
+    var slow = .5+.5*Math.sin(t*.23+1.7);
+    var breath = .80 + .20*br + .06*(slow-.5);             /* master swell ≈ .77–1.03 */
+    var flick = I*(.95+.03*Math.sin(t*.6)+.02*Math.sin(t*1.7+1.3));
+    var glow  = flick*breath;
+    /* hand the breath to CSS — halo, border ring, edge lights and the
+       orbiting comets on #stage all pulse from this one value */
+    if (wrap) wrap.style.setProperty('--breath', (I*(.15+.85*br)).toFixed(3));
+    ctx.clearRect(0,0,w,h);
+    ctx.globalCompositeOperation='lighter';
+    ctx.save(); ctx.beginPath(); ctx.rect(0,0,w,cy+2); ctx.clip();
+    fogJit=(t*3)|0;
+    fogLayer(PAT1,  t*10, .85*glow);
+    fogLayer(PAT2, -t*6 + 137, .60*glow);
+    for(var k=0;k<wisps.length;k++){ var W2=wisps[k];
+      W2.x+=W2.vx; if(W2.x>1.08)W2.x=-.08; if(W2.x<-.08)W2.x=1.08;
+      var px=W2.x*w, py=W2.y*cy+Math.sin(t*.14+W2.ph)*14;
+      var d=Math.abs(px-bx), lit=Math.exp(-(d*d)/(2*230*230));
+      var edge=Math.min(Math.max((cy-py)/120,0),1);          /* dissolve before the frame */
+      ctx.save(); ctx.translate(px,py); ctx.rotate(W2.rot+t*.008);
+      ctx.globalAlpha=(W2.o+lit*.25)*glow*edge;
+      var sc2=W2.s*(1+lit*.12);
+      ctx.drawImage(W2.sp,-170*sc2,-170*sc2,340*sc2,340*sc2);
+      ctx.restore();
+    }
+    ctx.restore();
+    /* the pour: two streak layers flowing down the shaft at different depths —
+       the pour surges on the inhale */
+    flowLayer(FLOW1,  66, Math.sin(t*.7)*6,  1.0, .34*glow, t);
+    flowLayer(FLOW2, 118, Math.sin(t*1.1+2)*4, .62, .20*glow, t);
+    ctx.globalAlpha=Math.min(1,glow);
+    ctx.drawImage(LM,0,0,LM.width,LM.height,0,0,w,LMH());
+    /* inhale bloom: the same lightmap redrawn slightly wider around the shaft
+       axis, additive — the beam visibly swells as it brightens */
+    ctx.save();
+    var swell=1+.05*br;
+    ctx.translate(bx,0); ctx.scale(swell,1); ctx.translate(-bx,0);
+    ctx.globalAlpha=(.06+.30*br)*flick;
+    ctx.drawImage(LM,0,0,LM.width,LM.height,0,0,w,LMH());
+    ctx.restore();
+    ctx.globalAlpha=1;
+    ctx.globalCompositeOperation='source-over';
+  }
+
+  size();
+  addEventListener('resize', function(){ size(); if(reduce) draw(10,1); });
+  addEventListener('load', function(){ size(); if(reduce) draw(10,1); });
+  if (reduce){ draw(10,1); return; }
+
+  var born=0, seen=false, running=true;
+  new IntersectionObserver(function(es){ es.forEach(function(e){
+    if(e.isIntersecting && !seen){ seen=true; born=performance.now(); }
+    running=e.isIntersecting;
+  }); },{threshold:.15}).observe(hero);
+
+  function frame(now){
+    if (stopped) return;
+    requestAnimationFrame(frame);
+    if (!running || !seen) return;
+    var I=Math.min((now-born)/1400,1);
+    try { draw(now/1000, I); } catch(err){ window.__beamStop(); }
+  }
+  requestAnimationFrame(frame);
+})();
+
+/* =========================================================
+   4) THE GRID — the background grid is invisible until your
+      cursor exposes it: a soft circle of grid follows the
+      pointer (fine pointers only), eased with a little lag.
+   ========================================================= */
+(function(){
+  var el=document.getElementById('gridreveal');
+  if (!el || matchMedia('(pointer: coarse)').matches) return;
+  var probe='radial-gradient(circle 10px at 0px 0px, rgb(0,0,0), transparent)';
+  var okMask = window.CSS && CSS.supports &&
+    (CSS.supports('mask-image',probe) || CSS.supports('-webkit-mask-image',probe));
+  if (!okMask) return;   /* without a working mask the full grid would flood the page */
+  var tx=-999,ty=-999,mx=-999,my=-999,raf=null,on=false;
+  function loop(){
+    raf=null;
+    mx+=(tx-mx)*.14; my+=(ty-my)*.14;
+    el.style.setProperty('--mx', mx.toFixed(1)+'px');
+    el.style.setProperty('--my', my.toFixed(1)+'px');
+    if (Math.abs(tx-mx)+Math.abs(ty-my) > .5) raf=requestAnimationFrame(loop);
+  }
+  addEventListener('pointermove', function(e){
+    tx=e.clientX; ty=e.clientY;
+    if(!on){ on=true; el.style.opacity='1'; }
+    if(!raf) raf=requestAnimationFrame(loop);
+  }, {passive:true});
+  document.documentElement.addEventListener('mouseleave', function(){
+    on=false; el.style.opacity='0';
+  });
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,2946 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Super (CD) · prototype</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:ital,wght@0,400;0,500;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script type="module">
+  /* **The portfolio nav, and only when this page is the top document.**
+
+     `index.html` embeds this file live in an `#appframe` iframe, so an
+     unconditional `<amp-nav>` would render a second portfolio header
+     inside the hero stage — a nav inside a nav — and fetch 99 KB to do
+     it. Opened directly (the landing page's "Open the live prototype"
+     link goes straight here) there is otherwise no way back out to the
+     rest of the portfolio, which is the reason it belongs at all.
+
+     Module scripts are deferred, so `document.body` exists by now. */
+  if (window.self === window.top) {
+    await import('/amp-nav.js');
+    const nav = document.createElement('amp-nav');
+    nav.setAttribute('property', 'super');
+    document.body.prepend(nav);
+  }
+</script>
+<style>
+:root{
+  --bg:#0B101B; --panel:#111927; --panel2:#172236; --panel3:#1D2A44;
+  --line:#243149; --line2:#33476E;
+  --text:#E9EDF6; --dim:#93A0B8; --faint:#5E6B85;
+  --ok:#4CD79B; --ok-dim:rgba(76,215,155,.14);
+  --warn:#F0B44C; --warn-dim:rgba(240,180,76,.14);
+  --err:#E5645A; --err-dim:rgba(229,100,90,.14);
+  --ice:#8FB8E8; --ice-dim:rgba(143,184,232,.14);
+  --violet:#A18FFF; --violet-dim:rgba(161,143,255,.14);
+  --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,monospace;
+  --sans:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+  --rail:224px; --dock:304px; --top:52px; --tick:36px; --r:10px;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{background:var(--bg);color:var(--text);font:14px/1.55 var(--sans);overflow:hidden}
+::selection{background:rgba(143,184,232,.3)}
+button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+input{font:inherit;color:inherit}
+a{color:var(--ice);text-decoration:none}
+.mono{font-family:var(--mono)}
+.dim{color:var(--dim)} .faint{color:var(--faint)}
+.ok{color:var(--ok)} .warn{color:var(--warn)} .err{color:var(--err)} .ice{color:var(--ice)} .violet{color:var(--violet)}
+
+/* ---------- shell grid ---------- */
+#app{display:grid;height:100vh;
+  grid-template-rows:var(--top) 1fr var(--tick);
+  grid-template-columns:var(--rail) 1fr var(--dock);
+  grid-template-areas:"top top top" "rail canvas dock" "tick tick tick"}
+#topbar{grid-area:top} #rail{grid-area:rail} #canvas{grid-area:canvas} #dock{grid-area:dock} #ticker{grid-area:tick}
+/* grid items default to min-width:auto, so one unwrappable journal line was widening the
+   1fr track: at a 337px viewport every area measured 675px and half the app hung off the
+   right edge, uncatchable because body is overflow:hidden. */
+#topbar,#rail,#canvas,#dock,#ticker{min-width:0}
+
+/* ---------- topbar ---------- */
+#topbar{display:flex;align-items:center;gap:14px;padding:0 14px;border-bottom:1px solid var(--line);background:var(--panel);overflow:hidden}
+.wordmark{font-family:var(--mono);font-weight:600;font-size:17px;letter-spacing:.02em;white-space:nowrap}
+.wordmark b{color:var(--ice)}
+.wsswitch{display:flex;align-items:center;gap:8px;padding:5px 10px;border:1px solid var(--line);border-radius:8px;background:var(--panel2);font-family:var(--mono);font-size:12.5px}
+.wsswitch:hover{border-color:var(--line2)}
+.simchip{font-family:var(--mono);font-size:9px;letter-spacing:.14em;color:var(--warn);border:1px solid rgba(240,180,76,.4);border-radius:6px;padding:3px 8px;margin-left:10px;cursor:help;white-space:nowrap}
+.spacer{flex:1}
+.gatebadge{display:flex;align-items:center;gap:7px;padding:5px 11px;border-radius:999px;font-family:var(--mono);font-size:12px;border:1px solid var(--line);white-space:nowrap;flex:none}
+.gatebadge.green{color:var(--ok);background:var(--ok-dim);border-color:rgba(76,215,155,.35)}
+.gatebadge.busy{color:var(--warn);background:var(--warn-dim);border-color:rgba(240,180,76,.35)}
+.dot{width:7px;height:7px;border-radius:50%;background:currentColor}
+.budgettop{display:flex;align-items:center;gap:8px;font-family:var(--mono);font-size:11.5px;color:var(--dim)}
+.kbd{font-family:var(--mono);font-size:11px;color:var(--dim);border:1px solid var(--line);border-bottom-width:2px;border-radius:5px;padding:1.5px 6px;background:var(--panel2)}
+
+/* ---------- rail (the tree) ---------- */
+#rail{border-right:1px solid var(--line);background:var(--panel);padding:14px 8px;overflow-y:auto}
+.railmode{display:flex;gap:6px;margin:0 0 10px}
+.rm{flex:1;font-family:var(--mono);font-size:10px;letter-spacing:.12em;padding:5px 0;border-radius:6px;border:1px solid var(--line);background:transparent;color:var(--dim);cursor:pointer}
+.rm.on{color:var(--ice);border-color:rgba(143,184,232,.45)}
+.rgroup{font-family:var(--mono);font-size:9px;letter-spacing:.22em;color:var(--dim);margin:13px 4px 5px}
+#railnav .glyph{opacity:.45}
+.tnode.twig{font-size:11px;opacity:.85;margin:0}
+.tnode.twig.on{background:transparent;color:var(--ice)}
+.raillabel{display:flex;align-items:center;gap:8px;white-space:nowrap;font-family:var(--mono);font-size:10px;letter-spacing:.11em;color:var(--faint);padding:0 10px 8px;text-transform:uppercase}
+.tree{font-family:var(--mono);font-size:12.5px;display:flex;flex-direction:column;gap:2px}
+.tree .glyph{white-space:pre}
+.tree .glyph{color:var(--faint)}
+.tnode{display:flex;align-items:center;gap:6px;width:100%;text-align:left;padding:6px 10px;border-radius:7px;color:var(--dim);white-space:nowrap;line-height:1.5}
+.tnode:hover{background:var(--panel2);color:var(--text)}
+.tnode.on{background:var(--panel3);color:var(--text)}
+.tnode.on .glyph{color:var(--ice)}
+.tnode .cnt{margin-left:auto;font-size:10.5px;color:var(--faint)}
+.tnode .cnt.hot{color:var(--warn)}
+.railfoot{margin-top:18px;padding:10px;border-top:1px dashed var(--line);font-family:var(--mono);font-size:10.5px;color:var(--faint);line-height:1.7}
+
+/* ---------- canvas ---------- */
+#canvas{overflow-y:auto;padding:22px 26px 40px}
+.screen{display:none;max-width:1080px}
+.screen.on{display:block;animation:fadein .18s ease}
+@keyframes fadein{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+.crumbs{font-family:var(--mono);font-size:11.5px;color:var(--faint);margin-bottom:6px}
+h1.sh{font-size:21px;font-weight:600;letter-spacing:-.01em;margin-bottom:4px}
+.sub{color:var(--dim);margin-bottom:20px;max-width:64ch}
+
+/* ---------- cards & stats ---------- */
+.grid{display:grid;gap:12px}
+.g5{grid-template-columns:repeat(5,1fr)} .g4{grid-template-columns:repeat(4,1fr)} .g3{grid-template-columns:repeat(3,1fr)} .g2{grid-template-columns:repeat(2,1fr)}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:14px 16px}
+.card.flat{background:transparent}
+.card h3{font-size:13px;font-weight:600;margin-bottom:8px}
+.stat .n{font-family:var(--mono);font-size:22px;font-weight:600;line-height:1.15}
+.stat .l{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin-top:3px}
+.rowline{display:flex;align-items:center;gap:10px}
+.sect{margin-top:26px}
+.sect>h2{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--faint);margin-bottom:10px;display:flex;align-items:center;gap:10px}
+.sect>h2::after{content:"";flex:1;height:1px;background:var(--line)}
+
+/* ---------- chips, badges, meters ---------- */
+.chip{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:11px;padding:2.5px 9px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);color:var(--dim)}
+.chip.engine{border-color:rgba(143,184,232,.4);color:var(--ice);background:var(--ice-dim)}
+.chip.place{border-color:rgba(161,143,255,.35);color:var(--violet);letter-spacing:.04em}
+.ep{display:inline-block;font-family:var(--mono);font-size:10px;letter-spacing:.05em;padding:2px 7px;border-radius:4px;border:1px solid var(--line2)}
+.ep.spec{color:var(--violet);border-color:rgba(161,143,255,.4)}.ep.tree{color:var(--ice);border-color:rgba(143,184,232,.4)}
+.ep.local{color:var(--ok);border-color:rgba(76,215,155,.4)}.ep.dep{color:var(--warn);border-color:rgba(240,180,76,.4)}.ep.ext{color:var(--dim)}
+.epladder{font-family:var(--mono);font-size:11px;color:var(--dim);margin:-6px 0 14px}
+.placecard pre{margin:10px 0 0;font-family:var(--mono);font-size:11.5px;line-height:1.85;color:var(--dim);white-space:pre-wrap}
+.placecard .dv{color:var(--ok)}
+.chip.id{border-color:rgba(161,143,255,.4);color:var(--violet);background:var(--violet-dim)}
+.badge{display:inline-flex;align-items:center;gap:6px;font-family:var(--mono);font-size:10.5px;letter-spacing:.06em;padding:2px 9px;border-radius:5px;text-transform:uppercase}
+.badge.run{color:var(--ok);background:var(--ok-dim)}
+.badge.paused{color:var(--warn);background:var(--warn-dim)}
+.badge.failed{color:var(--err);background:var(--err-dim)}
+.badge.restart{color:var(--ice);background:var(--ice-dim)}
+.badge.idle{color:var(--dim);background:var(--panel2)}
+.meter{height:6px;border-radius:4px;background:var(--panel3);overflow:hidden}
+.meter>i{display:block;height:100%;border-radius:4px;background:var(--ice);transition:width .5s ease}
+.meter.warn>i{background:var(--warn)} .meter.err>i{background:var(--err)}
+.hb{position:relative;width:10px;height:10px;border-radius:50%;background:var(--ok);flex:none}
+.hb::after{content:"";position:absolute;inset:0;border-radius:50%;background:var(--ok);animation:beat 1.6s ease-out infinite}
+.hb.paused{background:var(--warn)} .hb.paused::after{animation:none}
+.hb.dead{background:var(--err)} .hb.dead::after{animation:none}
+@keyframes beat{0%{transform:scale(1);opacity:.7}70%{transform:scale(2.6);opacity:0}100%{opacity:0}}
+@media (prefers-reduced-motion:reduce){.hb::after{animation:none}.screen.on{animation:none}}
+
+/* ---------- buttons ---------- */
+.btn{font-family:var(--mono);font-size:12px;padding:6.5px 13px;border-radius:8px;border:1px solid var(--line2);background:var(--panel2);color:var(--text)}
+.btn:hover{background:var(--panel3)}
+.btn.pri{background:var(--ice);border-color:var(--ice);color:#0B101B;font-weight:600}
+.btn.pri:hover{filter:brightness(1.08)}
+.btn.danger{color:var(--err);border-color:rgba(229,100,90,.45)}
+.btn.danger:hover{background:var(--err-dim)}
+.btn.ok{color:var(--ok);border-color:rgba(76,215,155,.45)}
+.btn.ok:hover{background:var(--ok-dim)}
+.btn.sm{padding:4px 9px;font-size:11px;border-radius:6px}
+.btn:disabled{opacity:.45;cursor:default}
+
+/* ---------- lanes ---------- */
+.comparebar{display:flex;align-items:center;gap:10px;margin-bottom:14px;padding:10px 14px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r)}
+.lanes{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+.lane{background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:15px;display:flex;flex-direction:column;gap:11px;transition:border-color .3s}
+.lane.selected{border-color:var(--line2)}
+.lane.dying{border-color:rgba(229,100,90,.6)}
+.lane .head{display:flex;align-items:center;gap:9px}
+.lane .name{font-family:var(--mono);font-weight:600;font-size:13.5px}
+.lane .wt{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.lane .act{font-family:var(--mono);font-size:11.5px;color:var(--dim);min-height:34px;border-left:2px solid var(--line);padding-left:9px}
+.lane .btns{display:flex;gap:7px;flex-wrap:wrap}
+.budgetline{display:flex;align-items:center;gap:9px;font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.budgetline .meter{flex:1}
+
+/* ---------- tables & ledger ---------- */
+.tbl{width:100%;border-collapse:collapse;font-size:12.5px}
+.tbl th{font-family:var(--mono);font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--faint);text-align:left;padding:7px 10px;border-bottom:1px solid var(--line)}
+.tbl td{padding:8px 10px;border-bottom:1px solid var(--line);vertical-align:top}
+.tbl tr:hover td{background:var(--panel)}
+.tbl tr.sel td{background:var(--panel2)}
+.kind{font-family:var(--mono);font-size:10.5px;padding:1.5px 7px;border-radius:4px;text-transform:uppercase;letter-spacing:.05em}
+.kind.claim{color:var(--ice);background:var(--ice-dim)}
+.kind.obligation{color:var(--warn);background:var(--warn-dim)}
+.kind.ruling{color:var(--violet);background:var(--violet-dim)}
+.kind.film{color:var(--ok);background:var(--ok-dim)}
+.kind.receipt{color:var(--ok);background:rgba(76,215,155,.10);border:1px solid rgba(76,215,155,.35)}
+/* capabilities */
+.capgrid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:4px}
+@media(max-width:840px){.capgrid{grid-template-columns:1fr}}
+.capsearch{font-family:var(--mono);font-size:12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;color:var(--text);padding:8px 12px;min-width:220px}
+.capstat{margin-left:auto;font-size:9px;letter-spacing:.12em;border:1px solid var(--line2);border-radius:4px;padding:2px 7px;color:var(--dim);font-family:var(--mono)}
+.capstat.in{color:var(--ok);border-color:rgba(76,215,155,.4)}
+.capstat.av{color:var(--ice);border-color:rgba(143,184,232,.4)}
+.capline{font-family:var(--mono);font-size:11px;color:var(--dim);margin-top:5px}
+.gm{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:11.5px;padding:6px 9px;border:1px solid var(--line);border-radius:7px;margin-top:6px;color:var(--dim);cursor:pointer}
+.gm .chk{width:14px;height:14px;border:1px solid var(--line2);border-radius:4px;position:relative;flex:0 0 auto}
+.gm.on{color:var(--text)} .gm.on .chk{border-color:var(--ok)}
+.gm.on .chk::after{content:"✓";position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:10px;color:var(--ok)}
+.gm .sc{margin-left:auto;font-size:10px;color:var(--faint)}
+.gm.granted{border-color:rgba(76,215,155,.45)}
+.gm .gst{font-size:9px;letter-spacing:.06em;color:var(--faint)}
+.gm.granted .gst{color:var(--ok)}
+.capchip{font-family:var(--mono);font-size:9px;border:1px solid var(--line2);border-radius:4px;padding:1px 6px;letter-spacing:.06em}
+.capchip.app{color:var(--warn);border-color:rgba(240,180,76,.4)}
+.capchip.deny{color:var(--err);border-color:rgba(229,100,90,.45)}
+.capchip.new{color:var(--warn);border-color:rgba(240,180,76,.55)}
+.durbtn{font-family:var(--mono);font-size:10px;letter-spacing:.08em;border:1px solid var(--line);border-radius:6px;background:transparent;color:var(--dim);padding:5px 10px;cursor:pointer}
+.durbtn.on{color:var(--ice);border-color:rgba(143,184,232,.5)}
+#ghdiff{display:none;margin-top:12px;border:1px solid rgba(240,180,76,.45);border-radius:10px;padding:12px 14px;font-family:var(--mono);font-size:11.5px;line-height:2;color:var(--dim)}
+#ghdiff .add{color:var(--warn)} #ghdiffstatus{color:var(--warn);letter-spacing:.05em} #ghdiffstatus.okst{color:var(--ok)}
+.pills{display:flex;gap:7px;margin-bottom:12px;flex-wrap:wrap}
+.pill{font-family:var(--mono);font-size:11px;padding:4px 11px;border-radius:999px;border:1px solid var(--line);color:var(--dim)}
+.pill.on{border-color:var(--ice);color:var(--ice);background:var(--ice-dim)}
+
+/* ---------- terminal / gate output ---------- */
+pre.term{font-family:var(--mono);font-size:11.5px;line-height:1.75;background:#080D16;border:1px solid var(--line);border-radius:var(--r);padding:14px 16px;overflow-x:auto;white-space:pre;color:var(--dim)}
+pre.term .p{color:var(--ok);font-weight:600}
+pre.term .f{color:var(--err);font-weight:600}
+pre.term .n{color:var(--faint)}
+.stamp{display:inline-block;font-family:var(--mono);font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--ok);border:1.5px solid var(--ok);border-radius:6px;padding:5px 12px;transform:rotate(-1.4deg);background:var(--ok-dim)}
+.gaterow{display:flex;align-items:center;gap:12px;padding:9px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-family:var(--mono);font-size:12px}
+.gaterow .gname{flex:1}
+.gaterow .gcount{color:var(--dim)}
+
+/* ---------- supervision tree viz ---------- */
+.suptree{font-family:var(--mono);font-size:12.5px;line-height:2;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:16px 18px;white-space:pre;overflow-x:auto}
+.suptree .g{color:var(--faint)}
+.suptree .proc{color:var(--text)}
+.suptree .proc.hot{color:var(--warn)}
+.suptree .note{color:var(--faint);font-size:11px}
+.suptree .swapme{color:var(--ice)}
+
+/* ---------- editor mock ---------- */
+.edwrap{display:grid;grid-template-columns:200px 1fr;gap:12px}
+.filetree{font-family:var(--mono);font-size:12px;background:var(--panel);border:1px solid var(--line);border-radius:var(--r);padding:12px;color:var(--dim);line-height:1.9}
+.filetree .on{color:var(--text)}
+.code{font-family:var(--mono);font-size:12px;line-height:1.75;background:#080D16;border:1px solid var(--line);border-radius:var(--r);padding:14px 0;overflow-x:auto}
+.cl{display:flex;white-space:pre}
+.cl .gut{width:86px;flex:none;text-align:right;padding-right:12px;color:var(--faint);user-select:none;font-size:10.5px}
+.cl .gut .who{color:var(--violet)}
+.cl:hover{background:rgba(143,184,232,.05)}
+.cl.hl{background:rgba(76,215,155,.07);box-shadow:inset 2px 0 0 var(--ok)}
+.k{color:#C792EA}.s{color:#C3E88D}.c{color:#546E8A;font-style:italic}.fn{color:#82AAFF}.num{color:#F78C6C}
+.claimcard{margin:8px 14px 8px 100px;border:1px solid rgba(76,215,155,.4);background:var(--ok-dim);border-radius:8px;padding:9px 12px;font-size:12px;max-width:560px}
+.claimcard .mono{font-size:10.5px;color:var(--dim)}
+
+/* ---------- bots ----------
+   The third root. Styling is deliberately NOT chat-app styling: an
+   utterance is a frame, so it renders with the cursor it was assembled
+   from, the same way every other projection on this surface does. */
+.botrow{display:flex;align-items:center;gap:8px;width:100%;text-align:left;padding:7px 10px;border-radius:7px;color:var(--dim);line-height:1.4}
+.botrow:hover{background:var(--panel2);color:var(--text)}
+.botrow.on{background:var(--panel3);color:var(--text)}
+.botrow .bn{display:flex;flex-direction:column;min-width:0}
+.botrow .bn b{font-weight:500;font-size:13px}
+.botrow .bn i{font-style:normal;font-size:10.5px;color:var(--faint);font-family:var(--mono)}
+.botrow .bs{margin-left:auto;font-size:10px;font-family:var(--mono);color:var(--faint);text-align:right;flex:none}
+.botrow .bs.hot{color:var(--warn)}
+.utt{border:1px solid var(--line);background:var(--panel);border-radius:var(--r);padding:12px 14px;margin-bottom:12px}
+.utt.you{background:transparent;border-style:dashed}
+.utt .uh{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.utt .uh b{font-size:13px;font-weight:600}
+.utt .uh .role{font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.utt .ub{font-size:13.5px;line-height:1.6;margin-bottom:9px}
+.claimrow{display:flex;align-items:flex-start;gap:9px;padding:6px 0;border-top:1px dashed var(--line);font-size:12.5px}
+.claimrow .cx{flex:1;min-width:0}
+/* A claim's KIND governs whether it can go stale at all. Only `snapshot`
+   decays; tying a whole conversation to the view revision turns it into a
+   graveyard of red labels within minutes, and a channel opening does not
+   falsify "kestrel completed F.8.2.5". */
+.claimrow .ckind{font-family:var(--mono);font-size:9px;letter-spacing:.1em;text-transform:uppercase;padding:2px 7px;border-radius:5px;border:1px solid var(--line);color:var(--faint);flex:none;margin-top:2px;cursor:help}
+.claimrow .ckind.snapshot{color:var(--warn);border-color:rgba(240,180,76,.35)}
+.claimrow .ckind.durable{color:var(--ok);border-color:rgba(76,215,155,.35)}
+.claimrow .ckind.decision{color:var(--violet);border-color:rgba(161,143,255,.35)}
+.claimrow .ckind.interpretation{color:var(--ice);border-color:rgba(143,184,232,.3)}
+.claimrow .stalemark{color:var(--warn);font-family:var(--mono);font-size:10.5px}
+/* An aggregate cites every object that established it, so the citation slot
+   holds a list rather than one chip. */
+.claimrow .cites{display:flex;flex-wrap:wrap;gap:4px;justify-content:flex-end;flex:none;max-width:46%}
+.claimrow .cite{font-family:var(--mono);font-size:10.5px;color:var(--ice);border:1px solid rgba(143,184,232,.3);border-radius:6px;padding:2px 8px;background:var(--ice-dim);flex:none;cursor:pointer}
+.claimrow .cite:hover{background:rgba(143,184,232,.24)}
+.ucursor{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:9px;padding-top:8px;border-top:1px solid var(--line);font-family:var(--mono);font-size:10.5px;color:var(--faint)}
+.ucursor .tag{border-radius:999px;padding:2px 9px;border:1px solid var(--line)}
+.ucursor .tag.cur{color:var(--ok);border-color:rgba(76,215,155,.45);background:var(--ok-dim)}
+.ucursor .tag.sup{color:var(--warn);border-color:rgba(240,180,76,.45);background:var(--warn-dim)}
+.botboard{border:1px solid var(--line);background:var(--panel);border-radius:var(--r);padding:12px 14px}
+.boardgrp{font-family:var(--mono);font-size:9px;letter-spacing:.2em;color:var(--faint);margin:12px 0 6px}
+.boardgrp:first-child{margin-top:0}
+.boarditem{display:flex;gap:8px;align-items:baseline;font-size:12.5px;padding:3px 0;color:var(--dim)}
+.boarditem b{color:var(--text);font-weight:500}
+
+/* ---------- dock ---------- */
+#dock{border-left:1px solid var(--line);background:var(--panel);overflow-y:auto;padding:14px}
+#dock h4{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);margin-bottom:10px}
+.frozen{font-family:var(--mono);font-size:11.5px;line-height:1.8;background:#080D16;border:1px solid var(--line);border-radius:8px;padding:12px;color:var(--dim);white-space:pre-wrap;word-break:break-word}
+.frozen b{color:var(--text);font-weight:500}
+.frozen .kk{color:var(--ice)}
+.docknote{font-size:11.5px;color:var(--faint);margin-top:10px;line-height:1.6}
+
+/* ---------- ticker ---------- */
+#ticker{border-top:1px solid var(--line);background:var(--panel);display:flex;align-items:center;gap:0;overflow:hidden}
+#ticker .tl{flex:none;font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;color:var(--faint);padding:0 12px;border-right:1px solid var(--line);text-transform:uppercase}
+#tickstream{flex:1;min-width:0;display:flex;gap:26px;align-items:center;overflow-x:auto;padding:0 14px;font-family:var(--mono);font-size:11.5px;color:var(--dim);white-space:nowrap;scrollbar-width:none}
+#tickstream::-webkit-scrollbar{display:none}
+#tickstream .t{color:var(--faint);margin-right:7px}
+#tickstream .ev{flex:none}
+#tickstream .ev.new{animation:tickin .4s ease}
+@keyframes tickin{from{opacity:0;transform:translateX(8px)}to{opacity:1}}
+
+/* ---------- palette ---------- */
+#palov{position:fixed;inset:0;background:rgba(4,8,15,.6);backdrop-filter:blur(2px);display:none;align-items:flex-start;justify-content:center;padding-top:14vh;z-index:50}
+#palov.on{display:flex}
+#pal{width:min(560px,92vw);background:var(--panel);border:1px solid var(--line2);border-radius:12px;overflow:hidden;box-shadow:0 24px 60px rgba(0,0,0,.5)}
+#pal input{width:100%;background:transparent;border:0;outline:0;padding:14px 16px;font-family:var(--mono);font-size:14px;color:var(--text);border-bottom:1px solid var(--line)}
+#palist{max-height:300px;overflow-y:auto;padding:6px}
+#palist .pi{display:flex;gap:10px;align-items:center;width:100%;text-align:left;padding:9px 12px;border-radius:8px;font-size:13px;color:var(--dim)}
+#palist .pi:hover,#palist .pi.on{background:var(--panel3);color:var(--text)}
+#palist .pi .k{font-family:var(--mono);font-size:10.5px;color:var(--faint);margin-left:auto}
+
+/* ---------- toast ---------- */
+#toast{position:fixed;bottom:52px;left:50%;transform:translateX(-50%) translateY(16px);background:var(--panel3);border:1px solid var(--line2);border-radius:10px;padding:10px 16px;font-family:var(--mono);font-size:12px;opacity:0;pointer-events:none;transition:all .25s ease;z-index:60;max-width:80vw}
+#toast.on{opacity:1;transform:translateX(-50%) translateY(0)}
+
+/* ---------- responsive ---------- */
+@media (max-width:1180px){#app{grid-template-columns:var(--rail) 1fr 0;grid-template-areas:"top top top" "rail canvas canvas" "tick tick tick"}#dock{display:none}}
+@media (max-width:840px){
+  #app{grid-template-columns:1fr;grid-template-rows:var(--top) auto 1fr var(--tick);grid-template-areas:"top" "rail" "canvas" "tick"}
+  #rail{display:flex;align-items:center;gap:4px;overflow-x:auto;padding:8px;border-right:0;border-bottom:1px solid var(--line)}
+  /* #railnav and #railtree are block containers, so putting #rail in a row left them as
+     tall columns inside it: the rail ate the viewport and the canvas — the actual app —
+     was squeezed to a sliver. They have to become rows too. */
+  #railnav,#railtree,#railtree .tree{display:flex;align-items:center;gap:4px;flex-direction:row}
+  .railmode{flex:none;margin:0}
+  .rgroup{display:none}
+  .raillabel,.railfoot,.tree .glyph,.tnode .cnt{display:none}
+  .tnode{white-space:nowrap;padding:6px 12px;width:auto}
+  .lanes,.g5,.g4,.g3{grid-template-columns:1fr 1fr}
+  .g2,.edwrap{grid-template-columns:1fr}
+  /* the topbar is a fixed 52px row of chips; below ~840 it stops fitting and used to
+     spill off the right edge. Shed the two that carry nothing a phone can act on —
+     the budget meter and the ⌘K hint — and keep the SIMULATED RUNTIME disclosure. */
+  #topbar .budgettop,#topbar .kbd{display:none}
+}
+@media (max-width:560px){
+  .lanes,.g5,.g4,.g3{grid-template-columns:1fr}
+  /* the workspace still names itself in the breadcrumb, and the gate count is a stat card
+     on the mission screen — the SIMULATED RUNTIME disclosure is the one that has to stay. */
+  #topbar .wsswitch,#topbar .gatebadge{display:none}
+}
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ================= TOPBAR ================= -->
+<header id="topbar">
+  <span class="wordmark">Super <b>(CD)</b></span>
+  <button class="wsswitch" onclick="cycleWorkspace()" title="one runtime, many workspaces — click to switch">workspace: <b id="wsname">&nbsp;trvm</b>&nbsp;⇄</button>
+  <div class="spacer"></div>
+  <span class="simchip" title="Interactive prototype. In the production runtime this surface is projected from OTP supervisors; here the state is simulated — the figures, however, are read from proof/latest.json.">SIMULATED RUNTIME</span>
+  <button class="gatebadge green" id="gatebadge" onclick="go('gates')"><span class="dot"></span><span id="gatebadgetxt">gates —</span></button>
+  <div class="budgettop">budget <div class="meter" style="width:70px"><i style="width:62%"></i></div> 62%</div>
+  <button class="kbd" onclick="openPal()">⌘K</button>
+</header>
+
+<!-- ================= RAIL ================= -->
+<nav id="rail">
+  <div class="railmode" role="tablist" aria-label="rail mode">
+    <button id="rm-bot" class="rm" onclick="railMode('bots')" title="who is working on this, and what they are asking of you">Bots</button>
+    <button id="rm-nav" class="rm on" onclick="railMode('nav')">Nav</button>
+    <button id="rm-run" class="rm" onclick="railMode('runtime')" title="show what is actually alive">Runtime</button>
+  </div>
+
+  <div id="railbots" style="display:none">
+    <div class="rgroup">BOTS</div>
+    <div id="botroster"></div>
+    <div class="rgroup">GROUPS</div>
+    <div id="botgroups"></div>
+    <button class="tnode" style="margin-top:8px" onclick="newBot()"><span class="glyph">+</span> New Bot</button>
+    <div class="railfoot" style="border-top:0;padding-top:6px">a persistent conversational role<br>over the world — not the model,<br>not the engine, not the authority.</div>
+  </div>
+
+  <div id="railnav">
+    <div class="rgroup">WORK</div>
+    <button class="tnode on" data-nav="mission"><span class="glyph">·</span> mission</button>
+    <button class="tnode" data-nav="lanes"><span class="glyph">·</span> lanes <span class="cnt" id="lanecnt">3 live</span></button>
+    <button class="tnode" data-nav="editor"><span class="glyph">·</span> editor</button>
+    <div class="rgroup">SOCIETY</div>
+    <button class="tnode" data-nav="agents"><span class="glyph">·</span> agents <span class="cnt">7</span></button>
+    <button class="tnode" data-nav="capabilities"><span class="glyph">·</span> capabilities <span class="cnt">4</span></button>
+    <button class="tnode" data-nav="routines"><span class="glyph">·</span> routines <span class="cnt">4</span></button>
+    <div class="rgroup">COMPUTE</div>
+    <button class="tnode" data-nav="fleet"><span class="glyph">·</span> fleet &amp; placement <span class="cnt">5</span></button>
+    <div class="rgroup">TRUTH</div>
+    <button class="tnode" data-nav="evidence"><span class="glyph">·</span> evidence <span class="cnt">§329</span></button>
+    <button class="tnode" data-nav="gates"><span class="glyph">·</span> gates <span class="cnt ok" id="gatecnt">—</span></button>
+    <button class="tnode" data-nav="rulings"><span class="glyph">·</span> rulings <span class="cnt hot" id="rulcnt">2 due</span></button>
+    <div class="rgroup">SYSTEM</div>
+    <button class="tnode" data-nav="authority"><span class="glyph">·</span> authority</button>
+    <button class="tnode" data-nav="settings"><span class="glyph">·</span> settings</button>
+  </div>
+
+  <div id="railtree" style="display:none">
+    <div class="raillabel">WorkspaceSupervisor <span class="cnt ok">alive</span></div>
+    <div class="tree">
+      <button class="tnode" data-nav="mission"><span class="glyph">├─</span> GoalServer</button>
+      <button class="tnode" data-nav="evidence"><span class="glyph">├─</span> EvidenceLedger</button>
+      <button class="tnode" data-nav="rulings"><span class="glyph">├─</span> ObligationRegistry</button>
+      <button class="tnode" data-nav="lanes"><span class="glyph">├─</span> LaneSupervisor <span class="cnt" id="lanecnt2">3</span></button>
+      <button class="tnode twig" data-nav="lanes" data-sub="lane-a"><span class="glyph">|&nbsp;&nbsp;├─</span> lane-a · WorkerSup</button>
+      <button class="tnode twig" data-nav="lanes" data-sub="lane-b"><span class="glyph">|&nbsp;&nbsp;├─</span> lane-b · WorkerSup</button>
+      <button class="tnode twig" data-nav="lanes" data-sub="lane-c"><span class="glyph">|&nbsp;&nbsp;└─</span> lane-c · WorkerSup</button>
+      <button class="tnode" data-nav="capabilities" data-sub="registry" title="what exists"><span class="glyph">├─</span> CapabilityRegistry <span class="cnt">sim</span></button>
+      <button class="tnode" data-nav="capabilities" data-sub="grants" title="what may be requested and exercised"><span class="glyph">├─</span> GrantRegistry <span class="cnt">sim</span></button>
+      <button class="tnode" data-nav="capabilities" data-sub="approvals" title="which exact effects await consent"><span class="glyph">├─</span> ApprovalSupervisor <span class="cnt">sim</span></button>
+      <button class="tnode" data-nav="capabilities" data-sub="gateway" title="what is trying to cross into the world"><span class="glyph">├─</span> CapabilityGateway <span class="cnt">sim</span></button>
+      <button class="tnode" data-nav="routines"><span class="glyph">├─</span> RoutineScheduler</button>
+      <button class="tnode" data-nav="authority"><span class="glyph">├─</span> AuthorityTable</button>
+      <button class="tnode" data-nav="fleet"><span class="glyph">└─</span> Fleet/Presence <span class="cnt">5</span></button>
+    </div>
+    <div class="railfoot" style="border-top:0;padding-top:6px">the literal supervision tree —<br>what is actually alive right now.</div>
+  </div>
+
+  <div class="railfoot">
+    amp-prototype · simulated<br>
+    phase 2 target: elixir/otp<br>
+    cert <span id="railcert">—</span><br>
+    run <span id="railrun">—</span> · figures from<br>proof/latest.json
+  </div>
+</nav>
+
+<!-- ================= CANVAS ================= -->
+<main id="canvas">
+
+<!-- ============ BOTS ============ -->
+<section class="screen" id="s-bots">
+  <div class="crumbs" id="botcrumbs">workspace/trvm › bots</div>
+  <h1 class="sh" id="bottitle">Bots</h1>
+  <p class="sub">A Bot is a persistent conversational role over the world — not the model, not the
+    engine, and not the authority. It explains; Nav organizes; Runtime proves. An utterance here is
+    <b>not world truth — it is a cited derivation from one coherent frame</b>, and every claim in it
+    is bound to an object that frame actually contained. The world moving does not falsify the
+    derivation; it makes the <i>snapshot</i> claims inside it stale, and only those.</p>
+
+  <div class="grid" style="grid-template-columns:1fr 300px;gap:16px;align-items:start" id="botsplit">
+    <div>
+      <div id="botfeed"></div>
+      <div class="card flat" style="border-style:dashed;display:flex;gap:8px;align-items:center;margin-top:4px">
+        <span class="mono dim" style="font-size:11.5px">ask</span>
+        <input id="botask" placeholder="what happened while I was gone?" autocomplete="off"
+               style="flex:1;background:transparent;border:0;outline:0;font-size:13.5px">
+        <button class="btn sm" onclick="botAsk()">Send</button>
+      </div>
+      <div class="docknote" style="margin-top:10px">Each utterance names the projection it derives
+        from. <b>Sampling a cursor after the content is not enough</b> — two claims read either side
+        of a mutation get one label and the frame is torn. So the frame is built once, under a
+        stability check, and the reasoning happens against it. A claim citing an object that frame
+        did not contain is refused <b class="warn">unobserved-citation</b>, which is why a Bot cannot
+        assert something it was never shown.</div>
+    </div>
+
+    <div>
+      <div class="botboard" id="botboard"></div>
+      <div class="docknote" style="margin-top:10px">The board is not hand-drawn UI. It is
+        <b>bot-projection@1</b> rendered by this Bot's own program, and it can show nothing outside
+        it — no global grant count, no other actor's approval queue, and no digest over authority the
+        Bot may not see. What the <i>person</i> may inspect about a Bot is a different view on a
+        different channel.</div>
+    </div>
+  </div>
+
+  <div class="sect">
+    <h2>Delegation</h2>
+    <div class="card">
+      <div id="botdelegate"></div>
+      <div class="docknote" style="margin-top:10px">A Bot may delegate only a capability it holds,
+        and the child must narrow or equal <b>every dimension</b> of the parent — resource, duration,
+        workspace, run, placement, budget, policy. Capability-and-duration alone is not enough: a
+        delegation that keeps both can still widen the resource from one repo to every repo, or turn
+        <span class="mono">human_approval_required</span> into <span class="mono">auto</span>.
+        <b>Delegation is not a second way to be authorized.</b> Revoking the parent takes its
+        children in the same operation.</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ MISSION CONTROL ============ -->
+<section class="screen on" id="s-mission">
+  <div class="crumbs" id="mcrumbs">workspace/trvm</div>
+  <h1 class="sh">Mission Control</h1>
+  <p class="sub">The society at a glance. In the production runtime this surface is projected from the running supervisors — never held as UI state. This prototype simulates that projection; its figures are read from the proof artifact.</p>
+
+  <div class="grid g5">
+    <div class="card stat"><div class="n" id="statlanes">3</div><div class="l">lanes live</div></div>
+    <div class="card stat"><div class="n" id="statagents">7</div><div class="l">agents</div></div>
+    <div class="card stat"><div class="n" id="statnodes">5</div><div class="l">fleet nodes</div></div>
+    <div class="card stat"><div class="n ok" id="statgates">—</div><div class="l" id="lgates">gates green</div></div>
+    <div class="card stat"><div class="n ice" id="statcert">—</div><div class="l" id="lcert">cert streak</div></div>
+  </div>
+
+  <div class="sect">
+    <h2>Goal</h2>
+    <div class="card">
+      <div class="rowline" style="justify-content:space-between;flex-wrap:wrap;gap:10px">
+        <div>
+          <div class="mono" id="goalname" style="font-size:15px;font-weight:600">EMISSION_CONFORMANCE-v1</div>
+          <div class="dim" id="goaldesc" style="font-size:12.5px;margin-top:3px">Next with nothing before it. B5.1 argument boundary sealed: parse defect + two siblings fixed, options ruling taken, MAXPATH mechanism built.</div>
+          <div id="goalchips" style="margin-top:9px;display:flex;gap:6px;flex-wrap:wrap"><span class="ep spec">spec ✓</span><span class="ep tree">in_tree ✓</span><span class="ep local">live_local ✓</span><span class="ep dep">live_deployed —</span><span class="ep ext">external —</span></div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn" onclick="go('lanes')">Open lanes</button>
+          <button class="btn pri" onclick="go('gates');setTimeout(runGates,300)">Replay gates</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="sect">
+    <h2>Lanes on this goal</h2>
+    <div class="grid g3" id="minilanes"></div>
+  </div>
+
+  <div class="sect">
+    <h2>Obligations due</h2>
+    <div class="card" id="obliglist" style="display:flex;flex-direction:column;gap:9px">
+      <div class="rowline"><span class="kind obligation">obligation</span><span>Confirm split: <span class="mono">film-budget-negative</span> vs <span class="mono">film-budget-invalid</span></span><button class="btn sm" style="margin-left:auto" onclick="go('rulings')">Rule</button></div>
+      <div class="rowline"><span class="kind obligation">obligation</span><span>Admit tenth harness species: stale-literal expectations</span><button class="btn sm" style="margin-left:auto" onclick="go('rulings')">Rule</button></div>
+      <div class="rowline"><span class="kind obligation">obligation</span><span><span class="mono">EMISSION_CONFORMANCE-v1</span> — merge blocked until film conformance obligations discharge</span><button class="btn sm" style="margin-left:auto" onclick="go('evidence')">Trace</button></div>
+    </div>
+  </div>
+
+  <div class="sect">
+    <h2>Latest evidence</h2>
+    <div class="card mono" id="latestev" style="font-size:12px;line-height:2;color:var(--dim)">
+      <div><span class="kind film">film</span> church_exp_2_2 · 21 frames · <span class="ok">NORMAL_FORM</span> · replayed on 2 runtime classes</div>
+      <div><span class="kind claim">claim</span> overflow case returns refusal <span class="mono">film-budget-invalid</span>, never a 21-frame answer to a different question</div>
+      <div><span class="kind ruling">ruling</span> argv is a transport type, not a capability type → options schema is the authority</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ LANES ============ -->
+<section class="screen" id="s-lanes">
+  <div class="crumbs">workspace/trvm › LaneSupervisor</div>
+  <h1 class="sh">Lanes</h1>
+  <p class="sub">Three independent attacks on <span class="mono">EMISSION_CONFORMANCE-v1</span>, each in its own worktree with its own budget. Kill one — the supervisor owns the failure semantics, and identity, worktree, and evidence survive.</p>
+
+  <div class="comparebar">
+    <span class="mono dim" style="font-size:11.5px">compare</span>
+    <button class="btn sm" onclick="toast('diff lane-a ↔ lane-b: 14 files, +412 −128. Opens in Editor with agent gutters.')">diff A↔B</button>
+    <button class="btn sm" onclick="toast('diff lane-b ↔ lane-c: 6 files.')">diff B↔C</button>
+    <div class="spacer"></div>
+    <button class="btn sm ok" onclick="toast('Promoting lane-a creates 3 merge obligations. Gates must replay green before merge is expressible.')">Promote winner…</button>
+    <button class="btn sm pri" onclick="spawnLane()">+ Spawn lane</button>
+  </div>
+
+  <div class="lanes" id="lanewrap"></div>
+
+  <div class="sect">
+    <h2>Supervision policy</h2>
+    <div class="card mono" style="font-size:12px;color:var(--dim);line-height:1.9">
+      LaneSupervisor strategy: <b class="ice">one_for_one</b> · max_restarts 3 / 60s · harness exit → restart child, preserve <b>worktree · evidence · identity · budget</b><br>
+      A dead harness is a lifecycle event, not an incident. Incidents are when the ledger disagrees.
+    </div>
+  </div>
+</section>
+
+<!-- ============ AGENTS ============ -->
+<section class="screen" id="s-agents">
+  <div class="crumbs">workspace/trvm › AgentSupervisor</div>
+  <h1 class="sh">Agents</h1>
+  <p class="sub">Identities, not processes. An agent's engine is a replaceable child under its supervisor — swap it and watch what survives.</p>
+
+  <div class="grid g3" style="margin-bottom:18px">
+    <div class="card">
+      <div class="rowline"><span class="hb"></span><b class="mono">kestrel</b><span class="chip id">ag_kestrel</span></div>
+      <div class="dim" style="font-size:12px;margin:7px 0">Lane A · 214 claims · 0 open obligations</div>
+      <div class="rowline"><span class="chip engine" id="kestrel-engine">claude-code</span><button class="btn sm" style="margin-left:auto" id="swapbtn" onclick="swapEngine()">Swap engine</button></div>
+    </div>
+    <div class="card">
+      <div class="rowline"><span class="hb"></span><b class="mono">magpie</b><span class="chip id">ag_magpie</span></div>
+      <div class="dim" style="font-size:12px;margin:7px 0">Lane B · 96 claims · 1 open obligation</div>
+      <div class="rowline"><span class="chip engine">codex</span><button class="btn sm" style="margin-left:auto" onclick="toast('magpie: engine swap available — same mechanism, same survivals.')">Swap engine</button></div>
+    </div>
+    <div class="card">
+      <div class="rowline"><span class="hb"></span><b class="mono">shrike</b><span class="chip id">ag_shrike</span></div>
+      <div class="dim" style="font-size:12px;margin:7px 0">Lane C · verifier · runs the batteries, forges on purpose</div>
+      <div class="rowline"><span class="chip engine">test-harness</span><button class="btn sm" style="margin-left:auto" onclick="go('gates')">Its gates</button></div>
+    </div>
+  </div>
+
+  <div class="sect">
+    <h2>kestrel — supervision tree</h2>
+    <div class="suptree" id="kestreltree"><span class="g">AgentSupervisor</span> <span class="note">(ag_kestrel · one_for_one)</span>
+<span class="g">├─</span> <span class="proc">AgentIdentity</span>        <span class="note">the part that cannot die</span>
+<span class="g">├─</span> <span class="proc swapme" id="tree-engine">Harness · claude-code</span>  <span class="note" id="tree-engine-note">animating the identity right now</span>
+<span class="g">├─</span> <span class="proc">Memory</span>               <span class="note">episodic + ledger citations</span>
+<span class="g">├─</span> <span class="proc">Budget</span>               <span class="note">62% of 40k ceiling</span>
+<span class="g">├─</span> <span class="proc">Heartbeat</span>            <span class="note">1.6s · silence is supervised</span>
+<span class="g">├─</span> <span class="proc">Authority</span>            <span class="note">4 capabilities · snapshot-at-entry</span>
+<span class="g">├─</span> <span class="proc">Worktree</span>             <span class="note">wt/lane-a @ 4f21c99</span>
+<span class="g">├─</span> <span class="proc">EvidenceCollector</span>    <span class="note">emits claims with receipts</span>
+<span class="g">└─</span> <span class="proc">ObligationTracker</span>    <span class="note">what must be proven before merge</span></div>
+    <div class="docknote" style="margin-top:8px">Engine ≠ identity: replacing <span class="mono">Harness</span> restarts one child. Everything else keeps its pid, its state, and its history.</div>
+  </div>
+</section>
+
+<!-- ============ CAPABILITIES ============ -->
+<section class="screen" id="s-capabilities">
+  <div class="crumbs">workspace/trvm › capabilities</div>
+  <h1 class="sh">Capabilities</h1>
+  <p class="sub">Installable abilities, governed. A pack is something you install; a capability is something you're allowed to exercise. Install grants nothing — and every pack here is <b class="warn">simulated</b> until ampd exists; the authority model is what's real.</p>
+
+  <div class="pills" id="captabs" style="align-items:center;gap:10px">
+    <button class="pill on" onclick="capTab('installed',this)">Installed</button>
+    <button class="pill" onclick="capTab('discover',this)">Discover</button>
+    <button class="pill" onclick="capTab('local',this)">Local</button>
+    <input class="capsearch" id="capsearchbox" placeholder="Search capabilities…" oninput="capSearch()" style="margin-left:auto">
+  </div>
+
+  <div class="capgrid" id="capgrid">
+
+    <div class="card capcard" data-pack="github" data-search="github mcp skill ui repo pr issue">
+      <div class="rowline"><b class="mono">GitHub</b><span class="chip">v<span id="ghver">1.4.2</span></span><span class="capstat in">INSTALLED</span></div>
+      <div class="capline">MCP · Skill · UI · secret: gateway-only · conformance 42/42 <span class="warn">(simulated)</span></div>
+      <div style="margin-top:10px" class="mono dim" style="font-size:11px">granted to <b class="mono" style="color:var(--text)">kestrel</b> · scope <span class="mono">traaviis/trvm</span></div>
+      <div class="gm on" id="gm-repo-read" onclick="ghToggle('repo.read',this)"><span class="chk"></span>github.repo.read<span class="capchip">OBSERVE</span><span class="gst" data-g="repo.read"></span><span class="sc">repo scope</span></div>
+      <div class="gm on" id="gm-issue-read" onclick="ghToggle('issue.read',this)"><span class="chk"></span>github.issue.read<span class="capchip">OBSERVE</span><span class="gst" data-g="issue.read"></span><span class="sc">repo scope</span></div>
+      <div class="gm on" id="gm-pr-draft" onclick="ghToggle('pr.draft',this)"><span class="chk"></span>github.pr.draft<span class="capchip">LOCAL MUTATE</span><span class="gst" data-g="pr.draft"></span><span class="sc">worktree only</span></div>
+      <div class="gm" id="gm-pr-create" onclick="ghToggle('pr.create',this)"><span class="chk"></span>github.pr.create<span class="capchip app">APPROVAL</span><span class="gst" data-g="pr.create"></span><span class="sc">every effect</span></div>
+      <div class="gm" id="gm-pr-merge" onclick="ghToggle('pr.merge',this)"><span class="chk"></span>github.pr.merge<span class="capchip deny">DENY</span><span class="sc">default</span></div>
+      <div class="gm" id="gm-new" style="display:none" onclick="ghToggle('issue.write',this)"><span class="chk"></span>github.issue.write<span class="capchip new">NEW · 1.5.0</span><span class="gst" data-g="issue.write"></span><span class="sc">requested by 1.5.0</span></div>
+      <div class="rowline" style="margin-top:10px;gap:6px" id="ghdur">
+        <span class="mono dim" style="font-size:10px">duration</span>
+        <button class="durbtn" onclick="ghDur('once',this)">once</button>
+        <button class="durbtn" onclick="ghDur('run',this)">run</button>
+        <button class="durbtn" onclick="ghDur('agent',this)">agent</button>
+        <button class="durbtn on" onclick="ghDur('workspace',this)">workspace</button>
+      </div>
+      <div class="mono dim" style="font-size:10.5px;margin-top:9px;line-height:1.9">placement: <span class="ok">LOCAL</span> · <span class="ice">FLEET</span> · <span class="err">CLOUD denied</span> (private-source) &nbsp;·&nbsp; receipts: <b>required</b><br>secret github.oauth · gateway only · engine-visible: <b>never</b></div>
+      <div class="btns" style="margin-top:11px">
+        <button class="btn sm pri" onclick="ghGrant()">Grant selected</button>
+        <button class="btn sm" onclick="ghRefusal()">Simulate: kestrel → pr.create</button>
+        <button class="btn sm" onclick="ghExercise('pr.draft')">Exercise pr.draft</button>
+        <button class="btn sm" onclick="ghExercise('pr.create')">Exercise pr.create</button>
+        <button class="btn sm" onclick="ghOpenDiff()">Update 1.5.0 available</button>
+      </div>
+      <div id="ghdiff">
+        <b style="color:var(--text)">github 1.4.2 → 1.5.0</b> · 14 files changed<br>
+        <span class="add">+ github.issue.write</span> NEW AUTHORITY<br>
+        <span class="add">+ api.linear.app</span> NEW EGRESS<br>
+        <span class="add">+ CLOUD</span> PLACEMENT WIDENED<br>
+        <span id="ghdiffstatus">STATUS: UPDATE HELD — authority surface widened</span>
+        <div class="btns" style="margin-top:9px">
+          <button class="btn sm" onclick="ghUpdateKeep()">Update, keep old grants</button>
+          <button class="btn sm" onclick="toast('Review in the matrix above — the NEW row stays ungranted until you say so.')">Review new authority</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="card capcard" data-pack="browser" data-search="browser navigate inspect screenshot form submit mcp app">
+      <div class="rowline"><b class="mono">Browser</b><span class="capstat in">INSTALLED</span></div>
+      <div class="capline">Native · MCP App · egress allowlist</div>
+      <div class="gm on" style="cursor:default"><span class="chk"></span>browser.public.navigate<span class="capchip">OBSERVE</span><span class="sc">any node</span></div>
+      <div class="gm on" style="cursor:default"><span class="chk"></span>browser.inspect · screenshot<span class="capchip">OBSERVE</span><span class="sc">receipted</span></div>
+      <div class="gm" style="cursor:default"><span class="chk"></span>browser.form.submit<span class="capchip app">APPROVAL</span><span class="sc">allowlisted domains</span></div>
+      <div class="mono dim" style="font-size:10.5px;margin-top:9px">placement: <span class="ok">LOCAL</span> · <span class="ice">FLEET</span> · <span class="violet">CLOUD</span></div>
+    </div>
+
+    <div class="card capcard" data-pack="postgres" data-search="postgres sql database schema query">
+      <div class="rowline"><b class="mono">Postgres</b><span class="capstat av">AVAILABLE</span></div>
+      <div class="capline">Native adapter · destructive SQL refuses by name</div>
+      <div class="gm" style="cursor:default"><span class="chk"></span>pg.schema.read · query.read<span class="capchip">OBSERVE</span></div>
+      <div class="gm" style="cursor:default"><span class="chk"></span>pg.query.write<span class="capchip deny">DENIED BY DEFAULT</span></div>
+      <div class="mono dim" style="font-size:10.5px;margin-top:9px">placement: <span class="ok">LOCAL</span> · <span class="ice">FLEET</span> · data policy: source stays home</div>
+      <div class="btns" style="margin-top:11px"><button class="btn sm" onclick="pgInstall(this)">Install</button></div>
+    </div>
+
+    <div class="card capcard" data-pack="mcpimport" data-search="mcp import server tools ui sandbox">
+      <div class="rowline"><b class="mono">MCP Import</b><span class="capstat">BUILT-IN</span></div>
+      <div class="capline">Bring any MCP server into Super</div>
+      <p class="dim" style="font-size:12px;margin-top:8px">Tools become <b style="color:var(--text)">requested</b> typed capabilities — nothing is granted by connecting. UI resources render sandboxed. Super supplies the authority; MCP supplies the transport.</p>
+      <div class="btns" style="margin-top:11px"><button class="btn sm" onclick="mcpImport()">Import a server</button></div>
+    </div>
+
+  </div>
+</section>
+
+<!-- ============ FLEET ============ -->
+<section class="screen" id="s-fleet">
+  <div class="crumbs">workspace/trvm › fleet</div>
+  <h1 class="sh">Fleet</h1>
+  <p class="sub">Remote machines are just more places for supervisors to live. Moving a lane is placement, not a different mental model.</p>
+  <div class="grid g3" id="fleetwrap"></div>
+  <div class="sect">
+    <h2>Placement</h2>
+    <div class="grid g2">
+      <div class="card mono" style="font-size:12px;color:var(--dim);line-height:2">
+        <div style="margin-bottom:4px"><span class="ep local">LOCAL</span> <span class="ep tree">FLEET</span> <span class="ep spec">CLOUD</span> — three placements, one world. Sites, not copies.</div>
+        <div>lane-a → <b>travis-desktop</b> <span class="faint">(LOCAL)</span> · lane-b → <b>ms02</b> <span class="faint">(FLEET)</span> · lane-c (verifier) → <b>ms02</b></div>
+        <div>routine <span class="ice">nightly-gate-replay</span> → <b>gpu01</b> · browser research fleet → <b>cd-west</b> <span class="faint">(CLOUD · ComputeDriven)</span></div>
+        <div class="faint">drag-to-move lands in Rev B; today: <span class="kbd" onclick="openPal()" style="cursor:pointer">⌘K</span> → "move lane"</div>
+      </div>
+      <div class="card placecard">
+        <h3>Placement is a governed computation</h3>
+        <pre>task: synthesizer-training
+requires: gpu.cuda
+may_run_on: [gpu01, computedriven-gpu]
+source_data: <span class="err">denied_remote</span>
+artifacts: allowed · max_cost: $5.00
+
+<span class="dv">derived placement → gpu01</span>  <span class="faint">(source policy excludes cloud)</span></pre>
+        <div class="faint" style="font-size:11.5px;margin-top:8px">Not a "Run in Cloud" button — eligibility is computed from capability, cost, and data policy, and the derivation is citable.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ EDITOR ============ -->
+<section class="screen" id="s-editor">
+  <div class="crumbs">workspace/trvm › editor › wt/lane-a</div>
+  <h1 class="sh">Editor</h1>
+  <p class="sub">Your hands on the worktree. The agent gutter says who touched what and links each region to the claim made about it — hover line 121's block.</p>
+  <div class="edwrap">
+    <div class="filetree">wt/lane-a @ 4f21c99<br><br>governance/<br>&nbsp;&nbsp;bridge/<br>&nbsp;&nbsp;&nbsp;&nbsp;<span class="on">ic32_film.c ●</span><br>&nbsp;&nbsp;&nbsp;&nbsp;film_check.mjs<br>&nbsp;&nbsp;round-11-ledger.md<br>&nbsp;&nbsp;negative_battery.sh<br>runtime/c/ic32.c<br>verify.sh</div>
+    <div>
+      <div class="code">
+<div class="cl"><span class="gut">114</span><span class="c">/* strict budget parse — endptr AND errno; they catch different things */</span></div>
+<div class="cl"><span class="gut">115</span><span class="k">static</span> <span class="k">int</span> <span class="fn">parse_budget</span>(<span class="k">const</span> <span class="k">char</span> *s, <span class="k">long</span> *out) {</div>
+<div class="cl hl"><span class="gut"><span class="who">kestrel</span> 118</span>  <span class="k">if</span> (*s == <span class="s">' '</span> || *s == <span class="s">'+'</span>) <span class="k">return</span> FILM_BUDGET_INVALID; <span class="c">/* strtol skips in silence */</span></div>
+<div class="cl hl"><span class="gut"><span class="who">kestrel</span> 119</span>  errno = <span class="num">0</span>; <span class="k">long</span> v = strtol(s, &amp;end, <span class="num">10</span>);</div>
+<div class="cl hl"><span class="gut"><span class="who">kestrel</span> 120</span>  <span class="k">if</span> (errno == ERANGE)      <span class="k">return</span> FILM_BUDGET_INVALID;  <span class="c">/* consumed, didn't fit */</span></div>
+<div class="cl hl"><span class="gut"><span class="who">kestrel</span> 121</span>  <span class="k">if</span> (*end != <span class="s">'\0'</span>)         <span class="k">return</span> FILM_BUDGET_INVALID;  <span class="c">/* not consumed */</span></div>
+<div class="cl hl"><span class="gut"><span class="who">kestrel</span> 122</span>  <span class="k">if</span> (v &lt; <span class="num">0</span>)                <span class="k">return</span> FILM_BUDGET_NEGATIVE; <span class="c">/* a number; the policy is wrong */</span></div>
+      </div>
+      <div class="claimcard">
+        <b>claim</b> — kestrel, cites B-12 · <span class="mono">§324</span><br>
+        Overflow now refuses by name instead of returning a complete 21-frame answer to a different question. <span class="mono">-1</span> keeps its own refusal: fix a <i>value</i>, not a <i>spelling</i>.
+        <div class="mono" style="margin-top:5px">evidence: negative battery <span data-prooffill="negative_battery">—</span> · 3 revert-cases fail the gate</div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:10px">
+        <button class="btn sm" onclick="toast('Thread pinned to ic32_film.c:118–122 → kestrel. Replies land as evidence.')">Ask kestrel about this</button>
+        <button class="btn sm" onclick="go('evidence')">Open cited evidence</button>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ EVIDENCE ============ -->
+<section class="screen" id="s-evidence">
+  <div class="crumbs">workspace/trvm › EvidenceLedger</div>
+  <h1 class="sh">Evidence</h1>
+  <p class="sub">The ledger. Claims cite evidence; rulings cite the claims they settle; films carry their frames. Select a row — the Inspector shows the frozen record.</p>
+  <div class="pills" id="evpills">
+    <button class="pill on" data-k="all">all</button>
+    <button class="pill" data-k="claim">claims</button>
+    <button class="pill" data-k="obligation">obligations</button>
+    <button class="pill" data-k="ruling">rulings</button>
+    <button class="pill" data-k="film">films</button>
+    <button class="pill" data-k="receipt">receipts</button>
+  </div>
+  <div class="epladder">epistemic ladder · spec → in_tree → live_local → live_deployed → external — a claim states where it was earned, never higher</div>
+  <table class="tbl" id="evtbl">
+    <thead><tr><th style="width:92px">kind</th><th style="width:104px">epistemic</th><th>asserts</th><th style="width:120px">emitted by</th><th style="width:70px">cites</th><th style="width:80px">ref</th></tr></thead>
+    <tbody>
+<!-- proof:quoted — ledger rows quote the run's own receipts (§317–§329) -->
+      <tr data-k="film"><td><span class="kind film">film</span></td><td><span class="ep local">live_local</span></td><td>church_exp_2_2 · 21 chained frames · APP-LAM…DUP-VAR · terminal <b class="ok">NORMAL_FORM</b>, replayed on both runtime classes with remaining_work re-derived</td><td class="mono dim">ic32 native</td><td class="mono dim">45/45</td><td class="mono dim">§317</td></tr>
+      <tr data-k="claim"><td><span class="kind claim">claim</span></td><td><span class="ep tree">in_tree</span></td><td>Overflow (<span class="mono">ERANGE</span>) refuses as <span class="mono">film-budget-invalid</span> — no longer a confident complete answer to a different question</td><td class="mono dim">kestrel</td><td class="mono dim">3</td><td class="mono dim">§324</td></tr>
+      <tr data-k="claim"><td><span class="kind claim">claim</span></td><td><span class="ep tree">in_tree</span></td><td>Trailing <span class="mono">--budget</span> and unknown flags refuse by name: <span class="mono">film-budget-missing-value</span> · <span class="mono">film-unknown-flag</span> · <span class="mono">film-multiple-terms</span></td><td class="mono dim">kestrel</td><td class="mono dim">3</td><td class="mono dim">§325</td></tr>
+      <tr data-k="ruling"><td><span class="kind ruling">ruling</span></td><td><span class="ep spec">spec</span></td><td>argv is a transport type, not a capability type → <span class="mono">emit(term, family, {budget?})</span> owns the spelling; diagnostics inexpressible through the authority</td><td class="mono dim">arbiter</td><td class="mono dim">2</td><td class="mono dim">§326</td></tr>
+      <tr data-k="obligation"><td><span class="kind obligation">obligation</span></td><td><span class="ep spec">spec</span></td><td>Confirm <span class="mono">film-budget-negative</span> stays distinct from <span class="mono">film-budget-invalid</span> — value-fault vs spelling-fault</td><td class="mono dim">kestrel</td><td class="mono dim">1</td><td class="mono dim">§327</td></tr>
+      <tr data-k="obligation"><td><span class="kind obligation">obligation</span></td><td><span class="ep spec">spec</span></td><td>Tenth harness species: assertions whose expectation is a literal the round could make stale — mechanically detectable, would have caught 3 of 5</td><td class="mono dim">kestrel</td><td class="mono dim">5</td><td class="mono dim">§328</td></tr>
+      <tr data-k="film"><td><span class="kind film">film</span></td><td><span class="ep local">live_local</span></td><td>6 budgets over the same 21-frame computation seal 5 partial films + 1 complete; finishing exactly on budget is <b class="ok">NORMAL_FORM</b></td><td class="mono dim">ic32 native</td><td class="mono dim">6</td><td class="mono dim">§318</td></tr>
+      <tr data-k="ruling"><td><span class="kind ruling">ruling</span></td><td><span class="ep spec">spec</span></td><td>MAXPATH stays a defensive ceiling, not a semantic refusal — witnessed by a <span class="mono">-DMAXFRAMES=4</span> limits build; <span class="mono">--limits</span> answers configuration, not the #define</td><td class="mono dim">arbiter</td><td class="mono dim">2</td><td class="mono dim">§329</td></tr>
+      <tr data-k="claim"><td><span class="kind claim">claim</span></td><td><span class="ep local">live_local</span></td><td>No term tried reaches the frame array, because MAXPATH binds first on every one of them — the bounded phrasing, not the unproven universal</td><td class="mono dim">shrike</td><td class="mono dim">2</td><td class="mono dim">§323</td></tr>
+    <!-- /proof:quoted -->
+</tbody>
+  </table>
+</section>
+
+<!-- ============ GATES ============ -->
+<section class="screen" id="s-gates">
+  <div class="crumbs">workspace/trvm › TRVM</div>
+  <h1 class="sh">Gates</h1>
+  <p class="sub">Green means measured <i>this run</i>. Counts below are produced by replay, never remembered — the app refuses to transcribe a number.</p>
+  <div class="rowline" style="margin-bottom:14px;gap:12px;flex-wrap:wrap">
+    <button class="btn pri" id="rungates" onclick="runGates()">Replay all gates</button>
+    <span class="stamp" id="certstamp">cert — · replay to measure</span>
+    <span class="mono faint" style="font-size:11px">declared-open boundaries listed as declared-open — witnesses, not gaps</span>
+  </div>
+  <div class="grid g2" id="gatewrap" style="margin-bottom:14px"></div>
+  <pre class="term" id="gateout">$ ./verify.sh
+<span class="n"># press Replay — every line below will be produced by this run</span></pre>
+</section>
+
+<!-- ============ RULINGS ============ -->
+<section class="screen" id="s-rulings">
+  <div class="crumbs">workspace/trvm › the bench</div>
+  <h1 class="sh">Rulings</h1>
+  <p class="sub">You are the arbiter. Questions agents flag arrive here instead of dying in transcripts. A ruling is recorded to the ledger, citable forever, and pushed to the agent that asked.</p>
+  <div class="grid g2" id="rulwrap">
+    <div class="card" id="rul1">
+      <div class="rowline"><span class="kind obligation">awaiting ruling</span><span class="mono faint" style="margin-left:auto;font-size:10.5px">from kestrel · §327</span></div>
+      <h3 style="margin-top:9px">Keep <span class="mono">film-budget-negative</span> distinct from <span class="mono">film-budget-invalid</span>?</h3>
+      <p class="dim" style="font-size:12.5px;margin:6px 0 12px"><b>For:</b> −1 is a number and the caller's <i>policy</i> is out of range; 3junk is not a number and the caller's <i>intent</i> is unrecoverable. One code hands a reader a refusal that can't say whether to fix a value or fix a spelling. <b>Against:</b> the strict regex folds both; one fewer code.</p>
+      <div style="display:flex;gap:8px">
+        <button class="btn ok sm" onclick="rule('rul1','Confirmed: kept distinct. A refusal must say which thing to fix.')">Confirm split</button>
+        <button class="btn sm" onclick="rule('rul1','Ruled: folded into film-budget-invalid.')">Fold into one</button>
+      </div>
+    </div>
+    <div class="card" id="rul2">
+      <div class="rowline"><span class="kind obligation">awaiting ruling</span><span class="mono faint" style="margin-left:auto;font-size:10.5px">from kestrel · §328</span></div>
+      <h3 style="margin-top:9px">Admit the tenth harness species?</h3>
+      <p class="dim" style="font-size:12.5px;margin:6px 0 12px"><i>An assertion whose expectation is a literal that the round could make stale</i> — version strings, revision numbers, bare polarities. Mechanically detectable in the battery; would have caught 3 of the last 5 defects. <b>Against:</b> governance machinery without a forcing workload.</p>
+      <div style="display:flex;gap:8px">
+        <button class="btn ok sm" onclick="rule('rul2','Admitted: species 10 added to harness_selftest — mechanical, not judgemental.')">Admit species 10</button>
+        <button class="btn sm" onclick="rule('rul2','Deferred: wait for a workload that forces it.')">Defer</button>
+      </div>
+    </div>
+  </div>
+  <div class="sect">
+    <h2>Ruled</h2>
+    <div class="card mono" id="ruled" style="font-size:12px;color:var(--dim);line-height:2">
+      <div><span class="kind ruling">ruling</span> argv = transport, not capability → schema owns the spelling <span class="faint">· §326</span></div>
+      <div><span class="kind ruling">ruling</span> MAXPATH is a resource ceiling, not a semantic refusal <span class="faint">· §329</span></div>
+      <div><span class="kind ruling">ruling</span> C-side replay re-filed as verifier diversity, behind EMISSION_CONFORMANCE-v1 <span class="faint">· §322</span></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ ROUTINES ============ -->
+<section class="screen" id="s-routines">
+  <div class="crumbs">workspace/trvm › RoutineScheduler</div>
+  <h1 class="sh">Routines</h1>
+  <p class="sub">Recurring work as supervised schedules. A failing routine is an event with evidence, never a silent skip.</p>
+  <table class="tbl">
+    <thead><tr><th>routine</th><th>owner</th><th>node</th><th>cadence</th><th>last</th><th>next</th><th></th></tr></thead>
+    <tbody>
+      <tr><td class="mono">nightly-gate-replay</td><td class="mono dim">shrike</td><td class="mono dim">gpu01</td><td class="mono dim">daily 03:00</td><td><span class="badge run" data-prooffill="frac">—</span></td><td class="mono dim">in 7h</td><td><button class="btn sm" onclick="go('gates');setTimeout(runGates,300)">Run now</button></td></tr>
+      <tr><td class="mono">ledger-compaction</td><td class="mono dim">magpie</td><td class="mono dim">travis-desktop</td><td class="mono dim">weekly sun</td><td><span class="badge run">ok</span></td><td class="mono dim">in 3d</td><td><button class="btn sm" onclick="toast('Compaction queued on travis-desktop.')">Run now</button></td></tr>
+      <tr><td class="mono">stale-literal-sentinel</td><td class="mono dim">shrike</td><td class="mono dim">ms02</td><td class="mono dim">every round</td><td><span class="badge paused">awaiting ruling</span></td><td class="mono dim">—</td><td><button class="btn sm" onclick="go('rulings')">Unblock</button></td></tr>
+      <tr><td class="mono">dependency-sweep</td><td class="mono dim">magpie</td><td class="mono dim">cloud-west</td><td class="mono dim">weekly wed</td><td><span class="badge run">ok</span></td><td class="mono dim">in 6d</td><td><button class="btn sm" onclick="toast('Sweep queued on cloud-west.')">Run now</button></td></tr>
+    </tbody>
+  </table>
+</section>
+
+<!-- ============ AUTHORITY ============ -->
+<section class="screen" id="s-authority">
+  <div class="crumbs">workspace/trvm › AuthorityGraph</div>
+  <h1 class="sh">Authority &amp; Budgets</h1>
+  <p class="sub">What each identity may do and may spend — typed, snapshotted at entry, revocable. If the schema can't express it, the fault is inexpressible, not caught.</p>
+  <div class="sect" style="margin-top:0">
+    <h2>kestrel — capabilities</h2>
+    <table class="tbl">
+      <thead><tr><th>capability</th><th>schema</th><th>issued</th><th></th></tr></thead>
+      <tbody>
+        <tr><td class="mono">film.emit</td><td class="mono dim">emit(term, family, {budget?: nonneg int})</td><td class="mono dim">arbiter · snap b51.0</td><td><button class="btn sm danger" onclick="revoke(this,'film.emit')">Revoke</button></td></tr>
+        <tr><td class="mono">worktree.write</td><td class="mono dim">write(path ⊂ wt/lane-a, patch)</td><td class="mono dim">arbiter · snap b51.0</td><td><button class="btn sm danger" onclick="revoke(this,'worktree.write')">Revoke</button></td></tr>
+        <tr><td class="mono">claim.emit</td><td class="mono dim">claim(assertion, cites[≥1])</td><td class="mono dim">arbiter · snap b50.2</td><td><button class="btn sm danger" onclick="revoke(this,'claim.emit')">Revoke</button></td></tr>
+        <tr><td class="mono">gate.replay</td><td class="mono dim">replay(gate_id) → evidence</td><td class="mono dim">arbiter · snap b50.2</td><td><button class="btn sm danger" onclick="revoke(this,'gate.replay')">Revoke</button></td></tr>
+      </tbody>
+    </table>
+    <div class="docknote" style="margin-top:8px">Not present, on purpose: <span class="mono">--measure</span>, <span class="mono">--probe-whnf</span>, <span class="mono">--limits</span>, <span class="mono">-v</span> — diagnostic modes are unreachable through agent authority, not forbidden by it.</div>
+  </div>
+  <div class="sect">
+    <h2>Budgets</h2>
+    <div class="grid g3">
+      <div class="card"><h3 class="mono">kestrel</h3><div class="budgetline"><div class="meter"><i style="width:62%"></i></div><span>24.8k / 40k</span></div></div>
+      <div class="card"><h3 class="mono">magpie</h3><div class="budgetline"><div class="meter warn"><i style="width:84%"></i></div><span>33.6k / 40k</span></div></div>
+      <div class="card"><h3 class="mono">shrike</h3><div class="budgetline"><div class="meter"><i style="width:31%"></i></div><span>7.4k / 24k</span></div></div>
+    </div>
+  </div>
+  <div class="sect">
+    <h2>Refusal log — every refusal by name</h2>
+    <div class="card mono" style="font-size:12px;color:var(--dim);line-height:2">
+      <div><span class="err">film-budget-invalid</span> · "99999999999999999999" · fix a spelling <span class="faint">— was: a complete 21-frame answer</span></div>
+      <div><span class="err">film-budget-negative</span> · "-1" · fix a value</div>
+      <div><span class="err">film-unknown-flag</span> · "--budjet" · fix a spelling</div>
+      <div><span class="err">authority-revoked</span> · magpie → worktree.write(runtime/) · fix a permission</div>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SETTINGS ============ -->
+<section class="screen" id="s-settings">
+  <div class="crumbs">workspace/trvm › settings</div>
+  <h1 class="sh">Settings</h1>
+  <p class="sub">The machine room.</p>
+  <div class="grid g2">
+    <div class="card"><h3>Engines</h3><p class="dim" style="font-size:12.5px;line-height:1.9">claude-code · <span class="ok">connected</span><br>codex · <span class="ok">connected</span><br>test-harness · <span class="ok">local</span><br><span class="faint">Keys live in the Rust body's keychain; the brain never sees them.</span></p></div>
+    <div class="card"><h3>Sandbox</h3><p class="dim" style="font-size:12.5px;line-height:1.9">worktree-jail: <b class="ok">on</b> · network: allowlist · pty: recorded<br><span class="faint">Enforced by the Rust body; policy is a capability schema.</span></p></div>
+    <div class="card"><h3>Fleet enrollment</h3><p class="dim" style="font-size:12.5px;line-height:1.9">token: <span class="mono">amp-node-••••••••</span> · epmd over tailnet<br><span class="faint">A node is adopted, not configured.</span></p></div>
+    <div class="card"><h3>ComputeDriven</h3><p class="dim" style="font-size:12.5px;line-height:1.9">account · <span class="ok">travis — plan: Fleet</span><br>sync: encrypted, selective WRL state · restore point <span class="mono">r-0847</span><br>hosted capacity: 0/8 runners attached<br><span class="faint">The cloud is a control plane, not a copy — one world, placed.</span></p></div>
+    <div class="card"><h3>Journal</h3><p class="dim" style="font-size:12.5px;line-height:1.9">retention: forever (it's the truth) · export: review pack<br><span class="faint">SQLite now; WRL records at Rev C.</span></p></div>
+  </div>
+</section>
+
+</main>
+
+<!-- ================= DOCK ================= -->
+<aside id="dock">
+  <h4>Inspector — frozen invocation</h4>
+  <div class="frozen" id="frozen"><b>select anything</b>
+lanes · agents · evidence rows
+—
+The Inspector renders the
+snapshot-at-entry record, never
+the live object. Decisions cite
+snapshots. <span class="kk">derivation.entry-snapshot@1</span></div>
+  <div class="docknote">The UI is a projection of the runtime. It can crash and resynchronize; it was never the truth.</div>
+</aside>
+
+<!-- ================= TICKER ================= -->
+<footer id="ticker">
+  <span class="tl">journal ▸</span>
+  <div id="tickstream"></div>
+</footer>
+
+</div><!-- /app -->
+
+<!-- ================= PALETTE ================= -->
+<div id="palov" onclick="if(event.target===this)closePal()">
+  <div id="pal">
+    <input id="palin" placeholder="Jump or act… try 'swap', 'replay', 'lanes'" autocomplete="off">
+    <div id="palist"></div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script type="application/json" id="proofEmbed">{
+  "schema": "proof@1",
+  "generated_at": "2026-08-27T18:21:52.659Z",
+  "source": "proof/RESULTS.txt",
+  "sha256": "628436fb8709af3ac75a66bfbcad95d0e28a74dd74194ebf8160c734154d8529",
+  "run": {
+    "id": "b5.1-628436fb",
+    "grid_version": "1.43.0",
+    "cert_hash": "a08ee15d",
+    "cert_streak": 39,
+    "cert_source": "proof/BRIEF.md",
+    "replayed_at": "2026-08-20T20:15Z",
+    "verifier": "v25.2.1"
+  },
+  "upstream": {
+    "repo": null,
+    "commit": null,
+    "note": "repo+commit not recorded in RESULTS.txt — the upstream emitter should add them"
+  },
+  "gates": {
+    "negative_battery": "307/307",
+    "harness_self_test": "9/9",
+    "runner_contract": "3/3",
+    "derive_battery": "45/45",
+    "realm_battery": "24/24",
+    "cross_plane_bridge": "48/48",
+    "semantic_film": "45/45",
+    "lowering": "23/23",
+    "grid_entries": 90,
+    "grid_citations": 380
+  },
+  "totals": {
+    "attempted": 25,
+    "passed": 25,
+    "failed": 0,
+    "skipped": 0
+  }
+}</script>
+<script>
+/* ============================================================
+   Super (CD) — prototype runtime (mock; the real one is OTP)
+   ============================================================ */
+const $ = s => document.querySelector(s);
+const $$ = s => [...document.querySelectorAll(s)];
+
+/* ---------- proof binding: dashboard figures come from the verifier's artifact ---------- */
+let PROOF=null;
+try{ PROOF=JSON.parse(document.getElementById('proofEmbed').textContent); }catch(e){}
+function applyProof(){
+  if(!PROOF) return;
+  const t=PROOF.totals||{}, r=PROOF.run||{}, g=PROOF.gates||{};
+  const frac=(t.passed!=null&&t.attempted!=null)?(t.passed+'/'+t.attempted):'—';
+  const cert=(r.cert_hash?r.cert_hash+'… ':'')+(r.cert_streak!=null?('×'+r.cert_streak):'');
+  gates.forEach(row=>{
+    if(row[2]==='grid'){ if(g.grid_entries!=null){ row[0]='invariant grid'+(r.grid_version?' v'+r.grid_version:''); row[1]=g.grid_entries+' · '+g.grid_citations+' cites'; } }
+    else if(row[2] && g[row[2]]!=null) row[1]=g[row[2]];
+  });
+  if (typeof renderGates==='function' && $('#gatewrap')) renderGates();
+  const cs=$('#certstamp'); if(cs && r.cert_hash) cs.textContent='cert '+r.cert_hash+'… byte-identical ×'+(r.cert_streak??'—');
+  const rc=$('#railcert'); if(rc) rc.textContent=cert||'—';
+  const rr=$('#railrun'); if(rr) rr.textContent=r.id||'—';
+  $$('[data-prooffill]').forEach(el=>{
+    const k=el.dataset.prooffill;
+    const v = k==='frac' ? frac : (k==='cert' ? (cert||null) : (g[k]!=null?g[k]:null));
+    if(v!=null && v!=='—') el.textContent=v;
+  });
+  if (typeof curWorld==='undefined' || curWorld==='trvm'){
+    $('#statgates').textContent=frac; $('#gatecnt').textContent=frac;
+    $('#statcert').textContent=r.cert_streak!=null?('×'+r.cert_streak):'—';
+    $('#gatebadgetxt').textContent='gates '+frac+' green';
+  }
+  if (typeof worlds!=='undefined' && worlds.trvm && worlds.trvm.stats){
+    worlds.trvm.stats.gates=frac; worlds.trvm.stats.cert=r.cert_streak!=null?('×'+r.cert_streak):'—';
+  }
+}
+
+/* ---------- simulated state (Phase 2: projected from ampd / OTP) ---------- */
+let lanes = [
+  {id:'lane-a', agent:'kestrel', engine:'claude-code', node:'travis-desktop', place:'LOCAL', status:'run', hb:'', budget:62,
+   wt:'wt/lane-a @ 4f21c99', act:'sealing the argv boundary: strict parse landed, B-12 goes through the binary', restarts:0},
+  {id:'lane-b', agent:'magpie', engine:'codex', node:'ms02', place:'FLEET', status:'run', hb:'', budget:84,
+   wt:'wt/lane-b @ 9c07d3e', act:'alternative attack: schema-first, argv shim quarantined behind FilmAuthority', restarts:0},
+  {id:'lane-c', agent:'shrike', engine:'test-harness', node:'ms02', place:'FLEET', status:'run', hb:'', budget:31,
+   wt:'wt/lane-c @ verify', act:'forging on purpose: 307 forgeries thrown, 307 caught; three revert-cases fail the gate', restarts:0},
+];
+
+let gates = [
+  ['law kernel','PASS',null],['invariant grid','—','grid'],['world warrant','PASS',null],['world receipt','REPLAYED',null],
+  ['negative battery','—','negative_battery'],['harness self-test','—','harness_self_test'],['runner contract','—','runner_contract'],
+  ['derive battery','—','derive_battery'],['realm battery','—','realm_battery'],['probe repros','12 gates',null],
+  ['cross-plane bridge','—','cross_plane_bridge'],['native semantic film','—','semantic_film'],
+  ['lowering refinement','—','lowering'],['measurement','non-gating',null],
+];
+
+const fleet = [
+  {n:'travis-desktop', kind:'workstation', load:41, workers:['kestrel · lane-a','arbiter session','journal']},
+  {n:'ms02', kind:'mini server', load:66, workers:['magpie · lane-b','shrike · lane-c','builds ×2']},
+  {n:'gpu01', kind:'gpu box', load:12, workers:['nightly-gate-replay','synthesizer (idle)']},
+  {n:'cd-west', kind:'computedriven cloud', load:23, workers:['browser research fleet ×3','dependency-sweep','hosted burst: 0/8']},
+  {n:'laptop', kind:'roaming', load:0, workers:['(asleep — supervised absence)']},
+];
+
+/* ---------- render: lanes ---------- */
+function laneCard(l, mini){
+  const badge = {run:'run', paused:'paused', failed:'failed', restart:'restarting'}[l.status];
+  const hbCls = l.status==='run' ? '' : (l.status==='failed' ? 'dead' : 'paused');
+  const meter = l.budget>80?'warn':'';
+  if(mini) return `<div class="card" style="cursor:pointer" onclick="go('lanes')">
+    <div class="rowline"><span class="hb ${hbCls}"></span><b class="mono">${l.id}</b><span class="badge ${l.status}" style="margin-left:auto">${badge}</span></div>
+    <div class="dim mono" style="font-size:11px;margin-top:6px">${l.agent} · ${l.engine} · ${l.place||'LOCAL'} · ${l.node}</div>
+    <div class="budgetline" style="margin-top:8px"><div class="meter ${meter}"><i style="width:${l.budget}%"></i></div><span>${l.budget}%</span></div>
+  </div>`;
+  return `<div class="lane ${l.status==='failed'?'dying':''}" id="ln-${l.id}" onclick="inspectLane('${l.id}')">
+    <div class="head"><span class="hb ${hbCls}"></span><span class="name">${l.id}</span><span class="badge ${l.status}" style="margin-left:auto">${badge}</span></div>
+    <div class="rowline"><span class="chip id">${l.agent}</span><span class="chip engine">${l.engine}</span><span class="chip place">${l.place||'LOCAL'} · ${l.node}</span></div>
+    <div class="wt">${l.wt}${l.restarts?` · restarts ${l.restarts}`:''}</div>
+    <div class="act">${l.act}</div>
+    <div class="budgetline"><span>budget</span><div class="meter ${meter}"><i style="width:${l.budget}%"></i></div><span>${l.budget}%</span></div>
+    <div class="btns">
+      <button class="btn sm" onclick="event.stopPropagation();togglePause('${l.id}')">${l.status==='paused'?'Resume':'Pause'}</button>
+      <button class="btn sm danger" onclick="event.stopPropagation();killLane('${l.id}')" ${l.status!=='run'?'disabled':''}>Kill harness</button>
+      <button class="btn sm" onclick="event.stopPropagation();go('editor')">Worktree</button>
+    </div>
+  </div>`;
+}
+function renderLanes(){
+  $('#lanewrap').innerHTML = lanes.map(l=>laneCard(l,false)).join('');
+  $('#minilanes').innerHTML = lanes.map(l=>laneCard(l,true)).join('');
+  const live = lanes.filter(l=>l.status==='run').length;
+  $('#lanecnt').textContent = live+' live';
+  $('#statlanes').textContent = lanes.length;
+}
+
+/* ---------- supervision drama ---------- */
+function togglePause(id){
+  const l = lanes.find(x=>x.id===id);
+  if(l.status==='failed'||l.status==='restart') return;
+  l.status = l.status==='paused' ? 'run' : 'paused';
+  tick(l.status==='paused'
+    ? `${l.agent}: paused — heartbeat suspended, budget frozen`
+    : `${l.agent}: resumed — heartbeat 1.6s`);
+  renderLanes();
+}
+function killLane(id){
+  const l = lanes.find(x=>x.id===id);
+  if(l.status!=='run') return;
+  l.status='failed'; l.act='harness exited (killed by operator)…'; renderLanes();
+  tick(`${l.id}: Harness exit — LaneSupervisor sees it`);
+  setTimeout(()=>{
+    l.status='restart'; l.act='supervisor restarting harness · worktree, evidence, identity, budget preserved'; renderLanes();
+  }, 900);
+  setTimeout(()=>{
+    l.status='run'; l.restarts++; l.act='resumed exactly where the ledger says it was — nothing recovered, because nothing was lost';
+    renderLanes();
+    tick(`${l.id}: restart ${l.restarts}/∞ complete — worktree · evidence · identity · budget all survived`);
+    toast('The supervisor owned the failure. No 900-line recovery block anywhere.');
+  }, 2100);
+}
+function spawnLane(){
+  if(lanes.length>=6){ toast('Six lanes is plenty of society for one goal.'); return; }
+  const id='lane-'+String.fromCharCode(97+lanes.length);
+  lanes.push({id, agent:'oriole', engine:'claude-code', node:'gpu01', place:'FLEET', status:'run', hb:'', budget:4,
+    wt:'wt/'+id+' @ fresh', act:'spawned: reading the ledger before touching anything', restarts:0});
+  renderLanes();
+  touched();          /* projection-visible: it changes every frame that observes lanes */
+  tick(`LaneSupervisor: ${id} spawned under one_for_one · authority profile "builder" · budget 40k`);
+}
+function inspectLane(id){
+  const l = lanes.find(x=>x.id===id);
+  $$('.lane').forEach(e=>e.classList.remove('selected'));
+  const el = $('#ln-'+id); if(el) el.classList.add('selected');
+  frozen(`<b>${l.id}</b> — frozen at selection
+<span class="kk">agent</span>     ${l.agent}
+<span class="kk">engine</span>    ${l.engine}
+<span class="kk">node</span>      ${l.node}
+<span class="kk">status</span>    ${l.status}
+<span class="kk">budget</span>    ${l.budget}% of 40k
+<span class="kk">worktree</span>  ${l.wt}
+<span class="kk">restarts</span>  ${l.restarts}
+<span class="kk">snapshot</span>  derivation.entry-snapshot@1
+—
+Live state is watched; decisions
+cite snapshots like this one.`);
+}
+
+/* ---------- engine swap (agents) ---------- */
+let swapping=false;
+function swapEngine(){
+  if(swapping) return; swapping=true;
+  const chip=$('#kestrel-engine'), tnode=$('#tree-engine'), note=$('#tree-engine-note'), btn=$('#swapbtn');
+  const from=chip.textContent.trim(), to=from==='claude-code'?'codex':'claude-code';
+  btn.disabled=true; chip.textContent='…'; tnode.textContent='Harness · (restarting)'; tnode.classList.add('hot');
+  note.textContent='supervisor replacing the child';
+  tick(`ag_kestrel: Harness child terminated (${from}) — replacement requested`);
+  setTimeout(()=>{
+    chip.textContent=to; tnode.textContent='Harness · '+to; tnode.classList.remove('hot');
+    note.textContent='new engine, same identity';
+    const la=lanes.find(x=>x.agent==='kestrel'); if(la){la.engine=to; renderLanes();}
+    btn.disabled=false; swapping=false;
+    tick(`ag_kestrel: harness replaced ${from} → ${to} · goal, history, worktree, budget, obligations intact`);
+    toast('Engine ≠ identity. kestrel is still kestrel.');
+  }, 1500);
+}
+
+/* ---------- workspaces: one runtime, many worlds ---------- */
+let curWorld = 'trvm';
+const worlds = {
+  trvm: { label:'trvm', crumbs:'workspace/trvm', lanes:null, dom:{}, stats:null },
+  pricing: {
+    label:'pricing-page', crumbs:'workspace/pricing-page',
+    goalName:'SHIP_PRICING_PAGE-v2',
+    goalDesc:'An ordinary Tuesday. Research done in the cloud, implementation local, the page proved at three widths on a fleet box — deploy is HELD on one human obligation.',
+    lanes:[
+      {id:'research', agent:'finch', engine:'claude-code', node:'cd-west', place:'CLOUD', status:'run', hb:'', budget:18,
+       wt:'notes/pricing-teardown', act:'competitor teardown: 9 pages diffed, comparison matrix drafted', restarts:0},
+      {id:'implementation', agent:'wren', engine:'claude-code', node:'travis-desktop', place:'LOCAL', status:'run', hb:'', budget:46,
+       wt:'wt/pricing @ 7d31aa0', act:'pricing table + billing toggle wired; copy pass in brand voice', restarts:0},
+      {id:'browser-test', agent:'harrier', engine:'test-harness', node:'ms02', place:'FLEET', status:'run', hb:'', budget:12,
+       wt:'wt/pricing @ verify', act:'walked 390 / 768 / 1440; checkout regression 18/18 green', restarts:0},
+    ],
+    stats:{agents:'3', nodes:'3', gates:'18/18', lgates:'checks green', cert:'1', lcert:'obligation open'},
+    oblig:`<div class="rowline"><span class="kind obligation">obligation</span><span>Human approval before production — the deploy lane is <b class="warn">HELD</b>, not "probably fine"</span><button class="btn sm pri" style="margin-left:auto" onclick="toast('Approved. Deploy lane released — obligation closed by travis, on the record.');tick('obligation closed: human approval · deploy released')">Approve</button></div>
+<div class="faint" style="font-size:11.5px">the merge to production is inexpressible until this closes</div>`,
+    ev:`<div><span class="kind claim">claim</span> responsive at 390 / 768 / 1440 — <span class="ep local" style="margin-left:4px">live_local</span></div>
+<div><span class="kind claim">claim</span> checkout regression <span class="ok">18/18</span> — harrier, on ms02</div>
+<div><span class="kind claim">claim</span> deployed commit = tested commit — <span class="dim">pending (deploy held)</span></div>`
+  }
+};
+
+function captureTrvm(){
+  const w = worlds.trvm;
+  w.goalName = $('#goalname').textContent;
+  w.goalDesc = $('#goaldesc').textContent;
+  w.chips = $('#goalchips').innerHTML;
+  w.oblig = $('#obliglist').innerHTML;
+  w.ev = $('#latestev').innerHTML;
+  w.lanes = lanes;
+  w.stats = {agents:$('#statagents').textContent, nodes:$('#statnodes').textContent,
+             gates:$('#statgates').textContent, lgates:$('#lgates').textContent,
+             cert:$('#statcert').textContent, lcert:$('#lcert').textContent};
+}
+
+function switchWorld(k){
+  const w = worlds[k]; if(!w) return;
+  curWorld = k;
+  lanes = w.lanes;
+  $('#wsname').textContent = '\u00a0' + w.label;
+  $('#mcrumbs').textContent = w.crumbs;
+  $('#goalname').textContent = w.goalName;
+  $('#goaldesc').textContent = w.goalDesc;
+  if (w.chips) $('#goalchips').innerHTML = w.chips;
+  $('#obliglist').innerHTML = w.oblig;
+  $('#latestev').innerHTML = w.ev;
+  $('#statagents').textContent = w.stats.agents; $('#statnodes').textContent = w.stats.nodes;
+  $('#statgates').textContent = w.stats.gates;   $('#lgates').textContent = w.stats.lgates;
+  $('#statcert').textContent = w.stats.cert;     $('#lcert').textContent = w.stats.lcert;
+  $('#gatecnt').textContent = w.stats.gates;
+  renderLanes();
+  go('mission');
+  tick(`workspace switched → ${w.label} · same runtime, different world`);
+  toast(k==='pricing' ? 'An ordinary Tuesday. No formal methods required — the receipts still apply.' : 'Back to the deep end.');
+}
+function cycleWorkspace(){ switchWorld(curWorld==='trvm' ? 'pricing' : 'trvm'); }
+
+/* ---------- capabilities (simulated; the authority model is real) ----------
+   LAWS: UI selection is not authority. Authorization is not approval.
+   Three layers: pack.surface (what a version declares) → grantDraft (what a
+   human is considering) → activeGrants (objects binding actor + capability +
+   resource + duration + policy). authorize() matches every dimension and
+   names the one that failed; approval-class effects are HELD until an
+   approval object bound to the exact request hash exists; approvals are
+   consumed per effect; one-shots are the same object with uses_remaining. */
+const packs = {
+  github: { installation:'installed', version:'1.4.2',
+    policy:{ source_data:'private', secret:{ref:'github.oauth', residency:['local','fleet']} },
+    surface:{
+      'repo.read':  {cls:'observe'},
+      'issue.read': {cls:'observe'},
+      'pr.draft':   {cls:'local_mutate'},
+      'pr.create':  {cls:'remote_commit', approval:'every_effect'},
+      'pr.merge':   {cls:'destructive_admin', deny:true},
+    }},
+  browser:  { installation:'installed', version:'0.9.0',
+    surface:{
+      'public.navigate':{cls:'observe'},
+      'inspect':{cls:'observe'},
+      'form.submit':{cls:'remote_commit', approval:'every_effect'},
+    }},
+  postgres: { installation:'available', version:'0.9.1',
+    policy:{ source_data:'private' },
+    surface:{
+      'schema.read':{cls:'observe'},
+      'query.read': {cls:'observe'},
+      'query.write':{cls:'remote_write', deny:true},
+    }},
+  mcpimport:{ installation:'builtin'  },
+};
+const SITES=['local','fleet','cloud'];
+function packOf(capId){ return capId.split('.')[0]; }
+function capKey(capId){ return capId.slice(capId.indexOf('.')+1); }
+function packPolicyDeny(pack, site){
+  const pol=pack.policy||{};
+  if (site==='cloud' && pol.source_data==='private')
+    return 'data-policy: source_data private — hosted cloud excluded';
+  if (pol.secret && pol.secret.residency && !pol.secret.residency.includes(site))
+    return 'secret '+pol.secret.ref+' residency: '+pol.secret.residency.join('·');
+  return null;
+}
+/* placement is DERIVED — grant eligibility ∩ pack data policy ∩ secret residency — and cited */
+function derivePlacement(pack, g, ctx){
+  const gsites=g.placement||['local','fleet'];
+  const denied={};
+  const eligible=SITES.filter(sName=>{
+    const pd=packPolicyDeny(pack,sName);          /* policy is the semantic cause — cite it first */
+    const ge=gsites.includes(sName);
+    if(pd || !ge){
+      denied[sName]= pd
+        ? pd + (ge ? '' : ' · grant '+g.id+' eligibility: '+gsites.join('·'))
+        : 'grant '+g.id+' eligibility: '+gsites.join('·');
+      return false;
+    }
+    return true;
+  });
+  const cited=['grant '+g.id+' eligibility: '+gsites.join('·')]
+    .concat(Object.entries(denied).map(([k,v])=>k+' denied: '+v));
+  if (ctx.placement){
+    if (!eligible.includes(ctx.placement))
+      return {ok:false, reason:'placement-denied · '+ctx.placement+' — '+(denied[ctx.placement]||'ineligible for this grant'), cited};
+    return {ok:true, site:ctx.placement, cited};
+  }
+  if (!eligible.length) return {ok:false, reason:'placement-denied · no eligible site', cited};
+  return {ok:true, site:eligible[0], cited};
+}
+let grantDraft = {'repo.read':true,'issue.read':true,'pr.draft':true,'pr.create':false,'pr.merge':false};
+const activeGrants = [];
+const approvals = [];
+let grantN=193, apN=36, evReceiptN=7, runSeq=51, currentRun='run-b51';
+/* The view clock, declared HERE rather than beside the Bots module that
+   reads it. `Ampd.ViewClock` is a `:counters` slot in `:persistent_term`
+   advanced synchronously inside each handler; this is the same idea with
+   the same rule — every projection-visible mutation advances it at the
+   source and a reader samples it without asking anyone. It lives up here
+   because `gwNote` advances it and `gwNote` runs first: a `let` in the
+   Bots module would be in its temporal dead zone at the first crossing
+   attempt, and a hoisted `function touched()` reading it would throw
+   rather than count. */
+let viewClock = 1;
+function touched(){ viewClock++; if (typeof refreshBots==='function') refreshBots(); }
+const effectReqs={};   /* er → {rev, canon(params)} — proposal identity */
+const retiredRuns=new Set();
+const receiptsLog=[];
+let capDur='workspace';
+/* authority-snapshot@1: a cryptographic commitment to the authority state,
+   recomputed from content — same authority, same hash; any change, new hash */
+function snapshotOf(grantList){
+  const gs=grantList.filter(g=>g.status==='active')
+    .map(g=>({id:g.id, actor:g.actor, capability:g.capability, resource:g.resource,
+      duration:g.duration, placement:g.placement, workspace:g.workspace, run:g.run,
+      uses_remaining:g.uses_remaining===undefined?null:g.uses_remaining}))
+    .sort((a,b)=>a.id<b.id?-1:1);
+  const env={schema:'authority-snapshot@1',
+    grants:gs,
+    pack_versions:Object.fromEntries(Object.entries(packs).map(([k,p])=>[k,p.version||null])),
+    policies:Object.fromEntries(Object.entries(packs).map(([k,p])=>[k,p.policy||null]))};
+  return 'sha256:'+sha256hex(canon(env));
+}
+function authoritySnapshot(){ return snapshotOf(activeGrants); }
+function ctxNow(){ return { actor:'kestrel',
+  workspace:(typeof curWorld!=='undefined'?curWorld:'trvm'),
+  run:currentRun, placement:null }; }   /* placement is derived, never assumed */
+function mintGrant(f){
+  /* Two things a grant must satisfy before it may exist at all.
+
+     A duration outside the closed set is an unbounded grant — it outlives
+     its run, survives a workspace change, and never spends a use.
+
+     And a capability that no *installed* pack declares must not be
+     grantable, because the grant would sit dormant and harmless until the
+     pack is installed — at which point installation activates authority
+     nobody granted afterwards. Refusing at the gateway is not enough on
+     its own: it leaves the dormant grant on disk, waiting. */
+  const dur=f.duration||'workspace';
+  if(!DURATIONS.includes(dur))
+    return {refused:'invalid-grant-duration · '+dur+' is not one of '+DURATIONS.join('·')};
+  if(f.capability){
+    const pk=packs[packOf(f.capability)];
+    const installed=pk && (pk.installation==='installed'||pk.installation==='builtin');
+    if(!installed || !pk.surface || !pk.surface[capKey(f.capability)])
+      return {refused:'capability-undeclared · no installed pack declares '+f.capability};
+  }
+  const g=Object.assign({ id:'gr_'+String(grantN++).padStart(4,'0'), actor:'kestrel',
+    resource:'traaviis/trvm', duration:'workspace', status:'active',
+    placement:['local','fleet'], workspace:'trvm', run:currentRun }, f);
+  activeGrants.push(g); return g;
+}
+function mintOneShot(capId, actor, resource){
+  return mintGrant({ capability:capId, actor:actor||'kestrel', resource:resource||'traaviis/trvm',
+    duration:'once', uses_remaining:1, expires:'effect completion' });
+}
+function endRun(){ retiredRuns.add(currentRun); currentRun='run-b'+(++runSeq); renderMatrix();
+  tick('run ended → '+currentRun+' — run-scoped grants just expired (old run id retired forever)'); }
+/* canonical form: object keys sorted recursively — same intent, same bytes */
+function canon(v){
+  if (Array.isArray(v)) return '['+v.map(canon).join(',')+']';
+  if (v && typeof v==='object')
+    return '{'+Object.keys(v).sort().map(k=>JSON.stringify(k)+':'+canon(v[k])).join(',')+'}';
+  return JSON.stringify(v);
+}
+/* real synchronous SHA-256 (verified against node:crypto by the battery) */
+function sha256hex(msg){
+  const K=[0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+    0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+    0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+    0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+    0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+    0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+    0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+    0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  let H=[0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  const enc=unescape(encodeURIComponent(msg)), L=enc.length;
+  const withOne=L+1, total=(((withOne+8+63)>>6)<<6);
+  const b=new Uint8Array(total);
+  for(let i=0;i<L;i++) b[i]=enc.charCodeAt(i);
+  b[L]=0x80;
+  const bits=L*8;
+  b[total-4]=(bits>>>24)&255; b[total-3]=(bits>>>16)&255; b[total-2]=(bits>>>8)&255; b[total-1]=bits&255;
+  const w=new Int32Array(64);
+  const rotr=(x,n)=>(x>>>n)|(x<<(32-n));
+  for(let off=0;off<total;off+=64){
+    for(let i=0;i<16;i++) w[i]=(b[off+i*4]<<24)|(b[off+i*4+1]<<16)|(b[off+i*4+2]<<8)|(b[off+i*4+3]);
+    for(let i=16;i<64;i++){
+      const s0=rotr(w[i-15],7)^rotr(w[i-15],18)^(w[i-15]>>>3);
+      const s1=rotr(w[i-2],17)^rotr(w[i-2],19)^(w[i-2]>>>10);
+      w[i]=(w[i-16]+s0+w[i-7]+s1)|0;
+    }
+    let [a,bb,c,d,e,f,g2,h2]=H;
+    for(let i=0;i<64;i++){
+      const S1=rotr(e,6)^rotr(e,11)^rotr(e,25);
+      const ch=(e&f)^(~e&g2);
+      const t1=(h2+S1+ch+K[i]+w[i])|0;
+      const S0=rotr(a,2)^rotr(a,13)^rotr(a,22);
+      const mj=(a&bb)^(a&c)^(bb&c);
+      const t2=(S0+mj)|0;
+      h2=g2; g2=f; f=e; e=(d+t1)|0; d=c; c=bb; bb=a; a=(t1+t2)|0;
+    }
+    H=[ (H[0]+a)|0,(H[1]+bb)|0,(H[2]+c)|0,(H[3]+d)|0,(H[4]+e)|0,(H[5]+f)|0,(H[6]+g2)|0,(H[7]+h2)|0 ];
+  }
+  return H.map(x=>(x>>>0).toString(16).padStart(8,'0')).join('');
+}
+function intentDigest(env){ return 'sha256:'+sha256hex(canon(env)); }
+/* effect-intent@1 — what should happen. Deliberately carries no actor, no
+   grant, no snapshot, no placement: those decide *permission*, and folding
+   them into the external deduplication key would give the far side a
+   different key for the same desired effect every time authority moved. */
+function effectIntent(capId, resource, er, rev, params){
+  return { schema:'effect-intent@1', capability:capId, resource,
+           request_id:er, request_revision:rev, request:params };
+}
+function effectKey(capId, resource, er, rev, params){
+  return 'sha256:'+sha256hex(canon(effectIntent(capId, resource, er, rev, params)));
+}
+/* A CLOSED enum. The final `return true` used to be reached by any string
+   at all, so a grant with duration 'forever' passed every scope check
+   there is — it outlived its run and its workspace and never spent a use.
+   'agent' is the real fourth member (actor equality is already required);
+   anything else is not a duration and must never be minted. */
+const DURATIONS=['once','run','agent','workspace'];
+function durationOk(g,ctx){
+  if(g.duration==='once')      return g.uses_remaining>0;
+  if(g.duration==='run')       return g.run===ctx.run && !retiredRuns.has(g.run);
+  if(g.duration==='workspace') return g.workspace===ctx.workspace;
+  if(g.duration==='agent')     return true; /* actor equality already required */
+  return false;
+}
+function grantFor(capId, resource, ctx){
+  return activeGrants.find(g=>g.status==='active' && g.capability===capId &&
+    g.actor===ctx.actor && g.resource===resource && durationOk(g,ctx));
+}
+function nearMissReason(capId, resource, ctx){
+  const c=activeGrants.filter(g=>g.status==='active' && g.capability===capId);
+  if(!c.length) return 'authority-missing · '+capId;
+  if(!c.some(g=>g.actor===ctx.actor))                 return 'actor-mismatch · grant is not '+ctx.actor+"'s";
+  if(!c.some(g=>g.resource===resource))               return 'scope-mismatch · grant is for '+c[0].resource+', not '+resource;
+  if(!c.some(g=>durationOk(g,ctx))){
+    const d=c[0].duration;
+    if(d==='once') return 'one-shot-consumed · '+capId;
+    if(d==='run')  return 'run-expired · grant was scoped to '+c[0].run;
+    return 'workspace-mismatch · grant lives in '+c[0].workspace;
+  }
+  return 'authority-missing · '+capId;
+}
+const gw={attempts:0,allowed:0,held:0,refused:0,last:'— nothing has tried yet'};
+function gwNote(res,capId){
+  /* Every crossing attempt is projection-visible — an ALLOW mints a
+     receipt, a HELD queues an approval, and a REFUSE is recorded. So all
+     three advance the view clock, which is what makes a Bot's earlier
+     sentence go stale the instant one of them lands. W.1.2's own witness
+     was a refusal moving the clock during an ordered build. */
+  if (typeof touched==='function') touched();
+  gw.attempts++;
+  if(res.allow){ gw.allowed++; gw.last=`ALLOW · ${capId} · grant ${res.grant_ref}`; }
+  else if(res.held){ gw.held++; gw.last=`HELD · ${capId} · awaiting ${res.approval_id}`; }
+  else { gw.refused++; gw.last=`REFUSE · ${res.reason}`; }
+  return res;
+}
+function authorize(capId, resource, ctx, request){ return gwNote(authorize_(capId, resource, ctx, request), capId); }
+function authorize_(capId, resource, ctx, request){
+  const pk=packs[packOf(capId)];
+  if(!pk || !pk.surface) return {allow:false, reason:'capability-undeclared · pack "'+packOf(capId)+'" declares no surface'};
+  /* A DISCOVERED pack already declares its full surface — that is what
+     makes it browsable. `installation` was read only by tabFor(), never
+     here, so a grant minted against a merely-available pack authorized
+     against a pack nobody installed. "Installation confers zero authority"
+     is this system's oldest law; unread, it ran the other way, and
+     *discovery* conferred authority the moment anyone granted against it. */
+  if(pk.installation!=='installed' && pk.installation!=='builtin')
+    return {allow:false, reason:'pack-not-installed · '+packOf(capId)+' is '+pk.installation+' — a declared surface is not an installed one'};
+  const key=capKey(capId);
+  const decl=pk.surface[key];
+  if(!decl) return {allow:false, reason:'capability-undeclared · '+capId+' is not in the pack surface'};
+  if(decl.deny && !activeGrants.some(g=>g.status==='active'&&g.capability===capId))
+    return {allow:false, reason:'denied-by-default · '+capId+' (class '+decl.cls+') — narrow one-shot grants only'};
+  const g=grantFor(capId, resource, ctx);
+  if(!g) return {allow:false, reason:nearMissReason(capId, resource, ctx)};
+  const pl=derivePlacement(pk, g, ctx);
+  if(!pl.ok) return {allow:false, reason:pl.reason, placement:pl};
+  if(decl.approval==='every_effect'){
+    if(!request || !request.params)
+      return {allow:false, reason:'request-missing · approval-class effects need an explicit intent — nothing hashes an empty request'};
+    const er=request.er||'er-'+capId, rev=request.rev||1;
+    /* Sampled ONCE, before anything can be consumed. This is the authority
+       the effect is authorized *under*, and the value its receipt must
+       attest to — a one-shot changes the snapshot as it is spent, so a
+       receipt that re-samples afterwards cites a world that did not
+       authorize it. */
+    const entrySnap=authoritySnapshot();
+    /* effect identity ≠ consent identity. `effect-intent@1` says what
+       should happen and is stable across authority churn — it is what an
+       external adapter deduplicates on. `approval-intent@1` says why this
+       actor may make it happen now, and embeds the effect key. If the
+       idempotency key carried the snapshot, an UNKNOWN effect reconciled
+       after an unrelated grant change would present the far side with a
+       different key for the same desired effect. */
+    const ek=effectKey(capId, resource, er, rev, request.params);
+    const env={ schema:'approval-intent@1', effect_key:ek,
+      pack:packOf(capId)+'@'+pk.version,
+      capability:capId, actor:ctx.actor, resource,
+      grant:g.id, authority_snapshot:entrySnap, placement:pl.site,
+      request_id:er, request_revision:rev,
+      request:request.params };
+    const h=intentDigest(env);
+    const ap=approvals.find(a=>a.status==='granted' && a.request_hash===h &&
+      a.capability===capId && a.actor===ctx.actor && a.grant_ref===g.id &&
+      a.pack_version===pk.version && a.snapshot===entrySnap && a.placement===pl.site);
+    if(!ap){
+      let stale_note=null;
+      approvals.filter(a=>a.status==='granted' && a.grant_ref===g.id && a.capability===capId &&
+        (a.envelope&&a.envelope.request_id)===er && a.request_hash!==h)
+        .forEach(a=>{ a.status='stale';
+          const e=a.envelope||{}; let f='request';
+          if(e.pack!==env.pack) f='pack version';
+          else if(e.authority_snapshot!==env.authority_snapshot) f='authority snapshot';
+          else if(e.placement!==env.placement) f='placement';
+          else if((e.request_revision||1)!==rev) f='proposal revision';
+          else if(canon(e.request||null)!==canon(env.request)) f='request parameters';
+          stale_note=a.id+' went STALE — '+f+' changed since consent';
+          tick('approval '+a.id+' → STALE: '+f+' changed after consent'); });
+      let pend=approvals.find(a=>a.status==='pending' && a.request_hash===h);
+      if(!pend){ pend={ id:'ap_'+String(apN++).padStart(4,'0'), request_hash:h, grant_ref:g.id,
+        capability:capId, actor:ctx.actor, pack_version:pk.version,
+        snapshot:authoritySnapshot(), placement:pl.site, envelope:env,
+        resource, held_ctx:{...ctx, placement:ctx.placement||null},
+        status:'pending', request:request }; approvals.push(pend); }
+      return {allow:false, held:true, approval_id:pend.id, grant_ref:g.id, request_hash:h,
+        effect_key:ek, stale_note, placement:pl, authority_snapshot_at_entry:entrySnap};
+    }
+    ap.status='consumed';
+    if(g.duration==='once'){ g.uses_remaining--; if(!g.uses_remaining) g.status='consumed'; }
+    renderMatrix();
+    return {allow:true, grant_ref:g.id, approval_ref:ap.id, request_hash:ap.request_hash,
+      effect_key:ek, one_shot:g.duration==='once', placement:pl,
+      authority_snapshot_at_entry:entrySnap};
+  }
+  const entrySnapDirect=authoritySnapshot();
+  const rq=request||{};
+  const ekDirect=effectKey(capId, resource, rq.er||('er-'+capId), rq.rev||1, rq.params);
+  if(g.duration==='once'){ g.uses_remaining--; if(!g.uses_remaining) g.status='consumed'; }
+  renderMatrix();
+  return {allow:true, grant_ref:g.id, one_shot:g.duration==='once', placement:pl,
+    effect_key:ekDirect, authority_snapshot_at_entry:entrySnapDirect};
+}
+window.__capState = { packs, grantDraft, activeGrants, approvals, authorize, gw, mintOneShot, mintGrant,
+  canon, sha256hex, intentDigest, effectKey, effectIntent, derivePlacement, packOf, receiptsLog, retiredRuns, endRun, ctxNow,
+  get run(){return currentRun;}, get snapshot(){return authoritySnapshot();}, snapshotOf, authoritySnapshot, get dur(){return capDur;},
+  setWorld(w){ if (typeof curWorld!=='undefined') curWorld=w; } };
+
+/* ===================== BOTS — the third root =========================
+
+   Nav organizes and Runtime proves; neither of them explains. A Bot is the
+   third projection of the same world — a persistent conversational role
+   that reads the world, sorts it, and asks the person for the only things a
+   person can give. It is not the model, not the engine, and not the
+   authority.
+
+   **An utterance is not world truth. It is a cited derivation from world
+   frames.** W.1.3 said "an utterance is a frame" and built the machinery
+   for it, and the slogan was wrong in a way that mattered: a frame is
+   coherent by construction, and an utterance assembled out of several live
+   reads is not. W.1.3's own witness proved only that the cursor was not
+   *older* than the last read — two claims read at views 20 and 21, stamped
+   21, and labelled CURRENT. A torn projection wearing a coherent label.
+
+   So the shape is now:
+
+       bot-projection@1     one coherent immutable frame, built under a
+                            stability check, filtered by OBSERVATION grants
+              │
+              ▼
+       the bot reasons for as long as it likes — the world may move ten
+       thousand times and none of it invalidates the derivation
+              │
+              ▼
+       bot-utterance@1      basis: the frame's cursor
+                            claims: each bound to an object IN that frame
+
+   The world moving does not make the derivation false. It makes some of the
+   *claims* stale, and only some — which is the second thing W.1.3 got
+   wrong. `view_revision` moves when a channel opens, so tying whole
+   utterances to it turns a conversation into a graveyard of red labels
+   within minutes. "Kestrel completed F.8.2.5" is not falsified by a channel
+   opening. "Three lanes are running" is.
+
+   The laws:
+
+     L1  Creating a Bot confers no authority. Observation is a GRANT, not a
+         field — `super.observe.*`, minted like any other.
+     L2  A Bot may delegate only a capability it holds, and the child grant
+         must narrow or equal EVERY dimension of the parent — not merely
+         capability and duration. A revoked parent takes its children.
+     L3  An utterance derives from one coherent frame and names it.
+     L4  A claim may cite only an object the frame actually contained. A Bot
+         cannot cite what it was never shown, because the object id has to
+         be in the frame it was handed.
+     L5  Freshness is per CLAIM and per claim KIND. Only snapshot claims go
+         stale.
+     L6  Nothing global escapes into a Bot's output — not a grant count, not
+         an approval count, and not `authoritySnapshot()`, which commits to
+         every actor's grants and is exactly why `agent-projection@2` omits
+         it. A Bot's cursor is a digest of its OWN projection.
+     L7  A Bot may HOLD an approval-class capability. It may never hold the
+         capability to supply the approval.
+     L8  A Group is a governed disclosure context. Its scope is the
+         INTERSECTION of its members' at creation, so adding a member can
+         never widen anyone, and a claim may enter a group only if the group
+         projection contains the object it cites.                          */
+
+/* ---- the three peer kinds, and why `:both` is retiring -----------------
+
+   `:agent` / `:human_control` are identified peer kinds; `:both` and
+   `:open` were audience markers, which reads fine with two principals and
+   becomes ambiguous the moment there are three. So the prototype declares
+   exact sets, and the runtime's CommandSpec is expected to follow. */
+const PEER_KINDS = ['agent','bot','human_control'];
+const BOT_COMMANDS = {
+  bot_projection:  ['bot'],
+  list_receipts:   ['agent','bot','human_control'],
+  inspect_refusal: ['agent','bot','human_control'],
+  request_effect:  ['agent','bot'],
+  request_grant:   ['agent','bot'],
+  runtime_status:  'open',
+  /* L7's other half. These are the person's, and a Bot holding one would
+     be a Bot consenting on the person's behalf. */
+  approve_effect:          ['human_control'],
+  deny_effect:             ['human_control'],
+  approve_grant_request:   ['human_control'],
+  deny_grant_request:      ['human_control'],
+  revoke_grant:            ['human_control'],
+  revoke_capability_domain:['human_control'],
+};
+const HUMAN_ONLY = Object.keys(BOT_COMMANDS).filter(c =>
+  Array.isArray(BOT_COMMANDS[c]) && BOT_COMMANDS[c].length===1 && BOT_COMMANDS[c][0]==='human_control');
+
+/* ---- observation is authority, not a field ----------------------------
+
+   W.1.3 had `observes: ['lanes','gates']` — a parallel permission system
+   beside the real one, which is how two sources for one fact start
+   disagreeing. Visibility is now a grant like any other, with a capability
+   and a resource, so "what may Ada know" is answered by the same machinery
+   as "what may Ada do". */
+const OBSERVABLE = ['lanes','gates','evidence','runtime','capabilities','receipts','bot'];
+function observationGrants(b){ return (b.grants||[]).filter(g=>g.capability.startsWith('super.observe.')); }
+
+/* ---- ONE observation-scope algebra, used in exactly two places ---------
+
+   W.1.3.1 had two implementations of "what may be seen" and both were
+   wrong in the same direction, which is the argument for there being one.
+
+   A scope is a set of `(kind, resource)` predicates. `*` is the whole kind.
+
+   **The bug this replaces.** `mayObserve(b, kind, resource)` returned true
+   when `resource === undefined`, and `assembleFrame` asked
+   `mayObserve(b,'lanes')` once and then emitted every lane. So a grant
+   reading `super.observe.lanes · lane-a` widened, at projection time, back
+   to the entire category. The capability was resource-scoped in syntax and
+   kind-scoped in execution. There is no `undefined` case now: admission is
+   asked **per object**, and an object always has an id.
+
+   **Intersection is over predicates, not kinds.** Ada observing
+   `bot(bot_auditor)` and Scout observing `bot(bot_builder)` both "have some
+   super.observe.bot", so intersecting kind names produced `['bot']` and let
+   Ada disclose Auditor to a group Scout is in. Intersecting predicates
+   gives ∅, which is the answer. `*` ∩ X = X — attenuation only ever adds
+   restrictions, the same property delegation has one layer down. */
+function scopeOf(b){
+  return observationGrants(b).map(g => ({ kind:g.capability.slice('super.observe.'.length),
+                                          resource:g.resource || '*' }));
+}
+function admits(scope, kind, resource){
+  return scope.some(p => p.kind===kind && (p.resource==='*' || p.resource===resource));
+}
+function intersectScope(a, b){
+  const out = [], seen = new Set();
+  for(const p of a) for(const q of b){
+    if(p.kind !== q.kind) continue;
+    let r = null;
+    if(p.resource === '*') r = q.resource;
+    else if(q.resource === '*') r = p.resource;
+    else if(p.resource === q.resource) r = p.resource;
+    if(r === null) continue;                     /* disjoint resources → ∅ */
+    const key = p.kind+'\u0000'+r;
+    if(!seen.has(key)){ seen.add(key); out.push({kind:p.kind, resource:r}); }
+  }
+  return out;
+}
+function scopeText(sc){ return sc.map(p=>p.kind+(p.resource==='*'?'':' · '+p.resource)).join(', '); }
+/* `resource` is REQUIRED. A caller that does not know which object it is
+   asking about is asking the question that produced the widening bug. */
+function mayObserve(b, kind, resource){ return admits(scopeOf(b), kind, resource); }
+function observedKinds(b){ return [...new Set(scopeOf(b).map(p=>p.kind))]; }
+
+/* ---- the Bot roster ---------------------------------------------------
+
+   `escalates` is gone. It was quasi-authority — a list that looked like a
+   permission and governed nothing. The gateway already tells a Bot when an
+   effect of its own is HELD awaiting consent; how the Bot presents that to
+   the person is its program, so it is `presents`, a routing preference.
+
+   Ada now HOLDS an approval-class capability, which is L7 made concrete:
+   she is authorized to *propose* a PR. She is not authorized to consent to
+   one, and no grant in this table could give her that. */
+const bots = [
+  { id:'bot_ada', name:'Ada', role:'Chief Architect', dur:'run',
+    grants:[
+      {capability:'super.observe.lanes',    resource:'*'},
+      {capability:'super.observe.gates',    resource:'*'},
+      {capability:'super.observe.evidence', resource:'*'},
+      {capability:'super.observe.runtime',  resource:'*'},
+      {capability:'super.observe.receipts', resource:'*'},
+      {capability:'super.observe.capabilities', resource:'gateway'},
+      {capability:'super.observe.bot',      resource:'bot_auditor'},
+      {capability:'lane.spawn', resource:'traaviis/trvm', duration:'run',
+       workspace:'trvm', run:'run-b51', placement:'LOCAL', budget:40000, policy:'auto'},
+      {capability:'github.pr.create', resource:'computedriven/super', duration:'run',
+       workspace:'trvm', run:'run-b51', placement:'LOCAL', budget:2000,
+       policy:'human_approval_required'},
+    ],
+    may_delegate:['lane.spawn'],
+    presents:['held effects first','blocking rulings second'],
+    delegates:['kestrel','magpie','shrike'], status:'2 need you', hot:true },
+  { id:'bot_scout', name:'Scout', role:'Research', dur:'run',
+    grants:[{capability:'super.observe.evidence',resource:'*'},
+            {capability:'super.observe.runtime', resource:'*'}],
+    may_delegate:[], presents:['findings only'], delegates:[], status:'working', hot:false },
+  { id:'bot_builder', name:'Builder', role:'Implementation', dur:'run',
+    grants:[{capability:'super.observe.lanes',resource:'*'},
+            {capability:'super.observe.runtime',resource:'*'}],
+    may_delegate:[], presents:['lane state'], delegates:['magpie'], status:'idle', hot:false },
+  { id:'bot_auditor', name:'Auditor', role:'Verification', dur:'run',
+    grants:[{capability:'super.observe.gates',resource:'*'},
+            {capability:'super.observe.evidence',resource:'*'},
+            {capability:'super.observe.runtime',resource:'*'}],
+    may_delegate:[], presents:['failing falsifiers first'], delegates:['shrike'],
+    status:'1 finding', hot:true },
+];
+let botNow = 'bot_ada';
+let botN = 4;
+const botOf = id => bots.find(b=>b.id===id);
+const actionGrants = b => (b.grants||[]).filter(g=>!g.capability.startsWith('super.observe.'));
+const botHoldsCap = (b,c) => actionGrants(b).some(g=>g.capability===c);
+const botGrantFor = (b,c) => actionGrants(b).find(g=>g.capability===c);
+
+/* L1 — a new Bot holds nothing and observes nothing. Installing Ada does
+   not hand Ada GitHub, and it does not hand Ada the lane board either. */
+function newBot(name){
+  botN++;
+  const b = { id:'bot_'+botN, name:name||('Bot '+botN), role:'unassigned', dur:'run',
+    grants:[], may_delegate:[], presents:[], delegates:[],
+    status:'no authority', hot:false, feed:[] };
+  bots.push(b); botNow=b.id; touched();
+  tick('bot: '+b.name+' created — 0 capabilities, 0 observation grants, 0 delegates');
+  toast('Created. A Bot confers no authority: what it may see is granted after this, or never.');
+  return b;
+}
+
+/* ---- bot-projection@1 -------------------------------------------------
+
+   One coherent immutable frame, built optimistically under a stability
+   check — W.1's shape, and the thing "sample after" was standing in for.
+
+   **Three optimistic attempts, then one ordered attempt, then
+   UNESTABLISHED — which is not a badge on an ordinary utterance.** W.1.3.1
+   returned `settled:false` and let the Bot speak anyway with a warning
+   beside it, and that is too permissive, because the two states are
+   different facts:
+
+     STALE          this WAS a coherent statement about world state P, and P
+                    is no longer current. Still evidence.
+     UNESTABLISHED  we never established that these facts coexisted in ANY
+                    world state. Not old truth — unestablished truth.
+
+   A small warning does not turn a possibly impossible conjunction into a
+   derivation, so an unestablished frame supports no factual claim at all.
+   The Bot can still converse; it just cannot say "three lanes are running"
+   from a basis that never existed coherently.
+
+   Every object gets an id, and admission is asked PER OBJECT — a claim
+   cites an id, so a Bot cannot cite an object this frame did not contain. */
+const COHERENCE = ['COHERENT','UNESTABLISHED'];
+/* THE STABILITY TOKEN IS THIS BOT'S PROJECTION, NOT THE WORLD'S CLOCK.
+
+   W.1.3.2 scoped *freshness* to the projection digest and left *coherence*
+   reading `viewClock` — which is the same leak one door down. Coherence is
+   not a label a Bot reads off a frame; it is an availability. A private
+   lane churning during Scout's build moved the global clock, every attempt
+   retried, and Scout's frame came back UNESTABLISHED while the bytes of
+   its permitted projection were identical throughout. Scout has learned
+   "something outside my projection is moving" — through the retry loop
+   instead of through the digest, which is a distinction with no difference
+   to the Bot.
+
+   So the law is stronger than W.1.3.2 stated it:
+   **neither freshness NOR coherence may reveal a change outside the Bot's
+   projection.** The stability test compares two builds of the same
+   projection. Nothing the Bot may not see can make them differ, so nothing
+   the Bot may not see can cost it a frame.
+
+   One line, deliberately, for the reason `cursorEq` is: the only forcing
+   sabotage is to swap the token for the clock, and a predicate split
+   across two lines orphans its tail and stops the file parsing, which
+   scores as a broken probe and leaves the law unchecked. */
+function stabilityToken(b){ return assembleFrame(b).cursor.projection_digest; }
+function botFrame(botId){
+  const b = botOf(botId); if(!b) return null;
+  let f = null;
+  for(let attempt=0; attempt<3; attempt++){
+    const before = stabilityToken(b);
+    f = assembleFrame(b);
+    if(stabilityToken(b) === before){ f.coherence='COHERENT'; f.settled=true; return f; }
+  }
+  /* The pessimistic path. In this prototype nothing can interleave with a
+     synchronous build, so this is the ordered fallback in shape rather than
+     in force — named honestly, because pretending it is the runtime's
+     linearized read would be the overclaim. */
+  const before = stabilityToken(b);
+  f = assembleFrame(b);
+  if(stabilityToken(b) === before){ f.coherence='COHERENT'; f.settled=true; f.ordered=true; return f; }
+  f.coherence='UNESTABLISHED'; f.settled=false;
+  return f;
+}
+function assembleFrame(b){
+  const objects = {};
+  const sc = scopeOf(b);
+  const put = (oid, o) => { objects[oid] = o; return oid; };
+
+  /* PER OBJECT, not per kind. `super.observe.lanes · lane-a` yields exactly
+     lane-a; W.1.3.1 asked once for the kind and then emitted all three. */
+  /* AND THE OBJECT CARRIES THE RESOURCE IT WAS ADMITTED BY.
+
+     An object id is IDENTITY; a grant resource is AUTHORITY SCOPE. W.1.3.2
+     required their string encodings to coincide — `objectResources` split
+     the id on `:` and used the tail — which holds for `lane:lane-a` and
+     breaks for `gateway:counters`, an object admitted by
+     `capabilities · gateway` whose id tail is `counters`. A group granted
+     `capabilities(gateway)` would refuse it. A false denial rather than a
+     leak, and still the wrong reason to be right anywhere else. The
+     admission predicate and the disclosure predicate now read the same
+     field instead of two encodings of it. */
+  lanes.filter(l => admits(sc,'lanes',l.id)).forEach(l =>
+    put('lane:'+l.id, {kind:'lanes', resource:l.id, label:l.id+' · '+l.status, screen:'lanes', sub:l.id,
+      status:l.status, agent:l.agent, claims:['snapshot']}));
+
+  /* A derived collection object, so an aggregate has something to cite that
+     actually established it. It names its members and `botSay` requires a
+     claim citing it to cite all of them — "3 of 3 lanes are running" was
+     derived from three lanes and cited one. */
+  const laneIds = lanes.filter(l=>admits(sc,'lanes',l.id)).map(l=>'lane:'+l.id);
+  /* A collection has no resource of its own — it is admitted by the ones
+     its members carry, which is what stops a summary smuggling a lane past
+     a group boundary. */
+  if(laneIds.length) put('lanes:summary', {kind:'lanes', label:'lanes — derived summary',
+    screen:'lanes', members:laneIds, claims:['snapshot'],
+    total:laneIds.length, running:laneIds.filter(k=>objects[k].status==='run').length});
+
+  if(admits(sc,'gates','board')) put('gates:board', {kind:'gates', resource:'board',
+    label:'gate board', screen:'gates', claims:['snapshot']});
+  if(admits(sc,'evidence','ledger')) put('evidence:ledger', {kind:'evidence', resource:'ledger',
+    label:'evidence ledger', screen:'evidence', claims:['snapshot']});
+  /* `gateway:counters` admitted by `gateway`, disclosed by `gateway`. The
+     id tail says `counters` and always did; nothing reads it now. */
+  if(admits(sc,'capabilities','gateway')) put('gateway:counters', {kind:'capabilities',
+    resource:'gateway', label:'capability gateway', screen:'capabilities', sub:'gateway',
+    claims:['snapshot'],
+    attempts:gw.attempts, allowed:gw.allowed, held:gw.held, refused:gw.refused});
+
+  /* THE ONLY DURABLE OBJECTS IN THE FRAME. W.1.3.1 demonstrated a `durable`
+     claim by citing `gates:board`, which is live state — an executable-spec
+     overclaim, and exactly the shape this arc keeps finding. A receipt is
+     durable because nothing removes one; if none exists yet, the Bot has no
+     durable claim to make and says nothing durable. */
+  receiptsLog.filter(r => admits(sc,'receipts', r.id)).slice(-3).forEach(r =>
+    put('receipt:'+r.id, {kind:'receipts', resource:r.id, label:'receipt '+r.id,
+      screen:'evidence', claims:['durable']}));
+
+  /* A Bot's OWN authority is always in its own frame — the one subject it
+     needs no grant to observe. Note what is NOT here: no count of anyone
+     else's grants, and no approval queue that is not this Bot's own. */
+  actionGrants(b).forEach(g => put('grant:'+b.id+':'+g.capability, {kind:'self', resource:b.id,
+    label:g.capability+' · '+g.duration+(g.policy==='human_approval_required'?' · needs you':''),
+    screen:'capabilities', policy:g.policy, capability:g.capability,
+    claims:['decision','snapshot']}));
+
+  /* Another Bot appears only under an explicit per-resource grant, and even
+     then only as identity and role. "Auditor · 1 finding" is a finding, a
+     finding is evidence, and evidence needs its own grant. */
+  /* Both classes, and the distinction is GPT's: "Auditor is in my
+     projection" is a fact about a moment and decays with the projection —
+     a SNAPSHOT. "Auditor should take this" is a recommendation held
+     against the frame it came from — an INTERPRETATION. W.1.3.2's brief
+     demonstrated the second by asserting the first, which is how a
+     presence claim ended up in the one class that never expires. */
+  bots.filter(x=>x.id!==b.id && admits(sc,'bot',x.id)).forEach(x =>
+    put('bot:'+x.id, {kind:'bot', resource:x.id, label:x.name+' · '+x.role, screen:'bots',
+      sub:x.id, claims:['snapshot','interpretation']}));
+
+  /* THE CURSOR CARRIES NO GLOBAL CLOCK.
+
+     W.1.3.1 removed `authoritySnapshot()` and left `view: viewClock`, which
+     leaks the same fact through a smaller hole: the global clock moves when
+     ANY part of the world changes, so a Bot whose own projection is
+     byte-identical still watched its claims go stale and learned that
+     something, somewhere, had moved. Freshness is now the digest of this
+     Bot's own projection compared against itself.
+
+         operator view_revision   versions everything the cockpit may see
+         projection_digest        versions only what THIS Bot may see        */
+  const digest = 'sha256:'+sha256hex(canon({schema:'bot-projection@1', bot:b.id, objects}));
+  return { schema:'bot-projection@1', bot:b.id, objects,
+    cursor:{ world:(typeof curWorld!=='undefined'?curWorld:'trvm'), run:currentRun,
+             bot:b.id, projection_digest:digest } };
+}
+
+/* ---- claim kinds and freshness ---------------------------------------
+
+   W.1.3 marked whole utterances SUPERSEDED against `view_revision`, which
+   moves when a channel opens. Every message in a conversation would carry a
+   red label within minutes, including the ones a channel opening cannot
+   possibly falsify. Freshness belongs to the claim, and it depends on what
+   KIND of claim it is. */
+const CLAIM_KINDS = {
+  snapshot:       'true of a moment — goes stale when the view moves',
+  durable:        'a receipt or a completed fact — stays true unless retracted',
+  decision:       'bound to an intent identity — follows its approval, not the clock',
+  interpretation: 'a recommendation — held against the frame it was derived from',
+};
+/* STALE IS THE WRONG WORD FOR THREE OF THE FOUR.
+
+   W.1.3.2 wrote the semantics above in a comment and implemented
+   `if(kind !== 'snapshot') return false`, so the shipped meaning was:
+
+       snapshot        can stale
+       durable         forever
+       decision        forever
+       interpretation  forever
+
+   Ada could say "github.pr.create is mine to propose" as a `decision`, the
+   grant could then be revoked, and the conversation still presented the
+   decision as holding. The prose promised a mechanism that was not there,
+   which is the defect this arc names most often and had not yet caught in
+   its own claim model. Each kind loses validity its own way, and only one
+   of the four ways is called STALE:
+
+       snapshot        CURRENT | STALE          the projection moved
+       durable         ESTABLISHED | RETRACTED  the world withdrew the object
+       decision        VALID | INVALIDATED      the authority behind it died
+       interpretation  BASIS-BOUND              never current, never false
+
+   An interpretation is the interesting one: "I recommend Auditor handle
+   this" was a real recommendation made from projection P and stays one
+   forever. It is not a claim about now, so it can never go stale and can
+   never be re-confirmed — it is bound to its basis, and saying so is the
+   whole of its truth condition. */
+const CLAIM_VALIDITY = {
+  snapshot:       ['CURRENT','STALE'],
+  durable:        ['ESTABLISHED','RETRACTED'],
+  decision:       ['VALID','INVALIDATED'],
+  interpretation: ['BASIS-BOUND'],
+};
+const VALIDITY_HOLDS = { CURRENT:1, ESTABLISHED:1, VALID:1, 'BASIS-BOUND':1 };
+/* FRESHNESS IS SCOPED TO THE BOT'S OWN PROJECTION.
+
+   W.1.3.1 compared `basis.view !== viewClock`. The global clock moves when
+   anything anywhere changes, so a Bot whose permitted projection was
+   byte-identical still watched its claims go stale — and learned that
+   something it has no authority to see had moved. Removing
+   `authoritySnapshot()` from the cursor closed the large hole and left this
+   one.
+
+   The law: **a Bot learns that its view changed only when its own
+   projection changed.** So the comparison is digest against digest, and a
+   Bot with no observation grant at all can never be told anything. */
+/* A durable object is withdrawn by the WORLD, not by the Bot losing sight
+   of it. Nothing in this prototype retracts a receipt — `receiptsLog` only
+   grows — so the honest shape is a lookup against the real register rather
+   than a parallel `retracted` flag that only a test would ever set. Splice
+   a receipt out of the log and the claim that cited it says RETRACTED. */
+function worldHolds(o){
+  if(o.kind === 'receipts') return receiptsLog.some(r => r.id === o.resource);
+  return true;                    /* nothing else here can be withdrawn */
+}
+/* THE VALIDITY CHECK MAY NOT BECOME THE NEXT SIDE CHANNEL.
+
+   `durable` is the one kind whose truth condition lives outside the Bot's
+   projection, so it is the one that could tell a Bot about a world it may
+   not observe. A Bot that has LOST the grant naming a receipt must not
+   thereby learn the receipt was retracted — so loss of sight answers
+   ESTABLISHED (it was established; nothing the Bot may see contradicts
+   it), and only a Bot that could still observe the object is told it is
+   gone. Conservative in the direction of not fabricating a retraction.
+
+   The open question, recorded rather than answered: "I cannot tell any
+   more" is arguably its own state and not ESTABLISHED. It is the same
+   shape as STALE vs UNESTABLISHED, one layer up, and it is on the B.1
+   sheet rather than invented here. */
+function claimValidity(c, basis){
+  const cites = c.cited || citedBy(c).map(id => ({id, kind:null, resource:null}));
+  if(c.kind === 'interpretation') return 'BASIS-BOUND';
+  if(c.kind === 'durable'){
+    const b = botOf(basis.bot); if(!b) return 'ESTABLISHED';
+    const sc = scopeOf(b);
+    const gone = cites.some(o => o.kind && admits(sc, o.kind, o.resource) && !worldHolds(o));
+    return gone ? 'RETRACTED' : 'ESTABLISHED';
+  }
+  /* EVERY DEREFERENCE HERE IS GUARDED, AND THAT IS NOT DEFENSIVENESS.
+
+     W.1.3.2 found a crash MASKING a probe: with one check stubbed out the
+     next one dereferenced a missing object, the battery THREW instead of
+     printing FAIL, and the sabotage harness — which greps for a named
+     assertion going red — scored the law as unfalsifiable. This function
+     reintroduced it: `now.objects[o.id]` against a stubbed `now` threw,
+     and the freshness probe came back NOT. A guard chain must answer a
+     DIFFERENT REFUSAL when a link is stubbed, never a stack trace. */
+  const now = botFrame(basis.bot);
+  if(c.kind === 'decision')
+    return (now && now.objects && cites.every(o => now.objects[o.id])) ? 'VALID' : 'INVALIDATED';
+  return (now && now.cursor && now.cursor.projection_digest === basis.projection_digest) ? 'CURRENT' : 'STALE';
+}
+function claimStale(c, basis){ return !VALIDITY_HOLDS[claimValidity(c, basis)]; }
+function uttStale(u){ return u.claims.filter(c=>claimStale(c,u.basis)).length; }
+
+/* ---- bot-utterance@1 --------------------------------------------------
+
+   `frame` is required and `source_object` must be an id inside it. There is
+   no path here that takes a hand-written `{screen:'lanes'}`, which is how
+   W.1.3 let Scout — who observes only evidence and runtime — assert three
+   lanes were running. A citation existing and a Bot being permitted to read
+   the cited thing are different gates, and only the second one is
+   interesting. */
+const citedBy = c => c.source_objects || (c.source_object ? [c.source_object] : []);
+function botSay(botId, body, claims, frame){
+  const b = botOf(botId); if(!b) return {refused:'unknown-bot · '+botId};
+  if(!frame || frame.bot !== b.id) return {refused:'frame-required · an utterance derives from a projection'};
+
+  /* UNESTABLISHED IS NOT STALE, AND IT IS NOT A BADGE.
+
+     W.1.3.1 let a Bot speak from a frame whose facts were never shown to
+     coexist, with a warning beside it. A warning does not turn a possibly
+     impossible conjunction into a derivation. The Bot may still say that it
+     could not establish a view — that utterance carries no claims. */
+  if(frame.coherence === 'UNESTABLISHED')
+    return {refused:'unestablished-basis · no world state was found in which these facts coexisted'};
+
+  const built = (typeof claims === 'function') ? claims() : (claims || []);
+
+  const uncited = built.filter(c=>citedBy(c).length===0);
+  if(uncited.length)
+    return {refused:'uncited-claim · '+uncited.length+' of '+built.length+
+      ' would be transcribed rather than read'};
+  const unseen = built.flatMap(citedBy).filter(o=>!frame.objects[o]);
+  if(unseen.length)
+    return {refused:'unobserved-citation · '+unseen[0]+' was not in '+b.name+"'s projection"};
+  const misKind = built.filter(c=>!CLAIM_KINDS[c.kind]);
+  if(misKind.length)
+    return {refused:'unclassified-claim · '+misKind[0].kind+' is not one of '+Object.keys(CLAIM_KINDS).join('·')};
+
+  /* THE CLASS IS THE OBJECT'S TO GIVE, NOT THE CLAIM'S TO DECLARE.
+
+     W.1.3.1 accepted whatever `kind` the caller wrote, and `claimStale`
+     exempts everything that is not `snapshot` — so labelling a live lane
+     state `durable` made it eternal truth. A model that guesses wrong, or a
+     program with a bug, could opt any fact out of decay by naming it. Each
+     frame object declares which classes it can support. */
+  for(const c of built){
+    const bad = citedBy(c).find(o => !((frame.objects[o]||{}).claims||[]).includes(c.kind));
+    if(bad) return {refused:'claim-class-mismatch · '+bad+' cannot support a '+c.kind+
+      ' claim (it supports '+(((frame.objects[bad]||{}).claims)||[]).join('·')+')'};
+  }
+
+  /* An aggregate must cite what established it. "3 of 3 lanes are running"
+     cited one lane. A collection object names its members and a claim
+     citing it must cite all of them. */
+  for(const c of built){
+    const cites = citedBy(c);
+    for(const o of cites){
+      const mem = (frame.objects[o]||{}).members;
+      if(mem && !mem.every(m=>cites.includes(m)))
+        return {refused:'incomplete-provenance · '+o+' was derived from '+mem.length+
+          ' objects and the claim cites '+cites.filter(x=>mem.includes(x)).length};
+    }
+  }
+
+  /* THE CLAIM CARRIES ITS RESOLVED CITATIONS, NOT JUST THEIR IDS.
+
+     Validity is asked long after the frame is gone, and the one thing it
+     must never do is reconstruct `(kind, resource)` by parsing an id —
+     that is the defect E3 removes from the group boundary, and putting it
+     back here would reintroduce it in the place hardest to see. So the
+     frame stamps what it knew at the moment it admitted each object. */
+  const stamped = built.map(c => Object.assign({}, c, {
+    cited: citedBy(c).map(o => ({ id:o, kind:frame.objects[o].kind,
+                                  resource:frame.objects[o].resource || null })) }));
+  const u = { schema:'bot-utterance@1', bot:b.id, body, claims:stamped,
+              basis:frame.cursor, coherence:frame.coherence };
+  (b.feed = b.feed || []).push(u);
+  return u;
+}
+
+/* The brief is DERIVED, and now derived from ONE frame rather than from
+   several live reads. A Bot that says "the authority revision advanced 14
+   times" with nothing behind it is transcribing, and transcribing is the
+   defect proof-battery.mjs already fails the release for. */
+function botBrief(botId){
+  const b = botOf(botId) || bots[0];
+  const frame = botFrame(b.id);
+  const O = frame.objects;
+  const cl = [];
+
+  /* An aggregate cites the derived collection AND every member that
+     established it — the summary object is what makes the number citable,
+     and `botSay` refuses if a member is missing. */
+  const sum = O['lanes:summary'];
+  if(sum) cl.push({t:`${sum.running} of ${sum.total} lanes are running`, kind:'snapshot',
+                   source_objects:['lanes:summary'].concat(sum.members)});
+  Object.keys(O).filter(k=>O[k].kind==='lanes' && O[k].status && O[k].status!=='run').slice(0,1)
+    .forEach(k=>cl.push({t:`${O[k].label} is not`, kind:'snapshot', source_object:k}));
+
+  if(O['gateway:counters']){
+    const g = O['gateway:counters'];
+    cl.push({t:`${g.attempts} crossing attempt${g.attempts===1?'':'s'} · ${g.allowed} allowed, ${g.held} held, ${g.refused} refused`,
+             kind:'snapshot', source_object:'gateway:counters'});
+  }
+
+  /* A DURABLE CLAIM NEEDS A DURABLE OBJECT.
+
+     W.1.3.1 demonstrated the class by citing `gates:board` and
+     `evidence:ledger` — both live state, so the claim was labelled eternal
+     and the object underneath it could change. If no receipt has been
+     minted yet there is nothing durable to say, and the honest brief says
+     nothing durable. */
+  Object.keys(O).filter(k=>O[k].kind==='receipts').slice(0,1).forEach(k=>
+    cl.push({t:`${O[k].label} was written and nothing removes one`, kind:'durable', source_object:k}));
+
+  Object.keys(O).filter(k=>O[k].policy==='human_approval_required').forEach(k=>
+    cl.push({t:`${O[k].capability} is mine to propose and yours to approve — I hold the grant, never the consent`,
+             kind:'decision', source_object:k}));
+
+  /* TWO CLAIMS, TWO CLASSES, AND W.1.3.2 MADE ONE OF THEM WEAR THE OTHER.
+
+     "Auditor is in my projection" is a fact about right now. It stops
+     being true the moment the observation grant naming Auditor is revoked,
+     so it is a SNAPSHOT and decays with the projection. Filed as an
+     interpretation it became eternal — a presence claim in the one class
+     that never expires, demonstrated in a brief as if that were the point
+     of the class.
+
+     The recommendation beside it is the genuine article: made from this
+     frame, true as a recommendation from this frame forever, and never a
+     statement about now. */
+  Object.keys(O).filter(k=>O[k].kind==='bot').slice(0,1).forEach(k=>{
+    cl.push({t:`${O[k].label} is in my projection because a grant names it`,
+             kind:'snapshot', source_object:k});
+    cl.push({t:`I would route verification questions to ${O[k].label.split(' · ')[0]}`,
+             kind:'interpretation', source_object:k});
+  });
+
+  /* Two ways to have nothing to say, and they are different answers. */
+  if(frame.coherence === 'UNESTABLISHED')
+    return { schema:'bot-utterance@1', bot:b.id, claims:[], basis:frame.cursor,
+             coherence:'UNESTABLISHED', unestablished:true,
+             body:'I could not establish a coherent view of the world — these facts were never shown to hold together, so I will not tell you they did.' };
+  if(!cl.length)
+    return { schema:'bot-utterance@1', bot:b.id, claims:[], basis:frame.cursor,
+             coherence:frame.coherence, blind:true,
+             body:'I hold no observation grant, so I can tell you nothing about the world — and that is a real answer, not an empty one.' };
+  return botSay(b.id, 'Derived from the projection below.', cl, frame);
+}
+
+/* ---- delegation over FULL grant identity ------------------------------
+
+   W.1.3 compared capability and duration. A real grant binds actor,
+   capability, resource, duration, workspace, run, placement, budget and
+   policy, and narrowing has to mean narrowing over all of it — otherwise a
+   delegation that keeps the capability and the duration can still widen the
+   resource from one repo to every repo, or the placement from LOCAL to
+   CLOUD, or turn `human_approval_required` into `auto`. Each of those is a
+   different effect on the world than the parent grant authorized. */
+const BOT_DUR = ['once','run','agent','workspace'];
+const POLICY_RANK = { human_approval_required:0, auto:1 };   /* lower = stricter */
+const DIMS = ['resource','duration','workspace','run','placement','budget','policy'];
+function narrows(dim, parent, child){
+  if(child === undefined || child === null) return true;      /* inherit */
+  if(parent === '*' || parent === undefined) return true;     /* parent admits anything */
+  switch(dim){
+    case 'duration': return BOT_DUR.indexOf(child) >= 0 && BOT_DUR.indexOf(child) <= BOT_DUR.indexOf(parent);
+    case 'budget':   return Number(child) <= Number(parent);
+    case 'policy':   return POLICY_RANK[child] !== undefined && POLICY_RANK[child] <= POLICY_RANK[parent];
+    default:         return child === parent;                 /* equal, or narrower via parent '*' */
+  }
+}
+let delegN = 0;
+const delegations = [];
+function botDelegate(botId, capId, toActor, want){
+  const b = botOf(botId);
+  if(!b) return {refused:'unknown-bot · '+botId};
+  if(HUMAN_ONLY.includes(capId))
+    return {refused:'human-control-only · '+capId+' is the person\'s consent and no grant confers it'};
+  const parent = botGrantFor(b, capId);
+  if(!parent) return {refused:'delegation-exceeds-holder · '+b.name+' does not hold '+capId};
+  if(!b.may_delegate.includes(capId))
+    return {refused:'delegation-not-permitted · '+b.name+' holds '+capId+' and may not pass it on'};
+
+  const req = Object.assign({}, want||{});
+  if(req.duration !== undefined && BOT_DUR.indexOf(req.duration) < 0)
+    return {refused:'invalid-grant-duration · '+req.duration+' is not one of '+BOT_DUR.join('·')};
+
+  for(const d of DIMS){
+    if(!narrows(d, parent[d], req[d]))
+      return {refused:'delegation-widens · '+d+' '+JSON.stringify(req[d])+
+        ' is not within the parent\'s '+JSON.stringify(parent[d])};
+  }
+
+  delegN++;
+  const child = { schema:'delegated-grant@1', id:'dg_'+String(delegN).padStart(4,'0'),
+    parent_grant_id:'bg_'+b.id+':'+capId, delegator:b.id, delegate:toActor,
+    capability:capId, status:'active',
+    delegation_chain:[b.id, toActor],
+    authority_snapshot_at_entry:authoritySnapshot() };
+  DIMS.forEach(d => child[d] = (req[d]!==undefined && req[d]!==null) ? req[d] : parent[d]);
+  delegations.push(child);
+  touched();
+  return Object.assign({ok:true}, child);
+}
+/* A child cannot outlive its parent. Revoking Ada's grant takes every
+   delegation derived from it, in the same operation — a delegated grant
+   whose parent is gone is authority with no holder. */
+function revokeBotGrant(botId, capId){
+  const b = botOf(botId); if(!b) return {refused:'unknown-bot'};
+  b.grants = b.grants.filter(g=>g.capability!==capId);
+  const doomed = delegations.filter(d=>d.delegator===botId && d.capability===capId && d.status==='active');
+  doomed.forEach(d=>{ d.status='revoked'; d.revoked_reason='parent-grant-revoked'; });
+  /* Counted AFTER the fact, by re-reading status, not by returning
+     `doomed.length`. That number is the size of the set the filter selected
+     and is the same whether or not the revocation happened — so an
+     assertion on it passes with the revocation stubbed out, which is what
+     the sabotage caught. Report what changed, not what was intended to. */
+  const revoked = delegations.filter(d=>d.delegator===botId && d.capability===capId &&
+    d.status==='revoked' && d.revoked_reason==='parent-grant-revoked').length;
+  touched();
+  return {ok:true, revoked};
+}
+
+/* ---- groups as governed disclosure contexts ---------------------------
+
+   A Group is not another Agent and it does not own effect authority. It is
+   the boundary an utterance has to clear to be said in front of other Bots.
+   The default scope is the INTERSECTION of its members', so adding a member
+   can never widen anyone — the naive alternative is a covert bridge between
+   two Bots whose observation sets differ, and neither one's grant describes
+   it. The person may grant the group more, explicitly; at that point adding
+   a member IS an information-authority change and is governed as one.
+
+   The rule is not "Ada can see it, so Ada may say it". It is "the group may
+   see it, so Ada may state it here."                                      */
+/* THE INTERSECTION IS OVER PREDICATES, NOT KIND NAMES.
+
+   W.1.3.1 intersected `OBSERVABLE` kind names, so Ada observing
+   `bot(bot_auditor)` and Scout observing `bot(bot_builder)` both "had some
+   super.observe.bot" and the group scope came out as `['bot']` — after
+   which Ada could disclose Auditor to a group Scout is in, and Scout had
+   never been permitted to see Auditor at all.
+
+   With `intersectScope` the same pair gives ∅, and `bot(*)` ∩
+   `bot(bot_auditor)` gives exactly Auditor. Attenuation only ever adds
+   restrictions — the same property delegation has one layer down, and the
+   reason there is now one implementation instead of two. */
+function intersectScopes(memberIds){
+  const ms = memberIds.map(id=>botOf(id)).filter(Boolean);
+  if(!ms.length) return [];
+  return ms.map(scopeOf).reduce((a,b)=>intersectScope(a,b));
+}
+const botGroups = [
+  { id:'g_w2', name:'# Super W.2', members:['bot_ada','bot_builder','bot_auditor'],
+    objective:'land the Tauri WebView', history_policy:'retained', granted:[] },
+  { id:'g_trvm', name:'# TRVM research', members:['bot_ada','bot_scout'],
+    objective:'argument boundary', history_policy:'retained', granted:[] },
+];
+function groupScope(g){ return intersectScopes(g.members).concat(g.granted||[]); }
+/* THE OBJECT ID IS IDENTITY. THE GRANT RESOURCE IS AUTHORITY SCOPE.
+
+   W.1.3.2 recovered the second from the first — `oid.split(':').slice(1)`
+   — which is true for `lane:lane-a` and `bot:bot_auditor` and false for
+   `gateway:counters`, admitted into the frame by `capabilities · gateway`
+   and tested at the boundary as `capabilities · counters`. A group holding
+   exactly the grant the frame used would have refused the object. A false
+   denial, not a leak, and the reason to fix it is that two encodings of
+   one fact drift and the disclosure side is the one you cannot see drift.
+
+   The frame now writes `resource` on every object it admits, and this
+   reads it. An object with no declared resource is not disclosable at all:
+   the boundary refuses what it cannot scope rather than guessing. A
+   collection carries no resource of its own and is admitted by every
+   member it names, so a summary still cannot smuggle a lane past. */
+function objectResources(oid, o, objects){
+  if(o.members) return o.members.map(m => ((objects||{})[m]||{}).resource);
+  return [o.resource];
+}
+function groupMaySay(groupId, botId, claim, frame){
+  const g = botGroups.find(x=>x.id===groupId);
+  if(!g) return {refused:'unknown-group · '+groupId};
+  if(!g.members.includes(botId)) return {refused:'not-a-member · '+botId};
+  const sc = groupScope(g);
+  for(const oid of citedBy(claim)){
+    const o = frame && frame.objects[oid];
+    if(!o) return {refused:'unobserved-citation · '+oid+' is not in the speaker\'s own projection'};
+    const res = objectResources(oid, o, frame.objects);
+    if(!res.length || res.some(r => r === undefined || r === null))
+      return {refused:'undeclared-resource · '+oid+' carries no authority scope and cannot be disclosed'};
+    if(!res.every(r => admits(sc, o.kind, r)))
+      return {refused:'outside-group-scope · '+oid+' is not disclosable in '+g.name+
+        ' (scope: '+(scopeText(sc)||'nothing')+')'};
+  }
+  return {ok:true};
+}
+
+/* ---- catalog / matrix projection ---- */
+function tabFor(p){ return p.installation==='available' ? 'discover' : (p.installation==='builtin' ? 'local' : 'installed'); }
+let capTabNow='installed';
+function renderCaps(){
+  const q=($('#capsearchbox')?$('#capsearchbox').value:'').toLowerCase();
+  $$('#capgrid .capcard').forEach(c=>{
+    const pk=packs[c.dataset.pack]||{installation:'installed'};
+    const tabOk = tabFor(pk)===capTabNow;
+    const qOk = !q || (c.dataset.search+' '+c.textContent.toLowerCase()).includes(q);
+    c.style.display = (tabOk && qOk) ? '' : 'none';
+  });
+}
+function durableFor(key){
+  const ctx=ctxNow();
+  return activeGrants.find(g=>g.status==='active' && g.capability==='github.'+key &&
+    g.actor===ctx.actor && g.duration!=='once' && durationOk(g,ctx));
+}
+function renderMatrix(){
+  const map={'repo.read':'gm-repo-read','issue.read':'gm-issue-read','pr.draft':'gm-pr-draft','pr.create':'gm-pr-create','pr.merge':'gm-pr-merge','issue.write':'gm-new'};
+  Object.entries(map).forEach(([id,el])=>{
+    const n=$('#'+el); if(!n) return;
+    n.classList.toggle('on', !!grantDraft[id]);
+    n.classList.toggle('granted', !!durableFor(id));
+  });
+  $$('#capgrid .gst').forEach(gEl=>{
+    const id=gEl.dataset.g;
+    const d=durableFor(id);
+    const shot=activeGrants.find(x=>x.capability==='github.'+id && x.status==='active' && x.duration==='once' && x.uses_remaining>0);
+    gEl.textContent = d ? ('· granted ('+d.duration+')') : (shot ? '· one-shot '+shot.id : '· ungranted');
+  });
+}
+function capTab(t,btn){ capTabNow=t; $$('#captabs .pill').forEach(x=>x.classList.toggle('on',x===btn)); renderCaps(); }
+function capSearch(){ renderCaps(); }
+function ghToggle(id,el){
+  if(id==='pr.merge'){ toast('github.pr.merge is DENY by default — destructive/admin class takes narrow one-shot grants only.'); return; }
+  grantDraft[id]=!grantDraft[id];
+  renderMatrix();
+  tick(`draft changed: github.${id} ${grantDraft[id]?'selected':'deselected'} — nothing authoritative happened yet`);
+}
+function ghDur(d,btn){ capDur=d; $$('#ghdur .durbtn').forEach(x=>x.classList.toggle('on',x===btn)); }
+function commitGrant(){
+  let changed=[];
+  const ctx=ctxNow();
+  Object.keys(packs.github.surface).forEach(key=>{
+    if(packs.github.surface[key].deny) return;
+    const capId='github.'+key, want=!!grantDraft[key];
+    /* the WHOLE applicable grant set for this identity domain — not one match */
+    const domain=activeGrants.filter(g=>g.status==='active' && g.capability===capId &&
+      g.actor===ctx.actor && g.resource==='traaviis/trvm');
+    if(!want){
+      if(domain.length){ domain.forEach(g=>g.status='revoked');
+        changed.push('−'+capId+' (×'+domain.length+')'); }
+      return;
+    }
+    /* desired grant identity: actor + capability + resource + duration + placement */
+    const keep=domain.find(g=>g.duration===capDur &&
+      (g.duration!=='once' || g.uses_remaining>0) &&
+      canon(g.placement)===canon(['local','fleet']));
+    domain.forEach(g=>{ if(g!==keep){ g.status='revoked';
+      changed.push('~'+capId+' ('+g.duration+'→'+capDur+' · '+g.id+' revoked)'); } });
+    if(!keep){
+      const g=(capDur==='once') ? mintOneShot(capId) : mintGrant({capability:capId, duration:capDur});
+      changed.push('+'+capId+' ('+capDur+' · '+g.id+')');
+    }
+  });
+  if(!changed.length){ toast('No change — the draft already matches the grant set.'); return; }
+  renderMatrix();
+  tick(`AUTHORITY SNAPSHOT CHANGED · ${authoritySnapshot().slice(0,18)}… · ${changed.join(' · ')}`);
+  toast('Committed. Selection was a draft; this was the boundary.');
+}
+function ghGrant(){ commitGrant(); }
+
+/* ---- exercise: gateway → (approval?) → effect → receipt ---- */
+function emitReceipt(capId, auth){
+  const id='rcpt-'+String(evReceiptN++).padStart(4,'0');
+  const pk=packOf(capId), pv=(packs[pk]&&packs[pk].version)||'0';
+  const site=auth.placement?auth.placement.site:'local';
+  const derived=auth.placement?` (derived: ${auth.placement.cited[0]}${auth.placement.cited[1]?' · '+auth.placement.cited[1]:''})`:'';
+  /* The receipt attests to the authority that authorized the effect, and
+     records what the world looks like once the effect's own consumption
+     has landed. For an ordinary workspace grant the two are equal; for a
+     one-shot they must not be, and the pair is the evidence:
+     X --authorized--> effect --consumed its use--> Y. */
+  const atEntry=auth.authority_snapshot_at_entry||authoritySnapshot();
+  receiptsLog.push({ kind:'capability-effect-receipt@1', id, capability:capId, pack:pk+'@'+pv,
+    grant_ref:auth.grant_ref, approval_ref:auth.approval_ref||null,
+    approval_digest:auth.request_hash||null, placement:auth.placement||{site},
+    effect_key:auth.effect_key||null, idempotency_key:auth.effect_key||null,
+    authority_snapshot_at_entry:atEntry, authority_snapshot_after:authoritySnapshot(),
+    secret_material_exposed_to_engine:false,
+    committed:true, ts:Date.now() });
+  const row=`<tr data-k="receipt"><td><span class="kind receipt">receipt</span></td><td><span class="ep local">live_local</span></td><td><span class="mono">capability-effect-receipt@1</span> · ${capId} · pack ${pk}@${pv} · grant ${auth.grant_ref}${auth.one_shot?' (one-shot, consumed)':''}${auth.approval_ref?' · approval '+auth.approval_ref:''}${auth.request_hash?' · intent '+auth.request_hash.slice(0,23)+'…':''} · placement ${site}/travis-desktop${derived} · secret gateway-only (engine-visible: <b>false</b>) · committed ✓</td><td class="mono dim">gateway</td><td class="mono dim">1</td><td class="mono dim">${id}</td></tr>`;
+  const tb=$('#evtbl tbody'); if(tb){ tb.insertAdjacentHTML('afterbegin',row); wireEvidence(); }
+  tick(`receipt: ${capId} committed · ${id} · grant ${auth.grant_ref}${auth.approval_ref?' · approval '+auth.approval_ref:''} · authorized under ${atEntry.slice(0,18)}…${authoritySnapshot()!==atEntry?' → now '+authoritySnapshot().slice(0,18)+'…':''}`);
+}
+function ghExercise(capShort, edited){
+  const capId='github.'+capShort;
+  const params={ repo:'traaviis/trvm', branch:'lane-a',
+    title:'close the argv boundary'+(edited?' (edited after approval)':'') };
+  const er='er-'+capId;
+  const pc=canon(params);
+  if(!effectReqs[er]) effectReqs[er]={rev:1, pc};
+  else if(effectReqs[er].pc!==pc){ effectReqs[er]={rev:effectReqs[er].rev+1, pc}; }
+  const request={ er, rev:effectReqs[er].rev, params };
+  const auth=authorize(capId,'traaviis/trvm',ctxNow(),request);
+  if(auth.held){
+    tick(`HELD: approval-required · ${capId} · intent ${auth.request_hash.slice(0,23)}… — no adapter call yet`);
+    frozen(`<b class="warn">approval-required · ${capId}</b>\nactor       kestrel\nrepo        ${params.repo}\nbranch      ${params.branch}\ntitle       "${params.title}"\nintent      ${auth.request_hash.slice(0,23)}…\npack        github@${packs.github.version} · snapshot bound\nplacement   ${auth.placement?auth.placement.site:'—'} (derived)\ngrant       ${auth.grant_ref} (eligibility, not consent)${auth.stale_note?'\n<span class="warn">'+auth.stale_note+'</span>':''}\n—\n<button class="btn sm ok" onclick="capApprove('${auth.approval_id}')">approve this effect</button> <button class="btn sm danger" onclick="capDeny('${auth.approval_id}')">deny</button>`);
+    toast('Authority ≠ approval. The effect waits on consent for this exact request.');
+    return;
+  }
+  if(!auth.allow){
+    tick(`REFUSED before effect: ${auth.reason} — no adapter call, no receipt`);
+    frozen(`<b class="err">${auth.reason}</b>\nrequested_by  agent/kestrel\nscope         repo traaviis/trvm\nadapter_call  none\nreceipt       none — attempts are not effects\n—\n<button class="btn sm" onclick="ghRefusal()">escalate</button>`);
+    toast('Refused at the gateway. Nothing reached the adapter.');
+    return;
+  }
+  emitReceipt(capId, auth);
+  toast(auth.one_shot ? 'One-shot consumed — try again and the gateway refuses.' : 'Effect receipted into Evidence.');
+}
+function capApprove(apId){
+  const ap=approvals.find(a=>a.id===apId);
+  if(!ap || ap.status!=='pending'){ toast('That approval is no longer pending.'); return; }
+  ap.status='granted';
+  tick(`approval granted: ${ap.id} · bound to intent ${ap.request_hash.slice(0,23)}… — any other intent stays held`);
+  /* consent was given to the HELD context — execution uses it, never ambient state */
+  const auth=authorize(ap.capability, ap.resource||'traaviis/trvm', ap.held_ctx||ctxNow(), {er:ap.envelope.request_id, rev:ap.envelope.request_revision, params:ap.envelope.request});
+  if(auth.allow){
+    emitReceipt(ap.capability, auth);
+    frozen(`<b>effect committed</b>\n${ap.capability}\napproval    ${ap.id} (consumed)\nintent      ${ap.request_hash.slice(0,23)}…\nplacement   ${auth.placement?auth.placement.site:'local'} (derived)\nreceipt in Evidence.`);
+    toast('Approved and committed. The approval was consumed by this one effect.');
+    return;
+  }
+  ap.status='stale'; ap.stale_reason=auth.stale_note||auth.reason||'state changed under the approval';
+  tick(`approval ${ap.id} could not execute → STALE: ${ap.stale_reason}`);
+  frozen(`<b class="warn">consent went stale before it could execute</b>\napproval  ${ap.id}\nreason    ${ap.stale_reason}\nno adapter call · no receipt\nreview and re-approve if still intended.`);
+  toast('State changed under the approval — it went stale. Nothing executed.');
+}
+function capDeny(apId){
+  const ap=approvals.find(a=>a.id===apId); if(ap) ap.status='denied';
+  frozen('<b>denied</b>\nno adapter call · no receipt\nthe grant remains; consent did not.');
+  tick(`approval denied: ${apId} — eligibility unchanged, effect never happened`);
+}
+function ghRefusal(){
+  frozen(`<b class="err">authority-missing · github.pr.create</b>\nrequested_by  agent/kestrel\nscope         repo traaviis/trvm\nreason        "open PR for lane-a: argv boundary"\ncurrent_grant pr.draft (worktree only)\n—\n<button class="btn sm" onclick="ghEsc('once')">grant once</button> <button class="btn sm" onclick="ghEsc('run')">grant this run</button> <button class="btn sm" onclick="ghEsc('agent')">grant to agent</button> <button class="btn sm" onclick="ghEsc('deny')">keep denied</button>`);
+  tick('refused by name: authority-missing · github.pr.create — you know exactly which thing to fix');
+}
+function ghEsc(k){
+  if(k==='deny'){ toast('Kept denied. The lane can still draft.'); frozen('<b>kept denied</b>\npr.draft remains the ceiling.'); return; }
+  if(k==='once'){
+    const g=mintOneShot('github.pr.create');
+    renderMatrix();
+    tick(`one-shot grant minted: ${g.id} · github.pr.create · uses_remaining 1`);
+    frozen(`<b>grant recorded · ${g.id}</b>\ngithub.pr.create · one-shot\nuses_remaining  1\neligibility only — the effect itself\nstill needs approval (remote commit).`);
+    toast('One-shot eligibility minted. The exact effect still needs approval.');
+    return;
+  }
+  grantDraft['pr.create']=true;
+  const g=mintGrant({capability:'github.pr.create', duration:k});
+  renderMatrix();
+  tick(`escalation committed: ${g.id} · github.pr.create · duration ${k} · snapshot ${authoritySnapshot().slice(0,18)}…`);
+  frozen(`<b>grant recorded · ${g.id}</b>\ngithub.pr.create · duration ${k}\neligibility only — each effect still\nneeds its own approval.`);
+  toast(`Granted for this ${k}. Effects still need approval.`);
+}
+function ghOpenDiff(){ $('#ghdiff').style.display='block'; tick('update available: github 1.4.2 → 1.5.0 · authority surface widened · UPDATE HELD'); }
+function ghUpdateKeep(){
+  packs.github.version='1.5.0'; $('#ghver').textContent='1.5.0';
+  packs.github.surface['issue.write']={cls:'remote_draft', introduced:'1.5.0'};
+  const st=$('#ghdiffstatus'); st.textContent='UPDATED TO 1.5.0 — surface expanded · draft and active grants unchanged'; st.classList.add('okst');
+  const gm=$('#gm-new'); if(gm) gm.style.display='';
+  renderMatrix();
+  tick('pack updated: github 1.5.0 · authority SURFACE expanded (+issue.write) · grant draft unchanged · active grants unchanged');
+  toast('Updates can change code and surface. They cannot silently change authority.');
+}
+function pgInstall(btn){
+  packs.postgres.installation='installed';
+  btn.textContent='INSTALLED · zero authority'; btn.disabled=true;
+  renderCaps();
+  tick('installed: postgres.super-pack@0.9.1 · requested: schema.read, query.read, query.write · granted: none');
+  toast('Installed ≠ authorized — the card moved to Installed; it can still do nothing.');
+}
+function mcpImport(){
+  tick('mcp import: 6 server tools → requested typed capabilities · ui resources sandboxed · granted: none');
+  toast('Imported. Super supplies the authority; MCP supplies the transport.');
+}
+/* seed: the three default grants are real objects, not booleans */
+mintGrant({capability:'github.repo.read'});
+mintGrant({capability:'github.issue.read'});
+mintGrant({capability:'github.pr.draft'});
+
+/* ---------- rail modes ---------- */
+/* Three roots, and they are not three views of one thing. Nav and Runtime
+   ARE two projections of the same target set — every node in the
+   supervision tree carries a `data-nav` and lands on one of the same twelve
+   screens, so Runtime is Nav relabelled by what is alive. Bots is not:
+   selecting Ada opens a conversation that is none of those screens. So it
+   gets its own screen and its own canvas mode, and the switch is honest
+   about changing KIND rather than view. */
+function railMode(m){
+  const modes = {bots:'railbots', nav:'railnav', runtime:'railtree'};
+  if(!modes[m]) m='nav';
+  for(const [k,id] of Object.entries(modes)) document.getElementById(id).style.display = (k===m)?'':'none';
+  document.getElementById('rm-bot').classList.toggle('on', m==='bots');
+  document.getElementById('rm-nav').classList.toggle('on', m==='nav');
+  document.getElementById('rm-run').classList.toggle('on', m==='runtime');
+  if(m==='runtime') tick('rail: runtime view — showing the live supervision tree');
+  if(m==='bots'){ go('bots'); renderBots(); tick('rail: bots — intent, above nav and runtime, over the same world'); }
+  rememberRoot(m);
+}
+
+/* No root is the permanent default. A first-ever launch opens on Nav /
+   Mission Control, because that is where a person orients; after that the
+   surface reopens where they left it, and if that was Bots it reopens on
+   the Bot they were talking to. Hard-coding Bots as the default would be
+   deciding for an experienced user, and hard-coding Nav forever would stop
+   Bots from ever becoming the way one actually lives in Super. */
+const ROOT_KEY = 'super.lastRoot';
+function rememberRoot(m){
+  try { localStorage.setItem(ROOT_KEY, JSON.stringify({root:m, bot:botNow})); } catch(e){}
+}
+function restoreRoot(){
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(ROOT_KEY)||'null'); } catch(e){}
+  if(!s || !s.root) return;                       /* first-ever launch → Nav */
+  if(s.root==='bots' && s.bot && botOf(s.bot)) botNow = s.bot;
+  railMode(s.root);
+}
+
+/* ---------- render: bots ---------- */
+function renderBots(){
+  const b = botOf(botNow) || bots[0];
+  if(!b) return;
+
+  $('#botroster').innerHTML = bots.map(x=>`<button class="botrow ${x.id===botNow?'on':''}" onclick="pickBot('${x.id}')">
+    <span class="hb ${x.hot?'':'paused'}"></span>
+    <span class="bn"><b>${x.name}</b><i>${x.role}</i></span>
+    <span class="bs ${x.hot?'hot':''}">${x.status}</span></button>`).join('');
+  $('#botgroups').innerHTML = botGroups.map(g=>`<button class="tnode" onclick="pickGroup('${g.id}')">
+    <span class="glyph">·</span> ${g.name} <span class="cnt">${g.members.length}</span></button>`).join('');
+
+  $('#botcrumbs').innerHTML = `workspace/${(typeof curWorld!=='undefined'?curWorld:'trvm')} › bots › ${b.name}`;
+  $('#bottitle').textContent = `${b.name} — ${b.role}`;
+
+  const feed = b.feed || [];
+  $('#botfeed').innerHTML = feed.map(u=>{
+    if(u.you) return `<div class="utt you"><div class="uh"><b>You</b></div><div class="ub">${u.body}</div></div>`;
+    const stale = uttStale(u);
+    return `<div class="utt">
+      <div class="uh"><span class="hb ${stale?'paused':''}"></span><b>${b.name}</b><span class="role">${b.role}</span></div>
+      <div class="ub">${u.body}</div>
+      ${(u.claims||[]).map(c=>{
+        const cites = citedBy(c);
+        /* THE BADGE NAMES THE KIND'S OWN FAILURE, NOT "STALE" FOR ALL FOUR.
+           A revoked grant does not make a decision old; it makes it
+           unauthorized, and rendering both as "stale" is the prose half of
+           the defect whose code half was `kind !== 'snapshot'`. */
+        const v = claimValidity(c, u.basis);
+        const why = {STALE:'my projection moved',
+                     RETRACTED:'the world withdrew what established this',
+                     INVALIDATED:'the authority behind it was revoked'}[v];
+        return `<div class="claimrow">
+          <span class="ckind ${c.kind}" title="${CLAIM_KINDS[c.kind]}">${c.kind}</span>
+          <span class="cx">${c.t}${why ? ` <span class="stalemark">· ${v} — ${why}</span>`
+                                       : (v==='BASIS-BOUND' ? ' <span class="dim">· BASIS-BOUND</span>' : '')}</span>
+          <span class="cites">${cites.map(o=>`<span class="cite" onclick="citeGo('${o}')">${o} ↗</span>`).join('')}</span></div>`;
+      }).join('')}
+      <div class="ucursor"><span>basis</span><span>${basisText(u.basis)}</span>
+        ${u.coherence==='UNESTABLISHED'
+          ? '<span class="tag sup">UNESTABLISHED — no world state held these together</span>'
+          : `<span class="tag ${stale?'sup':'cur'}">${stale? stale+' of '+u.claims.length+' claim'+(stale===1?'':'s')+' no longer holds'
+                                                           : 'derivation holds'}</span>`}
+      </div>
+    </div>`;
+  }).join('') || `<div class="utt"><div class="ub dim">Nothing said yet. Ask, and the answer will be
+    derived from a projection rather than composed about one.</div></div>`;
+
+  /* THE BOARD SHOWS ONLY WHAT IS IN THIS BOT'S PROJECTION.
+
+     W.1.3 computed `activeGrants.filter(...).length` and the pending
+     approval count here regardless of what the Bot could observe — so a Bot
+     with no observation grant at all still displayed "3 active grants". A
+     global count is a side channel whether or not anything else leaks, and
+     this is the surface the Bot's own program renders.
+
+     The person inspecting Ada's configuration is a DIFFERENT view: the
+     human control channel may see Ada's grants, and does, in the Inspector.
+     Those two are not the same screen and must not share a query.          */
+  const frame = botFrame(b.id);
+  const O = frame.objects;
+  const byKind = k => Object.keys(O).filter(x=>O[x].kind===k);
+  const mine = byKind('self');
+  const needsYou = mine.filter(k=>O[k].policy==='human_approval_required');
+  const group = (t, rows) => `<div class="boardgrp">${t}</div>` +
+    (rows.length ? rows.join('') : `<div class="boarditem dim">nothing</div>`);
+
+  $('#botboard').innerHTML =
+    group('NEEDS YOU', needsYou.map(k=>`<div class="boarditem">· <b>${O[k].capability}</b> · yours to approve</div>`)) +
+    group('OBSERVES', scopeOf(b).map(p=>
+      `<div class="boarditem">· ${p.kind}${p.resource!=='*'?' · <b>'+p.resource+'</b>':''}</div>`)) +
+    group('HOLDS', actionGrants(b).map(g=>
+      `<div class="boarditem">· <b>${g.capability}</b> · ${g.duration} · ${g.resource}${g.policy==='human_approval_required'?' · approval':''}</div>`)) +
+    group('PRESENTS', (b.presents||[]).map(p=>`<div class="boarditem">· ${p}</div>`)) +
+    group('DELEGATES TO', (b.delegates||[]).map(d=>`<div class="boarditem">· ${d}</div>`)) +
+    `<div class="boardgrp">PROJECTION</div>` +
+    `<div class="boarditem">· ${Object.keys(O).length} object${Object.keys(O).length===1?'':'s'} visible</div>` +
+    /* NO GLOBAL VIEW NUMBER. It used to print `view N`, which moves when
+       anything anywhere in the world changes — so a Bot watching its own
+       board learned that something outside its projection had moved. The
+       digest versions only what this Bot may see. */
+    `<div class="boarditem">· ${frame.coherence}${frame.ordered?' · ordered':''}</div>` +
+    `<div class="boarditem mono" style="font-size:10.5px">· ${frame.cursor.projection_digest.slice(7,19)}</div>`;
+
+  /* Delegation demo. Each row narrows or widens exactly one dimension of
+     Ada's own grant, because "narrowing" over a whole grant is the law and
+     capability+duration was only two of its nine parts. */
+  const par = botGrantFor(b,'lane.spawn');
+  const rows = par ? [
+    ['narrow duration → once',       {duration:'once'},                 true],
+    ['widen duration → workspace',   {duration:'workspace'},            false],
+    ['widen resource → *',           {resource:'*'},                    false],
+    ['widen placement → CLOUD',      {placement:'CLOUD'},               false],
+    ['widen budget → 80000',         {budget:80000},                    false],
+    ['narrow budget → 500',          {budget:500},                      true],
+  ] : [];
+  $('#botdelegate').innerHTML =
+    `<div class="rowline" style="padding:6px 0"><span class="mono" style="font-size:12.5px">deploy.production <span class="dim">· not held</span></span>
+      <button class="btn sm" style="margin-left:auto" onclick="tryDelegate('${b.id}','deploy.production')">Delegate</button></div>` +
+    `<div class="rowline" style="padding:6px 0"><span class="mono" style="font-size:12.5px">approve_effect <span class="dim">· the person's consent</span></span>
+      <button class="btn sm" style="margin-left:auto" onclick="tryDelegate('${b.id}','approve_effect')">Delegate</button></div>` +
+    rows.map(([label,want,ok])=>
+      `<div class="rowline" style="padding:6px 0"><span class="mono" style="font-size:12.5px">lane.spawn <span class="dim">· ${label}</span></span>
+        <button class="btn sm ${ok?'ok':''}" style="margin-left:auto"
+          onclick='tryDelegate("${b.id}","lane.spawn",${JSON.stringify(want)})'>Delegate</button></div>`).join('');
+}
+function basisText(c){ return `${c.world} · ${c.run} · ${c.bot} · ${c.projection_digest.slice(7,19)}`; }
+function refreshBots(){ if($('#s-bots') && $('#s-bots').classList.contains('on')) renderBots(); }
+
+/* Exported for the negative battery, alongside `__capState`. Kept separate
+   on purpose: the authority engine is the frozen executable spec the
+   conformance vectors are exported against, and the Bots layer sits ABOVE
+   it and mutates none of it. A single merged surface would make that easy
+   to stop being true. */
+window.__botState = { bots, botGroups, botOf, newBot, botDelegate, revokeBotGrant, botSay, botBrief,
+  botFrame, mayObserve, observationGrants, observedKinds, actionGrants, botGrantFor, botHoldsCap,
+  scopeOf, admits, intersectScope, scopeText, citedBy, COHERENCE, stabilityToken,
+  claimStale, claimValidity, uttStale, CLAIM_KINDS, CLAIM_VALIDITY, objectResources,
+  delegations, groupScope, groupMaySay, intersectScopes,
+  PEER_KINDS, BOT_COMMANDS, HUMAN_ONLY, OBSERVABLE, BOT_DUR, DIMS,
+  get view(){ return viewClock; }, touched };
+
+function pickBot(id){ botNow=id; go('bots'); renderBots(); }
+function pickGroup(id){
+  const g = botGroups.find(x=>x.id===id); if(!g) return;
+  /* `sc` became an array of PREDICATES in W.1.3.2 and these two lines kept
+     joining it as strings, so the toast read `[object Object]`. A renderer
+     left behind by a model change says something false about the model. */
+  const sc = groupScope(g);
+  toast(`${g.name} — scope is the INTERSECTION of its members': ${scopeText(sc)||'nothing'}. Adding a member cannot widen anyone.`);
+  tick(`bots: ${g.name} · ${g.members.length} members · disclosable: ${scopeText(sc)||'nothing'}`);
+}
+/* A citation is an object id from the frame, not a hand-written screen
+   name. Resolving it back to a screen is the renderer's job and happens
+   here, after the authority question has already been answered. */
+function citeGo(oid){
+  const f = botFrame(botNow), o = f.objects[oid];
+  if(!o){ toast('That object is not in this projection.'); return; }
+  go(o.screen);
+  if(o.sub && o.sub.startsWith('lane-')) inspectLane(o.sub);
+  else if(o.sub && o.screen==='capabilities') railInspect(o.sub);
+  tick('bots: followed '+oid+' → '+o.screen+' — the sentence and the object are the same world');
+}
+function botAsk(){
+  const q = ($('#botask') && $('#botask').value) || '';
+  const b = botOf(botNow);
+  if(b && q.trim()) (b.feed = b.feed||[]).push({bot:b.id, body:q.trim(), claims:[], you:true});
+  const u = botBrief(botNow);
+  if($('#botask')) $('#botask').value='';
+  if(u.refused){ toast('REFUSED · '+u.refused); tick('bots: utterance refused · '+u.refused); }
+  else if(u.blind){ tick('bots: '+(botOf(botNow)||{}).name+' holds no observation grant and said so'); }
+  /* `u.basis.view` printed `undefined` from the moment W.1.3.2 took the
+     global clock off the cursor — the journal line survived the model
+     change it was reporting. The basis is the projection digest now. */
+  else tick('bots: '+(botOf(botNow)||{}).name+' derived '+u.claims.length+' claim(s) from one frame · '+basisText(u.basis));
+  renderBots();
+}
+function tryDelegate(botId, cap, want){
+  const r = botDelegate(botId, cap, 'kestrel', want);
+  if(r.refused){
+    toast('REFUSED · '+r.refused);
+    tick('bots: delegation refused · '+r.refused);
+  } else {
+    toast(`Delegated ${r.capability} → ${r.delegate} · ${r.duration} · ${r.resource} · budget ${r.budget} · ${r.policy}`);
+    tick('bots: '+(botOf(botId)||{}).name+' delegated '+r.id+' · chain '+r.delegation_chain.join(' → '));
+  }
+  renderBots();
+}
+
+
+/* ---------- fleet ---------- */
+function renderFleet(){
+  $('#fleetwrap').innerHTML = fleet.map(f=>`<div class="card">
+    <div class="rowline"><span class="hb ${f.load===0?'paused':''}"></span><b class="mono">${f.n}</b><span class="chip" style="margin-left:auto">${f.kind}</span></div>
+    <div class="budgetline" style="margin:9px 0"><span>load</span><div class="meter"><i style="width:${f.load}%"></i></div><span>${f.load}%</span></div>
+    <div class="mono dim" style="font-size:11.5px;line-height:1.9">${f.workers.map(w=>'· '+w).join('<br>')}</div>
+  </div>`).join('') + `<div class="card flat" style="border-style:dashed;display:flex;align-items:center;justify-content:center;min-height:120px">
+    <button class="btn" onclick="toast('Enrollment token in Settings — a node is adopted, not configured.')">+ Adopt node</button></div>`;
+}
+
+/* ---------- gates ---------- */
+function renderGates(){
+  $('#gatewrap').innerHTML = gates.map(g=>`<div class="gaterow"><span class="dot" style="background:var(--ok)"></span><span class="gname">${g[0]}</span><span class="gcount">${g[1]}</span></div>`).join('');
+}
+/* proof:quoted — this block replays the receipt's own prose */
+const gateLines = [
+  ['PASS','law kernel — conformant; every asserted law holds; every by-design falsification still fails'],
+  ['PASS','invariant grid — 90 entries · 380 citations resolved · no banned stale claims · v1.43.0'],
+  ['PASS','world — warrant machinery holds; receipt emitted'],
+  ['PASS','world receipt — ground and composite REPLAYED with support equality'],
+  ['PASS','negative battery — 307/307 forgeries caught'],
+  ['PASS','harness self-test — 9/9 known apparatus failure species caught'],
+  ['PASS','runner contract — 3/3: the runner hears success, failure and crash'],
+  ['PASS','derive battery — 45/45: the program is data; the executor asserts its own identity'],
+  ['PASS','realm battery — 24/24: object authority does not cross the boundary'],
+  ['PASS','probe repros — 12/12 reproduce frozen · confined against live'],
+  ['PASS','cross-plane bridge — 48/48 states byte-identical across implementations'],
+  ['PASS','native semantic film — 45/45: both terminal classes native; remaining_work re-derived'],
+  ['PASS','lowering refinement — 23/23: refinement witnessed, and film-evidenced'],
+  ['note','measurement — non-gating: nothing here is committed, replayed or signed'],
+];
+/* /proof:quoted */
+let gatesRunning=false;
+function runGates(){
+  if(gatesRunning) return; gatesRunning=true;
+  const out=$('#gateout'), badge=$('#gatebadge');
+  out.innerHTML='$ ./verify.sh\n';
+  badge.className='gatebadge busy'; $('#gatebadgetxt').textContent='replaying…';
+  $('#rungates').disabled=true;
+  tick('shrike: gate replay started — counts will be from THIS run');
+  gateLines.forEach((g,i)=>setTimeout(()=>{
+    const cls=g[0]==='PASS'?'p':'n';
+    out.innerHTML += `<span class="${cls}">${g[0].padEnd(5)}</span>${g[1]}\n`;
+    out.scrollTop=out.scrollHeight;
+  }, 260*(i+1)));
+  setTimeout(()=>{
+    const t=(PROOF&&PROOF.totals)||{}, r=(PROOF&&PROOF.run)||{};
+    const att=t.attempted??'—', pas=t.passed??'—', fai=t.failed??0, skp=t.skipped??0;
+    const frac=pas+'/'+att, hash=r.cert_hash?r.cert_hash+'…':'(cert)';
+    const streakNow=(r.cert_streak!=null)?(r.cert_streak+1):null;
+    out.innerHTML += `\nchecks attempted ${att} · passed ${pas} · failed ${fai} · skipped ${skp}\n<span class="p">REVIEW PACK: every gate replayed green</span>\ncert_id ${hash} <span class="p">byte-identical</span>${streakNow?` — consecutive round ${streakNow}`:''}\n`;
+    badge.className='gatebadge green'; $('#gatebadgetxt').textContent='gates '+frac+' green';
+    if(streakNow) $('#certstamp').textContent='cert '+hash+' byte-identical ×'+streakNow;
+    $('#rungates').disabled=false; gatesRunning=false;
+    tick(`gates: ${frac} replayed green${streakNow?` · cert byte-identical, streak ×${streakNow}`:''}`);
+    toast('Green means measured. Nothing above was transcribed.');
+  }, 260*(gateLines.length+1)+400);
+}
+
+/* ---------- evidence ---------- */
+function wireEvidence(){
+  $$('#evpills .pill').forEach(p=>p.onclick=()=>{
+    $$('#evpills .pill').forEach(x=>x.classList.remove('on')); p.classList.add('on');
+    const k=p.dataset.k;
+    $$('#evtbl tbody tr').forEach(r=>r.style.display=(k==='all'||r.dataset.k===k)?'':'none');
+  });
+  $$('#evtbl tbody tr').forEach(r=>r.onclick=()=>{
+    $$('#evtbl tbody tr').forEach(x=>x.classList.remove('sel')); r.classList.add('sel');
+    const kind=r.dataset.k, ref=r.cells[4].textContent, by=r.cells[2].textContent, cites=r.cells[3].textContent;
+    frozen(`<b>${kind}</b> · ${ref}
+<span class="kk">emitted_by</span>  ${by}
+<span class="kk">cites</span>       ${cites}
+<span class="kk">snapshot</span>    frozen at emission
+<span class="kk">replayable</span>  yes — evidence is
+an execution the host drove,
+not a label anyone may attach.`);
+  });
+}
+
+/* ---------- rulings ---------- */
+function rule(id,msg){
+  const card=$('#'+id);
+  card.style.opacity=.45; card.querySelectorAll('button').forEach(b=>b.disabled=true);
+  card.querySelector('.kind').textContent='ruled'; card.querySelector('.kind').className='kind ruling';
+  $('#ruled').insertAdjacentHTML('afterbegin',`<div><span class="kind ruling">ruling</span> ${msg} <span class="faint">· just now</span></div>`);
+  const due=$$('#rulwrap .card').filter(c=>c.style.opacity==='').length;
+  $('#rulcnt').textContent = due? due+' due' : '0';
+  if(!due) $('#rulcnt').classList.remove('hot');
+  tick('arbiter ruling recorded to ledger · pushed to kestrel');
+  toast('Ruling recorded — citable forever.');
+}
+
+/* ---------- authority ---------- */
+function revoke(btn,cap){
+  const row=btn.closest('tr');
+  if(btn.textContent==='Revoke'){
+    row.style.opacity=.45; btn.textContent='Regrant'; btn.classList.remove('danger'); btn.classList.add('ok');
+    tick(`AuthorityGraph: ${cap} revoked from kestrel — revocation is a message its process receives`);
+    toast(cap+' revoked. Calls against it now refuse as authority-revoked.');
+  } else {
+    row.style.opacity=1; btn.textContent='Revoke'; btn.classList.add('danger'); btn.classList.remove('ok');
+    tick(`AuthorityGraph: ${cap} regranted to kestrel · snapshot b51.1`);
+  }
+}
+
+/* ---------- navigation ---------- */
+function go(name, src){
+  $$('.screen').forEach(s=>s.classList.remove('on'));
+  $('#s-'+name).classList.add('on');
+  const seen=new Set();
+  $$('#rail .tnode').forEach(t=>{
+    let on;
+    if (src) on = (t===src);
+    else {
+      const box=t.closest('#railnav,#railtree');
+      const key=(box?box.id:'?')+':'+t.dataset.nav;
+      on = (t.dataset.nav===name && !seen.has(key));
+      if (on) seen.add(key);
+    }
+    t.classList.toggle('on', on);
+  });
+  $('#canvas').scrollTop=0;
+}
+function railInspect(sub){
+  if (sub.startsWith('lane-')){ inspectLane(sub); return; }
+  if (sub==='registry'){
+    const rows=Object.entries(packs).map(([k,p])=>`<span class="kk">${k.padEnd(10)}</span>${p.installation}${p.version?' · v'+p.version:''}${p.surface?' · '+Object.keys(p.surface).length+' capabilities declared':''}`).join('\n');
+    frozen(`<b>CapabilityRegistry</b> — what exists\n${rows}\n—\ninstalled ≠ authorized; this registry\nholds surfaces, never grants.`);
+  } else if (sub==='grants'){
+    const act=activeGrants.filter(g=>g.status==='active');
+    const rows=act.slice(-6).map(g=>`<span class="kk">${g.id}</span> ${g.capability} · ${g.duration}${g.duration==='once'?' ('+g.uses_remaining+' left)':''}`).join('\n')||'(none active)';
+    frozen(`<b>GrantRegistry</b> — what may be exercised\nactive ${act.length} · total minted ${activeGrants.length}\n${rows}\n—\nevery grant binds actor + capability +\nresource + duration; authorize() matches\nall of them and names the miss.`);
+  } else if (sub==='approvals'){
+    const p=approvals.filter(a=>a.status==='pending'), c=approvals.filter(a=>a.status==='consumed');
+    const rows=approvals.slice(-5).map(a=>`<span class="kk">${a.id}</span> ${a.status} · ${a.request_hash.slice(0,15)}`).join('\n')||'(queue empty)';
+    frozen(`<b>ApprovalSupervisor</b> — awaiting consent\npending ${p.length} · consumed ${c.length}\n${rows}\n—\nan approval binds one exact request\nhash and dies with its effect.`);
+  } else if (sub==='gateway'){
+    frozen(`<b>CapabilityGateway</b> — crossing attempts\nattempts ${gw.attempts} · allowed ${gw.allowed} · held ${gw.held} · refused ${gw.refused}\nlast: ${gw.last}\n—\nno path reaches an adapter except\nthrough here. attempts are not effects.`);
+  }
+}
+$$('#rail .tnode').forEach(t=>t.onclick=()=>{
+  go(t.dataset.nav, t);
+  if (t.dataset.sub) railInspect(t.dataset.sub);
+});
+
+/* ---------- inspector / ticker / toast ---------- */
+function frozen(html){ $('#frozen').innerHTML=html; }
+function tick(msg){
+  const t=new Date().toTimeString().slice(0,8);
+  const el=document.createElement('span'); el.className='ev new';
+  el.innerHTML=`<span class="t">${t}</span>${msg}`;
+  const s=$('#tickstream'); s.appendChild(el); s.scrollLeft=s.scrollWidth;
+  while(s.children.length>40) s.removeChild(s.firstChild);
+}
+let toastT;
+function toast(msg){
+  const t=$('#toast'); t.textContent=msg; t.classList.add('on');
+  clearTimeout(toastT); toastT=setTimeout(()=>t.classList.remove('on'), 3200);
+}
+
+/* ---------- command palette ---------- */
+const palItems=[
+  {t:'Go to Bots', k:'g b', f:()=>railMode('bots')},
+  {t:'Ask Ada what happened', k:'act', f:()=>{railMode('bots');botAsk()}},
+  {t:'Delegate a capability Ada does not hold', k:'act', f:()=>{railMode('bots');tryDelegate('bot_ada','deploy.production')}},
+  {t:'New Bot (confers no authority)', k:'act', f:()=>{railMode('bots');newBot();renderBots()}},
+  {t:'Go to Mission Control', k:'g m', f:()=>go('mission')},
+  {t:'Go to Lanes', k:'g l', f:()=>go('lanes')},
+  {t:'Go to Agents', k:'g a', f:()=>go('agents')},
+  {t:'Go to Fleet', k:'g f', f:()=>go('fleet')},
+  {t:'Go to Editor', k:'g e', f:()=>go('editor')},
+  {t:'Go to Evidence', k:'g v', f:()=>go('evidence')},
+  {t:'Go to Gates', k:'g g', f:()=>go('gates')},
+  {t:'Go to Rulings', k:'g r', f:()=>go('rulings')},
+  {t:'Go to Capabilities', k:'g p', f:()=>go('capabilities')},
+  {t:'Replay all gates', k:'act', f:()=>{go('gates');setTimeout(runGates,250)}},
+  {t:'Swap engine on kestrel', k:'act', f:()=>{go('agents');setTimeout(swapEngine,300)}},
+  {t:'Spawn a lane', k:'act', f:()=>{go('lanes');setTimeout(spawnLane,250)}},
+  {t:'Move lane-b → gpu01', k:'act', f:()=>{const l=lanes.find(x=>x.id==='lane-b');l.node='gpu01';renderLanes();tick('placement: lane-b moved ms02 → gpu01 · same supervisor, new floor');toast('Moved. Distribution is placement, not a different mental model.')}},
+  {t:'Switch workspace (trvm ⇄ pricing-page)', k:'act', f:()=>cycleWorkspace()},
+  {t:'Simulate authority-missing (github.pr.create)', k:'act', f:()=>{go('capabilities');setTimeout(ghRefusal,350)}},
+  {t:'End run (expire run-scoped grants)', k:'act', f:()=>endRun()},
+  {t:'Place browser task on ComputeDriven', k:'act', f:()=>{tick('placement derived: browser-research → cd-west (CLOUD) · requires chromium · source_data: none · $0.14/h');toast('Eligibility computed from capability, cost, and data policy — the derivation is citable.')}},
+];
+let palIdx=0;
+function openPal(){ $('#palov').classList.add('on'); $('#palin').value=''; palIdx=0; renderPal(''); $('#palin').focus(); }
+function closePal(){ $('#palov').classList.remove('on'); }
+function renderPal(q){
+  const items=palItems.filter(i=>i.t.toLowerCase().includes(q.toLowerCase()));
+  $('#palist').innerHTML=items.map((i,n)=>`<button class="pi ${n===palIdx?'on':''}" data-n="${n}">${i.t}<span class="k">${i.k}</span></button>`).join('')||'<div class="pi">no match — the schema cannot express it</div>';
+  $$('#palist .pi[data-n]').forEach(b=>b.onclick=()=>{items[+b.dataset.n].f();closePal();});
+  return items;
+}
+$('#palin').addEventListener('input',e=>{palIdx=0;renderPal(e.target.value)});
+document.addEventListener('keydown',e=>{
+  if((e.metaKey||e.ctrlKey)&&e.key.toLowerCase()==='k'){e.preventDefault();openPal();return;}
+  if(!$('#palov').classList.contains('on')) return;
+  const items=palItems.filter(i=>i.t.toLowerCase().includes($('#palin').value.toLowerCase()));
+  if(e.key==='Escape') closePal();
+  if(e.key==='ArrowDown'){palIdx=Math.min(palIdx+1,items.length-1);renderPal($('#palin').value);}
+  if(e.key==='ArrowUp'){palIdx=Math.max(palIdx-1,0);renderPal($('#palin').value);}
+  if(e.key==='Enter'&&items[palIdx]){items[palIdx].f();closePal();}
+});
+
+/* ---------- boot ---------- */
+renderLanes(); renderFleet(); renderGates(); wireEvidence(); applyProof(); captureTrvm(); renderCaps(); renderMatrix();
+/* Ada opens with a brief rather than a greeting, because a greeting is the
+   one utterance that has nothing to cite. */
+botBrief('bot_ada'); renderBots(); restoreRoot();
+/* ---------- fragment channel: #screen=<name> works across any origin split ---------- */
+function applyScreenHash(){
+  var m=(location.hash||'').match(/screen=([a-z]+)/);
+  if(m && document.getElementById('s-'+m[1])) go(m[1]);
+}
+addEventListener('hashchange', applyScreenHash);
+applyScreenHash();
+fetch('proof/latest.json',{cache:'no-store'}).then(x=>x.ok?x.json():null).then(j=>{
+  if(!j) return; PROOF=j; applyProof();
+  if(curWorld==='trvm') captureTrvm();
+  tick('proof: figures refreshed from proof/latest.json');
+}).catch(()=>{});
+[['runtime: amp-runtime 1.0.0-b51 up · WorkspaceSupervisor healthy'],
+ ['kestrel: claim §324 emitted — overflow refuses by name'],
+ ['shrike: 307 forgeries thrown, 307 caught'],
+ [`gates: last replay ${(PROOF&&PROOF.totals&&PROOF.totals.passed!=null)?(PROOF.totals.passed+'/'+PROOF.totals.attempted):'—'} green · cert ${(PROOF&&PROOF.run&&PROOF.run.cert_hash)?(PROOF.run.cert_hash+'… ×'+PROOF.run.cert_streak):'—'}`],
+ ['rulings: 2 questions awaiting the arbiter'],
+].forEach((m,i)=>setTimeout(()=>tick(m[0]), 300*i));
+setInterval(()=>{
+  const idle=[
+    'heartbeats: 3 lanes, all nominal',
+    'EvidenceLedger: fsync ok · §329 tail',
+    'BudgetMonitor: magpie at 84% — ceiling warning at 90%',
+    'journal: 14,203 events · nothing lost',
+    'kestrel: reading round-11-ledger.md §327 before acting',
+  ];
+  tick(idle[Math.floor(Math.random()*idle.length)]);
+}, 9000);
+</script>
+<!-- host bridge: only runs when embedded. proto-ready is the handshake the landing page
+     waits on before fading the real app in over its inline mock; goto drives the surface
+     pills; release forwards Escape, which the host can never see for itself once focus
+     has moved inside this frame. The palette gets first refusal on Escape, so it takes
+     one press to close the palette and a second to hand the page back. -->
+<script>try{if(parent!==window){
+  var __ping=function(){try{parent.postMessage({amp:"proto-ready"},"*")}catch(e){}};
+  __ping();addEventListener("load",__ping);
+  addEventListener("message",function(e){var d=e&&e.data;if(d&&d.amp==="goto"&&typeof go==="function"){try{go(d.screen)}catch(_){}}});
+  addEventListener("keydown",function(e){
+    if(e.key!=="Escape")return;
+    var pal=document.getElementById("palov");
+    if(pal&&pal.classList.contains("on"))return;
+    try{parent.postMessage({amp:"release"},"*")}catch(_){}
+  });
+}}catch(e){}</script>
+</body>
+</html>
