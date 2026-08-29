@@ -1376,15 +1376,28 @@ async function run() {
      An earlier version of this asserted `#world .row` was non-empty, which
      is a claim about the WORLD's contents — by this point in the run the
      flagship and four witnesses have revoked everything, so a correct
-     recovery onto an empty world failed it. `render()` writes its three
-     section headings whatever the lists hold; the withdrawal writes one
-     paragraph and no headings. That is the frame-derived difference. */
+     recovery onto an empty world failed it. `render()` writes its section
+     headings whatever the lists hold; the withdrawal writes one paragraph
+     and no headings. That is the frame-derived difference.
+
+     **The count is read from the page, not written here.** It was `=== 3`,
+     which was the section count on the day this was written — so adding a
+     section to `ui/cockpit.js` failed a check about *recovery*, in another
+     language, for a reason with nothing to do with recovery. `render()`
+     now publishes how many sections it appended, and this compares the DOM
+     against that. Stronger, not weaker: a hardcoded literal only ever
+     caught the UI changing, while this catches a region that was built
+     half-way. */
   check(
     'the world region is rebuilt from that frame, and authority is submittable again',
-    (await script('return document.querySelectorAll(\'#world h2\').length')) === 3
+    (await script(`
+       const h = document.querySelectorAll('#world h2').length;
+       const intended = window.cockpit.rendered?.sections ?? 0;
+       return h > 0 && h === intended;`)) === true
       && (await script('return document.getElementById("badge-state").dataset.state')) === 'live-local'
       && (await script('return document.querySelectorAll("button[data-intent][disabled]").length')) === 0,
     `#world h2 = ${await script('return document.querySelectorAll(\'#world h2\').length')}, `
+      + `render intended ${await script('return window.cockpit.rendered?.sections ?? 0')}, `
       + `badge = ${await script('return document.getElementById("badge-state").dataset.state')}, `
       + `disabled controls = ${await script('return document.querySelectorAll("button[data-intent][disabled]").length')} `
       + '— the page stopped claiming and never started again',

@@ -54,7 +54,14 @@ defmodule Ampd do
       {Ampd.GrantRegistry, Ampd.GrantRegistry.sealed()},
       {Ampd.Approvals, Ampd.Approvals.sealed()},
       {Ampd.Receipts, Ampd.Receipts.sealed()},
-      {Ampd.Effects, Ampd.Effects.sealed()}
+      {Ampd.Effects, Ampd.Effects.sealed()},
+      # Both joined `Ampd.World.authority_stores/0` in D.1.1, so both can
+      # seal. A seals report that omitted them would report a fully
+      # accounted-for world while every Lane and every worktree resource
+      # was unreachable — the exact shape of incompleteness this function
+      # exists to make impossible.
+      {Ampd.Loci, Ampd.Loci.sealed()},
+      {Ampd.Worktree, Ampd.Worktree.sealed()}
     ]
     |> Enum.reject(&(elem(&1, 1) == nil))
   end

@@ -48,7 +48,17 @@ defmodule Ampd.World do
   # `capability_registry` is in the list because pack *policies* govern
   # placement: losing a tightened `source_data: private` and reseeding the
   # default would widen where an effect may run.
-  @authority_stores ~w(grant_registry approvals receipts session capability_registry effects)
+  #
+  # `loci` and `worktrees` joined the list in D.1.1, and the reasoning is
+  # the same one that put `capability_registry` here. Losing `loci` and
+  # reseeding the empty default would present a world with no lanes and no
+  # capabilities — indistinguishable, to every caller, from a revocation
+  # nobody ordered. Losing `worktrees` would leave admitted resources
+  # unresolvable while the caps naming them still read as active, so the
+  # runtime would be claiming authority over directories it can no longer
+  # find. Neither absence is a cache miss.
+  @authority_stores ~w(grant_registry approvals receipts session capability_registry effects
+                       loci worktrees)
 
   def authority_stores, do: @authority_stores
   def schema_version, do: @schema_version

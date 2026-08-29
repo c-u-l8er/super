@@ -205,6 +205,21 @@ pub const INTENT_SURFACE: &[&str] = &[
     "revoke_capability_domain",
     "approve_effect",
     "deny_effect",
+    // D.1.1a. Opening a position is an authority operation: `open_lane`
+    // names the actor that may occupy it, and that is a person deciding
+    // who stands where. It was reachable through the API and not through
+    // the person's own surface, which `tools/check-intent-surface.mjs`
+    // caught and refused.
+    //
+    // **These three words were not enough on their own, and adding only
+    // them would have been the worse failure.** The gate reads this const,
+    // so appending strings turns it green while a person still cannot open
+    // anything. What makes the gate's proposition true is the form in
+    // `ui/cockpit.js` and the loci block in `operator-projection@2` that
+    // gives the form something to choose from.
+    "open_workspace",
+    "open_goal",
+    "open_lane",
 ];
 
 /// **W.2.3.3 · which established position a bind or unbind is addressed to.**

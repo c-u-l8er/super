@@ -137,7 +137,13 @@ const el = {
 
 const short = (s) => (typeof s === 'string' && s.length > 12 ? s.slice(0, 12) + '…' : s ?? '—');
 
-function rowNode({ id, cap, who, action, intent, args }) {
+/* `actions` is a list, and it became one because the surface needed a row
+   to offer both halves of a decision. A row that could only carry one
+   button is why `approve_grant_request` sat on `INTENT_SURFACE` with only
+   `deny` rendered beside the request it applies to — the person could
+   refuse and could not consent, through a surface whose whole job is
+   consent. */
+function rowNode({ id, cap, who, actions = [] }) {
   const row = document.createElement('div');
   row.className = 'row';
   row.dataset.id = id;
@@ -155,14 +161,110 @@ function rowNode({ id, cap, who, action, intent, args }) {
 
   row.append(c, w, spacer);
 
-  if (action) {
+  for (const { label, intent, args, danger } of actions) {
     const b = document.createElement('button');
-    b.textContent = action;
+    b.textContent = label;
     b.dataset.intent = intent;
     b.dataset.args = JSON.stringify(args);
+    if (danger) b.dataset.danger = 'true';
     row.append(b);
   }
   return row;
+}
+
+/* ── D.1.1a · opening a position ──────────────────────────────────────
+ *
+ * `check-intent-surface.mjs` holds that every authority operation the
+ * runtime declares for a person is reachable from this surface. D.1.1
+ * added three and left the gate red, correctly: appending the words to
+ * `INTENT_SURFACE` would have turned it green while a person still could
+ * not open anything. This is what makes its proposition true.
+ *
+ * **The draft is module state, and it has to be.** `render` rebuilds the
+ * whole world region on every frame — deliberately, because a diff is a
+ * second model of the screen and a second thing that can be wrong. A form
+ * inside a region that is rebuilt would have its half-typed value
+ * destroyed by any frame that arrived while the person was thinking. So
+ * the typed value lives here, outside the region, and the inputs are
+ * repopulated from it. It is not a model of the world; it is a model of
+ * what the person has said so far, which no frame is entitled to move. */
+const draft = { workspace_name: '', goal_title: '', goal_ws: '', lane_goal: '', lane_actor: '', lane_repo: '', lane_base: '' };
+
+function fieldNode(key, label, placeholder) {
+  const wrap = document.createElement('label');
+  wrap.className = 'field';
+  wrap.textContent = label;
+  const i = document.createElement('input');
+  i.type = 'text';
+  i.placeholder = placeholder ?? '';
+  i.value = draft[key] ?? '';
+  i.dataset.draft = key;
+  i.addEventListener('input', () => { draft[key] = i.value; });
+  wrap.append(i);
+  return wrap;
+}
+
+function selectNode(key, label, options, empty) {
+  const wrap = document.createElement('label');
+  wrap.className = 'field';
+  wrap.textContent = label;
+  const s = document.createElement('select');
+  s.dataset.draft = key;
+  if (!options.length) {
+    const o = document.createElement('option');
+    o.value = '';
+    o.textContent = empty;
+    s.append(o);
+    s.disabled = true;
+  } else {
+    for (const { value, text } of options) {
+      const o = document.createElement('option');
+      o.value = value;
+      o.textContent = text;
+      o.selected = draft[key] === value;
+      s.append(o);
+    }
+    /* A stale draft naming an object that no longer exists must not
+       silently submit the first option instead — that would be the person
+       acting on something they did not choose. */
+    if (!options.some((o) => o.value === draft[key])) draft[key] = options[0].value;
+    s.value = draft[key];
+  }
+  s.addEventListener('change', () => { draft[key] = s.value; });
+  wrap.append(s);
+  return wrap;
+}
+
+/* `data-intent-form` rather than `data-args`: the arguments are read from
+   the draft at click time, so what is submitted is what the person can
+   see, not what the page happened to serialize when it last rendered. */
+function formNode(id, intent, fields, action, disabled) {
+  const row = document.createElement('div');
+  row.className = 'row form';
+  row.dataset.id = id;
+  fields.forEach((f) => row.append(f));
+  const b = document.createElement('button');
+  b.textContent = action;
+  b.dataset.intentForm = intent;
+  b.disabled = !!disabled;
+  row.append(b);
+  return row;
+}
+
+/* Read at click time from the draft. Empty optional fields are omitted
+   rather than sent as "", because `Ampd.CommandSpec` types
+   `base_revision` as a string and "" is a string — an empty box would
+   become a revision nobody named. */
+function argsFor(intent) {
+  const trim = (s) => (s ?? '').trim();
+  if (intent === 'open_workspace') return { name: trim(draft.workspace_name) };
+  if (intent === 'open_goal') return { workspace_ref: draft.goal_ws, title: trim(draft.goal_title) };
+  if (intent === 'open_lane') {
+    const a = { goal_ref: draft.lane_goal, actor: trim(draft.lane_actor), repository_ref: draft.lane_repo };
+    if (trim(draft.lane_base)) a.base_revision = trim(draft.lane_base);
+    return a;
+  }
+  return {};
 }
 
 function section(title, items, empty) {
@@ -203,14 +305,40 @@ export function render(frame) {
     return;
   }
 
-  const grants = (p.grants ?? []).map((g) =>
+  const liveGrants = p.grants ?? [];
+
+  const grants = liveGrants.map((g) =>
     rowNode({
       id: g.id,
       cap: g.capability,
       who: `${g.actor} · ${g.resource} · ${g.duration}`,
-      action: 'revoke',
-      intent: 'revoke_grant',
-      args: { grant_id: g.id },
+      actions: [{ label: 'revoke', intent: 'revoke_grant', args: { grant_id: g.id } }],
+    }),
+  );
+
+  /* **Bulk revocation, and the confirmation is the set on the screen.**
+     `expected_ids` are the ids of the grants rendered in this frame, so
+     the set the person is looking at and the set the runtime revokes
+     cannot be two different worlds — which is the whole reason
+     `Ampd.GrantRegistry.revoke_matching/2` takes them. A button that sent
+     the capability alone would be asking the runtime to re-sample. */
+  const byCapability = new Map();
+  for (const g of liveGrants) {
+    if (!byCapability.has(g.capability)) byCapability.set(g.capability, []);
+    byCapability.get(g.capability).push(g.id);
+  }
+
+  const domains = [...byCapability.entries()].map(([capability, ids]) =>
+    rowNode({
+      id: `domain-${capability}`,
+      cap: capability,
+      who: `${ids.length} grant${ids.length === 1 ? '' : 's'} across every actor`,
+      actions: [{
+        label: `revoke all ${ids.length}`,
+        intent: 'revoke_capability_domain',
+        args: { scope: { capability }, expected_ids: ids },
+        danger: true,
+      }],
     }),
   );
 
@@ -219,9 +347,33 @@ export function render(frame) {
       id: q.id,
       cap: q.capability,
       who: `${q.actor} asked · ${q.resource}`,
-      action: 'deny',
-      intent: 'deny_grant_request',
-      args: { request_id: q.id },
+      actions: [
+        /* `duration` is omitted, which means "as requested". Approving may
+           narrow and never widen — `Ampd.Authority.approve_grant_request/2`
+           refuses the other direction — so the safe default is the one the
+           agent actually asked for. */
+        { label: 'approve', intent: 'approve_grant_request', args: { request_id: q.id } },
+        { label: 'deny', intent: 'deny_grant_request', args: { request_id: q.id } },
+      ],
+    }),
+  );
+
+  /* Consent for one exact intent. Both halves rendered together, for the
+     same reason the grant request has both: a surface that can only refuse
+     is not a consent surface. */
+  const approvals = (p.pending_approvals ?? []).map((a) =>
+    rowNode({
+      id: a.id,
+      cap: a.capability,
+      who: `${a.actor} · ${a.resource ?? '—'}`,
+      actions: [
+        {
+          label: 'approve',
+          intent: 'approve_effect',
+          args: { request_id: a.envelope?.request_id, approval_id: a.id },
+        },
+        { label: 'deny', intent: 'deny_effect', args: { approval_id: a.id } },
+      ],
     }),
   );
 
@@ -229,11 +381,74 @@ export function render(frame) {
     rowNode({ id: peer.peer_id ?? peer.actor, cap: peer.actor ?? '—', who: peer.role ?? '' }),
   );
 
-  el.main.append(
-    section('Active grants', grants, 'No authority is granted.'),
+  /* ── the positions, and the forms that open them ──────────────────
+     Rendered from `operator-projection@2`, which is world-complete for
+     the person. The agent's own `list_loci` is ancestry-closed; these are
+     two different projections on purpose and the difference is the point
+     of F14. */
+  const wsList = Object.values(p.workspaces ?? {});
+  const goalList = Object.values(p.goals ?? {});
+  const repoList = Object.values(p.repositories ?? {});
+  const caps = Object.values(p.worktree_caps ?? {});
+
+  const lanes = Object.values(p.lanes ?? {}).map((l) => {
+    const held = caps.filter((c) => c.locus_ref === l.id && c.status === 'active').length;
+    return rowNode({
+      id: l.id,
+      cap: l.id,
+      who: `${l.actor} · ${short(l.goal_ref)} · ${held} capabilit${held === 1 ? 'y' : 'ies'}`,
+    });
+  });
+
+  const wsOptions = wsList.map((w) => ({ value: w.id, text: `${w.name ?? w.id}` }));
+  const goalOptions = goalList.map((g) => ({ value: g.id, text: `${g.title ?? g.id}` }));
+  const repoOptions = repoList.map((r) => ({ value: r.ref, text: r.ref }));
+
+  const openers = [
+    formNode('open-workspace', 'open_workspace',
+      [fieldNode('workspace_name', 'Workspace', 'name')], 'open'),
+
+    formNode('open-goal', 'open_goal',
+      [selectNode('goal_ws', 'in', wsOptions, 'no workspace yet'),
+       fieldNode('goal_title', 'Goal', 'what it is for')],
+      'open', wsOptions.length === 0),
+
+    /* `open_lane` names the actor that may occupy the Lane. That is the
+       person deciding who stands where, and it is the reason this whole
+       section is an authority surface rather than a convenience. */
+    formNode('open-lane', 'open_lane',
+      [selectNode('lane_goal', 'toward', goalOptions, 'no goal yet'),
+       fieldNode('lane_actor', 'Lane for', 'actor'),
+       selectNode('lane_repo', 'in', repoOptions, 'no repository registered'),
+       fieldNode('lane_base', 'from', 'revision (optional)')],
+      'open', goalOptions.length === 0 || repoOptions.length === 0),
+  ];
+
+  const sections = [
     section('Waiting on you', requests, 'Nothing is waiting.'),
+    section('Consent for one effect', approvals, 'Nothing is held for consent.'),
+    section('Active grants', grants, 'No authority is granted.'),
+    section('Whole capability domains', domains, 'No capability has a grant.'),
+    section('Positions', lanes, 'No Lane is open.'),
+    section('Open a position', openers, ''),
     section('Attached', peers, 'Nobody is attached.'),
-  );
+  ];
+
+  el.main.append(...sections);
+
+  /* **What this render intended, published so a checker need not hardcode
+     it.** `cockpit-battery.mjs` asserted `#world h2 === 3` — the section
+     count on the day it was written — so adding a section to this file
+     failed a check about *recovery*, in a different language, for a reason
+     that had nothing to do with recovery. That is the number-in-two-places
+     failure the release scope exists to prevent, and it was sitting in the
+     battery.
+
+     Publishing the intended count makes the assertion a real cross-check:
+     the DOM heading count and the number of sections `render` believes it
+     appended must agree, which catches a half-built region — where a
+     hardcoded literal only ever caught this file changing. */
+  window.cockpit.rendered = { sections: sections.length };
 }
 
 /* A submission, resolved. This writes to the receipt rail — which is
@@ -311,8 +526,23 @@ async function submit(name, args) {
 
 document.addEventListener('click', (ev) => {
   const b = ev.target.closest('button[data-intent]');
-  if (!b) return;
-  submit(b.dataset.intent, JSON.parse(b.dataset.args));
+  if (b) { submit(b.dataset.intent, JSON.parse(b.dataset.args)); return; }
+
+  /* The form path. Arguments are read from the draft now rather than
+     having been serialized at render time, so what is submitted is what
+     the person can currently see in the boxes. */
+  const f = ev.target.closest('button[data-intent-form]');
+  if (!f) return;
+  const intent = f.dataset.intentForm;
+  submit(intent, argsFor(intent)).then(() => {
+    /* Cleared only for the fields this intent consumed, and only after it
+       resolved. Clearing on click would discard what the person typed if
+       the runtime refused it, and they would have to type it again to
+       find out why. */
+    if (intent === 'open_workspace') draft.workspace_name = '';
+    if (intent === 'open_goal') draft.goal_title = '';
+    if (intent === 'open_lane') { draft.lane_actor = ''; draft.lane_base = ''; }
+  });
 });
 
 window.cockpit = {

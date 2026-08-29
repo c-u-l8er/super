@@ -107,3 +107,22 @@ aside#receipts {
 #receipt-list li { padding: 6px 0; border-top: 1px solid var(--line); color: var(--dim); }
 #receipt-list li[data-outcome="accepted"] { color: var(--live); }
 #receipt-list li[data-outcome="refused"] { color: var(--gone); }
+
+/* D.1.1a · opening a position. Reuses `.row`; the only new shapes are the
+   labelled inputs, which need to wrap on a narrow pane rather than push
+   the button off the edge. */
+.row.form { flex-wrap: wrap; gap: 6px 10px; align-items: baseline; }
+.field { display: inline-flex; align-items: baseline; gap: 5px; font-size: 12px; opacity: .8; }
+.field input, .field select {
+  font: inherit; font-size: 12px; padding: 2px 5px;
+  border: 1px solid currentColor; border-radius: 3px;
+  background: transparent; color: inherit; opacity: 1;
+}
+.field input { min-width: 9ch; }
+.row.form button:disabled { opacity: .4; cursor: not-allowed; }
+
+/* A whole-domain revocation is the operation `Ampd.GrantRegistry` makes
+   deliberately harder to say. The surface should not make it the easiest
+   thing on the row to hit by accident. */
+button[data-danger] { border-color: currentColor; opacity: .85; }
+button[data-danger]:hover { opacity: 1; }

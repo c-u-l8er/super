@@ -28,6 +28,8 @@
 //! forge a message on a channel it did not create, and nothing else can
 //! obtain one at all.
 
+pub mod effect;
+pub mod sha256;
 pub mod fdpass;
 
 use std::collections::HashMap;
@@ -1364,6 +1366,22 @@ pub fn cli() -> i32 {
                 .join("ampd")
         });
 
+    // **Before the `ampd/` requirement, deliberately.** `effect` performs a
+    // machine operation that was already admitted; it does not start a
+    // runtime, read a world, or consult anything in `ampd/`. Requiring the
+    // runtime's source tree to be present would couple the performer to the
+    // decider in the one direction this boundary exists to remove.
+    if args.get(1).map(String::as_str) == Some("effect") {
+        return effect::run();
+    }
+
+    // Same reason as `effect`, one step earlier: `ampd` asks what this
+    // machine *is* before it decides anything, and answering requires no
+    // world, no runtime and no `ampd/` tree.
+    if args.get(1).map(String::as_str) == Some("identity") {
+        return effect::identity_run();
+    }
+
     if !ampd_dir.join("mix.exs").exists() {
         eprintln!(
             "no ampd/ at {} — run from the release root, or set AMPD_DIR",
@@ -1380,7 +1398,9 @@ pub fn cli() -> i32 {
             0
         }
         Some(other) => {
-            eprintln!("usage: super-host [verify | run <actor> [-- <command>...]]");
+            eprintln!(
+                "usage: super-host [verify | run <actor> [-- <command>...] | effect | identity]"
+            );
             eprintln!("  unknown subcommand: {other}");
             2
         }

@@ -46,14 +46,46 @@ defmodule Ampd.CapabilityRegistry do
           "query.write" => %{"cls" => "remote_write", "deny" => true}}},
       "mcpimport" => %{"installation" => "builtin"}}
   end
+
+  @doc """
+  The `worktree` pack — D.1.1's capability surface.
+
+  **Deliberately not in `initial/0`.** `Ampd.Core.snapshot_of/2` folds
+  every pack's version and policy into the authority snapshot, and that
+  snapshot has a frozen cross-language parity vector
+  (`conformance/authority-vectors.json`, *"authority snapshot parity across
+  languages"*). Seeding a new pack at boot moves the digest, and the two
+  implementations would then disagree about what an authority snapshot
+  *is* — with the Elixir side declaring itself correct because it also
+  wrote the new expectation. The frozen simulator cannot be regenerated
+  from here, so the digest is not this slice's to move.
+
+  So it arrives through an explicit transition, exactly like `postgres`.
+  Which is also the more honest model: the ability to create worktrees on
+  the host is a capability surface an operator installs, not a fact about
+  every world that has ever booted.
+  """
+  def worktree_pack do
+    %{
+      "installation" => "installed",
+      "version" => "0.1.0",
+      "policy" => %{"source_data" => "private"},
+      "surface" => %{
+        "create" => %{"cls" => "local_mutate"},
+        "observe" => %{"cls" => "observe"}
+      }
+    }
+  end
+
   def get(pack), do: GenServer.call(__MODULE__, {:get, pack})
   def all, do: GenServer.call(__MODULE__, :all)
   def install_postgres, do: GenServer.call(__MODULE__, :install_postgres)
+  def install_worktree, do: GenServer.call(__MODULE__, :install_worktree)
   def update_github, do: GenServer.call(__MODULE__, :update_github)
   def reset, do: GenServer.call(__MODULE__, :reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
-  @ordered_ops [:install_postgres, :update_github, :reset, :load_state]
+  @ordered_ops [:install_postgres, :install_worktree, :update_github, :reset, :load_state]
   @impl true
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
@@ -90,6 +122,11 @@ defmodule Ampd.CapabilityRegistry do
   # effect may run. A mutation that cannot be attributed cannot be ordered.
   def handle_ordered(:install_postgres, %{tab: tab, s: s} = st),
     do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, put_in(s, ["postgres", "installation"], "installed"))}}
+
+  # Installing it declares the surface and grants nothing — the runtime's
+  # first law, and `Ampd.LocusTest` asserts it rather than trusting it.
+  def handle_ordered(:install_worktree, %{tab: tab, s: s} = st),
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, Map.put(s, "worktree", worktree_pack()))}}
 
   def handle_ordered(:update_github, %{tab: tab, s: s} = st) do
     s = put_in(s, ["github", "version"], "1.5.0")

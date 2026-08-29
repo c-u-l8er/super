@@ -259,6 +259,70 @@ defmodule Ampd.Authority do
   end
   def commit(surface), do: tx(fn -> GrantRegistry.commit(surface) end)
 
+  # ------------------------------------------------------------ loci · D.1.1
+  @doc """
+  Open a Workspace, a Goal, or a Lane — **human control only**.
+
+  These are here rather than called directly on `Ampd.Loci` for the reason
+  every other registry primitive is: creating a Lane creates a *position
+  from which authority may be established*, and a position that appeared
+  outside the total order would be one a concurrent revocation could not
+  have been ordered against.
+
+  Note what opening a Lane does **not** do: confer anything. A Lane with no
+  grant establishes no worktree — that is F1, and it is the product-level
+  form of the law this runtime has held since C0, *installation confers
+  zero authority*.
+  """
+  def open_workspace(fields), do: tx(fn -> Ampd.Loci.create_workspace(fields) end)
+  def open_goal(fields), do: tx(fn -> Ampd.Loci.create_goal(fields) end)
+  def open_lane(fields), do: tx(fn -> Ampd.Loci.create_lane(fields) end)
+
+  @doc """
+  Establish a worktree for a Lane — the D.1.1 slice, linearized.
+
+  The body is `Ampd.Locus.establish/3`; what this adds is the two things
+  only this module can add: the total order, and the world fence set by
+  `Ampd.Control.command/3`. Both matter here. The order, because the
+  function reads the grant table and then mints a capability from what it
+  read. The fence, because a worktree established against a world
+  incarnation that has since advanced is precisely the case
+  `check/2`'s `capability-generation-stale` exists to refuse, and it would
+  be perverse to create one by not fencing the creation.
+  """
+  def establish_worktree(peer, lane_id, name),
+    do: tx(fn -> Ampd.Locus.establish(peer, lane_id, name) end)
+
+  @doc """
+  Register a repository the runtime may create worktrees from.
+
+  Takes a host path, and is therefore **operator/host only** — no command
+  in `Ampd.CommandSpec` reaches it. It is ordered for the same reason every
+  other authority mutation is: it decides which directory on this machine
+  every future establishment resolves against.
+  """
+  def register_repository(path),
+    do: tx(fn -> Ampd.Worktree.register_repository!(path) end)
+
+  @doc """
+  Interpret every durable crash-cut left by the last shutdown.
+
+  Ordered, because it *writes* — it moves resources into terminal recovery
+  states. `Ampd.Locus.reconcile/0` called `Ampd.Worktree.quarantine_as/3`
+  directly at first, from outside the coordinator, and every one of those
+  writes was refused as `unordered-authority-mutation` while the function
+  cheerfully returned the interpretations it had failed to persist. The
+  symptom was that recovery never converged: each boot re-derived the same
+  verdict because the previous boot had not managed to record it.
+
+  That is the same defect class the D.1.1a review found in the lifecycle
+  calls, reached from the opposite direction — there a mutation was served
+  when it should have been refused; here one was refused when it should
+  have been served. Both are what happens when the ordered boundary is
+  reasoned about instead of exercised.
+  """
+  def reconcile_worktrees, do: tx(fn -> Ampd.Locus.reconcile() end)
+
   # --------------------------------------------------------------- session
   def end_run, do: tx(fn -> Session.end_run() end)
   def set_world(w), do: tx(fn -> Session.set_world(w) end)
@@ -267,6 +331,7 @@ defmodule Ampd.Authority do
   # Policy is authority: `source_data` and secret residency decide *where*
   # an effect may run, so changing them is ordered like a grant change.
   def install_postgres, do: tx(fn -> CapabilityRegistry.install_postgres() end)
+  def install_worktree, do: tx(fn -> CapabilityRegistry.install_worktree() end)
   def update_github, do: tx(fn -> CapabilityRegistry.update_github() end)
 
   # -------------------------------------------------------------- consent

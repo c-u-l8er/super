@@ -31,6 +31,19 @@ defmodule Ampd.Application do
       Ampd.Approvals,
       Ampd.Receipts,
       Ampd.Effects,
+      # The semantic objects, and the trusted edge that resolves one of
+      # them to a directory. After the registries because establishing a
+      # capability reads the grant table, and before the bridge because a
+      # Lane must be answerable the moment a channel can ask about one.
+      Ampd.Loci,
+      Ampd.Worktree,
+      # **Not an authority store.** It caches a measurement of the machine
+      # that performs effects — which host binary, which git, under which
+      # hardening policy — so that `Ampd.Locus.check/2` can bind that into
+      # the embodiment basis without forking on every authority check.
+      # Losing it costs one re-measurement, which is why it holds no dets
+      # table and is absent from `Ampd.World.authority_stores/0`.
+      Ampd.Embodiment,
       # Last: the bridge creates the sockets the outside world arrives on,
       # and nothing should be reachable before the registries that answer
       # it are up. A channel that accepted a connection during boot would
@@ -55,6 +68,23 @@ defmodule Ampd.Application do
         if moved != [] do
           require Logger
           Logger.warning("ampd: #{length(moved)} effect(s) recovered as UNKNOWN — reconcile required: #{inspect(moved)}")
+        end
+
+        # Same rule, one layer out — and it takes all three durable stores
+        # to apply. Establishment writes to `worktrees`, `receipts` and
+        # `loci`, so the state a crash leaves is a *combination* that no
+        # single store can see. `Ampd.Locus.reconcile/0` is the only place
+        # that can, and it never promotes: a cut it cannot interpret
+        # becomes RECOVERY_REQUIRED for a person, not `active`.
+        unresolved = Ampd.Authority.reconcile_worktrees()
+
+        if unresolved != [] do
+          require Logger
+
+          Logger.warning(
+            "ampd: #{length(unresolved)} worktree(s) need recovery — " <>
+              Enum.map_join(unresolved, "; ", fn {ref, state, why} -> "#{ref} #{state}: #{why}" end)
+          )
         end
 
         ok

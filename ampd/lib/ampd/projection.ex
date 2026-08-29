@@ -88,6 +88,25 @@ defmodule Ampd.Projection do
       "reconcile_queue" => Enum.map(Effects.reconcile_queue(), & &1["id"]),
       "peers" => Ampd.Peer.list(),
       "channels" => Ampd.Bridge.list(),
+
+      # --- the positions authority is held FROM -------------------------
+      #
+      # The operator's projection is world-complete by design — this is the
+      # person, and the world is theirs. The agent projection stays
+      # ancestry-closed; see `Ampd.Control`'s `list_loci`.
+      #
+      # `repositories` carries `ref` only. The operator registered the path
+      # and can see it in their own shell; putting it in a projection that
+      # is serialized, framed, coalesced and rendered would make every
+      # confinement argument above it decorative the moment a pane is
+      # screenshotted or a frame is logged.
+      "workspaces" => Ampd.Loci.workspaces(),
+      "goals" => Ampd.Loci.goals(),
+      "lanes" => Ampd.Loci.lanes(),
+      "worktree_caps" => Ampd.Loci.caps(),
+      "repositories" => Ampd.Worktree.repos() |> Map.new(fn {ref, _} -> {ref, %{"ref" => ref}} end),
+      "worktree_resources" =>
+        Ampd.Worktree.resources() |> Map.new(fn {ref, r} -> {ref, Ampd.Locus.view(r)} end),
       "recent_refusals" => Ampd.RefusalLog.recent(20),
       "seals" => Enum.map(Ampd.seals(), fn {m, reason} -> %{"registry" => inspect(m), "reason" => reason} end),
       "runtime" => runtime_status(),

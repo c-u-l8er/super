@@ -263,8 +263,124 @@ defmodule Ampd.Control do
 
   defp dispatch(_peer, :inspect_refusal, [id]), do: inspect_refusal(id)
 
+  # ------------------------------------------------------------ loci · D.1.1
+  # The Carrier is `peer`, and it is the runtime's record of the binding
+  # rather than anything the caller sent. That is the whole of F8: a fresh
+  # Carrier attaching as somebody else reaches no capability, however well
+  # it knows the ids.
+  defp dispatch(peer, :establish_worktree, [locus_ref, name]) do
+    Authority.establish_worktree(peer, locus_ref, name)
+    |> settled(fn r -> Map.put(r, "allow", true) end)
+  end
+
+  defp dispatch(peer, :observe_worktree, [cap_ref]) do
+    Ampd.Locus.observe(peer, cap_ref)
+    |> settled(fn v -> %{"allow" => true, "resource" => v} end)
+  end
+
+  defp dispatch(peer, :attach_locus, [locus_ref]) do
+    Ampd.Locus.reconstruct(peer, locus_ref)
+    |> settled(fn r -> Map.put(r, "allow", true) end)
+  end
+
+  # **Ancestry-closed, not table-wide.**
+  #
+  # This filtered `lanes` by actor and then returned `Ampd.Loci.workspaces()`
+  # and `Ampd.Loci.goals()` whole — so an agent could not see another
+  # actor's Lane and could see every Workspace and every Goal in the World,
+  # including their titles. That is the W.1.3.2 class exactly: **visibility
+  # is scoped authority**, and a projection that filters the leaf while
+  # serving the tree has not scoped anything.
+  #
+  # The projection is now the closure of what the caller can legitimately
+  # observe — visible lanes, then their goals, then those goals'
+  # workspaces — rather than a whole-table read with one filter on top.
+  # The operator's projection stays world-complete, because the operator is
+  # who the world is for.
+  defp dispatch(peer, :list_loci, _) do
+    all_lanes = Ampd.Loci.lanes()
+    operator? = peer["channel"] == :human_control
+
+    lanes =
+      if operator?,
+        do: all_lanes,
+        else: Map.filter(all_lanes, fn {_, l} -> l["actor"] == peer["actor"] end)
+
+    {goals, workspaces} =
+      if operator? do
+        {Ampd.Loci.goals(), Ampd.Loci.workspaces()}
+      else
+        goal_refs = lanes |> Map.values() |> MapSet.new(& &1["goal_ref"])
+        goals = Map.filter(Ampd.Loci.goals(), fn {id, _} -> MapSet.member?(goal_refs, id) end)
+
+        ws_refs = goals |> Map.values() |> MapSet.new(& &1["workspace_ref"])
+        {goals, Map.filter(Ampd.Loci.workspaces(), fn {id, _} -> MapSet.member?(ws_refs, id) end)}
+      end
+
+    %{
+      "allow" => true,
+      "workspaces" => workspaces,
+      "goals" => goals,
+      "lanes" => lanes,
+      "count" => map_size(lanes)
+    }
+  end
+
   # ------------------------------------------------------- human control
   defp dispatch(_peer, :operator_projection, _), do: Projection.operator()
+
+  # Opening a Lane names the actor that may occupy it. That is a person
+  # deciding who stands where, and it is the only place the association is
+  # made — an agent cannot open a Lane and cannot name itself into one.
+  defp dispatch(_peer, :open_workspace, [name]) do
+    Authority.open_workspace(%{"name" => name, "world_ref" => Ampd.World.lineage()})
+    |> settled(fn w -> %{"allow" => true, "workspace" => w} end)
+  end
+
+  # **Referential closure, enforced at the authority boundary.**
+  #
+  # A Locus's surroundings are supposed to be load-bearing — that is the
+  # whole claim of the position — and a phantom ancestor cannot be an
+  # established surrounding. `open_goal` accepted any `workspace_ref` that
+  # merely had the right prefix, so a Goal could be created under a
+  # Workspace that has never existed, and a Lane could then stand on it.
+  defp dispatch(_peer, :open_goal, [workspace_ref, title]) do
+    if Ampd.Loci.workspace(workspace_ref) == nil do
+      refuse("workspace-unknown", "No such workspace.", %{"workspace_ref" => workspace_ref})
+    else
+      Authority.open_goal(%{"workspace_ref" => workspace_ref, "title" => title})
+      |> settled(fn g -> %{"allow" => true, "goal" => g} end)
+    end
+  end
+
+  defp dispatch(_peer, :open_lane, [goal_ref, actor, repository_ref, base_revision]) do
+    goal = Ampd.Loci.goal(goal_ref)
+
+    cond do
+      goal == nil ->
+        refuse("goal-unknown", "No such goal.", %{"goal_ref" => goal_ref})
+
+      # The repository was checked at establishment and not at open, so a
+      # Lane could be opened naming a repository that does not resolve and
+      # only discover it much later — with the Lane already durable and
+      # already presented as a position someone occupies.
+      Ampd.Worktree.repo(repository_ref) == nil ->
+        refuse("repository-unknown", "No such repository.", %{
+          "repository_ref" => repository_ref
+        })
+
+      true ->
+        Authority.open_lane(%{
+          "workspace_ref" => goal["workspace_ref"],
+          "goal_ref" => goal_ref,
+          "actor" => actor,
+          "repository_ref" => repository_ref,
+          "base_revision" => base_revision,
+          "status" => "open"
+        })
+        |> settled(fn l -> %{"allow" => true, "lane" => l} end)
+    end
+  end
 
   defp dispatch(_peer, :approve_effect, [request_id, approval_id]),
     do: approve_effect(request_id, approval_id)

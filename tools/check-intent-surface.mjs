@@ -31,7 +31,7 @@
    down why it is excluded.                                              */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -116,6 +116,35 @@ check(
   'every authority operation a person has is reachable from the cockpit',
   missing.length === 0,
   `declared by the runtime, absent from the cockpit: ${missing.join(', ')}`,
+);
+
+/* **The loophole this gate had, closed.**
+
+   Every check above reads `INTENT_SURFACE`, which is a `const` in
+   `worker.rs`. So the cheapest way to turn the check above green has
+   always been to append three strings — after which the gate reports that
+   a person can reach an operation they cannot see, cannot type into, and
+   cannot press. That is W.1.4.2's dead-code-that-reads-like-a-check with
+   the check and the code in different languages.
+
+   D.1.1 left this red rather than take that shortcut. Refusing a shortcut
+   is a decision one session makes; removing it is a property the tree
+   keeps. So: an intent must also be *submittable from the page*, which
+   means the name appears in `ui/cockpit.js` as either a row action
+   (`intent: 'name'`, rendered to `data-intent`) or a form
+   (`'name'` handled in `argsFor`, rendered to `data-intent-form`).
+
+   This is still a source-level probe and it does not prove the button
+   works — `cockpit-battery.mjs` drives the real webview for that. What it
+   proves is that the const and the page cannot drift apart silently,
+   which is the specific failure that was available here.                */
+const ui = readFileSync(`${ROOT}/cockpit/ui/cockpit.js`, 'utf8');
+const unsubmittable = surface.filter((n) => !ui.includes(`'${n}'`) && !ui.includes(`"${n}"`));
+check(
+  'every intent the cockpit declares is submittable from the page',
+  unsubmittable.length === 0,
+  `on INTENT_SURFACE, absent from ui/cockpit.js: ${unsubmittable.join(', ')} — ` +
+    'appending a name to the const does not make a person able to perform it',
 );
 
 console.log(`\n  covering ${surface.length} of ${humanMutations.length} human-control mutations`);

@@ -173,7 +173,15 @@ defmodule Ampd.CockpitTest do
       list_grant_requests: {kestrel, [nil, 50]},
       inspect_refusal: {kestrel, [cid]},
       operator_projection: {human, []},
-      recovery_status: {human, []}
+      recovery_status: {human, []},
+      # D.1.1's reads. The refs are deliberately ones that do not exist:
+      # what is under test here is that a read is *framed*, and a refusal
+      # is a read's answer as much as a hit is. A framing that only
+      # applied on the success path would leave every refusal
+      # unattributable to an incarnation.
+      attach_locus: {kestrel, ["ln_0001"]},
+      observe_worktree: {kestrel, ["wc_0001"]},
+      list_loci: {kestrel, []}
     }
 
     # **Derived from `Ampd.CommandSpec`, not from this list.** A read added
@@ -712,12 +720,19 @@ defmodule Ampd.CockpitTest do
     # Enforced at compile time in `Ampd.CommandSpec`; asserted here so the
     # classification itself is visible, and so a read moved into `:safe`
     # because a probe was inconvenient shows up as a change to this list.
-    assert CommandSpec.retry_once() == [:inspect_refusal, :preflight]
+    # `attach_locus` and `observe_worktree` joined the `:once` list in
+    # D.1.1 for the reason the field exists: refusing is most of what they
+    # do, and `Ampd.Refusal.new/2` records into the ring as it constructs.
+    # `list_loci` is `:safe` because it constructs no refusal — it filters
+    # by the peer's own binding and returns whatever survives.
+    assert CommandSpec.retry_once() ==
+             [:attach_locus, :inspect_refusal, :observe_worktree, :preflight]
 
     safe = CommandSpec.reads() -- CommandSpec.retry_once()
     assert :agent_projection in safe
     assert :operator_projection in safe
     assert :list_receipts in safe
+    assert :list_loci in safe
   end
 
   test "an observation is ordered but is not an operation" do

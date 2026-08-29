@@ -26,7 +26,11 @@ defmodule Ampd.Bootstrap do
       {"grant_registry", Ampd.GrantRegistry.initial()},
       {"approvals", Ampd.Approvals.initial()},
       {"receipts", Ampd.Receipts.initial()},
-      {"effects", Ampd.Effects.initial()}
+      {"effects", Ampd.Effects.initial()},
+      # Zero lanes and zero resources. A fresh world confers nothing, and
+      # that includes conferring a position to confer things from.
+      {"loci", Ampd.Loci.initial()},
+      {"worktrees", Ampd.Worktree.initial()}
     ]
   end
 
@@ -164,4 +168,6 @@ defmodule Ampd.Bootstrap do
   defp registry_for("approvals"), do: Ampd.Approvals
   defp registry_for("receipts"), do: Ampd.Receipts
   defp registry_for("effects"), do: Ampd.Effects
+  defp registry_for("loci"), do: Ampd.Loci
+  defp registry_for("worktrees"), do: Ampd.Worktree
 end

@@ -80,6 +80,13 @@ defmodule Ampd.CommandSpec do
   @scope_bytes 4 * 1024
   @max_expected_ids 512
 
+  # A worktree leaf name. 64 B rather than 512 because it becomes one path
+  # segment, and the limit that matters is the one the filesystem has —
+  # `Ampd.Worktree.legal_name?/1` narrows it much further, to a character
+  # class. This bound exists so an oversized name is refused by the
+  # protocol before any module has to reason about it.
+  @name_bytes 64
+
   # ---------------------------------------------------------------------
   # The registry. `fields` is an ordered list: the order *is* the internal
   # positional calling convention `Ampd.Control.command/3` receives.
@@ -231,7 +238,79 @@ defmodule Ampd.CommandSpec do
         %{name: "cursor", type: {:id, "gq_"}, required: false, default: nil},
         %{name: "limit", type: {:count, 200}, required: false, default: 50}
       ]
-    }
+    },
+
+    # ------------------------------------------------- loci · D.1.1
+    #
+    # **Not one of these declares a path-typed field, and that is the
+    # point of the slice.** Every reference below is an opaque id minted
+    # by the runtime. A Lane that somehow learned a host path has no
+    # command to say it in, so the confinement argument in
+    # `Ampd.Worktree` is not the only thing standing between a Lane and
+    # the filesystem — the grammar is.
+    #
+    # `open_lane` takes a `repository_ref`, never a repository path.
+    # Registering a repository is a host-level trust decision made
+    # through `Ampd.Worktree.register_repository!/1`, and it is recorded
+    # in the D.1.1 ambient-authority census as exactly that rather than
+    # dressed up as a typed command.
+    "open_workspace" => %{
+      cmd: :open_workspace,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [%{name: "name", type: {:string, @name_bytes}, required: true}]
+    },
+    "open_goal" => %{
+      cmd: :open_goal,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "workspace_ref", type: {:id, "ws_"}, required: true},
+        %{name: "title", type: {:string, @reason_bytes}, required: true}
+      ]
+    },
+    "open_lane" => %{
+      cmd: :open_lane,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "goal_ref", type: {:id, "gl_"}, required: true},
+        %{name: "actor", type: {:string, @cap_bytes}, required: true},
+        %{name: "repository_ref", type: {:id, "rp_"}, required: true},
+        %{name: "base_revision", type: {:string, @cap_bytes}, required: false, default: nil}
+      ]
+    },
+    "establish_worktree" => %{
+      cmd: :establish_worktree,
+      channel: :agent,
+      kind: :mutation,
+      fields: [
+        %{name: "locus_ref", type: {:id, "ln_"}, required: true},
+        %{name: "name", type: {:string, @name_bytes}, required: true}
+      ]
+    },
+
+    # `retry: :once`, not `:safe`. Both of these refuse — that is most of
+    # what they do — and `Ampd.Refusal.new/2` records into the refusal
+    # ring as it constructs. A read that writes as it decides must not be
+    # speculated on under the seqlock; declaring these `:safe` would have
+    # one client command deposit four refusals and show the client one,
+    # which is the defect the `retry:` field was added to prevent.
+    "observe_worktree" => %{
+      cmd: :observe_worktree,
+      channel: :agent,
+      kind: :read,
+      retry: :once,
+      fields: [%{name: "capability_ref", type: {:id, "wc_"}, required: true}]
+    },
+    "attach_locus" => %{
+      cmd: :attach_locus,
+      channel: :agent,
+      kind: :read,
+      retry: :once,
+      fields: [%{name: "locus_ref", type: {:id, "ln_"}, required: true}]
+    },
+    "list_loci" => %{cmd: :list_loci, channel: :both, kind: :read, retry: :safe, fields: []}
   }
 
   # **Every command declares whether it reads or mutates, and the build
