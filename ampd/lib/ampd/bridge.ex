@@ -51,7 +51,7 @@ defmodule Ampd.Bridge do
     # reference to the bridge rather than two of unclear ownership.
     case bridge_fd(opts) do
       nil ->
-        {:ok, %{channels: %{}, control_open: false, bridge: nil}}
+        {:ok, %{channels: %{}, control_open: false, bridge: nil, effect: nil}}
 
       fd ->
         if admissible?(fd, Ampd.NativeFd.available?()) do
@@ -65,7 +65,7 @@ defmodule Ampd.Bridge do
                 nil
             end
 
-          {:ok, %{channels: %{}, control_open: false, bridge: bridge}}
+          {:ok, %{channels: %{}, control_open: false, bridge: bridge, effect: nil}}
         else
           IO.puts(:stderr, """
           AMPD REFUSES TO OPEN THE BRIDGE — there is no descriptor sink.
@@ -123,6 +123,54 @@ defmodule Ampd.Bridge do
 
   @doc "Every channel this bridge is serving, for the operator projection."
   def list, do: GenServer.call(__MODULE__, :list)
+
+  # =================================================== D.1.3a · the effect endpoint
+  @doc """
+  Take possession of the **host effect endpoint** and record the
+  incarnation it belongs to.
+
+  This module already holds the descriptors that carry *identity*. D.1.3a
+  gives it the one that carries *mechanism*, and deliberately does not
+  build a second place to keep descriptors: a `EffectChannelRegistry`
+  would have been a new supervised process, a new descriptor owner and a
+  new disposal path for a fact that already had an owner. The WEK
+  measurement is that it is not there.
+
+  `incarnation` is an `effect-channel@1` map minted by whoever created the
+  pair — the host in production, the harness in a test. It is **ephemeral
+  and is not authority**: it dies with the channel, nothing durable
+  references it, and a replacement channel gets a new one. Its only job is
+  to let an observation from a previous incarnation be recognised and
+  refused rather than accidentally satisfying a request on this one.
+
+  Consumes the argument exactly once, like `adopt_channel/3`: an endpoint
+  that replaces an existing one disposes of the one it replaces, because a
+  bridge holding two effect endpoints has no way to say which is current.
+  """
+  def bind_effect_endpoint(fd_or_socket, incarnation) when is_map(incarnation),
+    do: GenServer.call(__MODULE__, {:bind_effect, fd_or_socket, incarnation}, 10_000)
+
+  @doc """
+  The possessed endpoint and its incarnation, or `nil`.
+
+  **In-BEAM this is reachable by name and that is not claimed otherwise.**
+  `Ampd.Bridge`'s own moduledoc has said since C1.1 that any code inside
+  the runtime can bind a descriptor to any actor; the same is true here,
+  and for the same reason — the runtime *is* the thing trusted to hold
+  descriptors. What D.1.3a moves is the **production effect path**, which
+  no longer resolves an executable by pathname. Same-UID in-process
+  reachability is D.1.3b's question and is not answered here.
+  """
+  def effect_endpoint, do: GenServer.call(__MODULE__, :effect_endpoint)
+
+  @doc """
+  Drop the effect endpoint — the channel is gone.
+
+  **Never a reason to replay.** This closes ampd's end and forgets the
+  incarnation; it says nothing about whether an effect submitted on it
+  happened. `Ampd.Worktree.EffectChannel` is where that rule lives.
+  """
+  def drop_effect_endpoint, do: GenServer.call(__MODULE__, :drop_effect)
 
   @doc """
   Close every channel and free the control claim.
@@ -236,6 +284,51 @@ defmodule Ampd.Bridge do
   def handle_call(:list, _f, st),
     do: {:reply, Enum.map(Map.values(st.channels), & &1.meta), st}
 
+  # ------------------------------------------- D.1.3a · the effect endpoint
+  #
+  # One clause, and disposal is unconditional on every exit — the law
+  # `{:adopt, ...}` learned the hard way. A refused or replaced endpoint
+  # that is merely dropped from the map is a descriptor this process still
+  # holds and nothing will ever close.
+  def handle_call({:bind_effect, fd_or_socket, incarnation}, _f, st) do
+    case as_socket(fd_or_socket) do
+      {:ok, sock} ->
+        # A replacement disposes of what it replaces. Two endpoints and no
+        # way to say which is current is the state the incarnation exists
+        # to make impossible, so it must not be reachable here either.
+        if st.effect, do: dispose(st.effect.sock)
+
+        # Visible in the operator projection as an embodiment change, and
+        # `identity_probe/0` is keyed on the epoch, so binding a new
+        # incarnation re-measures the basis. That is correct: a different
+        # endpoint may be a different machine.
+        Ampd.AuthorityCoordinator.touched()
+
+        {:reply, {:ok, incarnation}, %{st | effect: %{sock: sock, incarnation: incarnation}}}
+
+      :error ->
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("effect-endpoint-adopt-failed",
+            component: "Ampd.Bridge",
+            retryable: false,
+            requires_human: false,
+            public_message: "The runtime could not adopt that effect endpoint.",
+            operator_detail: %{"reason" => "not a usable descriptor"})}, st}
+    end
+  end
+
+  def handle_call(:effect_endpoint, _f, st), do: {:reply, st.effect, st}
+
+  def handle_call(:drop_effect, _f, st) do
+    if st.effect do
+      dispose(st.effect.sock)
+      Ampd.AuthorityCoordinator.touched()
+    end
+
+    {:reply, :ok, %{st | effect: nil}}
+  end
+
   # **A barrier, not a broadcast.**
   #
   # This demonitored every channel — dropping the backstop F.8.2.2 exists
@@ -285,8 +378,17 @@ defmodule Ampd.Bridge do
       Ampd.Transport.Connection.rollback(ch.sock, ch.peer)
     end)
 
+    # **The effect endpoint goes with the world, like every channel does.**
+    # Re-initializing a world invalidates every open channel; an endpoint
+    # that survived one would be a possessed mechanism bound to a world
+    # that no longer exists, which is the stale-consent problem with a
+    # descriptor attached. The incarnation dies here and a replacement gets
+    # a new epoch — which is also what makes `C12` true, because there is
+    # no path on which losing a channel refreshes or widens anything.
+    if st.effect, do: dispose(st.effect.sock)
+
     Ampd.AuthorityCoordinator.touched()
-    {:reply, :ok, %{st | channels: %{}, control_open: false}}
+    {:reply, :ok, %{st | channels: %{}, control_open: false, effect: nil}}
   end
 
   # The disposal half of the contract. An integer is a raw descriptor and

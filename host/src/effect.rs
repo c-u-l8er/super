@@ -387,16 +387,99 @@ pub fn identity_run() -> i32 {
     0
 }
 
+/// A refusal, as a value rather than as a print.
+///
+/// Split out from `fail` so that the same refusal can be written to a
+/// socket. `fail` keeps the exit-code contract; this keeps the shape.
+///
+/// Deliberately **no `identity`**, on the failure path only — a refused
+/// effect creates nothing, so there is no commitment for an identity to be
+/// wrong about, and hashing two binaries to decorate an error is a cost
+/// with no reader.
+pub fn refusal(reason: String) -> Value {
+    json!({
+        "schema": "worktree-effect-observation@1",
+        "ok": false,
+        "reason": reason,
+        "confinement": confinement_profile(),
+    })
+}
+
+/// Perform one already-admitted `worktree-effect-request@1` and return one
+/// `worktree-effect-observation@1`.
+///
+/// **This is the whole mechanism, with no I/O in it.** `run` is stdin/stdout
+/// glue over this function and a socket server would be glue of a different
+/// shape over the same one — which is the point: moving how the request
+/// *arrives* must not move what performing it *means*, or the two transports
+/// would be two effectors and the parity check between them would be
+/// comparing a thing to itself.
+///
+/// Carries no actor, no lane, no capability, no grant and no world, so there
+/// is nothing here to form an opinion about. It performs an operation that
+/// was already admitted and it is not a second gate.
+///
+/// **Correlation fields are not read here.** `request_id` and
+/// `channel_epoch` belong to whatever carried the request; binding them to
+/// the reply is the transport's job, and letting the mechanism see them
+/// would be letting it decide which request it is answering.
+pub fn perform(req: &Value) -> Value {
+    if req["schema"] != "worktree-effect-request@1" {
+        return refusal(format!(
+            "unknown request schema: {}",
+            req["schema"].as_str().unwrap_or("(absent)")
+        ));
+    }
+
+    let repo = match req["repo_path"].as_str() {
+        Some(s) => s,
+        None => return refusal("repo_path is required".into()),
+    };
+    let target = match req["target"].as_str() {
+        Some(s) => s,
+        None => return refusal("target is required".into()),
+    };
+    let revision = req["revision"].as_str().unwrap_or("HEAD");
+
+    if req["op"] != "create" {
+        return refusal(format!(
+            "unknown op: {}",
+            req["op"].as_str().unwrap_or("(absent)")
+        ));
+    }
+
+    if let Err(e) = git(repo, &["worktree", "add", "--detach", target, revision]) {
+        return refusal(e);
+    }
+
+    // Observed, not assumed. The host reports what it can see; `ampd`
+    // decides whether that is good enough, re-checks confinement against
+    // its own root, and is the only thing that may commit.
+    let exists = Path::new(target).is_dir();
+    let head = match git(target, &["rev-parse", "HEAD"]) {
+        Ok(h) => h.trim().to_string(),
+        Err(e) => return refusal(e),
+    };
+
+    json!({
+        "schema": "worktree-effect-observation@1",
+        "ok": true,
+        "head": head,
+        "observed_dir": exists,
+        "confinement": confinement_profile(),
+        // **The machine that performed it, reported by the machine that
+        // performed it.** `ampd` builds the embodiment basis by asking
+        // `super-host identity` beforehand and caches the answer; this
+        // field is what lets it check that the thing which then ran was
+        // the thing it admitted under. Without it the basis is a claim
+        // about a lookup, not about an execution, and a binary swapped
+        // between the lookup and the exec would go unnoticed.
+        "identity": identity(),
+    })
+}
+
 fn fail(reason: String) -> i32 {
-    println!(
-        "{}",
-        json!({
-            "schema": "worktree-effect-observation@1",
-            "ok": false,
-            "reason": reason,
-            "confinement": confinement_profile(),
-        })
-    );
+    println!("{}", refusal(reason));
     // **Zero, deliberately.** A well-formed refusal is a successful
     // observation of a failed effect, and `ampd` reads the typed answer
     // rather than the exit code. Exiting non-zero would make a legitimate
@@ -435,65 +518,10 @@ pub fn run() -> i32 {
         Err(e) => return fail(format!("the request is not valid JSON: {e}")),
     };
 
-    if req["schema"] != "worktree-effect-request@1" {
-        return fail(format!(
-            "unknown request schema: {}",
-            req["schema"].as_str().unwrap_or("(absent)")
-        ));
-    }
-
-    let repo = match req["repo_path"].as_str() {
-        Some(s) => s,
-        None => return fail("repo_path is required".into()),
-    };
-    let target = match req["target"].as_str() {
-        Some(s) => s,
-        None => return fail("target is required".into()),
-    };
-    let revision = req["revision"].as_str().unwrap_or("HEAD");
-
-    if req["op"] != "create" {
-        return fail(format!(
-            "unknown op: {}",
-            req["op"].as_str().unwrap_or("(absent)")
-        ));
-    }
-
-    if let Err(e) = git(repo, &["worktree", "add", "--detach", target, revision]) {
-        return fail(e);
-    }
-
-    // Observed, not assumed. The host reports what it can see; `ampd`
-    // decides whether that is good enough, re-checks confinement against
-    // its own root, and is the only thing that may commit.
-    let exists = Path::new(target).is_dir();
-    let head = match git(target, &["rev-parse", "HEAD"]) {
-        Ok(h) => h.trim().to_string(),
-        Err(e) => return fail(e),
-    };
-
-    println!(
-        "{}",
-        json!({
-            "schema": "worktree-effect-observation@1",
-            "ok": true,
-            "head": head,
-            "observed_dir": exists,
-            "confinement": confinement_profile(),
-            // **The machine that performed it, reported by the machine that
-            // performed it.** `ampd` builds the embodiment basis by asking
-            // `super-host identity` beforehand and caches the answer; this
-            // field is what lets it check that the thing which then ran was
-            // the thing it admitted under. Without it the basis is a claim
-            // about a lookup, not about an execution, and a binary swapped
-            // between the lookup and the exec would go unnoticed.
-            //
-            // On the failure path deliberately not included: a refused
-            // effect creates nothing, so there is no commitment for an
-            // identity to be wrong about, and hashing two binaries to
-            // decorate an error is a cost with no reader.
-            "identity": identity(),
-        })
-    );
+    // Every decision about the request now lives in `perform`, so this
+    // subcommand and any future socket server cannot drift into disagreeing
+    // about what a request means. The exit code stays 0 either way — see
+    // `fail` for why a refusal is a successful observation.
+    println!("{}", perform(&req));
     0
 }
