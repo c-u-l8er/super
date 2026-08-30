@@ -253,6 +253,41 @@ probe "the ruleset descriptor colliding with the allowlist is noticed" \
   host/src/confine.rs \
   's|    let rs = relocate_above_allowlist(rs as RawFd)?;|    let rs = rs as RawFd;|'
 
+# --- the negative syscall census -------------------------------------
+#
+# These three answer the review objection directly. Every one of them
+# leaves the *mechanism* fully installed — Landlock, seccomp and
+# no_new_privs all still enforce — and removes exactly one number from
+# the deny list. If the census were reading a general property rather
+# than issuing the syscall, all three would stay green.
+
+# 18 · The anonymous file. `memfd_create` produces a file with no name on
+#      any filesystem, so Landlock — whose entire vocabulary is pathnames
+#      — cannot see it. Nothing but this list closes it, which is why its
+#      absence has to be loud.
+probe "memfd_create left reachable is noticed" \
+  "memfd_create is refused inside a Carrier" \
+  host/src/confine.rs \
+  's|^    319, // memfd_create$|    // 319, // memfd_create|'
+
+# 19 · The other half of the same escape. `execve` is deliberately
+#      permitted and bounded by Landlock's FS_EXECUTE grant; `execveat`
+#      takes a descriptor instead of a path and is bounded by nothing at
+#      all unless it is on this list.
+probe "execveat left reachable is noticed" \
+  "execveat_other_binary is refused inside a Carrier" \
+  host/src/confine.rs \
+  's|^    322, // execveat$|    // 322, // execveat|'
+
+# 20 · Process creation. The fixture needs none of it and the probe no
+#      longer forks, so this is pure policy — and it is the row whose
+#      first version went green over a fork that had already been
+#      refused, which is the defect the rewrite removed.
+probe "fork left reachable is noticed" \
+  "fork is refused inside a Carrier" \
+  host/src/confine.rs \
+  's|^    57,  // fork$|    // 57,  // fork|'
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.

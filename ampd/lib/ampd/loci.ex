@@ -250,6 +250,7 @@ defmodule Ampd.Loci do
       "lanes" => %{},
       "workers" => %{},
       "caps" => %{},
+      "carrier_attempts" => %{},
       "seq" => 0
     }
 
@@ -266,6 +267,7 @@ defmodule Ampd.Loci do
       "lanes" => %{},
       "workers" => %{},
       "caps" => %{},
+      "carrier_attempts" => %{},
       "seq" => 0
     }
 
@@ -321,6 +323,25 @@ defmodule Ampd.Loci do
   def put_cap(id, patch), do: GenServer.call(__MODULE__, {:patch, "caps", id, patch})
   def put_lane(id, patch), do: GenServer.call(__MODULE__, {:patch, "lanes", id, patch})
   def put_worker(id, patch), do: GenServer.call(__MODULE__, {:patch, "workers", id, patch})
+
+  # --- carrier start attempts -----------------------------------------
+  #
+  # A **new collection**, not a ninth authority store. Three prior slices each
+  # declined to add a store and recorded the declination as the measurement;
+  # this one has no better claim. The load-bearing test `Ampd.Store` states is
+  # whether losing it would require sealing the world — and losing the attempt
+  # table can only *subtract* reachable authority, because an attempt confers
+  # nothing. What it costs is the ability to notice that a process may exist,
+  # which is a recovery question and not an authority one.
+  #
+  # Keyed by `ticket_id` rather than by the shared `seq`: a ticket id is minted
+  # from a CSPRNG in `Ampd.Carrier` and the record must carry the same id the
+  # machine phase was handed, or the commit would be matching on a value the
+  # store chose after the fact.
+  def create_attempt(ticket), do: GenServer.call(__MODULE__, {:create_attempt, ticket})
+  def patch_attempt(id, patch), do: GenServer.call(__MODULE__, {:patch, "carrier_attempts", id, patch})
+  def attempts, do: GenServer.call(__MODULE__, {:all, "carrier_attempts"}) |> Map.values()
+  def attempt(id), do: GenServer.call(__MODULE__, {:get, "carrier_attempts", id})
   def reset, do: GenServer.call(__MODULE__, :reset)
 
   # --- ordered-authority boundary -------------------------------------
@@ -330,7 +351,7 @@ defmodule Ampd.Loci do
   # grant registry has held since C1.1.0, for the same reason: a mutation
   # that cannot be attributed cannot be ordered against a concurrent
   # revocation.
-  @ordered_ops [:create, :patch, :reset, :load_state]
+  @ordered_ops [:create, :create_attempt, :patch, :reset, :load_state]
   @impl true
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
@@ -381,6 +402,12 @@ defmodule Ampd.Loci do
     rec = Map.merge(%{"schema" => schema, "id" => id}, fields)
     s2 = s |> put_in([kind, id], rec) |> Map.put("seq", seq)
     {:reply, rec, %{st | s: Ampd.Store.save(tab, s2)}}
+  end
+
+  def handle_ordered({:create_attempt, ticket}, %{tab: tab, s: s} = st) do
+    id = ticket["ticket_id"]
+    s2 = put_in(s, ["carrier_attempts", id], ticket)
+    {:reply, {:ok, ticket}, %{st | s: Ampd.Store.save(tab, s2)}}
   end
 
   def handle_ordered({:patch, kind, id, patch}, %{tab: tab, s: s} = st) do

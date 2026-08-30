@@ -692,6 +692,39 @@ defmodule Ampd.Transport do
       end
     end
 
+    # The Carrier lifecycle channel. Same validation, same disposal, same
+    # closed-enum discipline — deliberately a copy rather than a shared
+    # helper parameterised by a protocol string, because the thing that
+    # differs between these two clauses is *which endpoint a descriptor is
+    # bound to*, and a helper that took that as an argument would be a place
+    # where passing the wrong one binds a Carrier channel as the effect
+    # channel. Two explicit clauses cannot be called with the wrong key.
+    defp run("bind_carrier_channel", %{"incarnation" => inc}, [fd | rest]) when is_map(inc) do
+      Enum.each(rest, &close_fd/1)
+
+      epoch = inc["channel_epoch"]
+
+      cond do
+        inc["schema"] != Ampd.Worktree.EffectChannel.channel_schema() ->
+          close_fd(fd)
+          err("invalid-carrier-channel", %{"reason" => "not an effect-channel@1 incarnation"})
+
+        not is_binary(epoch) or byte_size(epoch) < 16 or byte_size(epoch) > 128 ->
+          close_fd(fd)
+          err("invalid-carrier-channel", %{"reason" => "channel_epoch must be 16..128 bytes"})
+
+        inc["protocol"] != Ampd.Carrier.Machine.Channel.protocol() ->
+          close_fd(fd)
+          err("invalid-carrier-channel", %{"reason" => "unknown carrier protocol"})
+
+        true ->
+          case Ampd.Bridge.bind_carrier_endpoint(fd, inc) do
+            {:ok, _} -> ok(%{"channel" => "carrier", "channel_epoch" => epoch})
+            {:refused, r} -> %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+          end
+      end
+    end
+
     # **Registering a repository is a host-level trust decision, and until
     # now the host had no way to make it.**
     #

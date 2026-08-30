@@ -572,9 +572,26 @@ defmodule Ampd.Worker do
     if live?, do: "OCCUPIED", else: "OFFLINE"
   end
 
-  @doc "Workers, each with its rendered occupancy, for a projection."
+  @doc """
+  Add both statuses, as **two separate fields**.
+
+  `occupancy` is D.1.2's question — does a Peer hold this position. `carrier`
+  is D.1.3b's — is there a live execution process fulfilling it. They are not
+  synonyms and merging them into one word would erase the ordinary state:
+
+      occupancy OCCUPIED  ∧  carrier OFFLINE
+
+  which is an actor holding a position with nothing running, and is what every
+  Worker looks like before anything starts. A projection with a single status
+  would have to call that either OCCUPIED (hiding that nothing runs) or
+  OFFLINE (hiding that someone holds it), and both are wrong in a direction a
+  cockpit would render as fact.
+  """
   def projected(workers) when is_map(workers),
-    do: Map.new(workers, fn {id, w} -> {id, Map.put(w, "occupancy", status_of(w))} end)
+    do:
+      Map.new(workers, fn {id, w} ->
+        {id, w |> Map.put("occupancy", status_of(w)) |> Map.put("carrier", Ampd.Carrier.status_of(w))}
+      end)
 
   # ------------------------------------------------------------ refusals
   defp no_actor(peer) do

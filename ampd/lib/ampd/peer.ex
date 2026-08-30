@@ -119,7 +119,22 @@ defmodule Ampd.Peer do
        owners: %{},
        # peer_id => carrier-attachment@1. Carrier-local by construction:
        # it is in this process's state and nothing writes it to disk.
-       attachments: %{}
+       attachments: %{},
+       # peer_id => carrier-incarnation@1 — the LIVE OS execution Carrier.
+       #
+       # **Two different objects share the word "Carrier" and this is the
+       # seam.** `attachments` holds D.1.2's `carrier-attachment@1`, which is
+       # a *peer/session* occupying a Locus. `carriers` holds D.1.3b's
+       # execution process. An occupied Worker with no live process is
+       # ordinary, not broken.
+       #
+       # Ephemeral for the same reason the attachments are, and it buys the
+       # same four invalidations for free: `detach/1`, owner `:DOWN`,
+       # `reset/0`, and supervisor restart. That is the whole of the
+       # "losing the runtime incarnation terminates the Carrier" rule — it
+       # is a consequence of where the map lives, not a policy anything has
+       # to remember to apply.
+       carriers: %{}
      }}
   end
 
@@ -295,6 +310,24 @@ defmodule Ampd.Peer do
   nobody can supervise.
   """
   def attachments, do: GenServer.call(__MODULE__, :attachments)
+
+  @doc """
+  Install the live execution Carrier for a peer. Exactly one per peer.
+
+  Refuses rather than replaces: a second incarnation arriving for a peer that
+  already has one means two admissions raced, and the survivable direction is
+  for the second to be told so while the first keeps running.
+  """
+  def attach_carrier(peer_id, inc), do: GenServer.call(__MODULE__, {:attach_carrier, peer_id, inc})
+
+  @doc "The live execution Carrier for a peer, or nil."
+  def carrier(peer_id), do: GenServer.call(__MODULE__, {:carrier, peer_id})
+
+  @doc "Every live execution Carrier in this incarnation."
+  def carriers, do: GenServer.call(__MODULE__, :carriers)
+
+  @doc "Drop the live execution Carrier. Does not stop the process."
+  def detach_carrier(peer_id), do: GenServer.call(__MODULE__, {:detach_carrier, peer_id})
 
   @doc """
   Tear down every binding and free the control claim.
@@ -475,6 +508,42 @@ defmodule Ampd.Peer do
 
   def handle_call(:attachments, _f, st), do: {:reply, Map.values(st.attachments), st}
 
+  def handle_call({:attach_carrier, peer_id, inc}, _f, st) do
+    cond do
+      # A handle that does not resolve in this epoch cannot carry anything,
+      # for the same reason it cannot occupy anything.
+      Map.get(st.peers, peer_id) == nil or not String.contains?(peer_id, "-" <> st.epoch <> "-") ->
+        {:reply, {:taken, :unknown_peer}, st}
+
+      Map.has_key?(st.carriers, peer_id) ->
+        {:reply, {:taken, :carrier_live}, st}
+
+      # No occupancy, no execution. The position is what a Carrier embodies,
+      # so a Carrier without one would be a process fulfilling nothing.
+      not Map.has_key?(st.attachments, peer_id) ->
+        {:reply, {:taken, :not_attached}, st}
+
+      true ->
+        touched()
+        {:reply, {:ok, inc}, %{st | carriers: Map.put(st.carriers, peer_id, inc)}}
+    end
+  end
+
+  def handle_call({:carrier, peer_id}, _f, st) when is_binary(peer_id) do
+    if String.contains?(peer_id, "-" <> st.epoch <> "-"),
+      do: {:reply, Map.get(st.carriers, peer_id), st},
+      else: {:reply, nil, st}
+  end
+
+  def handle_call({:carrier, _}, _f, st), do: {:reply, nil, st}
+
+  def handle_call(:carriers, _f, st), do: {:reply, Map.values(st.carriers), st}
+
+  def handle_call({:detach_carrier, peer_id}, _f, st) do
+    if Map.has_key?(st.carriers, peer_id), do: touched()
+    {:reply, :ok, %{st | carriers: Map.delete(st.carriers, peer_id)}}
+  end
+
   # A new epoch too: a world reset invalidates every channel, and a handle
   # from before it must not resolve into the world that replaced it.
   def handle_call(:reset, _f, st) do
@@ -491,7 +560,8 @@ defmodule Ampd.Peer do
          # Carrier death takes occupancy with it. The Worker and the Lane
          # are untouched — they are in dets and this process has never
          # been able to reach them.
-         attachments: %{}
+         attachments: %{},
+         carriers: %{}
      }}
   end
 
@@ -574,7 +644,13 @@ defmodule Ampd.Peer do
     %{st | peers: Map.delete(st.peers, id),
            control_claimed: st.control_claimed and not freed,
            owners: owners,
-           attachments: Map.delete(st.attachments, id)}
+           attachments: Map.delete(st.attachments, id),
+           # The execution Carrier goes with the session that admitted it.
+           # Dropping it here — the one place every way of losing a channel
+           # converges — is what makes "losing the runtime incarnation
+           # terminates the Carrier" true by construction rather than by
+           # remembering to call something.
+           carriers: Map.delete(st.carriers, id)}
   end
 
   defp owner_gone do

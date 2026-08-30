@@ -1592,16 +1592,24 @@ pub fn run(ampd_dir: &Path) -> i32 {
 // answer depended on who launched the gate; here it would depend on a setting
 // the property does not mention. The fix has the same shape both times.
 //
-// Two grades of attribution are reported, and they are not the same claim:
+// Three grades of attribution are reported, and no two are the same claim:
 //
-//   by errno        the refusal carries 130 (EOWNERDEAD), which Super's
-//                   filter returns and no ptrace or DAC path produces, so
-//                   the refusal names its author
-//   by differential the bare control succeeded and the confined run did not,
-//                   so the confinement is what closed it
+//   ATTRIBUTED        the refusal carries 130 (EOWNERDEAD), which Super's
+//                     filter returns and no ptrace, LSM or DAC path
+//                     produces, so the refusal names its author
+//   DIFFERENTIAL      the bare control succeeded and the confined run did
+//                     not, so the confinement is what closed it
+//   AMBIENT-PRECLUDED the bare control failed too, so this host cannot show
+//                     the confinement was necessary — only that Super
+//                     refuses it as well
 //
-// `ptrace` and `pidfd_getfd` earn the first and not the second on this
-// kernel. Reported as such rather than rounded up.
+// `ptrace` and `pidfd_getfd` earn the first and the third on this kernel and
+// not the second. Reported as such rather than rounded up.
+//
+// The third grade was added after a review made an objection the first two
+// could not answer: *the minimal fixture's inability to exploit something is
+// not evidence that the syscall isn't available.* Thirteen syscalls are now
+// issued rather than assumed; see the negative census at the end.
 
 /// One row of the confined/bare comparison.
 struct Attack {
@@ -1988,6 +1996,178 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
             ),
         );
     }
+
+    // ------------------------------------------- the negative syscall census
+    //
+    // **"The minimal fixture's inability to exploit something is not evidence
+    // that the syscall isn't available."** That review objection is correct,
+    // and it applies to every deny-list entry nobody ever called. A Carrier
+    // that opens no files says nothing about `memfd_create`; a list of
+    // numbers in `confine::DENIED` is a list of intentions until something
+    // issues the syscall and reads what came back.
+    //
+    // So each of these is *called*, in both runs, and graded. The three
+    // grades are not interchangeable and each check's name says which one its
+    // row earned on this host:
+    //
+    //   ATTRIBUTED         the confined refusal carries errno 130
+    //                      (EOWNERDEAD), which Super's filter returns and no
+    //                      ptrace, LSM or DAC path produces — so the refusal
+    //                      names its author
+    //   DIFFERENTIAL       the bare control reached it and the Carrier did
+    //                      not — so the confinement is what closed it
+    //   AMBIENT-PRECLUDED  the bare control could not reach it either, so
+    //                      this host cannot prove the confinement was
+    //                      necessary. It can only show that Super refuses it
+    //                      too, which is a weaker claim and is printed as
+    //                      one. `mount` and `pivot_root` are here because
+    //                      they need CAP_SYS_ADMIN, and `bpf` because
+    //                      `kernel.unprivileged_bpf_disabled = 2` on this
+    //                      machine — all three before any of this runs.
+    //
+    // The grades are computed, never asserted: a machine with
+    // `unprivileged_bpf_disabled = 0` would move `bpf` to DIFFERENTIAL and
+    // this battery would print the stronger word without being edited. What
+    // is asserted is attribution, because that is the claim that does not
+    // depend on the host's settings.
+    //
+    // A row ALLOWED in the confined run reaches no grade at all. It is named
+    // UNRESOLVED GAP and its check fails — an available dangerous syscall
+    // must never pass quietly, which is the whole of the objection.
+    const CENSUS: &[(&str, u32, &str)] = &[
+        ("memfd_create", 319, "a file with no name to execute from"),
+        ("execveat_other_binary", 322, "execution by descriptor, around Landlock's pathnames"),
+        ("clone", 56, "a second process"),
+        ("clone3", 435, "a second process by the newer call"),
+        ("fork", 57, "a second process by the oldest call"),
+        ("vfork", 58, "a second process sharing this one's memory"),
+        ("process_vm_readv", 310, "another process's memory, read"),
+        ("process_vm_writev", 311, "another process's memory, written"),
+        ("keyctl", 250, "the kernel keyring"),
+        ("bpf", 321, "loading kernel bytecode"),
+        ("perf_event_open", 298, "the performance counters"),
+        ("mount", 165, "the mount table"),
+        ("pivot_root", 155, "the root of the filesystem"),
+    ];
+
+    let mut covered = 0usize;
+    for (name, nr, what) in CENSUS {
+        let a = row(name);
+        let refused = matches!(a.confined, Some((false, _)));
+        let attributed =
+            matches!(a.confined, Some((false, e)) if e as u32 == confine::SUPER_DENY_ERRNO);
+        let bare_reached = matches!(a.bare, Some((true, _)));
+        let bare_refused = matches!(a.bare, Some((false, _)));
+        if a.confined.is_some() {
+            covered += 1;
+        }
+
+        let grade = if !refused {
+            "UNRESOLVED GAP — reachable inside the Carrier"
+        } else if attributed && bare_reached {
+            "ATTRIBUTED · DIFFERENTIAL"
+        } else if attributed && bare_refused {
+            "ATTRIBUTED · AMBIENT-PRECLUDED"
+        } else if attributed {
+            "ATTRIBUTED · no bare reading"
+        } else if bare_reached {
+            "DIFFERENTIAL but NOT ATTRIBUTED"
+        } else {
+            "NEITHER ATTRIBUTED NOR DIFFERENTIAL"
+        };
+
+        b.check(
+            &format!("{name} is refused inside a Carrier — {grade}"),
+            attributed,
+            format!(
+                "nr {nr} · {what} · bare={:?} confined={:?} · expected a confined refusal \
+                 carrying errno {}",
+                a.bare,
+                a.confined,
+                confine::SUPER_DENY_ERRNO
+            ),
+        );
+    }
+
+    b.check(
+        "every syscall in the negative census was actually issued by the confined probe",
+        covered == CENSUS.len(),
+        format!(
+            "{covered} of {} rows present in the confined log — a missing row is a syscall \
+             nobody tried, which is the non-evidence this census replaces",
+            CENSUS.len()
+        ),
+    );
+
+    // `vfork` is the one row with no bare reading, and the absence is
+    // declared rather than inferred.
+    //
+    // The probe will not call `vfork` where a child could be created:
+    // measured, a raw `vfork` from compiled Rust resumes the parent at the
+    // wrong instruction, because the child's first `call` overwrites the
+    // return address the suspended parent is about to `ret` to. Under the
+    // filter no child exists — seccomp answers before the kernel forks — so
+    // the confined reading above is real. The unconfined one is not taken,
+    // and the probe prints a row saying so, because a line that is merely
+    // missing is indistinguishable from a probe that died.
+    b.check(
+        "the unconfined control declares that it declined to call vfork, rather than \
+         omitting the row",
+        matches!(bare.get("vfork_not_attempted_shared_stack"), Some((true, _)))
+            && !bare.contains_key("vfork"),
+        format!(
+            "bare marker={:?} bare vfork row={:?}",
+            bare.get("vfork_not_attempted_shared_stack"),
+            bare.get("vfork")
+        ),
+    );
+
+    // Configured against observed, which this module never merges.
+    //
+    // The census above is the enforced side. This is the other question: does
+    // the policy *say* what the measurements found? A syscall that came back
+    // 130 without being on the list, or is on the list without coming back
+    // 130, means something other than this filter answered — and inferring
+    // which would be exactly the mistake `SUPER_DENY_ERRNO` exists to
+    // prevent.
+    let undeclared: Vec<&str> = CENSUS
+        .iter()
+        .filter(|(_, nr, _)| !confine::denies(*nr))
+        .map(|(n, _, _)| *n)
+        .collect();
+    b.check(
+        "the filter's configured deny list names every syscall the census measured refused",
+        undeclared.is_empty(),
+        format!("measured refused, absent from DENIED: {undeclared:?}"),
+    );
+
+    // The one member of the family that stays PERMITTED, named so it cannot
+    // be mistaken for an oversight.
+    //
+    // `execve` cannot be denied: the filter is installed in `pre_exec`, so
+    // the Carrier's own exec has not happened yet and denying it would kill
+    // every Carrier at birth. Nothing bounds it but Landlock's `FS_EXECUTE`
+    // grant — which makes this row DIFFERENTIAL and never ATTRIBUTED, and the
+    // errno says which: 13 (EACCES, from Landlock) and not 130. `execveat`
+    // has no such requirement and is on the list, so the same target file is
+    // refused twice in the same run by two different authors, and the census
+    // row above holds the other half.
+    let ex = row("execve_other_binary");
+    b.check(
+        "execve stays PERMITTED by seccomp and is bounded by Landlock alone — \
+         DIFFERENTIAL, never ATTRIBUTED",
+        matches!(ex.bare, Some((true, _)))
+            && matches!(ex.confined, Some((false, e)) if e == 13)
+            && !confine::denies(59),
+        format!(
+            "bare={:?} confined={:?} · seccomp denies execve: {} · expected EACCES(13) from \
+             Landlock, not {} from the filter",
+            ex.bare,
+            ex.confined,
+            confine::denies(59),
+            confine::SUPER_DENY_ERRNO
+        ),
+    );
 
     // The policy must still be a policy and not a wall.
     let w = row("write_own_workdir");

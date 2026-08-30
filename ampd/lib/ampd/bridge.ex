@@ -51,7 +51,7 @@ defmodule Ampd.Bridge do
     # reference to the bridge rather than two of unclear ownership.
     case bridge_fd(opts) do
       nil ->
-        {:ok, %{channels: %{}, control_open: false, bridge: nil, effect: nil}}
+        {:ok, %{channels: %{}, control_open: false, bridge: nil, effect: nil, carrier: nil}}
 
       fd ->
         if admissible?(fd, Ampd.NativeFd.available?()) do
@@ -65,7 +65,7 @@ defmodule Ampd.Bridge do
                 nil
             end
 
-          {:ok, %{channels: %{}, control_open: false, bridge: bridge, effect: nil}}
+          {:ok, %{channels: %{}, control_open: false, bridge: bridge, effect: nil, carrier: nil}}
         else
           IO.puts(:stderr, """
           AMPD REFUSES TO OPEN THE BRIDGE — there is no descriptor sink.
@@ -171,6 +171,28 @@ defmodule Ampd.Bridge do
   happened. `Ampd.Worktree.EffectChannel` is where that rule lives.
   """
   def drop_effect_endpoint, do: GenServer.call(__MODULE__, :drop_effect)
+
+  @doc """
+  Bind the **Carrier lifecycle** channel.
+
+  A second possessed endpoint, deliberately separate from the effect one. The
+  machine phase of a Carrier start runs outside the total order, so it can be
+  in flight while a worktree effect is submitted; two submitters on one
+  stream would meet `await/4`'s skip-don't-route behaviour, which D.1.3a
+  named as the thing that breaks when mechanism duration leaves the order.
+
+  Two endpoints in one field-per-purpose is not two mechanisms: it is the
+  same socketpair, the same `SCM_RIGHTS`, the same adoption path and the same
+  framing, pointed at a second thing.
+  """
+  def bind_carrier_endpoint(fd_or_socket, incarnation) when is_map(incarnation),
+    do: GenServer.call(__MODULE__, {:bind_carrier, fd_or_socket, incarnation}, 10_000)
+
+  @doc "The possessed Carrier lifecycle endpoint and its incarnation, or `nil`."
+  def carrier_endpoint, do: GenServer.call(__MODULE__, :carrier_endpoint)
+
+  @doc "Drop the Carrier lifecycle endpoint. Never a reason to replay."
+  def drop_carrier_endpoint, do: GenServer.call(__MODULE__, :drop_carrier)
 
   @doc """
   Close every channel and free the control claim.
@@ -320,6 +342,41 @@ defmodule Ampd.Bridge do
 
   def handle_call(:effect_endpoint, _f, st), do: {:reply, st.effect, st}
 
+  # The Carrier endpoint, in the same shape and with the same disposal rule.
+  # Written out rather than generalised over a field name: two clauses that
+  # differ by one atom are cheaper to read than a helper that has to be
+  # trusted to have been given the right key, and this is the code that
+  # decides which descriptor gets closed.
+  def handle_call({:bind_carrier, fd_or_socket, incarnation}, _f, st) do
+    case as_socket(fd_or_socket) do
+      {:ok, sock} ->
+        if st.carrier, do: dispose(st.carrier.sock)
+        Ampd.AuthorityCoordinator.touched()
+        {:reply, {:ok, incarnation}, %{st | carrier: %{sock: sock, incarnation: incarnation}}}
+
+      :error ->
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("carrier-endpoint-adopt-failed",
+            component: "Ampd.Bridge",
+            retryable: false,
+            requires_human: false,
+            public_message: "The runtime could not adopt that carrier endpoint.",
+            operator_detail: %{"reason" => "not a usable descriptor"})}, st}
+    end
+  end
+
+  def handle_call(:carrier_endpoint, _f, st), do: {:reply, st.carrier, st}
+
+  def handle_call(:drop_carrier, _f, st) do
+    if st.carrier do
+      dispose(st.carrier.sock)
+      Ampd.AuthorityCoordinator.touched()
+    end
+
+    {:reply, :ok, %{st | carrier: nil}}
+  end
+
   def handle_call(:drop_effect, _f, st) do
     if st.effect do
       dispose(st.effect.sock)
@@ -387,8 +444,16 @@ defmodule Ampd.Bridge do
     # no path on which losing a channel refreshes or widens anything.
     if st.effect, do: dispose(st.effect.sock)
 
+    # And the Carrier endpoint, for the same reason and by the same rule.
+    # Setting the field to `nil` without disposing of the socket is the
+    # exact shape of the leak `sabotage-host.sh` probes 1 and 2 exist to
+    # catch: the map forgets the channel and this process still holds the
+    # descriptor. Every field added beside `effect` inherits that hazard,
+    # which is an argument for keeping the number of them small.
+    if st.carrier, do: dispose(st.carrier.sock)
+
     Ampd.AuthorityCoordinator.touched()
-    {:reply, :ok, %{st | channels: %{}, control_open: false, effect: nil}}
+    {:reply, :ok, %{st | channels: %{}, control_open: false, effect: nil, carrier: nil}}
   end
 
   # The disposal half of the contract. An integer is a raw descriptor and

@@ -127,6 +127,110 @@ fn new_epoch() -> String {
 /// actor, Worker, Lane, grant or capability, so there is nothing to form
 /// an opinion about. A malformed request gets a typed refusal — which is
 /// an observation of a failed effect, not a second gate.
+/// Serve Carrier lifecycle requests on a possessed channel.
+///
+/// **Holds no authority and decides nothing.** It starts what it is told to
+/// start and reports what it observed; whether that process joins the World is
+/// re-derived by `Ampd.Carrier.commit_start/2` inside the total order, against
+/// a world that may have moved while this was running. A host that could
+/// promote its own child would be a host deciding product authority.
+///
+/// The `carrier_ref` and `carrier_epoch` are **echoed, never consulted** —
+/// the same rule `serve_effects` follows for `request_id`. Letting the machine
+/// read them would be letting it decide which start it is answering.
+pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
+    use std::collections::HashMap;
+    let mut live: HashMap<String, carrier::Carrier> = HashMap::new();
+
+    loop {
+        let req = match read_frame(fd) { Ok(v) => v, Err(_) => break };
+        let carrier_ref = req["carrier_ref"].as_str().unwrap_or("").to_string();
+
+        let mut obs = match req["op"].as_str() {
+            Some("start") => match start_one(&workdir, &carrier_ref, &req) {
+                Ok((c, o)) => { live.insert(carrier_ref.clone(), c); o }
+                Err(e) => json!({
+                    "schema": "carrier-start-observation@1",
+                    "refused": e,
+                }),
+            },
+            Some("stop") => {
+                // Absence is success. A reap that insisted on having
+                // something to kill would fail exactly in the INDETERMINATE
+                // case where it matters most and is understood least.
+                if let Some(mut c) = live.remove(&carrier_ref) { c.terminate(3_000); }
+                json!({"schema": "carrier-stop-observation@1", "stopped": true})
+            }
+            _ => json!({"schema": "carrier-start-observation@1", "refused": "unknown carrier op"}),
+        };
+
+        obs["request_id"] = req["request_id"].clone();
+        obs["channel_epoch"] = req["channel_epoch"].clone();
+        obs["carrier_ref"] = req["carrier_ref"].clone();
+        obs["carrier_epoch"] = req["carrier_epoch"].clone();
+
+        if write_frame(fd, &obs).is_err() { break }
+    }
+
+    // The channel is gone, so every Carrier it admitted has lost the
+    // authority incarnation that owns it. Terminate rather than orphan:
+    // "losing the runtime incarnation terminates the Carrier" is a rule the
+    // machine side has to keep too, or the runtime forgets a process that is
+    // still running.
+    for (_, mut c) in live { c.terminate(3_000); }
+}
+
+/// Where Carrier working directories live.
+///
+/// Under the world directory, so they are removed with the world and never
+/// accumulate in a developer's tree. Each Carrier gets its own subdirectory
+/// and that subdirectory is the *only* thing its Landlock policy grants
+/// write access to.
+fn world_dir_for_carriers() -> PathBuf {
+    let base = std::env::var_os("AMPD_DATA_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let d = base.join("carriers");
+    let _ = std::fs::create_dir_all(&d);
+    d
+}
+
+fn start_one(
+    root: &Path,
+    carrier_ref: &str,
+    req: &Value,
+) -> Result<(carrier::Carrier, Value), String> {
+    let fixture = carrier::fixture_path().ok_or("no carrier fixture is installed")?;
+    let dir = root.join(carrier_ref);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("carrier workdir: {e}"))?;
+    let log = dir.join("carrier.log");
+
+    // The incarnation the Carrier must echo is the epoch the *runtime* minted
+    // and the host was handed. The host does not choose it: a machine that
+    // named the incarnation it was proving would be answering its own
+    // question, which is the reason D.1.3a mints the channel epoch on the
+    // opposite side from the one that checks it.
+    let epoch = req["carrier_epoch"].as_str().unwrap_or("").to_string();
+
+    let mut c = carrier::spawn(&fixture, &dir, &log, &epoch, None)?;
+    if let Err(e) = c.handshake(5_000) {
+        // A Carrier that cannot prove it is this incarnation is not left
+        // running. The runtime will see the refusal, but the process is this
+        // side's to dispose of.
+        c.terminate(3_000);
+        return Err(e);
+    }
+
+    let o = c.observe();
+    let obs = json!({
+        "schema": "carrier-start-observation@1",
+        "host_process_ref": format!("hp_{}_{}", c.pid, c.starttime.unwrap_or(0)),
+        "observed": o.to_json(),
+    });
+
+    Ok((c, obs))
+}
+
 pub fn serve_effects(fd: RawFd) {
     loop {
         let req = match read_frame(fd) {
@@ -1294,6 +1398,58 @@ impl Runtime {
         Ok(ours)
     }
 
+    /// The **Carrier lifecycle** channel — a second possessed endpoint.
+    ///
+    /// Deliberately its own channel and not a second protocol on the effect
+    /// one. D.1.3a recorded that `EffectChannel.await/4` skips a non-matching
+    /// observation rather than routing it, which is safe with one submitter
+    /// and is not a demultiplexer; D.1.3b·2 puts the Carrier machine phase
+    /// *outside* the total order, so a Carrier start can be in flight while a
+    /// worktree effect is submitted. Two submitters on one stream is exactly
+    /// the case that was named as the thing that would break.
+    ///
+    /// Same socketpair, same `SCM_RIGHTS`, same adoption, same framing. One
+    /// more bridge command and no new descriptor mechanism.
+    pub fn carrier_channel(&self) -> Result<RawFd, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let fdpass::Pair(ours, theirs) =
+            fdpass::pair_stream().map_err(|e| format!("carrier socketpair: {e}"))?;
+
+        let cmd = json!({
+            "schema": "bridge-command@1",
+            "command": "bind_carrier_channel",
+            "incarnation": {
+                "schema": "effect-channel@1",
+                "channel_epoch": new_epoch(),
+                "protocol": "carrier-lifecycle",
+                "protocol_version": 1,
+                "host_identity": effect::identity(),
+            }
+        });
+
+        let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let given = fd_inode(theirs);
+        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        fdpass::close_fd(theirs);
+        sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+        if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
+
+        let reply =
+            fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
+
+        if v["ok"] != true {
+            fdpass::close_fd(ours);
+            return Err(format!(
+                "the runtime refused the carrier channel: {}",
+                v["refusal"]["code"]
+            ));
+        }
+
+        self.channels.lock().unwrap().push(ours);
+        Ok(ours)
+    }
+
     pub fn agent_channel(&self, actor: &str) -> Result<Chan, String> {
         self.bind_channel("bind_agent_channel", Some(actor))
     }
@@ -1679,6 +1835,19 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
             println!("  effect channel   active (possessed descriptor, no path)");
         }
         Err(e) => eprintln!("  effect channel   UNAVAILABLE: {e}"),
+    }
+
+    // Same degraded-path rule: a host that cannot serve Carrier starts still
+    // runs, and the runtime refuses them by name rather than resolving an
+    // executable. The property has to hold on the unhappy path or it is not a
+    // property.
+    let carrier_root = world_dir_for_carriers();
+    match rt.carrier_channel() {
+        Ok(fd) => {
+            std::thread::spawn(move || serve_carrier(fd, carrier_root));
+            println!("  carrier channel  active (possessed descriptor, no path)");
+        }
+        Err(e) => eprintln!("  carrier channel  UNAVAILABLE: {e}"),
     }
 
     let mut children: Vec<Child> = Vec::new();

@@ -235,6 +235,33 @@ defmodule Ampd.Worktree.EffectChannel do
     end
   end
 
+  @doc """
+  Submit one request on a **caller-supplied** channel and await its answer.
+
+  `submit/2` is the worktree effect path and always uses the bridge's effect
+  endpoint. This is the same wire, correlation and deadline discipline made
+  reusable, so that `Ampd.Carrier.Machine.Channel` can possess a channel of
+  its own rather than sharing this one.
+
+  The sharing is what had to be avoided: `await/4` **skips** a non-matching
+  observation rather than routing it, which is safe with one submitter and
+  is not a demultiplexer. D.1.3a recorded that as the thing that would break
+  when mechanism duration left the total order — which is exactly what
+  D.1.3b·2's machine phase does. A second channel keeps the one-submitter
+  precondition true by construction instead of asking a filter to be
+  something it is not.
+  """
+  def request(sock, %{"channel_epoch" => epoch}, body, timeout) when is_map(body) do
+    request_id = new_epoch()
+
+    req =
+      body
+      |> Map.put("request_id", request_id)
+      |> Map.put("channel_epoch", epoch)
+
+    send_and_await(sock, req, request_id, epoch, timeout)
+  end
+
   # --------------------------------------------------------------- wire
   #
   # **The frozen framing and the frozen canonicalizer, both reused.**

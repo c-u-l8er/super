@@ -303,6 +303,26 @@ defmodule Ampd.Control do
     end)
   end
 
+  # Admit → machine → commit, with the machine phase outside the total order.
+  # This call can therefore take as long as starting a process takes without
+  # holding the coordinator, which is the entire point of the shape.
+  defp dispatch(peer, :start_carrier, [locus_ref]) do
+    case Ampd.Carrier.start(peer["id"], locus_ref) do
+      {:ok, inc} ->
+        # The incarnation, minus nothing — it carries no authority-shaped key
+        # by construction and `E2` reads it back recursively to prove it.
+        %{"allow" => true, "carrier" => inc}
+
+      {:refused, r} ->
+        %{"allow" => false, "refusal" => r}
+    end
+  end
+
+  defp dispatch(peer, :stop_carrier, _) do
+    :ok = Ampd.Carrier.stop(peer["id"])
+    %{"allow" => true, "carrier" => nil}
+  end
+
   defp dispatch(peer, :detach_worker, _) do
     Ampd.Worker.detach(peer)
     |> settled(fn r -> Map.merge(%{"allow" => true, "occupancy" => "OFFLINE"}, r) end)

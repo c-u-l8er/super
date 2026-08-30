@@ -87,6 +87,26 @@ defmodule Ampd.Application do
           )
         end
 
+        # Third application of the same rule, and the one with the sharpest
+        # consequence. A Carrier start attempt that was admitted but never
+        # committed may or may not have produced a live OS process, and
+        # nothing in this runtime can find out by looking — the process
+        # belonged to a `Ampd.Peer` incarnation that no longer exists.
+        #
+        # Marked INDETERMINATE and **never retried**. Retrying is how you get
+        # two processes for one admission, which is the duplicate this whole
+        # two-transaction shape exists to prevent.
+        pending = Ampd.Carrier.recover!()
+
+        if pending > 0 do
+          require Logger
+
+          Logger.warning(
+            "ampd: #{pending} carrier start attempt(s) were in flight at shutdown and are " <>
+              "INDETERMINATE — a process may exist for each; they will not be retried"
+          )
+        end
+
         ok
 
       other ->

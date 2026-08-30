@@ -358,6 +358,37 @@ defmodule Ampd.CommandSpec do
     # more often than it succeeds, and `Ampd.Refusal.new/2` writes to the
     # refusal ring as it constructs. A `:safe` read that refuses deposits
     # one refusal per speculative attempt and shows the client one.
+    # **The Carrier is started by the agent that occupies the position.**
+    #
+    # Not by a person, and not by the host. Occupancy *is* the launch
+    # authority — there is deliberately no separate "may start a Carrier"
+    # capability, because inventing a grant before anything needs one is the
+    # objection three prior slices raised against a new store, applied to the
+    # grammar instead. `Ampd.Carrier.admit_start/2` re-derives occupancy and
+    # refuses without it, so the channel restriction here is a courtesy and
+    # the check is elsewhere.
+    #
+    # `kind: :mutation`, because it starts an OS process. `retry` is therefore
+    # absent by the rule the compile-time guard enforces: a read must declare
+    # retry and a mutation must not, since a resubmitted start is how you get
+    # two processes for one intent.
+    #
+    # **No field names a process, a path, an executable or a pty.** The
+    # six-word constraint D.1.2 recorded still holds: the Carrier payload is
+    # chosen by the host from what it has installed, and a grammar in which a
+    # caller could name one would be a grammar where naming something runs it.
+    "start_carrier" => %{
+      cmd: :start_carrier,
+      channel: :agent,
+      kind: :mutation,
+      fields: [%{name: "locus_ref", type: {:id, "ln_"}, required: true}]
+    },
+    "stop_carrier" => %{
+      cmd: :stop_carrier,
+      channel: :agent,
+      kind: :mutation,
+      fields: []
+    },
     "attach_worker" => %{
       cmd: :attach_worker,
       channel: :agent,

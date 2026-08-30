@@ -573,6 +573,16 @@ const AF_UNIX: u32 = 1;
 /// yet — denying it would kill every Carrier at birth. What bounds execution
 /// is Landlock's `FS_EXECUTE` right, granted on the payload file and nowhere
 /// else. Measured: an unlisted binary then fails `execve` with `EACCES`.
+/// `execveat` carries no such requirement and is denied outright, so the same
+/// unlisted binary is refused twice over by two different authors.
+///
+/// **Every number here is called by `carrier-fixture`'s `probe`, in both a
+/// confined and an unconfined run.** A review of the first version made the
+/// objection: *the minimal fixture's inability to exploit something is not
+/// evidence that the syscall isn't available.* It is not. A list nobody calls
+/// is a list of intentions, and a fixture that opens no files proves nothing
+/// about `memfd_create`. The census in `verify::carrier_confinement` closes
+/// that gap and grades what it finds.
 const DENIED: &[u32] = &[
     101, // ptrace
     434, // pidfd_open
@@ -596,7 +606,57 @@ const DENIED: &[u32] = &[
     175, // init_module
     313, // finit_module
     176, // delete_module
+    // --- process creation ------------------------------------------------
+    //
+    // **Added after measuring, not after reasoning.** The worry was the Rust
+    // runtime: `clone` is what a thread is made of, and a Carrier that could
+    // not start would be a policy that had eaten its own subject. It does not
+    // start one — a static-pie binary with no threads never reaches `clone` —
+    // and with all four denied the fixture still starts, handshakes, echoes
+    // and stops on SIGTERM, with every observed row unchanged.
+    //
+    // What denying them *did* break was the adversarial probe, and the way it
+    // broke is the finding. Its `execve` row ran in a forked child; with the
+    // fork refused it fell through to `wait4(-1)`, decoded a zeroed status
+    // and printed **ALLOWED** for an `execve` it had never attempted. The
+    // probe now reaches the same answer without forking (`probe.rs` §7), and
+    // the general statement is worth keeping: *a probe whose own setup
+    // failing reads as the most permissive answer is worse than no probe*,
+    // because it turns green over an unasked question.
+    //
+    // **A threaded payload would need `clone` back.** This is the fixture's
+    // floor, not a general Carrier policy. A Motor running a language runtime
+    // with a thread pool will need its own list, and inheriting this one by
+    // default is how that gets discovered at the worst possible moment.
+    56,  // clone
+    57,  // fork
+    58,  // vfork
+    435, // clone3
+    // --- anonymous execution ---------------------------------------------
+    //
+    // `memfd_create` makes a file with no name on any filesystem; `execveat`
+    // executes a descriptor. Together they are a complete execution path that
+    // never presents a pathname — and Landlock's entire vocabulary is
+    // pathnames, so the `FS_EXECUTE` grant that bounds `execve` has nothing
+    // whatever to say about this route. Closed in seccomp instead: the same
+    // substitution the UDP clause makes, for the same reason, and reported as
+    // a substitution rather than as Landlock coverage.
+    319, // memfd_create
+    322, // execveat
 ];
+
+/// Does the filter refuse this syscall number?
+///
+/// **Configured, never observed.** This reads the list above; it is not
+/// evidence that a running Carrier was refused anything, and `verify` uses it
+/// only to ask whether the policy *says* what the behavioural census
+/// *measured* — the same `configured()`/`observe()` split this module keeps
+/// everywhere else. The two disagreeing would mean a syscall was refused by
+/// something that is not this filter, which is exactly the confusion
+/// `SUPER_DENY_ERRNO` exists to make visible.
+pub fn denies(nr: u32) -> bool {
+    DENIED.contains(&nr)
+}
 
 fn stmt(code: u16, k: u32) -> SockFilter {
     SockFilter {
