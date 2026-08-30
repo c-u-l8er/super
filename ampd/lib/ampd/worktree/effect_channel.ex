@@ -16,8 +16,25 @@ defmodule Ampd.Worktree.EffectChannel do
       name        →  ambient reachability
       descriptor  →  possessed reachability
 
-  So: can the trusted mechanism be reachable only through possession of an
-  unforgeable channel, **without moving any authorization into it**?
+  So: can the trusted mechanism be reachable only through possession of a
+  private channel, **without moving any authorization into it**?
+
+  ## What this channel is called, and what it is not called
+
+  **Possession-addressed and namespace-unaddressable** — not *unforgeable*.
+  The word matters because the two claims have different threat models and
+  only one of them is proved here:
+
+      knowing an executable, path or name
+          ≠  possessing the production mechanism endpoint      PROVED
+
+      a hostile same-UID process
+          cannot steal the endpoint                            NOT PROVED
+
+  Nothing here defends against `ptrace`, `pidfd_getfd`, `memfd` execution,
+  loader bypass, or arbitrary code already running inside the BEAM. Those
+  are D.1.3b threat-model items, and calling this channel "unforgeable"
+  would quietly borrow their conclusion.
 
   ## What did not move, and this is the load-bearing half
 

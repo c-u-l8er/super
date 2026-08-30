@@ -4,8 +4,13 @@ defmodule Ampd.EffectChannelTest do
   can refuse:
 
       The trusted machine-effect mechanism is reachable through possession
-      of an unforgeable channel rather than through an ambient executable
-      name, and no authorization moved across that boundary.
+      of a private channel rather than through an ambient executable name,
+      and no authorization moved across that boundary.
+
+  **Possession-addressed, not unforgeable.** See
+  `Ampd.Worktree.EffectChannel` for why the weaker word is the accurate
+  one: knowing a name is proved insufficient; resisting a hostile same-UID
+  process is not proved and is not claimed.
 
   ## What the harness is, stated so nothing here is over-read
 
@@ -13,9 +18,14 @@ defmodule Ampd.EffectChannelTest do
   Rust host's `effect::perform`, not a mock of the channel: the socket is
   a real `AF_UNIX` pair, the framing is the runtime's own four-byte
   prefix, `close` really delivers EOF, and the success paths run real
-  `git worktree add`. What it is *not* is the production host process —
-  wiring `super-host run` to serve this channel is the remaining half of
-  D.1.3a and is not claimed here. See §"deferred" in the bundle.
+  `git worktree add`. What it is *not* is the production host process.
+
+  **The production host now serves this channel too** — `super-host run`
+  creates the pair and `serve_effects` answers out of `effect::perform`,
+  proved end-to-end in `super-host verify`. These falsifiers keep the
+  harness because fault injection needs an endpoint that can be told to
+  die at a chosen instant, which a real host is not. The positive
+  production path is proved over there; the fault matrix is proved here.
 
   The distinction that matters for every falsifier below: **`ampd` reaching
   the mechanism by possession is the property under test.** The harness is
