@@ -210,6 +210,23 @@ async function main() {
      '--native-driver', process.env.WEBKIT_WEBDRIVER ?? '/usr/bin/WebKitWebDriver'],
     {
       stdio: ['ignore', 'inherit', 'inherit'],
+      /* **Its own process group, so the tree can be owned.**
+
+         `tauri-driver` spawns the cockpit, which spawns `super-host`, which
+         spawns `ampd` — a `beam.smp`. `stop()` killed only the driver, so
+         everything below it reparented to init and kept running. Worse,
+         `stdio: inherit` hands this process's stdout to every descendant,
+         so an orphaned BEAM held the pipe open and the harness waited for
+         an EOF that would never arrive. Measured: PPID 1, ~198% CPU,
+         eleven minutes of no output at all, released instantly by killing
+         the orphan by hand.
+
+         `detached` makes the driver a group leader whose pgid is its own
+         pid, so `kill(-pgid)` reaches the whole tree — and reaches exactly
+         the processes this battery started, which is the only set a test
+         harness is entitled to signal. A `pkill beam.smp` would also have
+         killed the ~35 unrelated BEAMs on this machine. */
+      detached: true,
       env: {
         ...process.env,
         AMPD_DIR: `${ROOT}/ampd`,
@@ -238,10 +255,48 @@ async function main() {
     },
   );
 
-  const stop = () => {
-    try { driver.kill('SIGTERM'); } catch {}
+  /* **Every exit path, and the group rather than the leader.**
+
+     Idempotent because several of these fire together: a thrown assertion
+     runs `finally` and then `exit`, and an interrupt runs the signal
+     handler and then `exit` too. */
+  let stopped = false;
+  const stopSync = () => {
+    if (stopped) return;
+    stopped = true;
+    /* Negative pid = the whole group. SIGTERM, never SIGKILL first: ampd's
+       stores are `:dets` and an unclean exit forces a repair on next open. */
+    try { process.kill(-driver.pid, 'SIGTERM'); } catch {}
   };
-  process.on('exit', stop);
+
+  /* The bounded version, for the paths that can await. Waits for the group
+     to actually go — a returned `kill` is not a dead process — and only
+     escalates if SIGTERM was ignored. */
+  const stop = async () => {
+    stopSync();
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      try { process.kill(-driver.pid, 0); } catch { return true; }
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    try { process.kill(-driver.pid, 'SIGKILL'); } catch {}
+    return false;
+  };
+
+  process.on('exit', stopSync);
+  for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    process.on(sig, () => { stopSync(); process.exit(130); });
+  }
+  process.on('uncaughtException', (e) => {
+    stopSync();
+    console.error(`cockpit battery: uncaught ${e?.message ?? e}`);
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (e) => {
+    stopSync();
+    console.error(`cockpit battery: unhandled rejection ${e?.message ?? e}`);
+    process.exit(1);
+  });
 
   try {
     await waitFor('tauri-driver to listen', async () => {
@@ -261,7 +316,15 @@ async function main() {
     console.log(`               ${e.message ?? e}`);
   } finally {
     if (session) { try { await wd('DELETE', `/session/${session}`); } catch {} }
-    stop();
+
+    /* **Awaited, and then verified.** The leak this closes was invisible
+       precisely because nothing ever checked; a `kill` that returns is not
+       a tree that is gone. */
+    const clean = await stop();
+    if (!clean) {
+      failed++;
+      console.log(`  \x1b[31mFAILED\x1b[0m       the battery left its own process group running`);
+    }
   }
 
   /* **Prefixed, and `super-host verify`'s is not.** `emit-measurements`

@@ -145,6 +145,28 @@ pub fn serve_effects(fd: RawFd) {
     }
 }
 
+
+/// The inode behind a `/proc/<pid>/fd/<n>` target, if it is a socket.
+///
+/// `socket:[12345]` → `Some(12345)`. Anything else → `None`.
+pub fn socket_inode(target: &str) -> Option<u64> {
+    let rest = target.strip_prefix("socket:[")?;
+    rest.strip_suffix(']')?.parse().ok()
+}
+
+/// The inode of a descriptor this process holds.
+///
+/// **This is what makes a channel identifiable after it has been given
+/// away.** `SCM_RIGHTS` and `dup2` both produce a descriptor sharing the
+/// *same open file description* as the one sent, so the inode the host
+/// reads here is the inode the runtime will show for its adopted copy —
+/// even though the fd numbers differ and the host has since closed its own.
+fn fd_inode(fd: RawFd) -> Option<u64> {
+    std::fs::read_link(format!("/proc/self/fd/{fd}"))
+        .ok()
+        .and_then(|p| socket_inode(&p.to_string_lossy()))
+}
+
 fn read_frame(fd: RawFd) -> io::Result<Value> {
     let len = read_exact(fd, 4)?;
     let n = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
@@ -969,6 +991,16 @@ pub struct Runtime {
     /// Every channel descriptor this host has created, so descriptor
     /// confinement is something the battery can check rather than trust.
     channels: Mutex<Vec<RawFd>>,
+    /// The inodes of every endpoint this host has handed to the runtime.
+    ///
+    /// The **structural** answer to "is this descriptor a Super channel?",
+    /// replacing the string test `readlink(...) contains "socket:"`. That
+    /// proxy called any socket a channel, so a verifier launched with
+    /// socketpair-backed stdio — which `execFileSync` supplies — reported a
+    /// channel on fd 1 and 2 and failed a gate about something else
+    /// entirely. Sockets are perfectly valid stdio; the question was never
+    /// whether a descriptor is a socket.
+    channel_inodes: Mutex<Vec<u64>>,
     /// Whether `release` has already run. `shutdown` and
     /// `stop_keeping_world` call it explicitly and `Drop` calls it again
     /// on the way out, so it has to be answerable twice.
@@ -1030,6 +1062,11 @@ impl Runtime {
         }
         .map_err(|e| format!("spawning ampd: {e}"))?;
 
+        // Read before closing: the child inherited this same open file
+        // description as fd 3, so this inode is the one its adopted bridge
+        // will show. The bridge is a Super channel and must be in the set.
+        let bridge_inode = fd_inode(theirs);
+
         // Our copy of the child's end is dead weight the moment it is
         // inherited; holding it would keep the channel alive after the
         // child died, which is a channel with nobody on it.
@@ -1043,6 +1080,7 @@ impl Runtime {
             bridge: ours,
             bridge_lock: Mutex::new(()),
             channels: Mutex::new(Vec::new()),
+            channel_inodes: Mutex::new(bridge_inode.into_iter().collect()),
             released: false,
         };
         rt.await_ready(Duration::from_secs(90))?;
@@ -1150,6 +1188,8 @@ impl Runtime {
         }
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        // Read before the send, because `theirs` is closed straight after.
+        let given = fd_inode(theirs);
         let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
@@ -1164,6 +1204,8 @@ impl Runtime {
                 v["refusal"]["code"]
             ));
         }
+
+        if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
 
         self.channels.lock().unwrap().push(ours);
         let chan = Chan::adopt(ours);
@@ -1221,9 +1263,11 @@ impl Runtime {
         });
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let given = fd_inode(theirs);
         let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+        if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
 
         let reply =
             fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
@@ -1254,7 +1298,9 @@ impl Runtime {
 
         let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let given = fd_inode(theirs);
         let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
@@ -1477,6 +1523,24 @@ impl Runtime {
     /// bridge descriptor was disposed of: the host `dup2`s the bridge onto
     /// 3 before `exec`, so 3 is where it lands, and after adoption there
     /// should be nothing there.
+    /// Every endpoint inode this host has handed to the runtime.
+    pub fn adopted_channel_inodes(&self) -> Vec<u64> {
+        self.channel_inodes.lock().unwrap().clone()
+    }
+
+    /// Is this `/proc/<pid>/fd/<n>` target one of the runtime's adopted
+    /// Super channels?
+    ///
+    /// **Not "is it a socket".** A socket the launcher supplied as stdio is
+    /// a socket and is not a channel; the difference is whether this host
+    /// gave it away. Independent of how the verifier itself was started.
+    pub fn is_adopted_channel(&self, target: &str) -> bool {
+        match socket_inode(target) {
+            None => false,
+            Some(i) => self.channel_inodes.lock().unwrap().contains(&i),
+        }
+    }
+
     pub fn runtime_fd_open(&self, n: RawFd) -> bool {
         std::fs::read_link(format!("/proc/{}/fd/{}", self.child.id(), n)).is_ok()
     }

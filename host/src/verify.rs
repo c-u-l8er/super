@@ -163,22 +163,95 @@ pub fn run(ampd_dir: &Path) -> i32 {
     // runtime started with stdout closed would eventually print into a
     // peer's channel.
     //
-    // **An invariant check, not a falsifier, and it is not counted as
-    // one.** This battery is launched from a shell, so 0, 1 and 2 are
-    // occupied whether or not `ensure_std_fds` exists — it passes with the
-    // fix disabled, which is the definition. The guarantee is for the
-    // launch environment this does not have and Super is about to acquire:
-    // a desktop session starting a GUI. Asserting the property is worth
-    // doing; claiming this run is evidence for the fix is not.
-    let std_fds: Vec<String> = (0..3)
+    // **The proposition, restated after it was found to be the wrong one.**
+    //
+    // This asked whether `readlink(/proc/<pid>/fd/N)` contained `socket:`
+    // and called any socket a channel. Sockets are perfectly valid stdio:
+    // `execFileSync` supplies stdout and stderr as socketpairs, so the same
+    // commit gave 87/0 from a shell and 86/1 through the bundle generator —
+    // a gate whose answer depended on who launched it.
+    //
+    // The real invariant is not "stdio is not a socket". It is:
+    //
+    //     fd 0/1/2 must not be a descriptor this host handed the runtime
+    //     as a privileged Super channel
+    //
+    // which is a question about *provenance*, answered structurally by
+    // socket inode. `SCM_RIGHTS` and `dup2` share the open file
+    // description, so the inode the host reads before giving an endpoint
+    // away is the inode the runtime shows for its adopted copy.
+    let std_channels: Vec<String> = (0..3)
         .map(|n| rt.runtime_fd_target(n))
-        .filter(|t| t.contains("socket:"))
+        .filter(|t| rt.is_adopted_channel(t))
         .collect();
+
     b.check(
         "the runtime's standard descriptors are open, and none of them is a channel",
-        std_fds.is_empty() && (0..3).all(|n| rt.runtime_fd_open(n)),
-        format!("0/1/2 in the runtime: {:?}", (0..3).map(|n| rt.runtime_fd_target(n)).collect::<Vec<_>>()),
+        std_channels.is_empty() && (0..3).all(|n| rt.runtime_fd_open(n)),
+        format!(
+            "0/1/2 in the runtime: {:?} · adopted channel inodes: {:?}",
+            (0..3).map(|n| rt.runtime_fd_target(n)).collect::<Vec<_>>(),
+            rt.adopted_channel_inodes()
+        ),
     );
+
+    // **And the classifier is falsified in both directions**, because a
+    // predicate that answered `false` for everything would also have made
+    // the check above pass.
+    {
+        let adopted = rt.adopted_channel_inodes();
+
+        b.check(
+            "the host knows which descriptors it handed the runtime",
+            !adopted.is_empty(),
+            "no adopted channel inode was recorded — the classifier has nothing to compare against",
+        );
+
+        // A real adopted channel IS recognised. This is the direction that
+        // matters: if an actual channel landed on fd 0/1/2 the gate must go
+        // red, and this proves the predicate would say so.
+        let a_channel = format!("socket:[{}]", adopted.first().copied().unwrap_or(0));
+        b.check(
+            "an adopted channel on a standard descriptor would be caught",
+            rt.is_adopted_channel(&a_channel),
+            format!("the predicate did not recognise {a_channel}"),
+        );
+
+        // A socket the launcher supplied is NOT a channel — the exact case
+        // that produced the false failure. Built from an inode this host
+        // never gave away.
+        let unrelated = crate::fdpass::pair_stream().ok();
+        let stdio_like = unrelated
+            .as_ref()
+            .and_then(|crate::fdpass::Pair(a, _)| {
+                std::fs::read_link(format!("/proc/self/fd/{a}")).ok()
+            })
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+
+        b.check(
+            "a socket this host never handed over is not a channel",
+            !stdio_like.is_empty() && !rt.is_adopted_channel(&stdio_like),
+            format!("{stdio_like} was misclassified as a Super channel"),
+        );
+
+        if let Some(crate::fdpass::Pair(a, bfd)) = unrelated {
+            crate::fdpass::close_fd(a);
+            crate::fdpass::close_fd(bfd);
+        }
+
+        // And the launcher genuinely varies: report what this run's own
+        // stdio is, so a green result from socket-backed stdio is legible
+        // as such rather than assumed.
+        let own = std::fs::read_link("/proc/self/fd/1")
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_default();
+        b.check(
+            "this gate is independent of how the verifier itself was launched",
+            !rt.is_adopted_channel(&own),
+            format!("the verifier's own stdout {own} was classified as a Super channel"),
+        );
+    }
 
     // ------------------------------------- an engine's channel already means it
     let mut kestrel = match rt.agent_channel("kestrel") {
