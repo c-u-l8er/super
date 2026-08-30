@@ -362,6 +362,17 @@ impl Drop for Chan {
     }
 }
 
+impl Drop for Runtime {
+    fn drop(&mut self) {
+        // Every path that is not `shutdown`/`stop_keeping_world`: a `?`
+        // inside `start`, a panic, a battery section returning early. The
+        // world is deliberately left alone — a durable world outliving the
+        // host is the point, and an ephemeral one is only disposable
+        // because `shutdown` was told so.
+        self.release();
+    }
+}
+
 /// Where a client is in a world's history.
 ///
 /// All four fields, because none of them means anything alone — see
@@ -903,6 +914,10 @@ pub struct Runtime {
     /// Every channel descriptor this host has created, so descriptor
     /// confinement is something the battery can check rather than trust.
     channels: Mutex<Vec<RawFd>>,
+    /// Whether `release` has already run. `shutdown` and
+    /// `stop_keeping_world` call it explicitly and `Drop` calls it again
+    /// on the way out, so it has to be answerable twice.
+    released: bool,
 }
 
 impl Runtime {
@@ -973,6 +988,7 @@ impl Runtime {
             bridge: ours,
             bridge_lock: Mutex::new(()),
             channels: Mutex::new(Vec::new()),
+            released: false,
         };
         rt.await_ready(Duration::from_secs(90))?;
         Ok(rt)
@@ -1160,16 +1176,44 @@ impl Runtime {
         Some(live)
     }
 
-    /// Stop the runtime. **Only an ephemeral world is deleted** — the
-    /// user's world outliving the program that opened it is the entire
-    /// point of it being durable.
-    pub fn shutdown(mut self) {
+    /// Kill the runtime, reap it, and release what the host was holding.
+    ///
+    /// **This is `Drop`'s body, and that is the point.** `Child` does not
+    /// kill on drop, so for as long as the only cleanup was a `self`-by-value
+    /// `shutdown` every path that dropped a `Runtime` without calling one
+    /// left a live `beam.smp` reparented to init, spinning a scheduler on
+    /// every core. `Runtime::start`'s own `await_ready(90s)?` was the worst
+    /// of them: it drops `rt` on timeout, so the caller never receives the
+    /// handle it would have needed to clean up, and no caller-side
+    /// discipline could have closed it. Measured before the fix: 368
+    /// `$XDG_RUNTIME_DIR/ampd-*` dirs — this function is the only thing
+    /// that removes one — and three separate occasions of 5, 8 and 13
+    /// orphans pinning 17 to 23 of 24 cores.
+    ///
+    /// Idempotent, because both stop paths call it *before* deciding what
+    /// happens to the world and then drop, which would otherwise
+    /// double-`close(2)` two descriptors onto numbers the kernel has
+    /// already handed back out.
+    fn release(&mut self) {
+        if self.released {
+            return;
+        }
+        self.released = true;
+
         let _ = self.child.kill();
         let _ = self.child.wait();
         fdpass::close_fd(self.bridge);
         // Releases the advisory lock with it.
         fdpass::close_fd(self.world_lock);
         let _ = std::fs::remove_dir_all(&self.dir);
+    }
+
+    /// Stop the runtime. **Only an ephemeral world is deleted** — the
+    /// user's world outliving the program that opened it is the entire
+    /// point of it being durable.
+    pub fn shutdown(mut self) {
+        // Before the world is touched: the runtime is still writing to it.
+        self.release();
 
         if let WorldDir::Ephemeral(p) = &self.world {
             let _ = std::fs::remove_dir_all(p);
@@ -1180,11 +1224,7 @@ impl Runtime {
     /// The durability check needs a first host to exit the way a user
     /// quitting the app does, and then a second one to find the world.
     pub fn stop_keeping_world(mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        fdpass::close_fd(self.bridge);
-        fdpass::close_fd(self.world_lock);
-        let _ = std::fs::remove_dir_all(&self.dir);
+        self.release();
     }
 
     /// How many descriptors the runtime process is holding.
