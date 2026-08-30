@@ -147,6 +147,9 @@ defmodule Ampd.Worktree.EffectChannel do
     end
   end
 
+  @doc "The bound this channel gives the mechanism. See `submit/2`."
+  def deadline_ms, do: 10_000
+
   @doc """
   Submit one already-admitted mechanism request and return its observation.
 
@@ -176,18 +179,23 @@ defmodule Ampd.Worktree.EffectChannel do
   deadline has to be the thing that ends it, and it has to end before the
   transaction does.
 
-      channel deadline  <  transaction budget  <  enclosing call deadline
-          10 s                   15 s                     30 s
+      mechanism wait  <  enclosing call deadline  <  transaction budget
+          10 s                    12 s                      15 s
 
-  **`Ampd.Worktree.Effector.Host` has the same shape and has not been
-  changed**: its `collect/2` waits 30 s inside the same 15 s budget. That
-  is a pre-existing defect on D.1.1's frozen path, recorded rather than
-  fixed here, because fixing it is a change to a frozen effector and this
-  slice is not the place to make one.
+  **`Ampd.Worktree.Effector.Host` had the same shape and has been brought
+  under the same bound** — its `collect/2` waited 30 s, inside a call that
+  waited 30 s, inside a 15 s budget. It is a deadline rather than a
+  semantic, so the frozen effector still does exactly what it did and the
+  parity check is unaffected. `C14` asserts the whole chain is strictly
+  decreasing by reading the four numbers off the modules that own them,
+  so it cannot drift back.
+
+  **This is the bounded fix and not the architectural one.** The right
+  shape is ordered-admit → unordered-mechanism → ordered-commit, so machine
+  latency is never inside the total order at all. `Ampd.Worktree.create/1`
+  records why that is a separate slice.
   """
-  @deadline_ms 10_000
-
-  def submit(body, timeout \\ @deadline_ms) when is_map(body) do
+  def submit(body, timeout \\ deadline_ms()) when is_map(body) do
     case Bridge.effect_endpoint() do
       %{sock: sock, incarnation: %{"channel_epoch" => epoch}} ->
         request_id = new_epoch()

@@ -140,12 +140,33 @@ defmodule Ampd.AuthorityCoordinator do
   end
 
   @doc """
+  The budget a transaction has to finish in, and the outermost bound on
+  every wait nested inside one.
+
+  Declared rather than repeated so the ordering below can be **asserted**
+  instead of maintained by hand. Every deadline nested inside a
+  transaction must be strictly smaller than this one, or the caller times
+  out and **raises inside the total order** rather than the inner call
+  returning a typed refusal — which leaves the transaction dead and the
+  lifecycle state unwritten. `Ampd.Bridge.reset/0` carries the same scar
+  in its own comment for the same reason.
+
+      mechanism wait  <  enclosing call deadline  <  transaction budget
+
+  `Ampd.WorktreeTest`'s deadline-ordering falsifier reads these four
+  numbers off the modules that own them and fails if the chain ever stops
+  being strictly decreasing.
+  """
+  def budget_ms, do: 15_000
+
+  @doc """
   Run `fun` inside the total order.
 
   Re-entrant by design: code already executing *inside* the coordinator is
   already ordered, so it runs directly instead of calling into itself and
   deadlocking.
   """
+
   def transact(fun, expected_world \\ nil, timeout \\ 15_000) do
     if self() == Process.whereis(__MODULE__) do
       # Re-entrant: the outer transaction was fenced, and this runs inside

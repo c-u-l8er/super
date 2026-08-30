@@ -219,6 +219,32 @@ defmodule Ampd.Worktree do
   def admitted(ref), do: GenServer.call(__MODULE__, {:set_state, ref, "ADMITTED", %{}})
 
   @doc """
+  The deadline this call gives the mechanism, **below the transaction
+  budget that encloses it**.
+
+  This was 30 s inside a 15 s `Ampd.AuthorityCoordinator` budget, so an
+  ordinary slow `git` did not produce an INDETERMINATE record — it made
+  the coordinator's caller raise, killing the transaction with the
+  lifecycle state unwritten. The record was already `CREATING` on disk by
+  then, so reconciliation still catches it, but the runtime learned
+  nothing at the moment it happened and the person saw a crash rather
+  than a refusal.
+
+  Newly reachable in D.1.3a: a channel endpoint can answer promptly and
+  *wrongly*, and a mis-correlated observation is skipped rather than
+  accepted — correctly — so it costs time without costing liveness.
+
+  **This is the bounded fix, not the architectural one.** The right shape
+  is ordered-admit → unordered-mechanism → ordered-commit, so machine
+  latency is never held inside the total order at all. That refactor is
+  not a completion-pass edit: `:create` is in `@ordered_ops`, so the
+  effect is reachable *only* from the coordinator, and moving it out means
+  changing the ordered-authority boundary itself and adding a revalidation
+  phase. It is named as the next slice rather than half-done here.
+  """
+  def call_deadline_ms, do: 12_000
+
+  @doc """
   Create the worktree. **Performs; does not judge.**
 
   Writes `CREATING` durably before invoking the effector, observes the
@@ -226,7 +252,7 @@ defmodule Ampd.Worktree do
   `OBSERVED_CREATED` or a recovery state. Returns `{:ok, record}` or
   `{:error, code, detail}`.
   """
-  def create(ref), do: GenServer.call(__MODULE__, {:create, ref}, 30_000)
+  def create(ref), do: GenServer.call(__MODULE__, {:create, ref}, call_deadline_ms())
 
   @doc "Mark the resource committed — reached only once a receipt is durable."
   def committed(ref), do: GenServer.call(__MODULE__, {:set_state, ref, "COMMITTED_READY", %{}})

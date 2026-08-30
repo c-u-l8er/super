@@ -544,6 +544,104 @@ defmodule Ampd.EffectChannelTest do
     end
   end
 
+  # =================================================================== C13
+  describe "C13 · there is no ambient production fallback" do
+    test "the unconfigured default effector is the channel, not a named one" do
+      # The test environment *selects* the reference effector in
+      # config/config.exs. This asserts what the runtime does when nobody
+      # has selected anything — which is what a deployed Super does.
+      prior = Application.get_env(:ampd, :worktree_effector)
+      Application.delete_env(:ampd, :worktree_effector)
+
+      on_exit(fn ->
+        if prior, do: Application.put_env(:ampd, :worktree_effector, prior)
+      end)
+
+      assert Ampd.Worktree.Effector.current() == Ampd.Worktree.Effector.Channel,
+             "a deployed runtime would reach the mechanism by resolving a pathname"
+    end
+
+    test "neither SUPER_HOST_BIN nor PATH can make the production path exec by name", ctx do
+      use_channel_effector!()
+      grant!(ctx.lane["id"])
+      assert Bridge.effect_endpoint() == nil
+
+      # Point both ambient names at a real, working host binary. If any
+      # fallback existed, this is precisely the configuration under which
+      # it would fire — and the effect would succeed.
+      prior_bin = System.get_env("SUPER_HOST_BIN")
+      prior_path = System.get_env("PATH")
+      real = Ampd.Worktree.Effector.Host.binary()
+      System.put_env("SUPER_HOST_BIN", real)
+      System.put_env("PATH", Path.dirname(real) <> ":" <> (prior_path || ""))
+
+      on_exit(fn ->
+        if prior_bin,
+          do: System.put_env("SUPER_HOST_BIN", prior_bin),
+          else: System.delete_env("SUPER_HOST_BIN")
+
+        if prior_path, do: System.put_env("PATH", prior_path)
+      end)
+
+      before = footprint()
+      r = Control.command(ctx.agent, :establish_worktree, [ctx.lane["id"], "wt-c13"])
+
+      assert r["allow"] == false,
+             "a reachable host binary revived the named path when no channel was possessed"
+
+      assert footprint() == before
+      refute File.dir?(Path.join(Worktree.root(), "wt-c13"))
+    end
+  end
+
+  # =================================================================== C14
+  describe "C14 · machine latency cannot raise inside the total order" do
+    test "every mechanism wait is strictly inside the deadline that encloses it" do
+      # Read off the modules that own them, not typed here. A chain
+      # maintained by hand is a chain that drifts; this one fails.
+      channel = Ampd.Worktree.EffectChannel.deadline_ms()
+      named = Ampd.Worktree.Effector.Host.deadline_ms()
+      call = Ampd.Worktree.call_deadline_ms()
+      budget = Ampd.AuthorityCoordinator.budget_ms()
+
+      assert channel < call,
+             "the channel outlives the call that encloses it: #{channel} >= #{call}"
+
+      assert named < call,
+             "the named effector outlives the call that encloses it: #{named} >= #{call}"
+
+      assert call < budget,
+             "the effect call outlives its transaction budget: #{call} >= #{budget}"
+
+      # Margin, not merely ordering. A chain that fits by a millisecond is
+      # one scheduler hiccup away from the defect it is meant to close.
+      assert budget - call >= 2_000, "less than 2s of margin under the transaction budget"
+      assert call - channel >= 1_000, "less than 1s of margin under the effect call"
+    end
+
+    test "a mechanism that never answers yields a typed record, not a raised transaction", ctx do
+      # The endpoint receives the request and says nothing, ever. Before the
+      # bound this raised out of the coordinator; now it must come back as
+      # an ordinary refusal with the record left INDETERMINATE.
+      {h, _inc} = channel!(fn _req, _n -> :no_reply end)
+      grant!(ctx.lane["id"])
+
+      r = Control.command(ctx.agent, :establish_worktree, [ctx.lane["id"], "wt-c14"])
+
+      assert r["allow"] == false
+      assert r["refusal"]["code"] == "worktree-create-failed"
+      assert length(Host.requests(h)) == 1
+      assert indeterminate?("wt-c14")
+
+      # And the runtime is still serving — a raised transaction would have
+      # taken the coordinator's caller down with it, and the next command
+      # would time out rather than answer.
+      proj = Control.command(ctx.control, :operator_projection, [])
+      assert is_map(proj) and proj["refusal"] == nil, "the coordinator did not survive: #{inspect(proj)}"
+      assert is_map(proj["projection"]) or is_map(proj["result"]) or map_size(proj) > 0
+    end
+  end
+
   # ==================================================================
   # helpers
   # ==================================================================

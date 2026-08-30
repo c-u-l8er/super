@@ -390,14 +390,29 @@ defmodule Ampd.Worktree.Effector.Host do
   # when the exit status arrives — not when the first chunk does. Reading
   # one chunk and calling it the answer is how a large observation becomes
   # a parse error that reads like a malformed host.
+  @doc """
+  How long this effector waits, **below the deadline of the call that
+  encloses it**.
+
+  This was 30 s, inside a 12 s `Ampd.Worktree.create/1` call, inside a
+  15 s transaction budget — so a slow host raised through two layers
+  instead of returning the typed error that becomes INDETERMINATE. Changed
+  here even though this is the frozen reference effector, because leaving
+  a known machine-latency-inside-the-total-order path in the tree is
+  exactly what D.1.3b must not inherit. It is a deadline, not a semantic:
+  what this effector *does* is untouched, and the parity check against
+  `Ampd.Worktree.Git` is unaffected.
+  """
+  def deadline_ms, do: 10_000
+
   defp collect(port, acc) do
     receive do
       {^port, {:data, chunk}} -> collect(port, acc <> chunk)
       {^port, {:exit_status, _}} -> {:ok, acc}
     after
-      30_000 ->
+      deadline_ms() ->
         Port.close(port)
-        {:error, "the host effector did not answer within 30s"}
+        {:error, "the host effector did not answer within #{div(deadline_ms(), 1000)}s"}
     end
   end
 
