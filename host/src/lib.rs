@@ -31,6 +31,8 @@
 pub mod effect;
 pub mod sha256;
 pub mod fdpass;
+pub mod confine;
+pub mod carrier;
 
 use std::collections::HashMap;
 use std::io;
@@ -161,6 +163,13 @@ pub fn socket_inode(target: &str) -> Option<u64> {
 /// *same open file description* as the one sent, so the inode the host
 /// reads here is the inode the runtime will show for its adopted copy —
 /// even though the fd numbers differ and the host has since closed its own.
+/// `fd_inode` for the Carrier module, which needs the same
+/// read-before-you-close discipline the bridge uses and must not grow a
+/// second copy of it.
+pub fn fd_inode_pub(fd: RawFd) -> Option<u64> {
+    fd_inode(fd)
+}
+
 fn fd_inode(fd: RawFd) -> Option<u64> {
     std::fs::read_link(format!("/proc/self/fd/{fd}"))
         .ok()

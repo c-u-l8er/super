@@ -1566,11 +1566,436 @@ pub fn run(ampd_dir: &Path) -> i32 {
         }
     }
 
+    let adopted_inodes = rt.adopted_channel_inodes();
+    carrier_confinement(&mut b, &scratch, &adopted_inodes);
+
     println!("\n  {} held · {} failed", b.pass, b.fail);
     rt.shutdown();
     let _ = std::fs::remove_dir_all(&scratch);
 
     if b.fail == 0 { 0 } else { 1 }
+}
+
+// ==================================== D.1.3b · THE CONFINED CARRIER PROCESS
+//
+// **Every attack is run twice.** Once inside a Carrier and once as an
+// unconfined child of this same host, and a refusal is scored only where the
+// bare control *succeeded*.
+//
+// The reason is measured. This machine runs `kernel.yama.ptrace_scope = 1`,
+// under which `ptrace` and `pidfd_getfd` against a non-descendant fail with
+// `EPERM` before any LSM is consulted. A battery that ran the attack, saw the
+// refusal and printed green would be reporting a sysctl — and would go on
+// printing green after an administrator set it to `0`.
+//
+// That is D.1.3a's standard-descriptor defect in new clothes: there, the
+// answer depended on who launched the gate; here it would depend on a setting
+// the property does not mention. The fix has the same shape both times.
+//
+// Two grades of attribution are reported, and they are not the same claim:
+//
+//   by errno        the refusal carries 130 (EOWNERDEAD), which Super's
+//                   filter returns and no ptrace or DAC path produces, so
+//                   the refusal names its author
+//   by differential the bare control succeeded and the confined run did not,
+//                   so the confinement is what closed it
+//
+// `ptrace` and `pidfd_getfd` earn the first and not the second on this
+// kernel. Reported as such rather than rounded up.
+
+/// One row of the confined/bare comparison.
+struct Attack {
+    bare: Option<(bool, i32)>,
+    confined: Option<(bool, i32)>,
+}
+
+fn parse_probe_log(p: &Path) -> std::collections::BTreeMap<String, (bool, i32)> {
+    let mut m = std::collections::BTreeMap::new();
+    if let Ok(s) = std::fs::read_to_string(p) {
+        for l in s.lines() {
+            let f: Vec<&str> = l.split('\t').collect();
+            if f.len() == 3 {
+                m.insert(f[0].to_string(), (f[1] == "ALLOWED", f[2].parse().unwrap_or(-1)));
+            }
+        }
+    }
+    m
+}
+
+/// **Verification scaffolding: an unconfined control.**
+///
+/// Deliberately here and not in `carrier.rs`. That module has exactly one
+/// spawn path and it is confined; a `spawn_unconfined` living beside it would
+/// be one refactor away from becoming a fallback, which is the shape C13
+/// exists to keep out of the effect path and which has no better claim here.
+fn bare_control(probe: &Path, dir: &Path, log: &Path, target: u32, leak: std::os::fd::RawFd) -> bool {
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let Ok(out) = std::fs::File::create(log) else { return false };
+    let Ok(err) = out.try_clone() else { return false };
+    let args = [target.to_string(), "9".to_string(), dir.to_string_lossy().to_string()];
+    let child = unsafe {
+        Command::new(probe)
+            .args(args)
+            .current_dir(dir)
+            .env_clear()
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(out))
+            .stderr(Stdio::from(err))
+            .pre_exec(move || {
+                crate::fdpass::ensure_std_fds()?;
+                crate::fdpass::dup_onto(leak, 9)
+            })
+            .spawn()
+    };
+    match child {
+        Ok(mut c) => c.wait().map(|_| true).unwrap_or(false),
+        Err(_) => false,
+    }
+}
+
+fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
+    use crate::{carrier, confine};
+
+    println!("\n  D.1.3b · the confined Carrier process");
+
+    let abi = confine::landlock_abi();
+    b.check(
+        "this kernel reports a Landlock ABI, read from the kernel not assumed",
+        abi.is_some(),
+        format!("landlock_create_ruleset(VERSION) said {abi:?}"),
+    );
+    let Some(abi) = abi else { return };
+
+    // ABI 10 is where LANDLOCK_ACCESS_NET_BIND_UDP and CONNECT_SEND_UDP
+    // arrive. Below it, UDP is not governable by Landlock at all and the
+    // policy closes it at `socket(2)` in seccomp instead. Recording which
+    // side of that line the kernel is on keeps a later reader from assuming
+    // the network row means the same thing it would on a newer machine.
+    b.check(
+        "the profile records whether UDP is governable by Landlock here",
+        true,
+        String::new(),
+    );
+    println!(
+        "                 landlock abi {abi} · udp governable by landlock: {}",
+        abi >= 10
+    );
+
+    let Some(fixture) = carrier::fixture_path() else {
+        b.check(
+            "the Carrier fixture is built and resolvable from the host image",
+            false,
+            "no super-carrier-fixture beside super-host or in carrier-fixture/target/release",
+        );
+        return;
+    };
+    let probe = fixture.with_file_name("probe");
+
+    let dir = scratch.join("carrier");
+    let _ = std::fs::create_dir_all(&dir);
+
+    // The ruleset descriptor must sit above every number the allowlist names.
+    //
+    // Asserted as a number rather than as "a Carrier starts", because the
+    // collision is latent: the ruleset takes the lowest free descriptor, so it
+    // lands on fd 3 only in a host holding few of them. The sabotage battery
+    // demonstrated the difference — with the relocation stubbed out, "a
+    // confined Carrier starts" stayed green here and went red in a smaller
+    // harness. A check whose ability to fail depends on how many files the
+    // host happens to have open is not a check.
+    {
+        let p = confine::Policy::minimal(&dir.to_string_lossy(), &fixture.to_string_lossy());
+        match confine::prepare(&p) {
+            Ok(prep) => b.check(
+                "the Landlock ruleset descriptor sits above the Carrier's allowlist",
+                prep.ruleset_fd() >= confine::Prepared::allowlist_ceiling(),
+                format!(
+                    "ruleset landed on fd {} · allowlist ceiling {}",
+                    prep.ruleset_fd(),
+                    confine::Prepared::allowlist_ceiling()
+                ),
+            ),
+            Err(e) => b.check(
+                "the Landlock ruleset descriptor sits above the Carrier's allowlist",
+                false,
+                e,
+            ),
+        }
+    }
+
+    // ---------------------------------------------------------- lifecycle
+    let log = dir.join("fixture.log");
+    let incarnation = crate::new_epoch();
+    let started = carrier::spawn(&fixture, &dir, &log, &incarnation, None);
+    match started {
+        Err(ref e) => {
+            b.check("a confined Carrier starts", false, e.clone());
+            return;
+        }
+        Ok(_) => b.check("a confined Carrier starts", true, String::new()),
+    }
+    let mut c = started.unwrap();
+
+    let hs = c.handshake(5_000);
+    b.check(
+        "the Carrier echoes the incarnation the host minted, not one it chose",
+        hs.is_ok(),
+        format!("{hs:?}"),
+    );
+
+    let o = c.observe();
+
+    // ------------------------------------------------ the exact descriptor set
+    let want: Vec<i32> = vec![0, 1, 2, 3];
+    let got: Vec<i32> = o.fds.keys().copied().collect();
+    b.check(
+        "the Carrier's descriptor table is exactly {0,1,2,3}",
+        got == want,
+        format!("{:?}", o.fds),
+    );
+    b.check(
+        "descriptor 0 is the explicit stdin policy and not an inherited stream",
+        o.fds.get(&0).map(|s| s == "/dev/null").unwrap_or(false),
+        format!("fd 0 = {:?}", o.fds.get(&0)),
+    );
+    b.check(
+        "descriptor 3 is the control channel this host created, by inode",
+        match (o.fds.get(&3), c.control_inode()) {
+            (Some(t), Some(i)) => crate::socket_inode(t) == Some(i),
+            _ => false,
+        },
+        format!("fd 3 = {:?} · recorded inode {:?}", o.fds.get(&3), c.control_inode()),
+    );
+    b.check(
+        "no descriptor the Carrier holds is a channel this host handed the runtime",
+        !o.fds.values().any(|t| crate::socket_inode(t).map(|i| adopted.contains(&i)).unwrap_or(false)),
+        format!("{:?}", o.fds),
+    );
+
+    // -------------------------------------------- observed, not configured
+    b.check(
+        "no_new_privs is observed set in the Carrier, read from its own /proc",
+        o.no_new_privs == Some(true),
+        format!("NoNewPrivs = {:?}", o.no_new_privs),
+    );
+    b.check(
+        "seccomp is observed in filter mode with at least one filter attached",
+        o.seccomp_mode == Some(2) && o.seccomp_filters.unwrap_or(0) >= 1,
+        format!("mode={:?} filters={:?}", o.seccomp_mode, o.seccomp_filters),
+    );
+    b.check(
+        "the Carrier's environment is constructed, not inherited",
+        o.env_keys.len() == 2
+            && o.env_keys.iter().all(|k| k.starts_with("SUPER_CARRIER_")),
+        format!("{:?}", o.env_keys),
+    );
+    b.check(
+        "the Carrier is the payload the host named, by /proc/<pid>/exe",
+        o.exe.as_deref() == Some(fixture.to_string_lossy().as_ref()),
+        format!("{:?}", o.exe),
+    );
+    b.check(
+        "process identity is pid AND start time, so a reused pid is not the Carrier",
+        c.same_process() && o.starttime.is_some(),
+        format!("starttime = {:?}", o.starttime),
+    );
+
+    let clean = c.terminate(3_000);
+    b.check(
+        "the Carrier stops on SIGTERM without needing SIGKILL",
+        clean,
+        "it had to be killed",
+    );
+    b.check(
+        "a terminated Carrier leaves no process behind",
+        crate::carrier::observe(c.pid).starttime != o.starttime,
+        format!("pid {} still shows the original start time", c.pid),
+    );
+
+    // ------------------------------------- the attributable attack battery
+    if !probe.is_file() {
+        b.check(
+            "the adversarial Carrier probe is built",
+            false,
+            format!("no probe at {}", probe.display()),
+        );
+        return;
+    }
+
+    // --- the clean case FIRST, while nothing has cleared CLOEXEC ---
+    //
+    // Order matters: this is the control for the leak below, and running it
+    // afterwards would measure the harness rather than the launch path.
+    let clean_fds: Vec<i32> = {
+        let held = std::fs::File::open("/etc/passwd").ok();
+        let r = carrier::spawn(&fixture, &dir, &dir.join("f2.log"), &crate::new_epoch(), None);
+        let f = match r {
+            Ok(mut r) => {
+                let f = r.observe().fds.keys().copied().collect();
+                r.terminate(2_000);
+                f
+            }
+            Err(_) => vec![],
+        };
+        drop(held);
+        f
+    };
+
+    // A sensitive file this host opens BEFORE any Landlock domain exists, then
+    // deliberately leaks into the child on fd 9.
+    let Ok(leaked) = std::fs::File::open("/etc/passwd") else { return };
+    let leak_fd = { use std::os::fd::AsRawFd; leaked.as_raw_fd() };
+    let _ = crate::fdpass::make_inheritable(leak_fd);
+
+    // Negative control: with CLOEXEC cleared, the descriptor really does
+    // arrive. Without this, the clean result above would be consistent with a
+    // launch path that never inherits anything for reasons of its own.
+    let leak_visible: bool = {
+        let r = carrier::spawn_with(
+            &fixture, &dir, &dir.join("f3.log"), &crate::new_epoch(), None, &[], &[(leak_fd, 9)],
+        );
+        match r {
+            Ok(mut r) => {
+                let f = r.observe().fds;
+                r.terminate(2_000);
+                f.contains_key(&9)
+            }
+            Err(_) => false,
+        }
+    };
+
+    let me = std::process::id();
+    let bare_log = dir.join("bare.log");
+    let ran_bare = bare_control(&probe, &dir, &bare_log, me, leak_fd);
+    b.check(
+        "the unconfined control ran, so refusals can be attributed at all",
+        ran_bare && !parse_probe_log(&bare_log).is_empty(),
+        "without a bare control every refusal is unattributable",
+    );
+
+    let conf_log = dir.join("confined.log");
+    let args = [me.to_string(), "9".to_string(), dir.to_string_lossy().to_string()];
+    let pol = confine::Policy::minimal(&dir.to_string_lossy(), &probe.to_string_lossy());
+    let probe_run = carrier::spawn_with(
+        &probe,
+        &dir,
+        &conf_log,
+        &crate::new_epoch(),
+        Some(pol),
+        &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
+        &[(leak_fd, 9)],
+    );
+    match probe_run {
+        Err(e) => {
+            b.check("the adversarial probe runs as a confined Carrier", false, e);
+            return;
+        }
+        Ok(mut p) => {
+            b.check("the adversarial probe runs as a confined Carrier", true, String::new());
+            std::thread::sleep(std::time::Duration::from_millis(900));
+            p.terminate(2_000);
+        }
+    }
+
+    let bare = parse_probe_log(&bare_log);
+    let conf = parse_probe_log(&conf_log);
+    let row = |k: &str| Attack {
+        bare: bare.get(k).copied(),
+        confined: conf.get(k).copied(),
+    };
+
+    // Closed, and demonstrably by us: the bare control reached it.
+    for (name, what) in [
+        ("open_etc_passwd", "host configuration"),
+        ("open_home_dotfile", "an unrelated home directory"),
+        ("open_super_source", "Super's own source tree"),
+        ("open_host_proc_fd_dir", "the trusted host's descriptor table"),
+        ("execve_other_binary", "a binary the policy does not name"),
+        ("socket_inet_tcp", "TCP"),
+        ("socket_inet_udp", "UDP"),
+        ("unshare_user_ns", "a new user namespace"),
+        ("pidfd_open_host", "a pidfd on the trusted host"),
+        ("signal_host", "a signal to the trusted host"),
+    ] {
+        let a = row(name);
+        let closed = matches!(a.bare, Some((true, _))) && matches!(a.confined, Some((false, _)));
+        b.check(
+            &format!("a Carrier cannot reach {what}, and the bare control could"),
+            closed,
+            format!("bare={:?} confined={:?}", a.bare, a.confined),
+        );
+    }
+
+    // Landlock does not reach a descriptor that was already open. This is the
+    // falsifier that keeps filesystem confinement from being read as
+    // descriptor confinement — it must SUCCEED in the confined run.
+    let pre = row("read_inherited_preopen_fd");
+    b.check(
+        "an inherited pre-open descriptor is readable THROUGH the filesystem sandbox",
+        matches!(pre.confined, Some((true, _))),
+        format!(
+            "confined={:?} — if this ever refuses, the claim below has changed and the \
+             descriptor doctrine must be re-derived rather than assumed",
+            pre.confined
+        ),
+    );
+    // The other half, and it must be falsified in both directions — a check
+    // that only ever ran the clean case would also pass if the Carrier
+    // inherited everything, because it would never have seen the difference.
+    //
+    // Producing the leak at all required `make_inheritable`, i.e. deliberately
+    // clearing `FD_CLOEXEC`. That is the finding: the production path cannot
+    // reproduce it because every descriptor this host creates is
+    // close-on-exec by construction — `SOCK_CLOEXEC` in `pair_stream`,
+    // `O_CLOEXEC` in `lock_world` and on the Landlock ruleset, and Rust's
+    // `File::open` — and the only thing that clears it is `dup_onto`, called
+    // on exactly the descriptors in the allowlist.
+    //
+    // Measured while writing this: the first version of this check ran AFTER
+    // the leak was set up and went red, because the harness's own leaked
+    // descriptor reached the Carrier. The check was correct; the thing it
+    // caught was the test.
+    b.check(
+        "the leaked descriptor IS visible to the Carrier when CLOEXEC is cleared",
+        leak_visible,
+        "the negative control did not reproduce the leak, so the check below proves nothing"
+    );
+    b.check(
+        "the real Carrier launch path leaks no such descriptor",
+        clean_fds == vec![0, 1, 2, 3],
+        format!("the production path inherited {clean_fds:?} with CLOEXEC intact"),
+    );
+
+    // Same-UID theft: attributable by errno, NOT by differential, and the
+    // difference is the check.
+    for name in ["ptrace_attach_host", "pidfd_getfd_host_fd3"] {
+        let a = row(name);
+        let ours = matches!(a.confined, Some((false, e)) if e as u32 == confine::SUPER_DENY_ERRNO);
+        b.check(
+            &format!("{name} is refused by Super's own filter, by errno"),
+            ours,
+            format!("confined={:?}, expected errno {}", a.confined, confine::SUPER_DENY_ERRNO),
+        );
+        let ambient = matches!(a.bare, Some((false, _)));
+        b.check(
+            &format!("{name} is reported as AMBIENT where the bare control also refused"),
+            ambient,
+            format!(
+                "bare={:?} — if the bare control now SUCCEEDS this becomes a differential \
+                 result and the ambient caveat can be dropped",
+                a.bare
+            ),
+        );
+    }
+
+    // The policy must still be a policy and not a wall.
+    let w = row("write_own_workdir");
+    b.check(
+        "the Carrier can still write its own working directory",
+        matches!(w.confined, Some((true, _))),
+        format!("confined={:?}", w.confined),
+    );
 }
 
 /// A git repository with one commit, for the production effect path to

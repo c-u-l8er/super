@@ -215,6 +215,44 @@ probe "a cursor field that is absent is not invented" \
   host/src/lib.rs \
   's|            authority_revision: v\["revision"\].as_u64()?,|            authority_revision: v["revision"].as_u64().unwrap_or(0),|'
 
+# ---------------------------------------------------------------- D.1.3b
+#
+# The confinement checks are the ones most able to go green over nothing:
+# every one of them would pass if the mechanism were absent and the probe
+# simply failed for its own reasons. These four stub a specific row of the
+# floor and name the check that must notice.
+
+# 14 · no_new_privs removed. `landlock_restrict_self` and
+#      `seccomp(SET_MODE_FILTER)` both refuse without it, so this is also the
+#      probe that proves `install` is not silently tolerating its own errors.
+probe "removing no_new_privs is noticed" \
+  "a confined Carrier starts" \
+  host/src/confine.rs \
+  's|        if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {|        if false {|'
+
+# 15 · The seccomp filter, not installed. Landlock stays, so the filesystem
+#      rows still pass — which is the point: the syscall rows must fail on
+#      their own and not be carried by the filesystem policy.
+probe "a Carrier with no seccomp filter is noticed" \
+  "seccomp is observed in filter mode with at least one filter attached" \
+  host/src/carrier.rs \
+  's|                prepared.install()|                { let _ = \&prepared; Ok(()) }|'
+
+# 16 · The environment, inherited rather than constructed. `env_clear` is one
+#      call and its absence hands the Carrier `AMPD_BRIDGE_FD` by name.
+probe "an inherited environment is noticed" \
+  "the Carrier's environment is constructed, not inherited" \
+  host/src/carrier.rs \
+  's|            .env_clear()|            |'
+
+# 17 · The ruleset descriptor left where the kernel put it — which is fd 3,
+#      the number the control channel is placed on. This is the bug this
+#      slice hit for real; the probe exists so it cannot come back quietly.
+probe "the ruleset descriptor colliding with the allowlist is noticed" \
+  "the Landlock ruleset descriptor sits above the Carrier's allowlist" \
+  host/src/confine.rs \
+  's|    let rs = relocate_above_allowlist(rs as RawFd)?;|    let rs = rs as RawFd;|'
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.

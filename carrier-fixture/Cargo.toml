@@ -1,0 +1,22 @@
+[package]
+name = "super-carrier-fixture"
+version = "0.1.0"
+edition = "2021"
+description = "The first [&] Super Carrier: a deterministic fixture with no general capability, so that any authority it turns out to hold is the host's doing."
+
+[[bin]]
+name = "super-carrier-fixture"
+path = "src/main.rs"
+
+# **Zero dependencies, including no serde.** The fixture answers on a wire the
+# host already speaks; giving it a JSON parser would make the first thing a
+# Carrier does be parsing untrusted bytes with a library, which is the shape
+# this fixture exists to avoid having to trust.
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1
