@@ -110,12 +110,24 @@ defmodule Ampd.Worktree.Effector do
   @doc """
   The effector this runtime will use.
 
-  `Ampd.Worktree.Effector.Host` is the default: the concrete `git`
-  execution belongs on the far side of a typed boundary, in a language
-  that can make the syscalls confinement needs. `Ampd.Worktree.Git`
-  remains, in-tree and tested, because it is what the boundary is checked
-  *against* — two implementations that must produce the same observation
-  are how the move is proved not to have changed the effect.
+  **`Ampd.Worktree.Effector.Channel` is the default, and the default is the
+  security property.** D.1.3a moved the production effect from *resolving a
+  name* to *possessing a descriptor*; a default that fell back to the named
+  effector when no channel was present would delete that property at
+  exactly the moment the system was degraded, which is when it matters. A
+  boundary with a convenient ambient fallback is not a boundary.
+
+  So a missing channel is `unavailable` — refused by name, lifecycle
+  `INDETERMINATE` — and never a pathname exec.
+
+  `Ampd.Worktree.Effector.Host` and `Ampd.Worktree.Git` remain, in-tree and
+  tested, as **explicit reference and parity mechanisms**: two
+  implementations that must produce the same observation are how the move
+  is proved not to have changed the effect. Selecting one is a
+  configuration a person writes, not a state the runtime falls into. The
+  test environment selects `Host` in `config/config.exs` for exactly that
+  reason, and `C13` asserts the *unconfigured* default is the channel so
+  that selection cannot quietly become the rule.
 
   **Which one is running is a load-bearing embodiment fact**, and it is
   already inside `Ampd.Locus.profile_facts/0`. So switching effectors
@@ -124,7 +136,7 @@ defmodule Ampd.Worktree.Effector do
   work around — it is the architecture behaving correctly about a change
   to what an effect *means*, and F10 covers it.
   """
-  def current, do: Application.get_env(:ampd, :worktree_effector, Ampd.Worktree.Effector.Host)
+  def current, do: Application.get_env(:ampd, :worktree_effector, Ampd.Worktree.Effector.Channel)
 end
 
 defmodule Ampd.Worktree.Effector.Host do

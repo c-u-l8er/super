@@ -75,7 +75,7 @@ use std::process::Command;
 /// Bound into `host-identity@1` and therefore into every capability's
 /// embodiment basis. A protocol change that altered what a request *means*
 /// while keeping the schema names would otherwise be invisible to `ampd`.
-const EFFECT_PROTOCOL_VERSION: u32 = 1;
+pub const EFFECT_PROTOCOL_VERSION: u32 = 1;
 
 /// Git variables that name a location or a program. Absence is the safe
 /// value for these: with none set, git uses its own defaults.

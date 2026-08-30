@@ -90,6 +90,61 @@ fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
+/// 16 bytes of kernel randomness, hex. No crate, and not a counter: an
+/// epoch that can be predicted is an epoch a replaced endpoint's
+/// observation can be stamped with.
+fn new_epoch() -> String {
+    use std::io::Read;
+    let mut b = [0u8; 16];
+    match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)) {
+        Ok(()) => b.iter().map(|x| format!("{x:02x}")).collect(),
+        // Refuse rather than substitute something guessable. The caller
+        // turns this into a failed bind, which is a host that does not
+        // serve effects — loud, and not a channel with a weak identity.
+        Err(e) => panic!("could not read /dev/urandom for a channel epoch: {e}"),
+    }
+}
+
+/// Serve `worktree-effect-request@1` on a possessed descriptor until it
+/// closes.
+///
+/// **One effect semantic implementation, two transports.** Every decision
+/// about what a request means lives in `effect::perform`, which the
+/// `effect` subcommand also calls. A second interpreter here is exactly
+/// how the reference path and the production path would come to disagree
+/// while both looked correct, and the parity check between them would
+/// then be comparing a thing to itself.
+///
+/// **Correlation is echoed, never consulted.** `request_id` and
+/// `channel_epoch` are copied from the request onto the observation and
+/// are not passed to `perform`. They say which request this is; letting
+/// the mechanism read them would be letting it decide which request it is
+/// answering.
+///
+/// **No authorization happens here and none can.** The request carries no
+/// actor, Worker, Lane, grant or capability, so there is nothing to form
+/// an opinion about. A malformed request gets a typed refusal — which is
+/// an observation of a failed effect, not a second gate.
+pub fn serve_effects(fd: RawFd) {
+    loop {
+        let req = match read_frame(fd) {
+            Ok(v) => v,
+            // EOF or a framing error ends the loop. The runtime treats a
+            // channel that stopped answering as indeterminate; it is not
+            // this side's job to decide that for it.
+            Err(_) => return,
+        };
+
+        let mut obs = effect::perform(&req);
+        obs["request_id"] = req["request_id"].clone();
+        obs["channel_epoch"] = req["channel_epoch"].clone();
+
+        if write_frame(fd, &obs).is_err() {
+            return;
+        }
+    }
+}
+
 fn read_frame(fd: RawFd) -> io::Result<Value> {
     let len = read_exact(fd, 4)?;
     let n = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
@@ -1126,6 +1181,66 @@ impl Runtime {
         self.bind_channel("bind_control_channel", None)
     }
 
+    /// Hand the runtime one end of a private **effect** channel and keep
+    /// the other, then serve machine effects on it.
+    ///
+    /// **The same bind, in the other direction of use.** A control or agent
+    /// channel makes the runtime the server and this process the client;
+    /// on this one the runtime is the client — it submits already-admitted
+    /// mechanism requests — and this process is the server that performs
+    /// them. That inversion is the whole point: authority is decided above,
+    /// and the mechanism only receives what was admitted.
+    ///
+    /// Nothing new is introduced to do it. Same `pair_stream`, same
+    /// `SCM_RIGHTS` transfer over the same bridge, same 4-byte framing,
+    /// same adoption on the far side. The only new thing on the wire is a
+    /// `bridge-command@1` name and the ephemeral incarnation that travels
+    /// with it.
+    ///
+    /// The incarnation is minted **here**, by the process that creates the
+    /// pair, because an epoch that the runtime chose would say nothing
+    /// about which endpoint it is talking to. `host_identity` is the same
+    /// object `super-host identity` prints — the runtime therefore learns
+    /// what performs its effects from the endpoint that will perform them,
+    /// instead of from a second resolution of a pathname.
+    pub fn effect_channel(&self) -> Result<RawFd, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let fdpass::Pair(ours, theirs) =
+            fdpass::pair_stream().map_err(|e| format!("effect socketpair: {e}"))?;
+
+        let cmd = json!({
+            "schema": "bridge-command@1",
+            "command": "bind_effect_channel",
+            "incarnation": {
+                "schema": "effect-channel@1",
+                "channel_epoch": new_epoch(),
+                "protocol": "worktree-effect",
+                "protocol_version": effect::EFFECT_PROTOCOL_VERSION,
+                "host_identity": effect::identity(),
+            }
+        });
+
+        let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        fdpass::close_fd(theirs);
+        sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+
+        let reply =
+            fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
+
+        if v["ok"] != true {
+            fdpass::close_fd(ours);
+            return Err(format!(
+                "the runtime refused the effect channel: {}",
+                v["refusal"]["code"]
+            ));
+        }
+
+        self.channels.lock().unwrap().push(ours);
+        Ok(ours)
+    }
+
     pub fn agent_channel(&self, actor: &str) -> Result<Chan, String> {
         self.bind_channel("bind_agent_channel", Some(actor))
     }
@@ -1474,6 +1589,24 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
 
     println!("  bridge           inherited descriptor (no path)");
     println!("  control channel  active");
+
+    // **The effect channel, before any engine exists.** Same ordering
+    // reason the control channel is taken first: the mechanism the runtime
+    // will reach for must be possessed before anything can ask for an
+    // effect, or the first request finds no endpoint and is correctly
+    // refused for a reason that is really a startup race.
+    //
+    // A host that cannot serve effects still runs. It says so, and the
+    // runtime refuses effects by name rather than falling back to
+    // resolving an executable — which is the property this whole slice
+    // exists to install, and it must hold on the degraded path too.
+    match rt.effect_channel() {
+        Ok(fd) => {
+            std::thread::spawn(move || serve_effects(fd));
+            println!("  effect channel   active (possessed descriptor, no path)");
+        }
+        Err(e) => eprintln!("  effect channel   UNAVAILABLE: {e}"),
+    }
 
     let mut children: Vec<Child> = Vec::new();
 

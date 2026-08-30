@@ -40,7 +40,7 @@ defmodule Ampd.WorkerTest do
     Ampd.Bridge.reset()
     Peer.reset()
     Application.delete_env(:ampd, :profile_overrides)
-    Application.delete_env(:ampd, :worktree_effector)
+    Application.put_env(:ampd, :worktree_effector, Ampd.Worktree.Effector.Host)
     Process.sleep(120)
     Authority.install_worktree()
 

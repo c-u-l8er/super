@@ -647,6 +647,104 @@ defmodule Ampd.Transport do
       end
     end
 
+    # **The mechanism endpoint, adopted exactly as an identity channel is.**
+    #
+    # Same bridge, same `SCM_RIGHTS` transfer, same single-consumption law:
+    # the descriptor is adopted or it is sunk, on every exit. What differs
+    # is only the direction of use — the runtime is the *client* on this
+    # one, and the host is the server that performs what was admitted.
+    #
+    # The incarnation is checked before it is bound. It comes from the
+    # trusted host, so this is not a defence against a forged one; it is
+    # the same reason `bind_agent_channel` bounds an actor it also trusts —
+    # a malformed value that reaches storage becomes a malformed value in
+    # every projection that reads it, and refusing at the boundary is one
+    # place instead of many.
+    defp run("bind_effect_channel", %{"incarnation" => inc}, [fd | rest]) when is_map(inc) do
+      Enum.each(rest, &close_fd/1)
+
+      epoch = inc["channel_epoch"]
+
+      cond do
+        inc["schema"] != Ampd.Worktree.EffectChannel.channel_schema() ->
+          close_fd(fd)
+          err("invalid-effect-channel", %{"reason" => "not an effect-channel@1 incarnation"})
+
+        not is_binary(epoch) or byte_size(epoch) < 16 or byte_size(epoch) > 128 ->
+          close_fd(fd)
+
+          err("invalid-effect-channel", %{
+            "reason" => "channel_epoch must be 16..128 bytes",
+            "hint" =>
+              "an epoch short enough to guess is an epoch a replaced endpoint's observation " <>
+                "can be stamped with"
+          })
+
+        inc["protocol"] != Ampd.Worktree.EffectChannel.protocol() ->
+          close_fd(fd)
+          err("invalid-effect-channel", %{"reason" => "unknown effect protocol"})
+
+        true ->
+          case Ampd.Bridge.bind_effect_endpoint(fd, inc) do
+            {:ok, _} -> ok(%{"channel" => "effect", "channel_epoch" => epoch})
+            {:refused, r} -> %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+          end
+      end
+    end
+
+    # **Registering a repository is a host-level trust decision, and until
+    # now the host had no way to make it.**
+    #
+    # `Ampd.Worktree.register_repository!/1` says in its own docs that this
+    # is host-level, and `Ampd.CommandSpec` says the same where `open_lane`
+    # declines to take a path. Both were right about where the decision
+    # belongs and neither put a door there: `open_lane` requires an `rp_`
+    # ref, the only thing that mints one is an in-process function call, and
+    # `cockpit.js` sends `repository_ref` for a value nothing could produce.
+    # **So no deployed Super could open a Lane at all.** The D.1.3a
+    # production end-to-end test is what surfaced it — the first thing that
+    # tried to drive the whole chain from outside the BEAM.
+    #
+    # It goes on the bridge rather than the human control channel because
+    # that is what "host-level" means here: the bridge is reachable only by
+    # the process the runtime was born holding a descriptor to. A person
+    # naming a path to trust is a decision the host makes on their behalf,
+    # not a command an agent channel could ever carry.
+    defp run("register_repository", %{"path" => path}, fds) when is_binary(path) do
+      Enum.each(fds, &close_fd/1)
+
+      if byte_size(path) > 0 and byte_size(path) <= 4096 do
+        case Ampd.Authority.register_repository(path) do
+          {:ok, repo} -> ok(%{"repository" => repo})
+          {:refused, r} -> %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+          other -> err("repository-not-registered", %{"reason" => inspect(other)})
+        end
+      else
+        err("invalid-repository-path", %{"reason" => "path must be 1..4096 bytes"})
+      end
+    end
+
+    # **The other half of the same gap.** `register_repository` had no door
+    # from outside the BEAM; neither does installing a capability pack, and
+    # without one no world can reach a state where *any* worktree is
+    # establishable — `request_grant` refuses `capability-undeclared`
+    # forever. Both were found the same way, by the first thing that tried
+    # to drive the whole chain from outside.
+    #
+    # **A closed enum, not a module name.** Taking a string and resolving it
+    # to a function would make the bridge a place where naming something
+    # runs it, which is the exact property D.1.3a spent itself removing one
+    # layer up. Two packs exist; both are listed.
+    defp run("install_pack", %{"pack" => pack}, fds) when is_binary(pack) do
+      Enum.each(fds, &close_fd/1)
+
+      case pack do
+        "worktree" -> installed(Ampd.Authority.install_worktree(), pack)
+        "postgres" -> installed(Ampd.Authority.install_postgres(), pack)
+        _ -> err("unknown-pack", %{"pack" => pack, "known" => ["worktree", "postgres"]})
+      end
+    end
+
     defp run("list_channels", _f, fds) do
       Enum.each(fds, &close_fd/1)
       ok(%{"channels" => Ampd.Bridge.list()})
@@ -681,6 +779,9 @@ defmodule Ampd.Transport do
     #
     # One sink for every descriptor out of ancillary data.
     defp close_fd(fd), do: Ampd.NativeFd.discard(fd)
+
+    defp installed({:refused, r}, _), do: %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+    defp installed(_, pack), do: ok(%{"pack" => pack})
 
     defp ok(map), do: Map.merge(%{"schema" => "bridge-reply@1", "ok" => true}, map)
 

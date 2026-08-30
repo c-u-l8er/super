@@ -1303,11 +1303,223 @@ pub fn run(ampd_dir: &Path) -> i32 {
         }
     }
 
+    // ================================ D.1.3a · THE PRODUCTION EFFECT CHANNEL
+    //
+    // **The proof the harness could not give.** `ampd`'s own falsifiers
+    // drive a socketpair whose far end is an Elixir test process; that is a
+    // real socket and a real framing, and it is not this program. Here the
+    // host creates the pair, passes the descriptor over the bridge it was
+    // born holding, serves the request out of `effect::perform`, and a real
+    // `git worktree add` happens — with no pathname resolved anywhere on
+    // the production path.
+    {
+        let repo = scratch.join("d13a-repo");
+        let _ = std::fs::create_dir_all(&repo);
+        let git_ok = init_fixture_repo(&repo);
+
+        let effect_fd = rt.effect_channel();
+        let served = effect_fd.is_ok();
+
+        if let Ok(fd) = effect_fd {
+            std::thread::spawn(move || crate::serve_effects(fd));
+        }
+
+        b.check(
+            "the host creates the effect channel and passes it over the bridge",
+            served,
+            format!("{:?}", effect_fd.as_ref().err()),
+        );
+
+        // The runtime learned what performs its effects from the endpoint
+        // that will perform them, not from a second pathname lookup.
+        let status = rt
+            .bridge_call(&json!({"schema":"bridge-command@1","command":"runtime_status"}))
+            .unwrap_or(Value::Null);
+        b.check(
+            "the runtime still answers with the effect channel bound",
+            status["ok"] == true,
+            format!("{status}"),
+        );
+
+        let agent = rt.agent_channel("kestrel");
+
+        // A fresh control channel: the battery's original was dropped
+        // hundreds of checks ago, and at most one is live at a time.
+        let ctl = match rt.control_channel() {
+            Ok(c) => c,
+            Err(e) => {
+                b.check("a control channel is available for the effect section", false, e);
+                rt.shutdown();
+                let _ = std::fs::remove_dir_all(&scratch);
+                return 1;
+            }
+        };
+
+        // The worktree capability pack, and then the repository. Neither had
+        // a door from outside the BEAM before D.1.3a asked for one.
+        let packed = rt
+            .bridge_call(&json!({"schema":"bridge-command@1",
+                                 "command":"install_pack","pack":"worktree"}))
+            .unwrap_or(Value::Null);
+        b.check(
+            "the host can install the worktree capability pack",
+            packed["ok"] == true,
+            format!("{packed}"),
+        );
+
+        // Registering the repository is a bridge call, not a channel
+        // command — see the note on `register_repository` in
+        // `Ampd.Transport`. Until D.1.3a needed it, nothing outside the
+        // BEAM could mint an `rp_` ref at all.
+        let reg = rt
+            .bridge_call(&json!({"schema":"bridge-command@1",
+                                 "command":"register_repository",
+                                 "path": repo.to_string_lossy()}))
+            .unwrap_or(Value::Null);
+        let repo_ref = reg["repository"]["ref"].as_str().unwrap_or("").to_string();
+
+        b.check(
+            "the host can register a repository for the runtime to open Lanes on",
+            !repo_ref.is_empty(),
+            format!("{reg}"),
+        );
+
+        match (&agent, git_ok) {
+            (Ok(a), true) if !repo_ref.is_empty() => {
+                let ws = ctl.call("open_workspace", json!({"name": "d13a"})).unwrap_or(Value::Null);
+                let ws_id = ws["result"]["workspace"]["id"].as_str().unwrap_or("").to_string();
+
+                let goal = ctl
+                    .call("open_goal", json!({"workspace_ref": ws_id, "title": "production effect"}))
+                    .unwrap_or(Value::Null);
+                let goal_id = goal["result"]["goal"]["id"].as_str().unwrap_or("").to_string();
+
+                let lane = ctl
+                    .call(
+                        "open_lane",
+                        json!({"goal_ref": goal_id, "actor": "kestrel",
+                               "repository_ref": repo_ref, "base_revision": Value::Null}),
+                    )
+                    .unwrap_or(Value::Null);
+                let lane_id = lane["result"]["lane"]["id"].as_str().unwrap_or("").to_string();
+
+                let worker = ctl
+                    .call("open_worker", json!({"locus_ref": lane_id, "purpose": "implement"}))
+                    .unwrap_or(Value::Null);
+                let worker_id = worker["result"]["worker"]["id"].as_str().unwrap_or("").to_string();
+
+                let _ = a.call("attach_worker", json!({"worker_ref": worker_id}));
+
+                // The real grant flow: the agent asks, the person approves.
+                let req = a
+                    .call(
+                        "request_grant",
+                        json!({"capability": "worktree.create", "resource": lane_id,
+                               "options": {"duration": "workspace",
+                                           "reason": "the production effect path"}}),
+                    )
+                    .unwrap_or(Value::Null);
+                let gq = req["result"]["grant_request"]["id"].as_str().unwrap_or("").to_string();
+
+                b.check(
+                    "the agent's grant request parks on a person",
+                    req["result"]["held"] == true && !gq.is_empty(),
+                    format!("{}", req["result"]),
+                );
+
+                let approved = ctl
+                    .call("approve_grant_request", json!({"request_id": gq, "duration": "workspace"}))
+                    .unwrap_or(Value::Null);
+
+                let est = a
+                    .call("establish_worktree", json!({"locus_ref": lane_id, "name": "wt-prod"}))
+                    .unwrap_or(Value::Null);
+
+                b.check(
+                    "an admitted effect reaches the real host through the possessed channel",
+                    est["result"]["allow"] == true,
+                    format!("approved={approved} establish={est}"),
+                );
+
+                // **Checked against the repository, not against the reply.**
+                //
+                // `path` is deliberately absent from an agent projection —
+                // a worktree root is topology — so this cannot look at the
+                // directory the agent was told about, and should not want
+                // to. What it can do is ask the fixture repository, in this
+                // process, what commit `HEAD` is, and require the head the
+                // runtime committed to be that commit. A host inventing an
+                // observation cannot satisfy that; only a real
+                // `git worktree add` from this repository can.
+                let fixture_head = std::process::Command::new("git")
+                    .arg("-C").arg(&repo).args(["rev-parse", "HEAD"])
+                    .output()
+                    .ok()
+                    .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+                    .unwrap_or_default();
+
+                let res = &est["result"]["resource"];
+
+                b.check(
+                    "the committed worktree is a real checkout of the real repository",
+                    !fixture_head.is_empty()
+                        && res["head"] == json!(fixture_head)
+                        && res["exists"] == true
+                        && res["state"] == "OBSERVED_CREATED",
+                    format!("fixture HEAD={fixture_head} resource={res}"),
+                );
+
+                b.check(
+                    "the capability the effect established is active",
+                    est["result"]["capability"]["status"] == "active",
+                    format!("capability={}", est["result"]["capability"]),
+                );
+
+                // **The named path is not merely unused — it is broken.**
+                // `SUPER_HOST_BIN` on the runtime points nowhere, and this
+                // effect still worked, so the production path cannot have
+                // resolved it.
+                b.check(
+                    "the production effect path did not resolve an executable by name",
+                    est["result"]["allow"] == true && std::env::var("SUPER_HOST_BIN").is_err(),
+                    "SUPER_HOST_BIN was set for this run, so this proves nothing",
+                );
+            }
+            (ag, g) => b.check(
+                "the production effect path could be exercised at all",
+                false,
+                format!("agent={:?} fixture_repo={} repo_ref={:?}", ag.is_err(), g, repo_ref),
+            ),
+        }
+    }
+
     println!("\n  {} held · {} failed", b.pass, b.fail);
     rt.shutdown();
     let _ = std::fs::remove_dir_all(&scratch);
 
     if b.fail == 0 { 0 } else { 1 }
+}
+
+/// A git repository with one commit, for the production effect path to
+/// create a worktree from.
+fn init_fixture_repo(dir: &Path) -> bool {
+    use std::process::Command;
+    let _ = std::fs::write(dir.join("README"), "d13a\n");
+    let steps: &[&[&str]] = &[
+        &["init", "-q", "-b", "main"],
+        &["config", "user.email", "d13a@example.invalid"],
+        &["config", "user.name", "D13a"],
+        &["config", "commit.gpgsign", "false"],
+        &["add", "-A"],
+        &["commit", "-q", "-m", "init"],
+    ];
+    for args in steps {
+        let ok = Command::new("git")
+            .arg("-C").arg(dir).args(*args)
+            .output().map(|o| o.status.success()).unwrap_or(false);
+        if !ok { return false; }
+    }
+    true
 }
 
 /// Spawn a child exactly the way an engine is spawned, and ask it what it

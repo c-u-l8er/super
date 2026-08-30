@@ -40,7 +40,7 @@ defmodule Ampd.LocusTest do
     Ampd.Bridge.reset()
     Peer.reset()
     Application.delete_env(:ampd, :profile_overrides)
-    Application.delete_env(:ampd, :worktree_effector)
+    Application.put_env(:ampd, :worktree_effector, Ampd.Worktree.Effector.Host)
     Process.sleep(120)
 
     # The capability surface is installed, not seeded. See
@@ -452,7 +452,7 @@ defmodule Ampd.LocusTest do
       Application.put_env(:ampd, :worktree_effector, Ampd.LocusTest.FailingEffector)
       grant_worktree!(ctx.lane["id"])
       Control.command(ctx.agent, :establish_worktree, [ctx.lane["id"], "lane-a"])
-      Application.delete_env(:ampd, :worktree_effector)
+      Application.put_env(:ampd, :worktree_effector, Ampd.Worktree.Effector.Host)
 
       [{failed_id, failed}] = Map.to_list(Loci.caps())
       assert failed["status"] == "failed"
