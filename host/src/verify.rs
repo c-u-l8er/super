@@ -1403,6 +1403,30 @@ pub fn run(ampd_dir: &Path) -> i32 {
             format!("{:?}", effect_fd.as_ref().err()),
         );
 
+        // **And the Carrier lifecycle channel, which this battery did not
+        // bind and therefore could not have exercised.**
+        //
+        // `run_host` binds it; `verify` did not, so the production World-join
+        // check below returned `carrier-start-indeterminate` — "no host
+        // carrier channel is possessed" — the first time it ran. That is the
+        // correct refusal and it is also the proof that the join was untested:
+        // a gate that never binds the channel it needs is a gate measuring its
+        // own setup.
+        let carrier_root = scratch.join("carrier-machine");
+        let _ = std::fs::create_dir_all(&carrier_root);
+        let carrier_fd = rt.carrier_channel();
+        let carrier_served = carrier_fd.is_ok();
+
+        if let Ok(fd) = carrier_fd {
+            std::thread::spawn(move || crate::serve_carrier(fd, carrier_root));
+        }
+
+        b.check(
+            "the host creates the Carrier lifecycle channel and passes it over the bridge",
+            carrier_served,
+            format!("{:?}", carrier_fd.as_ref().err()),
+        );
+
         // The runtime learned what performs its effects from the endpoint
         // that will perform them, not from a second pathname lookup.
         let status = rt
@@ -1556,6 +1580,74 @@ pub fn run(ampd_dir: &Path) -> i32 {
                     "the production effect path did not resolve an executable by name",
                     est["result"]["allow"] == true && std::env::var("SUPER_HOST_BIN").is_err(),
                     "SUPER_HOST_BIN was set for this run, so this proves nothing",
+                );
+
+                // ============ D.1.3b·2b · THE PRODUCTION WORLD-JOIN PATH
+                //
+                // **The freeze criterion, end to end, with nothing selected.**
+                //
+                // Every Carrier falsifier in ExUnit runs against
+                // `Carrier.Machine.Harness`, and `super-host verify` proves
+                // the confined process physically. Those are two halves and
+                // the join between them was proved by nobody — which is how
+                // the real host shipped emitting no `attested` object at all
+                // while seventeen floor rows required one, so the production
+                // path could not have committed a single Carrier and every
+                // test still passed.
+                //
+                // That is D.1.3a's "no deployed Super could open a Lane"
+                // exactly, one slice later. This is the check that would have
+                // caught it: a real agent, on a real channel, issuing the real
+                // command, against the real host, joining the real World.
+                let started = a
+                    .call("start_carrier", json!({"locus_ref": lane_id}))
+                    .unwrap_or(Value::Null);
+
+                let inc = &started["result"]["carrier"];
+
+                b.check(
+                    "a real agent starts a real confined Carrier and it JOINS THE WORLD",
+                    started["result"]["allow"] == true
+                        && inc["schema"] == "carrier-incarnation@1"
+                        && inc["status"] == "RUNNING",
+                    format!("{started}"),
+                );
+
+                // The incarnation must name this position, not merely exist.
+                b.check(
+                    "the committed incarnation names the Locus the agent occupies",
+                    inc["locus_ref"] == json!(lane_id) && inc["carrier_ref"].is_string(),
+                    format!("incarnation={inc}"),
+                );
+
+                // And the process is real: the runtime holds an opaque handle,
+                // so this reads the pid out of it and asks the kernel.
+                let hpr = inc["host_process_ref"].as_str().unwrap_or("").to_string();
+                let cpid: Option<u32> = hpr.strip_prefix("hp_")
+                    .and_then(|r| r.split('_').next())
+                    .and_then(|v| v.parse().ok());
+                b.check(
+                    "the committed Carrier is a live OS process, not a record",
+                    cpid.map(|p| crate::carrier::observe(p).starttime.is_some()).unwrap_or(false),
+                    format!("host_process_ref={hpr:?}"),
+                );
+
+                // Stop it through the same command path, and require the
+                // process to actually be gone — termination requested is not
+                // termination established.
+                let stopped = a.call("stop_carrier", json!({})).unwrap_or(Value::Null);
+                let mut gone = false;
+                for _ in 0..40 {
+                    if cpid.map(|p| crate::carrier::observe(p).starttime.is_none()).unwrap_or(false) {
+                        gone = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                b.check(
+                    "stopping through the command path really ends the OS process",
+                    stopped["result"]["allow"] == true && gone,
+                    format!("stopped={stopped} pid={cpid:?} still alive"),
                 );
             }
             (ag, g) => b.check(
@@ -2327,12 +2419,106 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
                     true,
                     String::new(),
                 );
-                println!(
-                    "                 pdeathsig: attested SIGKILL · behavioural proof needs a \
-                     sacrificial intermediate parent — OPEN GAP"
-                );
             }
             Err(e) => b.check("the parent-death falsifier could run", false, e),
+        }
+    }
+
+    // --------- D.1.3b·2b · the payload cannot cut its own death binding
+    //
+    // `prctl(PR_SET_PDEATHSIG, 0)` clears the parent-death signal. Today's
+    // fixture never calls it; a PTY or Motor payload can, and would then
+    // survive the host it is bound to — undoing the mechanism the check below
+    // proves. Argument-aware seccomp refuses exactly that option while
+    // leaving `PR_GET` and every other `prctl` alone.
+    //
+    // This is the one property where the payload IS the right witness. The
+    // question is not "is the binding set" — the host attests that, and the
+    // sacrificial-parent check proves it — but "can the payload cut it", and
+    // only the payload can attempt that.
+    {
+        let g = row("prctl_get_pdeathsig");
+        let c = row("prctl_clear_pdeathsig");
+        b.check(
+            "a confined Carrier sees SIGKILL as its parent-death signal",
+            matches!(g.confined, Some((true, 9))),
+            format!("confined={:?} (expected ALLOWED with value 9)", g.confined),
+        );
+        b.check(
+            "a confined Carrier cannot clear its parent-death signal — ATTRIBUTED",
+            matches!(c.confined, Some((false, e)) if e as u32 == confine::SUPER_DENY_ERRNO),
+            format!("confined={:?}, expected errno {}", c.confined, confine::SUPER_DENY_ERRNO),
+        );
+        b.check(
+            "and the bare control CAN clear it — DIFFERENTIAL",
+            matches!(c.bare, Some((true, _))),
+            format!("bare={:?} — without this the refusal above is unattributable", c.bare),
+        );
+    }
+
+    // ------------------------ D.1.3b·2b · the host cannot orphan a Carrier
+    //
+    // Attested is not proved. There is no `/proc` field for
+    // `PR_SET_PDEATHSIG`, so the only way to show the binding works is to
+    // kill a parent and watch the child go. A sacrificial intermediate host
+    // does that without touching the real one.
+    {
+        use std::process::{Command, Stdio};
+        use std::io::BufRead as _;
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("super-host"));
+        let child = Command::new(&exe)
+            .arg("carrier-orphan-fixture")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+
+        match child {
+            Ok(mut inter) => {
+                let line = inter
+                    .stdout
+                    .take()
+                    .map(|o| {
+                        let mut s = String::new();
+                        let _ = std::io::BufReader::new(o).read_line(&mut s);
+                        s
+                    })
+                    .unwrap_or_default();
+
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let cpid: Option<u32> = parts.first().and_then(|v| v.parse().ok());
+                let cstart: Option<u64> = parts.get(1).and_then(|v| v.parse().ok());
+
+                let alive_before = cpid
+                    .map(|p| carrier::observe(p).starttime == cstart)
+                    .unwrap_or(false);
+
+                // SIGKILL: no destructor, no serve-loop cleanup, no Drop.
+                // Exactly what a crashed host does.
+                let _ = inter.kill();
+                let _ = inter.wait();
+
+                let mut gone = false;
+                for _ in 0..50 {
+                    if cpid.map(|p| carrier::observe(p).starttime != cstart).unwrap_or(false) {
+                        gone = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+
+                b.check(
+                    "a sacrificial host really started a Carrier",
+                    alive_before,
+                    format!("line {line:?}"),
+                );
+                b.check(
+                    "SIGKILLing the host kills its Carrier — PR_SET_PDEATHSIG, proved not attested",
+                    gone,
+                    format!("carrier pid {cpid:?} survived its host being killed"),
+                );
+            }
+            Err(e) => b.check("the orphan falsifier could run", false, e.to_string()),
         }
     }
 

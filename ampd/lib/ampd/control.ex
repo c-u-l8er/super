@@ -326,14 +326,43 @@ defmodule Ampd.Control do
     end
   end
 
+  # **`:ok = ...` raised on the one outcome the closure just introduced.**
+  # `Carrier.stop/1` now legitimately returns `{:indeterminate, why}` when the
+  # host does not confirm the process is gone, and a match on `:ok` turned
+  # that expected safety state into a MatchError through the public command
+  # path. A fail-closed state that crashes is not fail-closed.
   defp dispatch(peer, :stop_carrier, _) do
-    :ok = Ampd.Carrier.stop(peer["id"])
-    %{"allow" => true, "carrier" => nil}
+    case Ampd.Carrier.stop(peer["id"]) do
+      :ok ->
+        %{"allow" => true, "carrier" => nil}
+
+      {:indeterminate, why} ->
+        %{
+          "allow" => false,
+          "refusal" =>
+            Ampd.Refusal.new("carrier-stop-indeterminate",
+              component: "Ampd.Carrier",
+              retryable: false,
+              requires_human: true,
+              public_message: "The runtime could not confirm the carrier stopped.",
+              operator_detail: %{
+                "reason" => why,
+                "hint" =>
+                  "membership has ended, but a process may still exist — a replacement " <>
+                    "is refused until reconcile_carrier_attempt establishes absence"
+              })
+        }
+    end
   end
 
+  # **Detaching ends the occupancy that authorized the execution.** A Carrier
+  # left RUNNING at a position nobody occupies is exactly the state
+  # `Carrier.still_current?/2` refuses to report, and leaving the process alive
+  # would make that refusal cosmetic.
   defp dispatch(peer, :detach_worker, _) do
-    Ampd.Worker.detach(peer)
-    |> settled(fn r -> Map.merge(%{"allow" => true, "occupancy" => "OFFLINE"}, r) end)
+    r = Ampd.Worker.detach(peer) |> settled(fn r -> Map.merge(%{"allow" => true, "occupancy" => "OFFLINE"}, r) end)
+    Ampd.Carrier.converge("the occupancy was detached")
+    r
   end
 
   # Ancestry-closed, exactly like `list_loci` and for the same reason: an
@@ -466,9 +495,16 @@ defmodule Ampd.Control do
     |> settled(fn w -> %{"allow" => true, "worker" => w} end)
   end
 
+  # **`close_worker` is a supervision primitive and must now supervise
+  # execution too.** It was established as the way a person ends a live
+  # occupancy; with a Carrier in the picture, ending the occupancy while the
+  # process keeps running would make the supervision primitive supervise half
+  # the thing. Closing advances the generation, so `converge/1` finds the
+  # incarnation stale by re-derivation rather than by being told.
   defp dispatch(_peer, :close_worker, [worker_ref]) do
-    Authority.close_worker(worker_ref)
-    |> settled(fn w -> %{"allow" => true, "worker" => w} end)
+    r = Authority.close_worker(worker_ref) |> settled(fn w -> %{"allow" => true, "worker" => w} end)
+    Ampd.Carrier.converge("the worker was closed")
+    r
   end
 
   defp dispatch(_peer, :reopen_worker, [worker_ref]) do

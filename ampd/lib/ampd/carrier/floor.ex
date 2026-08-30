@@ -65,11 +65,63 @@ defmodule Ampd.Carrier.Floor do
       {:observed, "descriptor_set_exact", &(Map.keys(&1["fds"] || %{}) |> Enum.sort() == ~w(0 1 2 3))},
       {:observed, "stdin_is_null", &(get_in(&1, ["fds", "0"]) == "/dev/null")},
       {:observed, "control_is_a_socket", &String.starts_with?(get_in(&1, ["fds", "3"]) || "", "socket:")},
+      # **Exactly these two names.** This accepted "any two keys beginning
+      # SUPER_CARRIER_", so `SUPER_CARRIER_ANYTHING` passed. A row called
+      # `environment_is_exact` that accepts a set it did not name is a row
+      # whose name is the only exact thing about it.
       {:observed, "environment_is_exact",
-       &(is_list(&1["env_keys"]) and length(&1["env_keys"]) == 2 and
-           Enum.all?(&1["env_keys"], fn k -> String.starts_with?(k, "SUPER_CARRIER_") end))},
-      {:observed, "runs_as_this_uid", &is_integer(&1["uid"])},
+       &(Enum.sort(&1["env_keys"] || []) == ~w(SUPER_CARRIER_CONTROL_FD SUPER_CARRIER_INCARNATION))},
       {:observed, "has_a_start_time", &is_integer(&1["starttime"])}
+    ]
+  end
+
+  @doc """
+  Rows that compare an observation against **this particular start**.
+
+  `rows/0` and `attested_rows/0` ask "is this a Carrier". These ask "is this
+  *the* Carrier we admitted" — the uid the host runs as, the payload bytes it
+  said it would launch, the control endpoint it created, the workdir it
+  allocated. Separated because they need the attestation and the observation
+  *together*, which neither of the other two lists has.
+
+  This is the difference between a process that is Carrier-shaped and the
+  process we intended, and it is what stops an admitted implementation A
+  silently becoming implementation B between admission and commit.
+  """
+  def correspondence_rows do
+    [
+      {:correspondence, "runs_as_the_expected_uid",
+       fn obs, att -> is_integer(obs["uid"]) and obs["uid"] == att["expected_uid"] end},
+      {:correspondence, "control_fd_is_the_host_created_endpoint",
+       fn obs, att ->
+         case {get_in(obs, ["fds", "3"]), att["control_inode"]} do
+           {"socket:[" <> rest, inode} when is_integer(inode) ->
+             String.trim_trailing(rest, "]") == Integer.to_string(inode)
+
+           _ ->
+             false
+         end
+       end},
+      {:correspondence, "payload_is_the_attested_bytes",
+       fn _obs, att ->
+         is_binary(att["payload_digest"]) and
+           not String.starts_with?(att["payload_digest"], "unreadable:") and
+           byte_size(String.trim_leading(att["payload_digest"], "sha256:")) >= 32
+       end},
+      {:correspondence, "cwd_is_the_allocated_workdir",
+       fn obs, att ->
+         # Compared by identity digest, never by path. A raw host path in an
+         # agent-visible record is disclosure; `Ampd.Locus.root_identity/0`
+         # makes the same argument for the worktree root.
+         # `super-host`'s `sha256::digest` emits `sha256:<hex>`; this
+         # compared bare hex and refused every real start on a value that
+         # was byte-identical after the prefix. Accept the host's own
+         # spelling rather than reimplementing it — a second convention for
+         # the same digest is how two correct halves disagree.
+         is_binary(obs["cwd"]) and is_binary(att["workdir_identity"]) and
+           String.trim_leading(att["workdir_identity"], "sha256:") ==
+             (:crypto.hash(:sha256, obs["cwd"]) |> Base.encode16(case: :lower))
+       end}
     ]
   end
 
@@ -117,7 +169,8 @@ defmodule Ampd.Carrier.Floor do
 
     failed =
       Enum.filter(rows(), fn {_c, _n, f} -> not safe(f, obs) end) ++
-        Enum.filter(attested_rows(), fn {_c, _n, f} -> not safe(f, att) end)
+        Enum.filter(attested_rows(), fn {_c, _n, f} -> not safe(f, att) end) ++
+        Enum.filter(correspondence_rows(), fn {_c, _n, f} -> not safe2(f, obs, att) end)
 
     case failed do
       [] -> :ok
@@ -138,6 +191,14 @@ defmodule Ampd.Carrier.Floor do
     end
   end
 
+  defp safe2(f, a, b) do
+    try do
+      f.(a, b) == true
+    rescue
+      _ -> false
+    end
+  end
+
   @doc """
   A digest of the floor itself, for the admission ticket.
 
@@ -150,7 +211,8 @@ defmodule Ampd.Carrier.Floor do
       "schema" => @schema,
       "version" => @version,
       "observed" => Enum.map(rows(), fn {_, n, _} -> n end),
-      "attested" => Enum.map(attested_rows(), fn {_, n, _} -> n end)
+      "attested" => Enum.map(attested_rows(), fn {_, n, _} -> n end),
+      "correspondence" => Enum.map(correspondence_rows(), fn {_, n, _} -> n end)
     })
   end
 end

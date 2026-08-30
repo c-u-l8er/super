@@ -149,10 +149,16 @@ pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
         let mut obs = match req["op"].as_str() {
             Some("start") => match start_one(&workdir, &carrier_ref, &req) {
                 Ok((c, o)) => { live.insert(carrier_ref.clone(), c); o }
-                Err(e) => json!({
-                    "schema": "carrier-start-observation@1",
-                    "refused": e,
-                }),
+                Err(e) => {
+                    // The host says why on its own stream. The runtime's
+                    // refusal is disclosure-graded and an agent never sees
+                    // this text; an operator reading the host's log should.
+                    eprintln!("  carrier start refused: {e}");
+                    json!({
+                        "schema": "carrier-start-observation@1",
+                        "refused": e,
+                    })
+                }
             },
             Some("stop") => {
                 // Absence is success. A reap that insisted on having
@@ -195,6 +201,24 @@ fn world_dir_for_carriers() -> PathBuf {
     d
 }
 
+extern "C" {
+    fn getuid() -> u32;
+}
+
+/// Content identity of the Carrier payload.
+///
+/// A pathname says which file was *named*; a digest says which bytes ran. The
+/// runtime binds this at admission so that "admitted Carrier implementation A"
+/// cannot silently become implementation B between admission and commit.
+fn fixture_digest(p: &Path) -> String {
+    match std::fs::read(p) {
+        Ok(b) => crate::sha256::digest(&b),
+        // Unreadable is not "no digest" — a missing value must not be able to
+        // satisfy a comparison, so it is a value nothing else can equal.
+        Err(e) => format!("unreadable:{e}"),
+    }
+}
+
 fn start_one(
     root: &Path,
     carrier_ref: &str,
@@ -222,10 +246,59 @@ fn start_one(
     }
 
     let o = c.observe();
+
+    // **Three evidence classes, never merged.**
+    //
+    //   observed    read by this host out of the child's own /proc
+    //   attested    this host installed it and says so — Landlock and
+    //               PR_SET_PDEATHSIG are not exposed per-process anywhere on
+    //               this kernel, so there is no other in-band evidence
+    //   configured  what the policy asked for, kept so the runtime can see
+    //               the gap between request and result
+    //
+    // The runtime may trust the host — it is inside the TCB — but it must not
+    // be able to claim it *observed* a field that was attested.
+    //
+    // **This object was missing entirely and the omission was invisible.**
+    // `Ampd.Carrier.Floor` requires eight attested rows; the Elixir harness
+    // fabricated them, so every falsifier passed while the production path
+    // could not have committed a single Carrier. The two halves were proved
+    // separately and the join between them was proved by nobody — which is
+    // the D.1.3a "no deployed Super could open a Lane" shape exactly.
+    let cfg = c.configured().clone();
     let obs = json!({
         "schema": "carrier-start-observation@1",
         "host_process_ref": format!("hp_{}_{}", c.pid, c.starttime.unwrap_or(0)),
         "observed": o.to_json(),
+        "attested": {
+            "schema": "carrier-confinement-attested@1",
+            "landlock_abi": cfg["landlock_abi"].clone(),
+            "landlock_handled_fs": cfg["handled_access_fs"].clone(),
+            "landlock_handled_net": cfg["handled_access_net"].clone(),
+            "landlock_scoped": cfg["scoped"].clone(),
+            "landlock_grants": cfg["grants"].clone(),
+            "seccomp_deny_errno": cfg["seccomp_deny_errno"].clone(),
+            "pdeathsig": "SIGKILL",
+            "network": "none",
+            "attestor": "super-host",
+            // Identity of what was actually launched, so the runtime can bind
+            // it rather than trusting a pathname. Content identity, not path.
+            "payload_digest": fixture_digest(&fixture),
+            "expected_uid": unsafe { getuid() },
+            "control_inode": c.control_inode(),
+            // **Canonicalized before digesting.** `/proc/<pid>/cwd` is a
+            // resolved path; `dir` may contain a symlink component, and
+            // `carrier::spawn` canonicalizes it before `current_dir` anyway.
+            // Digesting the unresolved form compared two spellings of the
+            // same directory and refused every real start on
+            // `cwd_is_the_allocated_workdir` — sixteen of seventeen floor
+            // rows passing, which is the shape of a correspondence bug rather
+            // than a policy one.
+            "workdir_identity": crate::sha256::digest(
+                dir.canonicalize().unwrap_or_else(|_| dir.clone()).to_string_lossy().as_bytes()
+            ),
+        },
+        "configured": cfg,
     });
 
     Ok((c, obs))
@@ -1766,6 +1839,44 @@ pub fn cli() -> i32 {
         return effect::identity_run();
     }
 
+    // **Test scaffolding, and named as such.** Spawns one Carrier, prints its
+    // pid and start time, and waits to be killed. `verify` uses it as a
+    // sacrificial parent so the parent-death binding can be proved
+    // behaviourally rather than only attested — there is no `/proc` field for
+    // `PR_SET_PDEATHSIG`, so the only way to show it works is to kill a
+    // parent and watch the child go.
+    //
+    // Before the `ampd/` check for the same reason `effect` is: it starts no
+    // runtime and reads no world. +1 subcommand on the host's surface,
+    // counted; it creates no authority and adopts no channel.
+    if args.get(1).map(String::as_str) == Some("carrier-orphan-fixture") {
+        let dir = std::env::temp_dir().join("super-orphan-fixture");
+        let _ = std::fs::create_dir_all(&dir);
+        let Some(fx) = carrier::fixture_path() else {
+            eprintln!("no carrier fixture is installed");
+            return 1;
+        };
+        return match carrier::spawn(&fx, &dir, &dir.join("o.log"), "orphan-probe", None) {
+            Ok(mut c) => {
+                let _ = c.handshake(5_000);
+                println!("{} {}", c.pid, c.starttime.unwrap_or(0));
+                use std::io::Write as _;
+                let _ = std::io::stdout().flush();
+                // Forgotten deliberately: the point is to die WITHOUT running
+                // cleanup, which is what a SIGKILL of the real host does.
+                // `Drop` would reap it and the test would prove nothing.
+                std::mem::forget(c);
+                loop {
+                    std::thread::park()
+                }
+            }
+            Err(e) => {
+                eprintln!("{e}");
+                1
+            }
+        };
+    }
+
     if !ampd_dir.join("mix.exs").exists() {
         eprintln!(
             "no ampd/ at {} — run from the release root, or set AMPD_DIR",
@@ -1783,7 +1894,7 @@ pub fn cli() -> i32 {
         }
         Some(other) => {
             eprintln!(
-                "usage: super-host [verify | run <actor> [-- <command>...] | effect | identity]"
+                "usage: super-host [verify | run <actor> [-- <command>...] | effect | identity | carrier-orphan-fixture]"
             );
             eprintln!("  unknown subcommand: {other}");
             2

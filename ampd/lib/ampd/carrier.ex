@@ -256,6 +256,11 @@ defmodule Ampd.Carrier do
     if reason do
       state = if reason == "carrier-confinement-unacceptable", do: "FAILED", else: "STALE"
 
+      if reason == "carrier-confinement-unacceptable" do
+        require Logger
+        Logger.warning("ampd: carrier floor refused #{inspect(floor_failures(obs))}")
+      end
+
       _ =
         Loci.patch_attempt(ticket["ticket_id"], %{
           "state" => state,
@@ -327,6 +332,12 @@ defmodule Ampd.Carrier do
           # channel holds for the same reason, which is that a second attempt
           # against an unknown first one is how you get two.
           #
+          require Logger
+
+          Logger.warning(
+            "ampd: carrier start #{ticket["carrier_ref"]} is INDETERMINATE — #{why}"
+          )
+
           # Wrapped in its own transaction: `carrier_attempts` is a collection
           # of an ordered store, so a bare `patch_attempt` from out here is
           # refused as an unordered authority mutation and the record silently
@@ -337,7 +348,12 @@ defmodule Ampd.Carrier do
             Loci.patch_attempt(ticket["ticket_id"], %{"state" => "INDETERMINATE", "refused_as" => why})
           end)
 
-          {:refused, refuse("carrier-start-indeterminate", ticket)}
+          # The machine's own words, carried through. A refusal that says only
+          # "indeterminate" is not a diagnosis — the same argument
+          # `floor_failures` makes one clause down, and the reason the
+          # production join check could not say why it was failing.
+          {:refused,
+           refuse("carrier-start-indeterminate", Map.put(ticket, "machine_reason", why))}
       end
     end
   end
@@ -451,6 +467,50 @@ defmodule Ampd.Carrier do
   end
 
   @doc """
+  End the membership of every Carrier whose admitting relationship has ceased
+  to exist, and schedule physical termination.
+
+  ## The invariant
+
+  > Every event that invalidates the live relationship under which a Carrier
+  > was admitted ends semantic membership immediately and schedules physical
+  > termination. Ambiguous termination blocks replacement until reconciled.
+
+  Review found this scattered rather than converged: `Ampd.Peer.drop/2` handled
+  channel death, and `detach_worker`, `close_worker` and `Peer.reset/0` each
+  handled *half* — they invalidated the basis and left the process running,
+  because each remembered occupancy and none remembered execution.
+
+  So there is one operation, and every path calls it. It takes no argument
+  naming which Carrier to kill: it **re-derives** which live incarnations are
+  no longer current, using the same predicate the projection uses. A caller
+  that had to name the victim would be a caller that could get it wrong, and
+  four callers naming victims is four chances.
+
+  Never blocks: the announcement is a cast and `Ampd.Carrier.Reaper` does the
+  waiting. Called from `Ampd.Control` after an occupancy or Worker mutation,
+  and from `Ampd.Peer` when a channel dies.
+  """
+  def converge(reason \\ "the admitting relationship ended") do
+    stale =
+      Enum.filter(Peer.carriers(), fn c ->
+        w = Loci.worker(c["worker_ref"])
+        w == nil or not still_current?(c, w)
+      end)
+
+    Enum.each(stale, fn c ->
+      # Membership first and unconditionally. Whether the process can be
+      # confirmed dead is a separate question with its own answer; leaving
+      # membership in place until it is answered would mean a Carrier stayed
+      # RUNNING because the host was slow.
+      Peer.detach_carrier(c["peer_ref"])
+      if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.orphaned(c)
+    end)
+
+    {length(stale), reason}
+  end
+
+  @doc """
   Reap a Carrier whose owning Peer is gone.
 
   `Ampd.Peer` drops the incarnation the moment a channel dies — that is
@@ -489,8 +549,40 @@ defmodule Ampd.Carrier do
     |> Enum.find(fn c -> c["worker_ref"] == worker["id"] end)
     |> case do
       nil -> "OFFLINE"
-      c -> if (worker["generation"] || 1) == c["worker_generation"], do: c["status"], else: "OFFLINE"
+      c -> if still_current?(c, worker), do: c["status"], else: "OFFLINE"
     end
+  end
+
+  @doc """
+  Is the relationship that admitted this Carrier still the relationship?
+
+  **The map entry is not the answer.** An earlier version compared only the
+  Worker generation, which left this reachable:
+
+      occupancy OFFLINE   ∧   Carrier RUNNING
+
+  after an ordinary `detach_worker` — because the incarnation is still in the
+  map until the reaper converges. The legitimate asymmetry is the other one,
+  `OCCUPIED ∧ OFFLINE`: a position held with nothing running. A Carrier
+  running at a position nobody occupies is the ambient-authority shape the
+  whole lane exists to refuse, rendered as fact on a person's screen.
+
+  `RUNNING` is a statement about a current relationship, not about a table
+  having a row in it. No machine I/O happens here — the read predicate says
+  what is true now, and `Ampd.Carrier.Reaper` makes the process agree.
+  """
+  def still_current?(c, worker) when is_map(c) and is_map(worker) do
+    peer = Peer.resolve(c["peer_ref"])
+    att = peer && Peer.attachment(peer["id"])
+
+    peer != nil and
+      att != nil and
+      att["peer_epoch"] == c["peer_epoch"] and
+      att["locus_ref"] == c["locus_ref"] and
+      att["worker_ref"] == c["worker_ref"] and
+      worker["status"] == "open" and
+      (worker["generation"] || 1) == c["worker_generation"] and
+      World.lineage() == c["world_ref"]
   end
 
   @doc """
@@ -591,7 +683,12 @@ defmodule Ampd.Carrier do
       retryable: false,
       requires_human: false,
       operator_detail:
-        %{"ticket_id" => ticket["ticket_id"], "carrier_ref" => ticket["carrier_ref"]}
+        %{
+          "ticket_id" => ticket["ticket_id"],
+          "carrier_ref" => ticket["carrier_ref"],
+          "reason" => ticket["machine_reason"] || ticket["reason"],
+          "floor_failures" => ticket["floor_failures"]
+        }
         |> Enum.reject(fn {_, v} -> v == nil end)
         |> Map.new()
     )

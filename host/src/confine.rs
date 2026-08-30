@@ -717,6 +717,28 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
         f.push(stmt(BPF_RET | BPF_K, deny));
     }
 
+    // **A payload must not be able to cut its own death binding.**
+    //
+    // `prctl(PR_SET_PDEATHSIG, 0)` clears the parent-death signal. Today's
+    // fixture never calls it; a PTY or Motor payload can, and would then
+    // survive the host it is bound to — undoing the one mechanism that stops
+    // a hard host death from orphaning Carriers.
+    //
+    // Argument-aware rather than a blanket ban: seccomp can read `args[0]`,
+    // and banning every `prctl` forever would be deciding the eventual Motor
+    // profile now, from here, with no evidence about what it needs. So
+    // exactly one option is refused, and the rest are the payload's business
+    // until something measures otherwise.
+    //
+    // `PR_GET_PDEATHSIG` (2) stays allowed on purpose: a Carrier that can
+    // read its binding but not change it is strictly better for anything
+    // that wants to check, and reading changes nothing.
+    f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 157 /* prctl */, 0, 3));
+    f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARG0));
+    f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 1 /* PR_SET_PDEATHSIG */, 0, 1));
+    f.push(stmt(BPF_RET | BPF_K, deny));
+    f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
+
     // ABI 9 has no UDP right, so the network policy cannot be completed in
     // Landlock on this kernel. Close the family at `socket(2)` instead:
     // AF_UNIX is permitted, everything else refused. This is coarser than a

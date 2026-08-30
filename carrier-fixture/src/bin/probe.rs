@@ -245,6 +245,21 @@ fn main() {
         sysc(3, s, 0, 0);
     }
 
+    // 5b · The parent-death binding, from the payload's own side.
+    //
+    // This is the one property where the subject IS the right witness: the
+    // question is not "is it set" — the host attests that — but "can the
+    // payload cut it", and only the payload can attempt that. `PR_GET` is
+    // read-only and stays allowed; `PR_SET` must be refused with our errno.
+    {
+        let mut sig: i32 = -1;
+        let (rc, e) = sysc(157 /* prctl */, 2 /* PR_GET_PDEATHSIG */, &mut sig as *mut i32 as i64, 0);
+        r("prctl_get_pdeathsig", rc == 0 && sig == 9, if rc == 0 { sig } else { e });
+
+        let (rc2, e2) = sysc(157, 1 /* PR_SET_PDEATHSIG */, 0, 0);
+        r("prctl_clear_pdeathsig", rc2 == 0, e2);
+    }
+
     // 6 · Privilege-boundary syscalls.
     let (v, e) = sysc(272 /* unshare */, 0x1000_0000 /* CLONE_NEWUSER */, 0, 0);
     r("unshare_user_ns", v == 0, e);

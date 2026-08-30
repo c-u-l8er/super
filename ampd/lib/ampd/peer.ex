@@ -550,6 +550,18 @@ defmodule Ampd.Peer do
     touched()
     Enum.each(Map.keys(st.owners), &Process.demonitor(&1, [:flush]))
 
+    # **Announced before they are dropped, not silently cleared.** `reset/0`
+    # emptied this map and told nobody, so the invariant it claims — losing
+    # the runtime incarnation terminates the Carrier — held only when some
+    # higher caller happened to close the Bridge first. An invariant that
+    # depends on a caller remembering a second teardown is not an invariant.
+    #
+    # A cast, from inside this GenServer, to a different process: nothing
+    # about resetting identity may wait on a machine deadline.
+    if Process.whereis(Ampd.Carrier.Reaper) do
+      for {_id, inc} <- st.carriers, do: Ampd.Carrier.Reaper.orphaned(inc)
+    end
+
     {:reply, :ok,
      %{
        st

@@ -138,7 +138,16 @@ defmodule Ampd.Carrier.Machine.Channel do
          "no host carrier channel is possessed — refusing to resolve and execute the host by name instead"}
 
       %{sock: sock, incarnation: inc} ->
-        Ampd.Worktree.EffectChannel.request(sock, inc, body, @deadline_ms)
+        # The Carrier protocol's own observation schema. Passing it is what
+        # makes the shared correlation machinery reusable rather than
+        # worktree-specific — see `EffectChannel.match/6`.
+        expect =
+          case body["op"] do
+            "stop" -> "carrier-stop-observation@1"
+            _ -> "carrier-start-observation@1"
+          end
+
+        Ampd.Worktree.EffectChannel.request(sock, inc, body, @deadline_ms, expect)
     end
   end
 end
@@ -205,9 +214,10 @@ defmodule Ampd.Carrier.Machine.Harness do
           "no_new_privs" => true,
           "seccomp_mode" => 2,
           "seccomp_filters" => 1,
-          "fds" => %{"0" => "/dev/null", "1" => "log", "2" => "log", "3" => "socket:[1]"},
+          "fds" => %{"0" => "/dev/null", "1" => "log", "2" => "log", "3" => "socket:[4242]"},
           "env_keys" => ["SUPER_CARRIER_CONTROL_FD", "SUPER_CARRIER_INCARNATION"],
           "uid" => 1000,
+          "cwd" => "/tmp/harness-carrier-workdir",
           "starttime" => 1
         },
         # The attestation the real host makes. Present here so the harness
@@ -224,7 +234,17 @@ defmodule Ampd.Carrier.Machine.Harness do
           "seccomp_deny_errno" => 130,
           "pdeathsig" => "SIGKILL",
           "network" => "none",
-          "attestor" => "super-host"
+          "attestor" => "super-host",
+          # The correspondence rows compare observation against attestation,
+          # so the harness has to supply both halves consistently — otherwise
+          # it would exercise a shorter floor than production does, which is
+          # exactly the divergence that let the real host ship with no
+          # attestation at all.
+          "expected_uid" => 1000,
+          "control_inode" => 4242,
+          "payload_digest" => String.duplicate("ab", 32),
+          "workdir_identity" =>
+            :crypto.hash(:sha256, "/tmp/harness-carrier-workdir") |> Base.encode16(case: :lower)
         }
       },
       overrides

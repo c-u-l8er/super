@@ -223,7 +223,7 @@ defmodule Ampd.Worktree.EffectChannel do
           |> Map.put("request_id", request_id)
           |> Map.put("channel_epoch", epoch)
 
-        send_and_await(sock, req, request_id, epoch, timeout)
+        send_and_await(sock, req, request_id, epoch, timeout, @observation_schema)
 
       _ ->
         # Named, and not a silent fallback to `Port.open`. The whole
@@ -251,7 +251,9 @@ defmodule Ampd.Worktree.EffectChannel do
   precondition true by construction instead of asking a filter to be
   something it is not.
   """
-  def request(sock, %{"channel_epoch" => epoch}, body, timeout) when is_map(body) do
+  def request(sock, incarnation, body, timeout, expect \\ @observation_schema)
+
+  def request(sock, %{"channel_epoch" => epoch}, body, timeout, expect) when is_map(body) do
     request_id = new_epoch()
 
     req =
@@ -259,7 +261,7 @@ defmodule Ampd.Worktree.EffectChannel do
       |> Map.put("request_id", request_id)
       |> Map.put("channel_epoch", epoch)
 
-    send_and_await(sock, req, request_id, epoch, timeout)
+    send_and_await(sock, req, request_id, epoch, timeout, expect)
   end
 
   # --------------------------------------------------------------- wire
@@ -275,7 +277,7 @@ defmodule Ampd.Worktree.EffectChannel do
   # `Ampd.Frame` is deliberately *not* used: it validates `command@1` /
   # `reply@1`, which are the channel-protocol schemas. An effect request is
   # not a command and must not be able to become one.
-  defp send_and_await(sock, req, request_id, epoch, timeout) do
+  defp send_and_await(sock, req, request_id, epoch, timeout, expect) do
     body = Core.canon(req)
 
     case :socket.send(sock, <<byte_size(body)::big-32>> <> body) do
@@ -283,7 +285,7 @@ defmodule Ampd.Worktree.EffectChannel do
         # **Past this line the effect may have happened.** Every failure
         # below is therefore indeterminate rather than failed, and none of
         # them may resubmit.
-        await(sock, request_id, epoch, deadline(timeout))
+        await(sock, request_id, epoch, deadline(timeout), expect)
 
       {:error, e} ->
         # Nothing left this runtime. `Ampd.Worktree` still treats this as
@@ -295,7 +297,7 @@ defmodule Ampd.Worktree.EffectChannel do
 
   defp deadline(timeout), do: System.monotonic_time(:millisecond) + timeout
 
-  defp await(sock, request_id, epoch, deadline) do
+  defp await(sock, request_id, epoch, deadline, expect) do
     left = deadline - System.monotonic_time(:millisecond)
 
     cond do
@@ -305,7 +307,7 @@ defmodule Ampd.Worktree.EffectChannel do
       true ->
         case recv_frame(sock, left) do
           {:ok, obs} ->
-            match(sock, obs, request_id, epoch, deadline)
+            match(sock, obs, request_id, epoch, deadline, expect)
 
           {:error, :closed} ->
             # **The C7 shape.** Submitted, no trustworthy observation, the
@@ -333,15 +335,24 @@ defmodule Ampd.Worktree.EffectChannel do
   # because the deadline still governs: a channel that only ever produces
   # mismatches times out into the indeterminate answer rather than
   # blocking forever or accepting the wrong reply.
-  defp match(sock, obs, request_id, epoch, deadline) do
+  # **`expect` is a parameter, not a constant, and that is not cosmetic.**
+  #
+  # This module's wire and correlation discipline is reused by
+  # `Ampd.Carrier.Machine.Channel` on its own channel — but the schema check
+  # was hard-coded to the *worktree* observation, so every Carrier reply was
+  # rejected as "an unknown observation schema" and every production start
+  # became INDETERMINATE. Found by the first test that drove the real host
+  # end to end; nothing in 53 harness falsifiers could see it, because the
+  # harness never crosses this function.
+  defp match(sock, obs, request_id, epoch, deadline, expect) do
     cond do
       obs["channel_epoch"] != epoch ->
-        await(sock, request_id, epoch, deadline)
+        await(sock, request_id, epoch, deadline, expect)
 
       obs["request_id"] != request_id ->
-        await(sock, request_id, epoch, deadline)
+        await(sock, request_id, epoch, deadline, expect)
 
-      obs["schema"] != @observation_schema ->
+      obs["schema"] != expect ->
         {:error, "the host returned an unknown observation schema: #{inspect(obs["schema"])}"}
 
       true ->
