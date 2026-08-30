@@ -220,6 +220,23 @@ pub const INTENT_SURFACE: &[&str] = &[
     "open_workspace",
     "open_goal",
     "open_lane",
+    // D.1.2. Opening an assignment is the same kind of decision one rung
+    // down: `open_lane` says who *may* stand at a position, and
+    // `open_worker` says that someone is actually assigned to it. Both
+    // belong to the person, and neither is reachable from an agent channel
+    // — a runtime in which a process could create its own assignment has
+    // moved the decision from the person to the process.
+    //
+    // `close_worker` is the one that matters most for supervision, because
+    // it is how a person ends an occupancy that is already live. It does
+    // not ask the Carrier to stop; it makes the position stop being one,
+    // and the next thing issued from there refuses. `reopen_worker` exists
+    // so that ending is not irreversible — and, because it advances the
+    // Worker's generation, re-opening cannot revive the attachment that
+    // spanned the close.
+    "open_worker",
+    "close_worker",
+    "reopen_worker",
 ];
 
 /// **W.2.3.3 · which established position a bind or unbind is addressed to.**

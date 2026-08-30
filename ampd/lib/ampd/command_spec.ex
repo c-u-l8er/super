@@ -310,7 +310,69 @@ defmodule Ampd.CommandSpec do
       retry: :once,
       fields: [%{name: "locus_ref", type: {:id, "ln_"}, required: true}]
     },
-    "list_loci" => %{cmd: :list_loci, channel: :both, kind: :read, retry: :safe, fields: []}
+    "list_loci" => %{cmd: :list_loci, channel: :both, kind: :read, retry: :safe, fields: []},
+
+    # ----------------------------------------------- workers · D.1.2
+    #
+    # **Six words, and not one of them can name a process.** There is no
+    # `pid` field, no `command`, no `executable`, no `pty`, no `argv`. A
+    # Worker is an assignment; the grammar is what makes "assignment" a
+    # thing that cannot quietly become "process", because a field that
+    # does not exist cannot be filled in later by accident.
+    #
+    # The channel split is the load-bearing part. **Creating, closing and
+    # re-opening an assignment are `:human_control`** — a person decides
+    # who is assigned where, exactly as `open_lane` decides who a Lane is
+    # held by, and an agent can no more assign itself to a position than
+    # it can open the Lane under it. **Attaching is `:agent`**, because
+    # taking up an assignment is something only the Carrier that will
+    # fulfil it can do; the human control channel holds no actor and
+    # `Ampd.Worker.occupancy/2` refuses it by name.
+    "open_worker" => %{
+      cmd: :open_worker,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "locus_ref", type: {:id, "ln_"}, required: true},
+        # No `actor` field. The actor is copied from the Lane, so there is
+        # no argument in which a person could assign a Worker to someone
+        # the Lane is not held by — referential closure by construction
+        # rather than by a check that could be forgotten.
+        %{name: "purpose", type: {:string, @reason_bytes}, required: true}
+      ]
+    },
+    "close_worker" => %{
+      cmd: :close_worker,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [%{name: "worker_ref", type: {:id, "wk_"}, required: true}]
+    },
+    "reopen_worker" => %{
+      cmd: :reopen_worker,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [%{name: "worker_ref", type: {:id, "wk_"}, required: true}]
+    },
+
+    # `retry: :once` for the same reason `attach_locus` is: it refuses far
+    # more often than it succeeds, and `Ampd.Refusal.new/2` writes to the
+    # refusal ring as it constructs. A `:safe` read that refuses deposits
+    # one refusal per speculative attempt and shows the client one.
+    "attach_worker" => %{
+      cmd: :attach_worker,
+      channel: :agent,
+      kind: :read,
+      retry: :once,
+      fields: [%{name: "worker_ref", type: {:id, "wk_"}, required: true}]
+    },
+    "detach_worker" => %{
+      cmd: :detach_worker,
+      channel: :agent,
+      kind: :read,
+      retry: :once,
+      fields: []
+    },
+    "list_workers" => %{cmd: :list_workers, channel: :both, kind: :read, retry: :safe, fields: []}
   }
 
   # **Every command declares whether it reads or mutates, and the build

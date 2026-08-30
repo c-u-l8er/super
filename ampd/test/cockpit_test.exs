@@ -181,7 +181,14 @@ defmodule Ampd.CockpitTest do
       # unattributable to an incarnation.
       attach_locus: {kestrel, ["ln_0001"]},
       observe_worktree: {kestrel, ["wc_0001"]},
-      list_loci: {kestrel, []}
+      list_loci: {kestrel, []},
+      # D.1.2's reads, same rule. `attach_worker` on a Worker that does not
+      # exist refuses, and the refusal still has to name the incarnation it
+      # was decided in — an occupancy refusal a client cannot attribute to a
+      # world is one it cannot tell apart from a stale reply.
+      attach_worker: {kestrel, ["wk_0001"]},
+      detach_worker: {kestrel, []},
+      list_workers: {kestrel, []}
     }
 
     # **Derived from `Ampd.CommandSpec`, not from this list.** A read added
@@ -725,14 +732,29 @@ defmodule Ampd.CockpitTest do
     # do, and `Ampd.Refusal.new/2` records into the ring as it constructs.
     # `list_loci` is `:safe` because it constructs no refusal — it filters
     # by the peer's own binding and returns whatever survives.
+    #
+    # `attach_worker` and `detach_worker` joined the `:once` list in D.1.2
+    # for the same reason. `attach_worker` refuses in nine distinct ways
+    # and every one of them writes to the ring; `detach_worker` refuses
+    # only when the Carrier has no actor, which is rare and still a write.
+    # `list_workers` is `:safe` — like `list_loci` it constructs no
+    # refusal, it filters by the caller's own binding.
     assert CommandSpec.retry_once() ==
-             [:attach_locus, :inspect_refusal, :observe_worktree, :preflight]
+             [
+               :attach_locus,
+               :attach_worker,
+               :detach_worker,
+               :inspect_refusal,
+               :observe_worktree,
+               :preflight
+             ]
 
     safe = CommandSpec.reads() -- CommandSpec.retry_once()
     assert :agent_projection in safe
     assert :operator_projection in safe
     assert :list_receipts in safe
     assert :list_loci in safe
+    assert :list_workers in safe
   end
 
   test "an observation is ordered but is not an operation" do

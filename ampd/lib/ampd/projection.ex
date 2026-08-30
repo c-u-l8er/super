@@ -103,6 +103,14 @@ defmodule Ampd.Projection do
       "workspaces" => Ampd.Loci.workspaces(),
       "goals" => Ampd.Loci.goals(),
       "lanes" => Ampd.Loci.lanes(),
+      # **Each carries its live occupancy, derived rather than stored.**
+      # `Ampd.Worker.status_of/1` re-runs the same `occupancy/2` the
+      # runtime would refuse on, so `OCCUPIED` on a person's screen and
+      # "this Carrier may act from here" are the same proposition. A status
+      # computed from "is there an attachment row" would go green for an
+      # attachment the runtime has already stopped honouring, which is the
+      # cosmetic-green failure the cockpit gate exists to refuse.
+      "workers" => Ampd.Worker.projected(Ampd.Loci.workers()),
       "worktree_caps" => Ampd.Loci.caps(),
       "repositories" => Ampd.Worktree.repos() |> Map.new(fn {ref, _} -> {ref, %{"ref" => ref}} end),
       "worktree_resources" =>
@@ -230,6 +238,13 @@ defmodule Ampd.Projection do
       "effects" => Effects.all() |> mine.() |> Enum.reject(&Effects.terminal?/1),
       "effects_history" => Effects.all() |> mine.() |> Enum.filter(&Effects.terminal?/1) |> window(),
       "receipts" => Receipts.all() |> mine.() |> window(),
+      # Scoped by actor like everything else here. An agent seeing another
+      # actor's assignments would learn that actor's Lane ids, which is the
+      # ancestry-closure rule `list_loci` already had to be taught.
+      "workers" =>
+        Ampd.Loci.workers()
+        |> Map.filter(fn {_, w} -> w["actor"] == actor end)
+        |> Ampd.Worker.projected(),
       "runtime" => runtime_status()
     }
   end

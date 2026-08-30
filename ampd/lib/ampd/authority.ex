@@ -279,6 +279,26 @@ defmodule Ampd.Authority do
   def open_lane(fields), do: tx(fn -> Ampd.Loci.create_lane(fields) end)
 
   @doc """
+  Open, close and re-open a Worker — the persistent assignments, linearized.
+
+  Ordered because they write `Ampd.Loci`, which refuses a mutation that did
+  not come from the coordinator. Note what is **not** here: `attach_worker`
+  and `detach_worker` do not appear, because occupancy is Carrier-local and
+  mutates no durable state. Routing them through the total order would buy
+  nothing and would grow the ordered-mutation count for a fact that lives in
+  a GenServer's memory.
+
+  `close_worker` and `reopen_worker` both advance the Worker's generation,
+  and that is what makes a stale attachment refusable — see
+  `Ampd.Worker.reopen/1`.
+  """
+  def open_worker(locus_ref, purpose),
+    do: tx(fn -> Ampd.Worker.create(locus_ref, purpose) end)
+
+  def close_worker(worker_ref), do: tx(fn -> Ampd.Worker.close(worker_ref) end)
+  def reopen_worker(worker_ref), do: tx(fn -> Ampd.Worker.reopen(worker_ref) end)
+
+  @doc """
   Establish a worktree for a Lane — the D.1.1 slice, linearized.
 
   The body is `Ampd.Locus.establish/3`; what this adds is the two things

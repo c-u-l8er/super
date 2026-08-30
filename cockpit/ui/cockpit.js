@@ -188,7 +188,8 @@ function rowNode({ id, cap, who, actions = [] }) {
  * the typed value lives here, outside the region, and the inputs are
  * repopulated from it. It is not a model of the world; it is a model of
  * what the person has said so far, which no frame is entitled to move. */
-const draft = { workspace_name: '', goal_title: '', goal_ws: '', lane_goal: '', lane_actor: '', lane_repo: '', lane_base: '' };
+const draft = { workspace_name: '', goal_title: '', goal_ws: '', lane_goal: '', lane_actor: '', lane_repo: '', lane_base: '',
+                worker_lane: '', worker_purpose: '', worker_close: '', worker_reopen: '' };
 
 function fieldNode(key, label, placeholder) {
   const wrap = document.createElement('label');
@@ -264,6 +265,14 @@ function argsFor(intent) {
     if (trim(draft.lane_base)) a.base_revision = trim(draft.lane_base);
     return a;
   }
+  /* `open_worker` has no `actor` field, and the omission is the design.
+     A Worker's actor is copied from its Lane by the runtime, so there is
+     no box in which a person could assign someone to a Lane that is not
+     theirs — referential closure the person cannot get wrong rather than
+     a validation they can be refused by. */
+  if (intent === 'open_worker') return { locus_ref: draft.worker_lane, purpose: trim(draft.worker_purpose) };
+  if (intent === 'close_worker') return { worker_ref: draft.worker_close };
+  if (intent === 'reopen_worker') return { worker_ref: draft.worker_reopen };
   return {};
 }
 
@@ -391,14 +400,50 @@ export function render(frame) {
   const repoList = Object.values(p.repositories ?? {});
   const caps = Object.values(p.worktree_caps ?? {});
 
-  const lanes = Object.values(p.lanes ?? {}).map((l) => {
+  const workerList = Object.values(p.workers ?? {});
+
+  /* ── Workspace → Goal → Lane → Worker ─────────────────────────────────
+     The fourth rung, D.1.2. A Lane says who *may* stand at a position; a
+     Worker is somebody actually assigned to it, and its `occupancy` says
+     whether a live Carrier is fulfilling that assignment right now.
+
+     **`occupancy` is derived by the runtime, not by this page.**
+     `Ampd.Worker.status_of/1` re-runs the same `occupancy/2` the runtime
+     would refuse on, so `OCCUPIED` here and "a command issued from here
+     would be honoured" are the same proposition. Counting attachment rows
+     in JavaScript would have been easy and would have gone green for an
+     attachment the runtime had already stopped honouring — a status line
+     that disagrees with what the runtime does is worse than none.
+
+     Rendered under its Lane rather than in a list of its own, because a
+     Worker with no Lane above it is not a position and the hierarchy is
+     the thing being shown. */
+  const lanes = Object.values(p.lanes ?? {}).flatMap((l) => {
     const held = caps.filter((c) => c.locus_ref === l.id && c.status === 'active').length;
-    return rowNode({
+    const mine = workerList.filter((w) => w.locus_ref === l.id);
+
+    const laneRow = rowNode({
       id: l.id,
       cap: l.id,
       who: `${l.actor} · ${short(l.goal_ref)} · ${held} capabilit${held === 1 ? 'y' : 'ies'}`,
     });
+
+    const workerRows = mine.map((w) =>
+      rowNode({
+        id: w.id,
+        cap: `└ ${w.id}`,
+        who: `Worker · ${w.occupancy ?? 'OFFLINE'}${w.status === 'closed' ? ' · closed' : ''} · ${w.purpose ?? ''}`,
+      }),
+    );
+
+    return [laneRow, ...workerRows];
   });
+
+  const openWorkers = workerList.filter((w) => w.status === 'open');
+  const closedWorkers = workerList.filter((w) => w.status !== 'open');
+  const laneOptions = Object.values(p.lanes ?? {}).map((l) => ({ value: l.id, text: `${l.id} · ${l.actor}` }));
+  const openWorkerOptions = openWorkers.map((w) => ({ value: w.id, text: `${w.id} · ${w.occupancy ?? ''}` }));
+  const closedWorkerOptions = closedWorkers.map((w) => ({ value: w.id, text: `${w.id} · closed` }));
 
   const wsOptions = wsList.map((w) => ({ value: w.id, text: `${w.name ?? w.id}` }));
   const goalOptions = goalList.map((g) => ({ value: g.id, text: `${g.title ?? g.id}` }));
@@ -422,6 +467,26 @@ export function render(frame) {
        selectNode('lane_repo', 'in', repoOptions, 'no repository registered'),
        fieldNode('lane_base', 'from', 'revision (optional)')],
       'open', goalOptions.length === 0 || repoOptions.length === 0),
+
+    /* D.1.2. Three forms, because a person needs all three verbs: assign
+       somebody to a position, end that assignment, and — since ending it
+       must not be irreversible — restore it. `close_worker` is the one
+       that carries supervision: it is how a person stops a Carrier that
+       is already standing somewhere, and the runtime refuses the next
+       thing issued from there without anyone having to ask the Carrier
+       to cooperate. */
+    formNode('open-worker', 'open_worker',
+      [selectNode('worker_lane', 'at', laneOptions, 'no lane yet'),
+       fieldNode('worker_purpose', 'Worker', 'what it is assigned to do')],
+      'assign', laneOptions.length === 0),
+
+    formNode('close-worker', 'close_worker',
+      [selectNode('worker_close', 'end', openWorkerOptions, 'no open worker')],
+      'close', openWorkerOptions.length === 0),
+
+    formNode('reopen-worker', 'reopen_worker',
+      [selectNode('worker_reopen', 'restore', closedWorkerOptions, 'no closed worker')],
+      'reopen', closedWorkerOptions.length === 0),
   ];
 
   const sections = [
@@ -542,6 +607,10 @@ document.addEventListener('click', (ev) => {
     if (intent === 'open_workspace') draft.workspace_name = '';
     if (intent === 'open_goal') draft.goal_title = '';
     if (intent === 'open_lane') { draft.lane_actor = ''; draft.lane_base = ''; }
+    /* Only `purpose` — the Lane selection is a choice among things that
+       still exist and `selectNode` already re-resolves a stale one. Close
+       and reopen consume nothing typed. */
+    if (intent === 'open_worker') draft.worker_purpose = '';
   });
 });
 

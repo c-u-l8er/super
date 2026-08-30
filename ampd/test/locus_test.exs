@@ -61,7 +61,37 @@ defmodule Ampd.LocusTest do
         "lane"
       )
 
-    %{repo: repo, repo_ref: r["ref"], control: control, agent: agent, ws: ws, goal: goal, lane: lane}
+    # **D.1.2 added two lines to this fixture, and they are the whole slice.**
+    #
+    # Under D.1.1 the Carrier occupied this Lane the moment it authenticated
+    # as `kestrel`, so the battery below never had to say where anybody was
+    # standing. It does now: a person opens an assignment, and the Carrier
+    # takes it up. Every D.1.1 falsifier still states exactly what it
+    # stated — what changed is that the precondition it silently relied on
+    # is now something that has to happen.
+    worker = ok!(Control.command(control, :open_worker, [lane["id"], "implement"]), "worker")
+    ok!(Control.command(agent, :attach_worker, [worker["id"]]), "worker")
+
+    %{
+      repo: repo,
+      repo_ref: r["ref"],
+      control: control,
+      agent: agent,
+      ws: ws,
+      goal: goal,
+      lane: lane,
+      worker: worker
+    }
+  end
+
+  # Open an assignment on `lane_id` and have `carrier` take it up. Returns
+  # the `worker@1`. Two acts, deliberately not one: a person assigns and a
+  # Carrier attaches, and the falsifiers below need to do the first without
+  # the second.
+  defp occupy!(control, carrier, lane_id, purpose \\ "work") do
+    w = ok!(Control.command(control, :open_worker, [lane_id, purpose]), "worker")
+    ok!(Control.command(carrier, :attach_worker, [w["id"]]), "worker")
+    w
   end
 
   # A real repository with one real commit. `git worktree add` needs a
@@ -398,6 +428,7 @@ defmodule Ampd.LocusTest do
 
       grant_worktree!(lane_b["id"], "mallory")
       {:ok, mallory} = Peer.attach_agent("mallory")
+      occupy!(ctx.control, mallory, lane_b["id"])
 
       before = world_footprint()
       o = Control.command(mallory, :observe_worktree, [cap_id])
@@ -493,6 +524,13 @@ defmodule Ampd.LocusTest do
       # The advance closed every channel — which is itself the rule under
       # test one layer down — so a Carrier has to reattach.
       {:ok, kestrel} = Peer.attach_agent("kestrel")
+
+      # And, since D.1.2, retake its position. The Worker survived the
+      # advance exactly as the Lane did — both are durable records and
+      # neither is authority — while the attachment did not, because
+      # occupancy does not cross a discontinuity.
+      assert Loci.worker(ctx.worker["id"])["status"] == "open"
+      ok!(Control.command(kestrel, :attach_worker, [ctx.worker["id"]]), "worker")
 
       o = Control.command(kestrel, :observe_worktree, [cap_id])
       assert o["allow"] == false
@@ -713,6 +751,12 @@ defmodule Ampd.LocusTest do
       Process.sleep(50)
       {:ok, kestrel} = Peer.attach_agent("kestrel")
 
+      # **The replacement Carrier has to retake the position, and D.1.2 is
+      # what makes that sentence non-trivial.** Under D.1.1 authenticating
+      # as `kestrel` put it back at the Lane; now the Worker is still open
+      # and unoccupied, and standing there again is an act.
+      ok!(Control.command(kestrel, :attach_worker, [ctx.worker["id"]]), "worker")
+
       a = Control.command(kestrel, :attach_locus, [ctx.lane["id"]])
       assert a["allow"] == true
       assert a["count"] == 1
@@ -732,6 +776,7 @@ defmodule Ampd.LocusTest do
       Authority.revoke_one(g["id"])
 
       {:ok, kestrel} = Peer.attach_agent("kestrel")
+      ok!(Control.command(kestrel, :attach_worker, [ctx.worker["id"]]), "worker")
       a = Control.command(kestrel, :attach_locus, [ctx.lane["id"]])
 
       assert a["allow"] == true, "the Locus itself is still occupiable"

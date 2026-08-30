@@ -234,21 +234,40 @@ defmodule Ampd.Locus do
 
   # ----------------------------------------------------------- occupancy
   @doc """
-  Does `peer` occupy `lane`?
+  Does `peer` occupy `lane`? **Delegated to `Ampd.Worker` since D.1.2.**
 
-  The actor comes from the peer binding — `Ampd.Peer` established it at
-  attach time and a command payload has no actor field to lie in. So this
-  is not "did the caller claim the lane", it is "is the caller the
-  identity the lane is held by".
+  ## What this used to be, and why it is not that any more
 
-  This is the whole of F8. A fresh Carrier attaching as somebody else
-  occupies nothing, and therefore reaches no capability, no matter how
-  many capabilities exist or how well it knows their ids.
+      def occupies?(peer, lane),
+        do: peer["actor"] != nil and peer["actor"] == lane["actor"]
+
+  That was the D.1.1 bootstrap and it was sufficient for what D.1.1 asked:
+  the actor came from the peer binding rather than the payload, so a fresh
+  Carrier attaching as somebody else reached nothing. F8 is still true.
+
+  It stopped being sufficient the moment one identity could hold more than
+  one position. Under actor equality, a Carrier authenticating as an actor
+  with three Lanes occupied **all three simultaneously**, and the check
+  above could not tell which one a command was issued from — because there
+  was nothing to tell. `who you are ⇒ everywhere you are associated with`
+  is ambient authority wearing the vocabulary that was supposed to remove
+  it.
+
+  **The architectural result D.1.2 was asked for is that this equality did
+  have to go.** It did not survive contact with a Worker. What replaced it
+  keeps identity as a necessary condition and adds an explicit, current,
+  singular assignment:
+
+      occupancy  =  identity  ∧  live attachment to an open Worker on
+                                 this Lane, under the current world
+                                 lineage, peer epoch and Worker generation
+
+  Every call site here is unchanged — `check/2`, `reconstruct/2` and
+  `establish/3` still ask the same question and still refuse the same way.
+  What changed is the answer, which is why the D.1.1 falsifiers still pass
+  while `D2-01` … `D2-12` are now also true.
   """
-  def occupies?(peer, lane) when is_map(peer) and is_map(lane),
-    do: peer["actor"] != nil and peer["actor"] == lane["actor"]
-
-  def occupies?(_, _), do: false
+  defdelegate occupies?(peer, lane), to: Ampd.Worker
 
   @doc """
   The capability set a Carrier gets by attaching to `lane`.
@@ -266,8 +285,12 @@ defmodule Ampd.Locus do
       lane == nil ->
         {:refused, refuse("locus-unknown", %{"locus_ref" => lane_id})}
 
-      not occupies?(peer, lane) ->
-        {:refused, not_occupied(peer, lane)}
+      # The refusal comes from `Ampd.Worker` rather than being rebuilt
+      # here, so the caller learns *which* of the occupancy conditions
+      # failed — "attach first" and "you are standing somewhere else" are
+      # different instructions and both are actionable.
+      (occ = Ampd.Worker.occupancy(peer, lane)) != :ok ->
+        occ
 
       true ->
         live =
@@ -308,7 +331,16 @@ defmodule Ampd.Locus do
       # Occupancy first means a stranger gets exactly one answer,
       # `capability-not-held`, whatever the capability's condition is; the
       # holder gets the specific reason, because the holder is entitled to it.
-      not occupies?(peer, lane) ->
+      #
+      # **D.1.2 splits "not the holder" into two cases, and they disclose
+      # differently.** A stranger — an actor the Lane is not held by — is
+      # told exactly what it was told before. An actor that *is* the Lane's
+      # actor but is not standing there is told so, because that is a fact
+      # about its own position and "attach first" is unactionable if it
+      # cannot be told apart from "this was never yours". The grading is
+      # `Ampd.Worker.occupancy/2`'s; this branch only chooses which of the
+      # two questions is being answered.
+      peer == nil or peer["actor"] == nil or peer["actor"] != lane["actor"] ->
         {:refused,
          refuse("capability-not-held", %{
            "capability" => cap["id"],
@@ -316,6 +348,9 @@ defmodule Ampd.Locus do
            "hint" =>
              "the capability exists and is held by another Locus — knowing its id is not holding it"
          })}
+
+      (occ = Ampd.Worker.occupancy(peer, lane)) != :ok ->
+        occ
 
       cap["status"] != "active" ->
         {:refused,
@@ -398,8 +433,13 @@ defmodule Ampd.Locus do
       lane == nil ->
         {:refused, refuse("locus-unknown", %{"locus_ref" => lane_id})}
 
-      not occupies?(peer, lane) ->
-        {:refused, not_occupied(peer, lane)}
+      # **`locus_ref` is a check, not a choice.** A Carrier holds at most
+      # one attachment, so this argument cannot select which position to
+      # act from — it can only agree or disagree with where the Carrier
+      # already is, and a disagreement is refused. Property A of
+      # *Capability Myths Demolished*: no designation without authority.
+      (occ = Ampd.Worker.occupancy(peer, lane)) != :ok ->
+        occ
 
       # F4, first half — refused before anything touches the filesystem.
       match?({:error, _}, Worktree.legal_name?(name)) ->
@@ -751,15 +791,6 @@ defmodule Ampd.Locus do
   # says what was got, and a repository whose HEAD moves between the two
   # is exactly when the difference matters.
   defp base_revision(lane), do: lane["base_revision"] || "HEAD"
-
-  defp not_occupied(peer, lane) do
-    refuse("locus-not-occupied", %{
-      "locus_ref" => lane["id"],
-      "bound_actor" => peer && peer["actor"],
-      "hint" =>
-        "a Carrier occupies a Locus by being bound to its actor — attaching does not confer it"
-    })
-  end
 
   defp refuse(code, detail) do
     Refusal.new(code,

@@ -1,7 +1,7 @@
 defmodule Ampd.Loci do
   @moduledoc """
-  `workspace@1` · `goal@1` · `lane@1` · `worktree-cap@1` — the durable
-  semantic objects, and the store that outlives every Carrier.
+  `workspace@1` · `goal@1` · `lane@1` · `worker@1` · `worktree-cap@1` — the
+  durable semantic objects, and the store that outlives every Carrier.
 
   ## What this store is for
 
@@ -83,6 +83,44 @@ defmodule Ampd.Loci do
   proves when a record was written and nothing about whether the authority
   it describes is current, and treating it as freshness is the error
   `worktree_created@1` is explicitly forbidden from making.
+
+  ## `worker@1`, and why it is in *this* store — D.1.2
+
+  A **Worker** is a persistent assignment to perform work from exactly one
+  Lane. It is the same kind of thing as a Lane — a position record with no
+  process behind it — so it lives in the same store, and adding it does
+  **not** add a durable authority store. That is the WEK measurement the
+  slice exists to take: semantic richness grew by an object and privileged
+  mechanism did not grow at all.
+
+  It is also, deliberately, **not an authority bag**:
+
+      no pid · no pty · no executable · no shell command
+      no host path · no copied WorktreeCap · no capability
+      no grant · no delegation
+
+  A Worker says *someone is assigned to stand here*. What may be done from
+  there is still decided, on every use, by the grant, the world lineage and
+  the embodiment basis — none of which the Worker carries or can confer.
+  Creating one confers nothing; the falsifier that proves it is
+  `D2-11`, which reads the durable record and refuses if any
+  authority-shaped key has appeared in it.
+
+  ### `generation`, and the resurrection it exists to refuse
+
+  `close_worker` and `reopen_worker` both **advance** `generation`. That is
+  not bookkeeping. `Ampd.Locus.grant_of/1` carries a scar from exactly this
+  shape one layer down — a revoked capability came back to life when an
+  equivalent grant was minted, because the check looked for *an* applicable
+  grant rather than *the* one it was established from. The occupancy layer
+  has the same hole available to it: close a Worker while a Carrier is
+  attached, reopen it, and a design that compared only `status` would find
+  the attachment valid again.
+
+  So an attachment binds the generation it was made under, and a reopened
+  Worker is a different assignment from the one that was closed. **A
+  reopened position is grounds for a new attachment, never for reviving an
+  old one.**
   """
 
   use GenServer
@@ -92,12 +130,42 @@ defmodule Ampd.Loci do
   @workspace_schema "workspace@1"
   @goal_schema "goal@1"
   @lane_schema "lane@1"
+  @worker_schema "worker@1"
   @cap_schema "worktree-cap@1"
 
   def workspace_schema, do: @workspace_schema
   def goal_schema, do: @goal_schema
   def lane_schema, do: @lane_schema
+  def worker_schema, do: @worker_schema
   def cap_schema, do: @cap_schema
+
+  @doc """
+  The key set a `worker@1` is permitted to carry, sorted.
+
+  Declared rather than derived, and then checked against a freshly created
+  record by `D2-11` — the same two-answers-to-different-questions
+  discipline `Ampd.Locus.fact_keys/0` uses. This is what the record
+  *promises*; that is what the runtime *produced*; a change to one without
+  the other fails a test instead of appearing in a bundle.
+  """
+  @worker_keys ~w(actor generation goal_ref id locus_ref purpose schema status
+                  workspace_ref world_ref)
+  def worker_keys, do: @worker_keys
+
+  @doc """
+  Keys a `worker@1` must **never** carry, whatever else is added to it.
+
+  A denylist as well as an allowlist, because the two fail differently: the
+  allowlist catches a field arriving, and this catches a field arriving
+  under a name someone argued was fine. `D2-11` walks the record
+  recursively — a nested object inherits every rule of the record it is
+  embedded in, which is the lesson `F19f` left behind.
+  """
+  @worker_forbidden_keys ~w(authority_basis capabilities capability cap_ref
+                            command delegation executable grant grant_ref
+                            path pid profile pty resource_ref rights
+                            shell worktree_root)
+  def worker_forbidden_keys, do: @worker_forbidden_keys
 
   @doc """
   The rights a `worktree-cap@1` may carry. **One.**
@@ -134,9 +202,34 @@ defmodule Ampd.Loci do
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
-      {:ok, tab, s} -> {:ok, %{tab: tab, s: s, sealed: nil}}
+      {:ok, tab, s} -> {:ok, %{tab: tab, s: shape(s), sealed: nil}}
       {:sealed, reason} -> {:ok, %{tab: nil, s: sealed_state(), sealed: reason}}
     end
+  end
+
+  @doc """
+  Add collection keys a world written before D.1.2 does not have, without
+  touching any key it does.
+
+  **This is a schema migration on an authority store, so it needs the
+  argument the store's own rules demand.** `Ampd.Store`'s second law is
+  that recovery may never infer authority from defaults — which is why a
+  *missing* loci store seals rather than initializing empty.
+
+  Defaulting `workers` to `%{}` is the one direction that law permits,
+  because of what a Worker is: an empty worker table means **nobody is
+  assigned anywhere**, and under D.1.2 occupancy no assignment means no
+  occupancy means no exercisable authority. The default can only ever
+  subtract from what is reachable. Had `worker@1` been an authority-bearing
+  record, the correct behaviour on a missing table would be to seal, and
+  this function would be a hole.
+
+  It is deliberately not a general merge: `Map.put_new/3` per known key, so
+  a world that *has* workers keeps exactly the ones it has, and an
+  unrecognised key on disk is left alone rather than pruned.
+  """
+  def shape(s) when is_map(s) do
+    Enum.reduce(Map.keys(initial()), s, fn k, acc -> Map.put_new(acc, k, initial()[k]) end)
   end
 
   @doc """
@@ -151,7 +244,14 @@ defmodule Ampd.Loci do
   refusal before any of it is reachable.
   """
   def sealed_state,
-    do: %{"workspaces" => %{}, "goals" => %{}, "lanes" => %{}, "caps" => %{}, "seq" => 0}
+    do: %{
+      "workspaces" => %{},
+      "goals" => %{},
+      "lanes" => %{},
+      "workers" => %{},
+      "caps" => %{},
+      "seq" => 0
+    }
 
   @doc """
   The zero-authority initial state: no workspace, no goal, no lane, no cap.
@@ -160,7 +260,14 @@ defmodule Ampd.Loci do
   to confer things from. Fixtures create lanes; boot does not.
   """
   def initial,
-    do: %{"workspaces" => %{}, "goals" => %{}, "lanes" => %{}, "caps" => %{}, "seq" => 0}
+    do: %{
+      "workspaces" => %{},
+      "goals" => %{},
+      "lanes" => %{},
+      "workers" => %{},
+      "caps" => %{},
+      "seq" => 0
+    }
 
   def sealed, do: GenServer.call(__MODULE__, :sealed)
   def close_store, do: GenServer.call(__MODULE__, :close_store)
@@ -170,12 +277,18 @@ defmodule Ampd.Loci do
   def workspaces, do: GenServer.call(__MODULE__, {:all, "workspaces"})
   def goals, do: GenServer.call(__MODULE__, {:all, "goals"})
   def lanes, do: GenServer.call(__MODULE__, {:all, "lanes"})
+  def workers, do: GenServer.call(__MODULE__, {:all, "workers"})
   def caps, do: GenServer.call(__MODULE__, {:all, "caps"})
 
   def workspace(id), do: GenServer.call(__MODULE__, {:get, "workspaces", id})
   def goal(id), do: GenServer.call(__MODULE__, {:get, "goals", id})
   def lane(id), do: GenServer.call(__MODULE__, {:get, "lanes", id})
+  def worker(id), do: GenServer.call(__MODULE__, {:get, "workers", id})
   def cap(id), do: GenServer.call(__MODULE__, {:get, "caps", id})
+
+  @doc "Every Worker assigned to one Lane, open or closed."
+  def workers_of(lane_id),
+    do: workers() |> Enum.filter(fn {_, w} -> w["locus_ref"] == lane_id end) |> Map.new()
 
   @doc "Every cap held by one lane, active or not."
   def caps_of(lane_id),
@@ -203,9 +316,11 @@ defmodule Ampd.Loci do
   def create_workspace(f), do: GenServer.call(__MODULE__, {:create, "workspaces", "ws_", f})
   def create_goal(f), do: GenServer.call(__MODULE__, {:create, "goals", "gl_", f})
   def create_lane(f), do: GenServer.call(__MODULE__, {:create, "lanes", "ln_", f})
+  def create_worker(f), do: GenServer.call(__MODULE__, {:create, "workers", "wk_", f})
   def create_cap(f), do: GenServer.call(__MODULE__, {:create, "caps", "wc_", f})
   def put_cap(id, patch), do: GenServer.call(__MODULE__, {:patch, "caps", id, patch})
   def put_lane(id, patch), do: GenServer.call(__MODULE__, {:patch, "lanes", id, patch})
+  def put_worker(id, patch), do: GenServer.call(__MODULE__, {:patch, "workers", id, patch})
   def reset, do: GenServer.call(__MODULE__, :reset)
 
   # --- ordered-authority boundary -------------------------------------
@@ -259,6 +374,7 @@ defmodule Ampd.Loci do
         "workspaces" -> @workspace_schema
         "goals" -> @goal_schema
         "lanes" -> @lane_schema
+        "workers" -> @worker_schema
         "caps" -> @cap_schema
       end
 
@@ -278,9 +394,14 @@ defmodule Ampd.Loci do
     end
   end
 
+  # `shape/1` here as well as at boot: `load_state/1` is how a snapshot, a
+  # fixture or a restore enters, and every one of those can be older than
+  # the current collection set. Normalizing at boot only would leave the
+  # restore path able to install a state with no `workers` key, which the
+  # next `create` would crash on rather than refuse.
   def handle_ordered({:load_state, s}, st) do
     tab = st.tab || Ampd.Store.open!(@store)
-    {:reply, :ok, %{st | tab: tab, s: Ampd.Store.save(tab, s), sealed: nil}}
+    {:reply, :ok, %{st | tab: tab, s: Ampd.Store.save(tab, shape(s)), sealed: nil}}
   end
 
   def handle_ordered(:reset, %{tab: tab} = st),

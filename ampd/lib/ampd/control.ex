@@ -283,6 +283,50 @@ defmodule Ampd.Control do
     |> settled(fn r -> Map.put(r, "allow", true) end)
   end
 
+  # ---------------------------------------------------- workers · D.1.2
+  #
+  # **Taking up an assignment is the Carrier's own act.** It is not
+  # ordered, because it writes nothing durable — the attachment is a
+  # property of a live channel and dies with it. What it returns is a
+  # position, not a permission: no capability is reconstructed here, and a
+  # Carrier that wants to know what it can now do asks `attach_locus`,
+  # which re-derives the set from scratch.
+  defp dispatch(peer, :attach_worker, [worker_ref]) do
+    Ampd.Worker.attach(peer, worker_ref)
+    |> settled(fn r ->
+      %{
+        "allow" => true,
+        "worker" => r["worker"],
+        "attachment" => r["attachment"],
+        "occupancy" => "OCCUPIED"
+      }
+    end)
+  end
+
+  defp dispatch(peer, :detach_worker, _) do
+    Ampd.Worker.detach(peer)
+    |> settled(fn r -> Map.merge(%{"allow" => true, "occupancy" => "OFFLINE"}, r) end)
+  end
+
+  # Ancestry-closed, exactly like `list_loci` and for the same reason: an
+  # agent that cannot see another actor's Lane must not be handed that
+  # actor's assignments, which name the Lane in `locus_ref`. The operator
+  # sees the world, because the operator is who the world is for.
+  defp dispatch(peer, :list_workers, _) do
+    all = Ampd.Loci.workers()
+
+    mine =
+      if peer["channel"] == :human_control,
+        do: all,
+        else: Map.filter(all, fn {_, w} -> w["actor"] == peer["actor"] end)
+
+    %{
+      "allow" => true,
+      "workers" => Ampd.Worker.projected(mine),
+      "count" => map_size(mine)
+    }
+  end
+
   # **Ancestry-closed, not table-wide.**
   #
   # This filtered `lanes` by actor and then returned `Ampd.Loci.workspaces()`
@@ -380,6 +424,28 @@ defmodule Ampd.Control do
         })
         |> settled(fn l -> %{"allow" => true, "lane" => l} end)
     end
+  end
+
+  # **A person assigns; nobody assigns themselves.** `open_worker` is on the
+  # human control channel for the same reason `open_lane` is: it decides who
+  # stands where, and a runtime in which an agent could create its own
+  # assignment has moved the decision from the person to the process.
+  #
+  # Referential closure is enforced before the mutation, not inside it, so
+  # a Worker naming a Lane that never existed cannot become durable.
+  defp dispatch(_peer, :open_worker, [locus_ref, purpose]) do
+    Authority.open_worker(locus_ref, purpose)
+    |> settled(fn w -> %{"allow" => true, "worker" => w} end)
+  end
+
+  defp dispatch(_peer, :close_worker, [worker_ref]) do
+    Authority.close_worker(worker_ref)
+    |> settled(fn w -> %{"allow" => true, "worker" => w} end)
+  end
+
+  defp dispatch(_peer, :reopen_worker, [worker_ref]) do
+    Authority.reopen_worker(worker_ref)
+    |> settled(fn w -> %{"allow" => true, "worker" => w} end)
   end
 
   defp dispatch(_peer, :approve_effect, [request_id, approval_id]),

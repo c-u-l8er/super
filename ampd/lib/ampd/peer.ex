@@ -45,6 +45,43 @@ defmodule Ampd.Peer do
   A peer binding that survived a restart would be a connection that
   outlived its socket. Bindings die with the node; authority does not.
 
+  ## The Carrier↔Worker attachment lives here — D.1.2
+
+  A **Worker** is World-persistent and lives in `Ampd.Loci`. The fact that
+  *this Carrier is currently fulfilling that Worker* is not: it is a
+  property of a live channel, exactly like the identity binding beside it,
+  and it must die when the channel does.
+
+  So the attachment is a second map in this GenServer's state and it
+  inherits, for free, every invalidation the bindings already have:
+
+      detach/1                    the channel closed → attachment gone
+      owner process death         `:DOWN` → `drop/2` → attachment gone
+      reset/0                     new epoch → every attachment gone
+      supervisor restart          fresh state → every attachment gone
+
+  **That reuse is the WEK measurement.** D.1.2 could have introduced a
+  `CarrierRegistry` — a supervised process holding occupancy, with its own
+  lifecycle, its own crash semantics and its own way of being wrong about
+  who is where. It would also have been a new privileged mechanism class
+  for a fact that already has a home. Occupancy is Carrier-local, the
+  Carrier is a peer binding, and a peer binding is this table.
+
+  ## What this module decides about occupancy: almost nothing
+
+  This module owns the *table* and the invariants a table can hold —
+  at most one attachment per Carrier, at most one Carrier per Worker, and
+  both checked inside the same `handle_call` so two racing attachments
+  cannot both win.
+
+  It does **not** decide whether an attachment is legitimate. Whether the
+  Worker exists, is open, sits on the right Lane and is held by the right
+  actor is `Ampd.Worker`'s question, and the answer is re-derived on every
+  use rather than trusted from attach time. This module cannot answer it
+  and should not try: the moment identity machinery starts ruling on
+  product semantics, the two grow into each other and the channel layer
+  becomes something you cannot reason about without the world.
+
   ## What is still unenforced
 
   Anything inside this BEAM can call `attach_agent/2`, because this module
@@ -73,7 +110,17 @@ defmodule Ampd.Peer do
     # handle that still resolves — is an identity outliving the channel
     # that established it, which is the thing this module exists to
     # prevent one level down.
-    {:ok, %{peers: %{}, control_claimed: false, seq: 0, epoch: new_epoch(), owners: %{}}}
+    {:ok,
+     %{
+       peers: %{},
+       control_claimed: false,
+       seq: 0,
+       epoch: new_epoch(),
+       owners: %{},
+       # peer_id => carrier-attachment@1. Carrier-local by construction:
+       # it is in this process's state and nothing writes it to disk.
+       attachments: %{}
+     }}
   end
 
   defp new_epoch, do: :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
@@ -123,6 +170,131 @@ defmodule Ampd.Peer do
 
   @doc "Every live binding, for the operator projection."
   def list, do: GenServer.call(__MODULE__, :list)
+
+  # ------------------------------------------------- carrier attachment
+  @attachment_schema "carrier-attachment@1"
+  def attachment_schema, do: @attachment_schema
+
+  @doc """
+  Record that `peer_id` is now fulfilling a Worker.
+
+  `binding` is the already-validated `carrier-attachment@1` body —
+  `Ampd.Worker.attach/2` builds it and is the only sanctioned caller.
+  This function adds the three fields only this process can know
+  (`schema`, `peer_ref`, `peer_epoch`) and enforces the table invariants.
+
+  `reap` is the list of peer ids whose attachment on the **same Locus** the
+  caller has determined is no longer live. See below for why that list is
+  computed elsewhere and why passing it is safe.
+
+  Returns `{:ok, attachment}`, or `{:taken, :carrier}` / `{:taken, :worker}`
+  / `{:taken, :locus}` so the caller can refuse by the right name. Returns
+  `{:taken, :unknown_peer}` if the handle does not resolve in this
+  incarnation.
+
+  ## Exclusivity is on the Locus, and the first version got that wrong
+
+  This checked for a conflicting `worker_ref`. Since more than one Worker
+  may be open on one Lane, two Carriers could hold two Workers whose
+  `locus_ref` was identical and **both satisfied occupancy for the same
+  Lane at once** — the invariant the ontology claims, silently absent.
+
+      Lane L
+      ├── Worker W1  ←  Carrier C1
+      └── Worker W2  ←  Carrier C2          both occupy L
+
+  "One Carrier per Worker" and "one Carrier per Locus" are separate
+  invariants, and only the second is the one being claimed: the position is
+  the Lane, and the Worker is an assignment at it. `D2-10c` is the
+  falsifier. The `worker_ref` case survives only to give the more specific
+  refusal when the conflict really is the same assignment.
+
+  ## A raw row is not a reservation
+
+  The second half of the same defect: a *stale* attachment still reserved
+  the position. A Carrier whose Worker had been closed had lost all
+  authority — occupancy is re-derived — and kept **denial power**, because
+  exclusivity was computed from table presence. It could block a
+  replacement indefinitely by staying connected and declining to detach,
+  which contradicts the one thing `close_worker` exists to guarantee: that
+  a person can end an occupancy without the Carrier's cooperation.
+
+      raw attachment row   ≠   live reservation
+
+  So liveness decides, and liveness is `Ampd.Worker`'s question, not this
+  module's — deciding it here would mean the channel layer reasoning about
+  worlds and Workers. The caller computes which rows on the target Locus
+  are stale and passes them as `reap`.
+
+  **Why handing this process a caller-computed list is safe *under the
+  sanctioned path*.** Staleness is *monotonic*: world lineage only
+  advances, a peer epoch is never restored, a Worker's generation only
+  advances, and closed→open advances it too. An attachment that has failed
+  occupancy can therefore never satisfy it again, so a row that
+  `Ampd.Worker.stale_on/1` reported is still stale when this process reads
+  it. Reaping it cannot revoke a live occupancy. `D2-16` is the falsifier
+  for the monotonicity itself.
+
+  ## TRUSTED-BEAM PRECONDITION — this process does not check the witness
+
+  The monotonicity argument is a property of `stale_on/1`'s **output**, not
+  of this function's **input**. Stated exactly:
+
+      Peer.attach_worker/3 assumes `reap` was produced by
+      Ampd.Worker.stale_on/1. This process serializes the mutation but
+      does not authenticate semantic staleness.
+
+  Mechanically, a caller passing `reap = [live_peer]` both excludes that
+  row from the conflict scan and drops it on admission, so it **does**
+  displace a live occupant. That was measured by calling this function
+  directly, bypassing `Ampd.Worker.attach/2`; the sanctioned path refused
+  the same attach `locus-already-occupied`.
+
+  This is a **trusted-BEAM seam, not an agent-channel authority path.**
+  Worker code has no BEAM or process execution, no command in the grammar
+  reaches this function with a caller-supplied list, and `Ampd.Peer` is
+  already trusted runtime surface — the same surface that, as `attach/2`
+  records, cannot defend identity attachment against arbitrary code already
+  executing inside the BEAM. Closing it means having the owner of the
+  reservation verify the witness independently rather than receive it,
+  which is a design question for a later slice and not a patch to this one.
+
+  It is recorded rather than absorbed because an unstated assumption in the
+  trusted base is the thing that later gets quoted as a guarantee.
+
+  **And the race still closes here.** Two Carriers attaching to two
+  different Workers on one Lane both compute their reap lists before
+  either arrives; neither list can name the other's row, because neither
+  row existed yet. This process serializes, the first inserts, and the
+  second finds a live conflict it may not reap. Exactly one wins.
+  """
+  def attach_worker(peer_id, binding, reap \\ [])
+      when is_binary(peer_id) and is_map(binding) and is_list(reap),
+      do: GenServer.call(__MODULE__, {:attach_worker, peer_id, binding, reap})
+
+  @doc """
+  The live attachment for `peer_id`, or `nil`.
+
+  Returns `nil` for a handle from another incarnation even if the id
+  somehow collides — the same epoch check `resolve/1` applies, for the same
+  reason and deliberately redundant with the table being emptied on reset.
+  """
+  def attachment(nil), do: nil
+  def attachment(peer_id), do: GenServer.call(__MODULE__, {:attachment, peer_id})
+
+  @doc "Release the attachment `peer_id` holds. `:ok` either way — releasing nothing is not an error."
+  def detach_worker(peer_id) when is_binary(peer_id),
+    do: GenServer.call(__MODULE__, {:detach_worker, peer_id})
+
+  @doc """
+  Every live attachment, for the operator projection and for rendering
+  `Worker · OCCUPIED`.
+
+  This is what makes occupancy *visible to a person* rather than only
+  enforceable. A position nobody can see the occupancy of is a position
+  nobody can supervise.
+  """
+  def attachments, do: GenServer.call(__MODULE__, :attachments)
 
   @doc """
   Tear down every binding and free the control claim.
@@ -234,12 +406,93 @@ defmodule Ampd.Peer do
 
   def handle_call(:list, _f, st), do: {:reply, Map.values(st.peers), st}
 
+  def handle_call({:attach_worker, peer_id, binding, reap}, _f, st) do
+    # The conflict is any *other* row on the same Locus that the caller did
+    # not establish is stale.
+    #
+    # **`reap` is a trusted witness and this process does not check it.**
+    # Naming a live row here both hides it from this scan and drops it on
+    # the admission below, so an in-BEAM caller bypassing
+    # `Ampd.Worker.attach/2` displaces a live occupant. This comment
+    # previously claimed the subtraction order prevented that; it does not,
+    # and a direct call measured the displacement. The precondition is
+    # documented at `attach_worker/3` and carried in the TCB ledger rather
+    # than enforced here — see there for why enforcing it is a design
+    # question and not a patch.
+    conflict =
+      Enum.find_value(st.attachments, fn {pid, a} ->
+        if pid != peer_id and a["locus_ref"] == binding["locus_ref"] and pid not in reap,
+          do: a
+      end)
+
+    cond do
+      # A handle that does not resolve cannot occupy anything. Checked
+      # here rather than trusted from the caller, because this is the
+      # process that knows what resolving means.
+      Map.get(st.peers, peer_id) == nil or not String.contains?(peer_id, "-" <> st.epoch <> "-") ->
+        {:reply, {:taken, :unknown_peer}, st}
+
+      Map.has_key?(st.attachments, peer_id) ->
+        {:reply, {:taken, :carrier}, st}
+
+      # Same position, and the more specific answer when it is also the
+      # same assignment.
+      conflict != nil ->
+        {:reply,
+         {:taken, if(conflict["worker_ref"] == binding["worker_ref"], do: :worker, else: :locus)},
+         st}
+
+      true ->
+        att =
+          Map.merge(binding, %{
+            "schema" => @attachment_schema,
+            "peer_ref" => peer_id,
+            "peer_epoch" => st.epoch,
+            "attached_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+          })
+
+        touched()
+
+        # Reaped only on admission. A refused attach mutates nothing, so a
+        # Carrier cannot use a failing attach to clear rows it dislikes.
+        {:reply, {:ok, att},
+         %{st | attachments: st.attachments |> Map.drop(reap) |> Map.put(peer_id, att)}}
+    end
+  end
+
+  def handle_call({:attachment, peer_id}, _f, st) when is_binary(peer_id) do
+    if String.contains?(peer_id, "-" <> st.epoch <> "-"),
+      do: {:reply, Map.get(st.attachments, peer_id), st},
+      else: {:reply, nil, st}
+  end
+
+  def handle_call({:attachment, _peer_id}, _f, st), do: {:reply, nil, st}
+
+  def handle_call({:detach_worker, peer_id}, _f, st) do
+    if Map.has_key?(st.attachments, peer_id), do: touched()
+    {:reply, :ok, %{st | attachments: Map.delete(st.attachments, peer_id)}}
+  end
+
+  def handle_call(:attachments, _f, st), do: {:reply, Map.values(st.attachments), st}
+
   # A new epoch too: a world reset invalidates every channel, and a handle
   # from before it must not resolve into the world that replaced it.
   def handle_call(:reset, _f, st) do
     touched()
     Enum.each(Map.keys(st.owners), &Process.demonitor(&1, [:flush]))
-    {:reply, :ok, %{st | peers: %{}, control_claimed: false, epoch: new_epoch(), owners: %{}}}
+
+    {:reply, :ok,
+     %{
+       st
+       | peers: %{},
+         control_claimed: false,
+         epoch: new_epoch(),
+         owners: %{},
+         # Carrier death takes occupancy with it. The Worker and the Lane
+         # are untouched — they are in dets and this process has never
+         # been able to reach them.
+         attachments: %{}
+     }}
   end
 
   # **An identity exists only while the process that asked for it does.**
@@ -313,9 +566,15 @@ defmodule Ampd.Peer do
         nil -> st.owners
       end
 
+    # The attachment goes with the binding, in the one place every way of
+    # losing a channel already converges — `detach/1` and the `:DOWN`
+    # handler both arrive here. Releasing it at the call sites instead
+    # would mean a Carrier whose process died silently kept occupying a
+    # position no live channel could vacate.
     %{st | peers: Map.delete(st.peers, id),
            control_claimed: st.control_claimed and not freed,
-           owners: owners}
+           owners: owners,
+           attachments: Map.delete(st.attachments, id)}
   end
 
   defp owner_gone do
