@@ -2169,6 +2169,173 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         ),
     );
 
+    // **Close the deliberate leak before measuring anything else.**
+    //
+    // Third time this descriptor has contaminated a later check: it broke the
+    // clean-spawn check in b·1, it broke the replacement battery here, and
+    // between those it was the reason the clean case had to be hoisted above
+    // the leak setup. The descriptor table is process-wide state shared by
+    // every check in this function, and `make_inheritable` is a mutation of
+    // it that outlives the block that wanted it.
+    //
+    // The rule, since it keeps being learned: a check that clears `FD_CLOEXEC`
+    // owns restoring it. Dropping the `File` is the version of that with no
+    // way to forget.
+    drop(leaked);
+
+    // ------------------------------------------ D.1.3b·2a · FD ownership
+    //
+    // Source review found a descriptor-lifetime bug in `Carrier::handshake`
+    // that no gate here would have caught, because b·1's census reads the
+    // CHILD's descriptor table and the leak was on the HOST side. These
+    // checks look at the other end.
+
+    let host_fds = || std::fs::read_dir("/proc/self/fd").map(|d| d.count()).unwrap_or(0);
+
+    let baseline = host_fds();
+    let mut cycle_ok = true;
+    let mut peak = baseline;
+    for _ in 0..100 {
+        match carrier::spawn(&fixture, &dir, &dir.join("cyc.log"), &crate::new_epoch(), None) {
+            Ok(mut c) => {
+                if c.handshake(5_000).is_err() { cycle_ok = false }
+                c.terminate(2_000);
+            }
+            Err(_) => cycle_ok = false,
+        }
+        let now = host_fds();
+        if now > peak { peak = now }
+    }
+    let after = host_fds();
+
+    b.check(
+        "100 start/stop cycles complete",
+        cycle_ok,
+        "a cycle failed to start, handshake or stop",
+    );
+    b.check(
+        "100 start/stop cycles leave the host descriptor table at baseline",
+        after <= baseline,
+        format!("host fds {baseline} -> {after} (peak {peak}) — one leak per handshake is +100"),
+    );
+
+    // The other half, and the sharper one. A leaked descriptor is a resource
+    // bug; a STALE NUMBER is a correctness bug, because closing it closes
+    // whatever the kernel has since handed that number to.
+    {
+        let r = carrier::spawn(&fixture, &dir, &dir.join("reuse.log"), &crate::new_epoch(), None);
+        match r {
+            Ok(mut c) => {
+                let hs = c.handshake(5_000).is_ok();
+                // The control endpoint must still work AFTER the handshake.
+                // Under the old shape the reader thread had already closed it.
+                let alive = c.speak("IDENT", 2_000).is_ok();
+                c.terminate(2_000);
+                // Take the numbers the Carrier used, then prove terminating a
+                // second time cannot close them again.
+                let probe = std::fs::File::open("/etc/hostname").ok();
+                let second = c.terminate(2_000);
+                b.check(
+                    "the control endpoint survives its own handshake",
+                    hs && alive,
+                    format!("handshake={hs} ident={alive}"),
+                );
+                b.check(
+                    "terminating twice cannot close a descriptor the host has since reused",
+                    probe.as_ref().map(|f| {
+                        use std::os::fd::AsRawFd;
+                        crate::fdpass::fd_state(f.as_raw_fd()) != crate::fdpass::FdState::Closed
+                    }).unwrap_or(false) && second,
+                    "a second terminate closed an unrelated reused descriptor",
+                );
+            }
+            Err(e) => b.check("the fd-reuse falsifier could run", false, e),
+        }
+    }
+
+    // ------------------------------------ D.1.3b·2a · replacement ownership
+    //
+    // b·1 proved one Carrier's descriptor table. That does not compose: the
+    // handshake leak was invisible to it precisely because it was one-shot.
+    {
+        let mut a = carrier::spawn(&fixture, &dir, &dir.join("A.log"), &crate::new_epoch(), None).ok();
+        let a_inode = a.as_ref().and_then(|c| c.control_inode());
+        if let Some(c) = a.as_mut() { let _ = c.handshake(5_000); c.terminate(2_000); }
+        drop(a);
+
+        let mut bcar = carrier::spawn(&fixture, &dir, &dir.join("B.log"), &crate::new_epoch(), None).ok();
+        let b_inode = bcar.as_ref().and_then(|c| c.control_inode());
+        let b_fds = bcar.as_ref().map(|c| c.observe().fds).unwrap_or_default();
+        if let Some(c) = bcar.as_mut() { c.terminate(2_000); }
+
+        b.check(
+            "a replacement Carrier gets a control endpoint that is not its predecessor's",
+            a_inode.is_some() && b_inode.is_some() && a_inode != b_inode,
+            format!("A inode {a_inode:?} · B inode {b_inode:?}"),
+        );
+        b.check(
+            "a replacement Carrier inherits no descriptor from the one it replaced",
+            b_fds.keys().copied().collect::<Vec<i32>>() == vec![0, 1, 2, 3]
+                && !b_fds.values().any(|t| crate::socket_inode(t) == a_inode),
+            format!("{b_fds:?}"),
+        );
+    }
+
+    // ------------------------------- D.1.3b·2a · the host cannot orphan them
+    //
+    // `serve_carrier` reaps its map when the lifecycle channel closes, and
+    // `Carrier::drop` covers every in-process path — neither runs on SIGKILL.
+    // PR_SET_PDEATHSIG is what makes the kernel do it instead.
+    {
+        let r = carrier::spawn(&fixture, &dir, &dir.join("pd.log"), &crate::new_epoch(), None);
+        match r {
+            Ok(mut c) => {
+                let hs = c.handshake(5_000).is_ok();
+                let pid = c.pid;
+                // **This was a vacuous check and is now two honest ones.**
+                //
+                // The first version asserted that `/proc/<pid>/status` has a
+                // `PPid:` line, which is true of every process that has ever
+                // existed. It could not fail.
+                //
+                // There is no `/proc` field for `PR_SET_PDEATHSIG` — like
+                // Landlock, it is set by the host and is not readable from
+                // outside the process it was set on. So it is **attested**,
+                // and the honest checks are: the child is really our child
+                // (which is what makes the signal reach it), and the host
+                // says it armed it. The behavioural proof that the
+                // attestation corresponds to something needs a sacrificial
+                // intermediate parent and is recorded as an open gap.
+                let is_our_child = std::fs::read_to_string(format!("/proc/{pid}/status"))
+                    .and_then(|s| {
+                        s.lines()
+                            .find(|l| l.starts_with("PPid:"))
+                            .and_then(|l| l.split_whitespace().nth(1))
+                            .and_then(|v| v.parse::<u32>().ok())
+                            .ok_or_else(|| std::io::Error::other("no PPid"))
+                    })
+                    .map(|ppid| ppid == std::process::id())
+                    .unwrap_or(false);
+                c.terminate(2_000);
+                b.check(
+                    "the Carrier is a direct child of this host, so a parent-death signal reaches it",
+                    hs && is_our_child,
+                    format!("the carrier's PPid is not this process ({})", std::process::id()),
+                );
+                b.check(
+                    "PR_SET_PDEATHSIG is ATTESTED, not observed — no /proc field exposes it",
+                    true,
+                    String::new(),
+                );
+                println!(
+                    "                 pdeathsig: attested SIGKILL · behavioural proof needs a \
+                     sacrificial intermediate parent — OPEN GAP"
+                );
+            }
+            Err(e) => b.check("the parent-death falsifier could run", false, e),
+        }
+    }
+
     // The policy must still be a policy and not a wall.
     let w = row("write_own_workdir");
     b.check(

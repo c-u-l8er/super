@@ -41,6 +41,7 @@
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::os::fd::{FromRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -60,7 +61,30 @@ pub struct Carrier {
     pub pid: u32,
     pub starttime: Option<u64>,
     child: Child,
-    control: RawFd,
+    /// The host's end of the control channel, **owned**.
+    ///
+    /// This was a `RawFd` and the handshake was a descriptor-lifetime bug that
+    /// source review caught and no gate did. The old shape did
+    /// `File::from_raw_fd(self.control)` — which *transfers ownership of the
+    /// number* — handed the `File` to a reader thread, `try_clone()`d a second
+    /// descriptor for writing, and then `mem::forget`ed the clone to stop it
+    /// closing. Three consequences, all silent:
+    ///
+    /// 1. the reader thread dropped its `File` after one line, closing the
+    ///    original descriptor;
+    /// 2. the forgotten clone leaked, one per successful handshake;
+    /// 3. `self.control` still held the **closed** number, so `terminate`'s
+    ///    `close(self.control)` could close whatever the kernel had since
+    ///    handed that number to.
+    ///
+    /// The third is the one that makes this more than a leak: a
+    /// close-the-wrong-thing bug in the process that owns every privileged
+    /// descriptor in the host.
+    ///
+    /// An `Option<UnixStream>` fixes all three by construction. There is one
+    /// owner, `Drop` closes it exactly once, `None` is how "already closed" is
+    /// represented, and no number outlives the object that owned it.
+    control: Option<UnixStream>,
     control_inode: Option<u64>,
     configured: serde_json::Value,
 }
@@ -129,6 +153,18 @@ pub fn observe(pid: u32) -> Observed {
     // on kernels that report it. Its absence is not proof of no domain, so
     // `verify` never rests a claim on this field alone — the attributable
     // evidence is the confined-versus-bare behavioural difference.
+    // **Measured: this kernel exposes no Landlock field anywhere.** Not in
+    // `/proc/<pid>/status`, not in `/proc/<pid>/attr/`. So a Landlock domain
+    // is not observable from outside the process that is in it, and the
+    // previous version of this code read a key that never exists and
+    // therefore always answered `false`.
+    //
+    // That forces a classification rather than allowing one. Landlock is
+    // **host-attested**: the host built the ruleset and called
+    // `landlock_restrict_self`, and its word is the only evidence available
+    // in-band. It is not, and must not be reported as, an observation.
+    // `super-host verify`'s differential battery is the out-of-band proof
+    // that the attestation corresponds to something.
     let landlock_domain = proc_field(pid, "status", "Landlock:")
         .map(|v| !v.is_empty() && v != "0")
         .unwrap_or(false);
@@ -187,7 +223,9 @@ impl Observed {
             "no_new_privs": self.no_new_privs,
             "seccomp_mode": self.seccomp_mode,
             "seccomp_filters": self.seccomp_filters,
-            "landlock_domain_reported": self.landlock_domain,
+            // Retained and renamed so nothing reads it as an observation.
+            // False on this kernel always; see `observe`.
+            "landlock_domain_observable": self.landlock_domain,
             "ppid": self.ppid,
             "env_keys": self.env_keys,
             "cwd": self.cwd, "exe": self.exe,
@@ -265,6 +303,10 @@ pub fn spawn_with(
         .map_err(|e| format!("carrier log dup: {e}"))?;
 
     let extra: Vec<(RawFd, RawFd)> = extra_fds.to_vec();
+    // Read before the fork. `getppid()` inside `pre_exec` answers "who is my
+    // parent now", which is the question; this is "who did we mean", which is
+    // what it has to be compared against.
+    let expected_parent = std::process::id() as i32;
     let child = unsafe {
         Command::new(&payload_s)
             .args(args)
@@ -299,7 +341,7 @@ pub fn spawn_with(
                 for (from, to) in extra.iter() {
                     fdpass::dup_onto(*from, *to)?;
                 }
-                prepared.install()
+                prepared.install(expected_parent)
             })
             .spawn()
     }
@@ -312,6 +354,10 @@ pub fn spawn_with(
     let control_inode = crate::fd_inode_pub(theirs);
     fdpass::close_fd(theirs);
 
+    // SAFETY: `ours` came from `pair_stream()` and this is its first and only
+    // owner. From here the descriptor number is never handled again.
+    let control = unsafe { UnixStream::from_raw_fd(ours) };
+
     let pid = child.id();
     let starttime = observe(pid).starttime;
 
@@ -320,7 +366,7 @@ pub fn spawn_with(
         pid,
         starttime,
         child,
-        control: ours,
+        control: Some(control),
         control_inode,
         configured,
     })
@@ -345,28 +391,31 @@ impl Carrier {
     /// is minted host-side from `/dev/urandom` rather than chosen by the
     /// runtime.
     pub fn handshake(&mut self, deadline_ms: u64) -> Result<String, String> {
-        let sock = unsafe { std::fs::File::from_raw_fd(self.control) };
-        let mut w = sock
-            .try_clone()
-            .map_err(|e| format!("carrier control dup: {e}"))?;
-        writeln!(w, "HELLO {}", self.incarnation)
-            .map_err(|e| format!("carrier hello: {e}"))?;
+        // No dup, no thread, no `forget`. `impl Read for &UnixStream` and
+        // `impl Write for &UnixStream` let both directions borrow the one
+        // owned endpoint, and `set_read_timeout` supplies the deadline that
+        // used to need a thread and a channel. The bug the old shape had was
+        // not in any one of those three devices; it was in there being three.
+        let sock = self
+            .control
+            .as_ref()
+            .ok_or_else(|| "the carrier control endpoint is already closed".to_string())?;
+
+        sock.set_read_timeout(Some(std::time::Duration::from_millis(deadline_ms)))
+            .map_err(|e| format!("carrier control deadline: {e}"))?;
+
+        let mut w = sock;
+        writeln!(w, "HELLO {}", self.incarnation).map_err(|e| format!("carrier hello: {e}"))?;
         w.flush().ok();
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut line = String::new();
-            let _ = BufReader::new(sock).read_line(&mut line);
-            let _ = tx.send(line);
-        });
-        let line = rx
-            .recv_timeout(std::time::Duration::from_millis(deadline_ms))
-            .map_err(|_| "the carrier did not complete its handshake in time".to_string())?;
+        let mut line = String::new();
+        BufReader::new(sock)
+            .read_line(&mut line)
+            .map_err(|e| format!("the carrier did not complete its handshake in time: {e}"))?;
 
-        // Leaked deliberately: the reader thread owns the `File` and closing
-        // it here would close the control channel out from under a Carrier
-        // the host has not decided to stop.
-        std::mem::forget(w);
+        // Back to blocking: the deadline governed the handshake, and a
+        // timeout left on the endpoint would silently bound every later read.
+        let _ = sock.set_read_timeout(None);
 
         let line = line.trim();
         let want = format!("READY super-carrier 1 {}", self.incarnation);
@@ -376,6 +425,25 @@ impl Carrier {
             ));
         }
         Ok(line.to_string())
+    }
+
+    /// Send one verb and read one line. Proves the control endpoint is live
+    /// in both directions after the handshake, which the old raw-fd shape
+    /// could not have survived — the reader thread had already closed it.
+    pub fn speak(&mut self, verb: &str, deadline_ms: u64) -> Result<String, String> {
+        let sock = self
+            .control
+            .as_ref()
+            .ok_or_else(|| "the carrier control endpoint is closed".to_string())?;
+        sock.set_read_timeout(Some(std::time::Duration::from_millis(deadline_ms)))
+            .map_err(|e| e.to_string())?;
+        let mut w = sock;
+        writeln!(w, "{verb}").map_err(|e| e.to_string())?;
+        w.flush().ok();
+        let mut line = String::new();
+        BufReader::new(sock).read_line(&mut line).map_err(|e| e.to_string())?;
+        let _ = sock.set_read_timeout(None);
+        Ok(line.trim().to_string())
     }
 
     pub fn observe(&self) -> Observed {
@@ -400,8 +468,11 @@ impl Carrier {
     /// A `kill` that returns is not a dead process — the harness lesson from
     /// D.1.3a, applied here to the thing the harness was measuring.
     pub fn terminate(&mut self, grace_ms: u64) -> bool {
-        fdpass::close_fd(self.control);
-        self.control = -1;
+        // Dropping the stream closes it exactly once. `take()` makes the
+        // second call a no-op rather than a double close — which is the
+        // whole reason the field is an `Option` and not a number that has to
+        // be remembered to be invalid.
+        drop(self.control.take());
         unsafe { libc_kill(self.pid as i32, 15) };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(grace_ms);
         while std::time::Instant::now() < deadline {
@@ -419,6 +490,23 @@ impl Carrier {
 extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: i32, sig: i32) -> i32;
+}
+
+impl Drop for Carrier {
+    /// A dropped Carrier is not an orphan.
+    ///
+    /// `serve_carrier` reaps its map when its channel closes, but a `Carrier`
+    /// dropped on any other path — an error return between spawn and
+    /// handshake, a panic, a `HashMap` overwrite — would previously have left
+    /// a live process with no owner and no record. `Drop` is the one place
+    /// every such path converges, which is the argument `Ampd.Peer.drop/2`
+    /// makes for putting the attachment release there rather than at the call
+    /// sites.
+    fn drop(&mut self) {
+        if self.control.is_some() || self.child.try_wait().ok().flatten().is_none() {
+            self.terminate(1_000);
+        }
+    }
 }
 
 /// Where the fixture lives, relative to the host binary.

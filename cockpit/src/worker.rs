@@ -237,6 +237,19 @@ pub const INTENT_SURFACE: &[&str] = &[
     "open_worker",
     "close_worker",
     "reopen_worker",
+    // D.1.3b·2a. The only way to un-wedge a Worker whose Carrier start went
+    // ambiguous. An unresolved attempt blocks every subsequent start for that
+    // Worker — deliberately, because a process may still exist — and
+    // reconciliation is what establishes absence.
+    //
+    // It is a person's operation for the reason `close_worker` is: an agent
+    // able to clear its own ambiguous attempt could clear the one thing
+    // standing between it and a second process for the same position.
+    //
+    // As with the D.1.1a note above, the string is not what makes the gate's
+    // proposition true — the form in `ui/cockpit.js` and the attempts block in
+    // the projection are.
+    "reconcile_carrier_attempt",
 ];
 
 /// **W.2.3.3 · which established position a bind or unbind is addressed to.**

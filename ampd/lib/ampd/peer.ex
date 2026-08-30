@@ -645,12 +645,31 @@ defmodule Ampd.Peer do
            control_claimed: st.control_claimed and not freed,
            owners: owners,
            attachments: Map.delete(st.attachments, id),
-           # The execution Carrier goes with the session that admitted it.
-           # Dropping it here — the one place every way of losing a channel
-           # converges — is what makes "losing the runtime incarnation
-           # terminates the Carrier" true by construction rather than by
-           # remembering to call something.
+           # The execution Carrier's *membership* goes with the session that
+           # admitted it. Dropping it here — the one place every way of losing
+           # a channel converges — is what makes that true by construction.
+           #
+           # **Membership ending is not the process ending, and the source
+           # used to claim it was.** Review caught it: the host's
+           # `serve_carrier` map still held the child, so the OS process kept
+           # running with nothing in the runtime referring to it. `orphaned/1`
+           # hands the incarnation to whoever will do the reaping.
+           #
+           # It is announced rather than performed. This function runs inside
+           # the `Ampd.Peer` GenServer and on the `:DOWN` path; submitting a
+           # machine request from here would put an 8-second timeout in front
+           # of every disconnect.
            carriers: Map.delete(st.carriers, id)}
+    |> announce_orphan(Map.get(st.carriers, id))
+  end
+
+  # Cast, not call: nothing about a channel closing should wait for a
+  # process to die. `Ampd.Carrier.Reaper` owns the retry and the ambiguity.
+  defp announce_orphan(st, nil), do: st
+
+  defp announce_orphan(st, inc) do
+    if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.orphaned(inc)
+    st
   end
 
   defp owner_gone do

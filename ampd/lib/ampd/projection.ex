@@ -111,6 +111,22 @@ defmodule Ampd.Projection do
       # attachment the runtime has already stopped honouring, which is the
       # cosmetic-green failure the cockpit gate exists to refuse.
       "workers" => Ampd.Worker.projected(Ampd.Loci.workers()),
+      # **Only the unresolved ones, and only for a person.**
+      #
+      # An unresolved Carrier start attempt blocks every later start for that
+      # Worker, and `reconcile_carrier_attempt` is the only thing that ends
+      # that. A surface offering the action without showing the subject would
+      # be an action with nothing to choose, which is the "appending three
+      # strings turns the gate green" failure D.1.1a records one rung down.
+      #
+      # Committed and terminal attempts are deliberately absent: this is the
+      # list of things that are stuck, not a history. History is a receipt.
+      "carrier_attempts" =>
+        Ampd.Carrier.unresolved()
+        |> Map.new(fn a ->
+          {a["ticket_id"],
+           Map.take(a, ~w(ticket_id carrier_ref worker_ref locus_ref state refused_as admitted_at))}
+        end),
       "worktree_caps" => Ampd.Loci.caps(),
       "repositories" => Ampd.Worktree.repos() |> Map.new(fn {ref, _} -> {ref, %{"ref" => ref}} end),
       "worktree_resources" =>

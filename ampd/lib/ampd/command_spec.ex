@@ -377,6 +377,18 @@ defmodule Ampd.CommandSpec do
     # six-word constraint D.1.2 recorded still holds: the Carrier payload is
     # chosen by the host from what it has installed, and a grammar in which a
     # caller could name one would be a grammar where naming something runs it.
+    # **Human control, not the agent.** An agent that could clear its own
+    # ambiguous attempt could clear the one thing standing between it and a
+    # second process for the same Worker. Reconciliation is the operation that
+    # un-wedges a Worker, so it belongs to the party the wedge protects.
+    #
+    # A read would be wrong: this asks the host to make a process absent.
+    "reconcile_carrier_attempt" => %{
+      cmd: :reconcile_carrier_attempt,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [%{name: "ticket_id", type: {:id, "ct_"}, required: true}]
+    },
     "start_carrier" => %{
       cmd: :start_carrier,
       channel: :agent,

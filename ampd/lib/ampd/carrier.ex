@@ -156,7 +156,13 @@ defmodule Ampd.Carrier do
         "actor" => peer["actor"],
         "world_ref" => World.lineage(),
         "worker_generation" => worker["generation"] || 1,
+        # Two bases, not one. `profile_basis` is the worktree/host embodiment
+        # profile and stays what it is; the Carrier runs under a confinement
+        # floor that is a different object with its own version, and
+        # conflating them would mean a change to either silently stood for a
+        # change to the other.
         "profile_basis" => Locus.profile_digest(),
+        "floor_basis" => Ampd.Carrier.Floor.digest(),
         "state" => "START_ADMITTED",
         "admitted_at" => DateTime.utc_now() |> DateTime.to_iso8601()
       }
@@ -184,7 +190,7 @@ defmodule Ampd.Carrier do
   is outside the total order. Nothing here may touch authority state.
   """
   def machine_start(ticket) when is_map(ticket) do
-    machine().start(ticket)
+    Ampd.Carrier.Machine.Gate.start(ticket)
   end
 
   @doc """
@@ -239,13 +245,27 @@ defmodule Ampd.Carrier do
         # acceptance D.1.3a refused one layer down.
         obs["carrier_ref"] != ticket["carrier_ref"] -> "carrier-observation-cross-incarnation"
         obs["carrier_epoch"] != ticket["carrier_epoch"] -> "carrier-observation-cross-incarnation"
-        not confinement_acceptable?(obs) -> "carrier-confinement-unacceptable"
+        # Bind the floor VERSION as well as the result: changing the floor
+        # must invalidate an admission accepted under the previous one rather
+        # than silently applying a new rule to it.
+        Ampd.Carrier.Floor.digest() != ticket["floor_basis"] -> "carrier-floor-basis-changed"
+        floor_failures(obs) != nil -> "carrier-confinement-unacceptable"
         true -> nil
       end
 
     if reason do
       state = if reason == "carrier-confinement-unacceptable", do: "FAILED", else: "STALE"
-      _ = Loci.patch_attempt(ticket["ticket_id"], %{"state" => state, "refused_as" => reason})
+
+      _ =
+        Loci.patch_attempt(ticket["ticket_id"], %{
+          "state" => state,
+          "refused_as" => reason,
+          # Which rows, not just that it failed. "Confinement unacceptable" is
+          # not a diagnosis, and this is where a person finds out which of
+          # seventeen things it was.
+          "floor_failures" => floor_failures(obs)
+        })
+
       {:refused, refuse(reason, ticket)}
     else
       inc = %{
@@ -326,19 +346,132 @@ defmodule Ampd.Carrier do
   Stop a process that was started but refused membership. Outside the order.
   """
   def reap_refused(ticket, obs) do
-    machine().terminate(ticket, obs)
+    Ampd.Carrier.Machine.Gate.terminate_carrier(ticket, obs)
   end
 
   @doc """
   Stop a live Carrier and drop its incarnation.
+
+  **A lost stop confirmation is not a stop.** The membership is dropped either
+  way — the runtime has decided this process is no longer its Carrier — but if
+  the host could not confirm the process is gone, an unresolved attempt is
+  recorded and a replacement is refused until `reconcile/1` establishes
+  absence.
+
+  The alternative, returning `:ok` on an unconfirmed stop, would let a lost
+  confirmation manufacture a second process for the same Worker by exactly the
+  route `unresolved/0` exists to close on the start side. Start and stop get
+  the same rule because they have the same ambiguity.
   """
   def stop(peer_ref) do
     case Peer.carrier(peer_ref) do
-      nil -> :ok
-      inc -> machine().terminate(inc, %{"host_process_ref" => inc["host_process_ref"]})
-    end
+      nil ->
+        :ok
 
-    Peer.detach_carrier(peer_ref)
+      inc ->
+        result = Ampd.Carrier.Machine.Gate.terminate_carrier(inc, %{"host_process_ref" => inc["host_process_ref"]})
+        Peer.detach_carrier(peer_ref)
+
+        case result do
+          :ok ->
+            :ok
+
+          {:error, why} ->
+            _ = record_ambiguous_stop(inc, why)
+            {:indeterminate, why}
+        end
+    end
+  end
+
+  # A stop whose outcome is unknown becomes an unresolved attempt against the
+  # same Worker, which is what blocks a replacement. It is a *new* record
+  # rather than a mutation of the start attempt: the start committed, and
+  # rewriting a committed fact to describe a later event would lose both.
+  defp record_ambiguous_stop(inc, why) do
+    AuthorityCoordinator.transact(fn ->
+      Loci.create_attempt(%{
+        "schema" => @ticket_schema,
+        "ticket_id" => mint("ct_"),
+        "carrier_ref" => inc["carrier_ref"],
+        "carrier_epoch" => inc["carrier_epoch"],
+        "worker_ref" => inc["worker_ref"],
+        "locus_ref" => inc["locus_ref"],
+        "state" => "INDETERMINATE",
+        "refused_as" => "stop was not confirmed: #{why}",
+        "admitted_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+      })
+    end)
+  end
+
+  @doc """
+  Reconcile an unresolved start or stop attempt by **establishing physical
+  absence**, not by relabelling it.
+
+  ```text
+  ticket carrier_ref
+        ↓
+  host stop-if-present
+        ↓
+  confirmed absent  →  ordered transition to RESOLVED
+  still ambiguous   →  stays INDETERMINATE, no replacement
+  ```
+
+  There is deliberately no "mark it fine" path. A reconciliation that only
+  changed a string would make `INDETERMINATE` a log entry rather than a safety
+  state, and the whole reason a Worker can wedge is that the state means
+  something.
+
+  Human control only. An agent that could clear its own ambiguous attempt
+  could clear the thing standing between it and a second process.
+  """
+  def reconcile(ticket_id) when is_binary(ticket_id) do
+    case Loci.attempt(ticket_id) do
+      nil ->
+        {:refused, refuse("carrier-attempt-unknown", %{"ticket_id" => ticket_id})}
+
+      %{"state" => s} = a when s in ~w(COMMITTED STALE FAILED RESOLVED) ->
+        {:ok, a}
+
+      a ->
+        # Outside the order: this asks a machine to do something and waits.
+        case Ampd.Carrier.Machine.Gate.terminate_carrier(a, %{}) do
+          :ok ->
+            AuthorityCoordinator.transact(fn ->
+              Loci.patch_attempt(ticket_id, %{
+                "state" => "RESOLVED",
+                "resolved_as" => "the host confirmed no such carrier is running"
+              })
+            end)
+
+          {:error, why} ->
+            {:refused,
+             refuse("carrier-reconcile-indeterminate", Map.put(a, "reason", why))}
+        end
+    end
+  end
+
+  @doc """
+  Reap a Carrier whose owning Peer is gone.
+
+  `Ampd.Peer` drops the incarnation the moment a channel dies — that is
+  semantic membership ending, and it is immediate and correct. It does **not**
+  make the process stop, and review caught the source claiming it did: the
+  host's `serve_carrier` map still held the child, so the OS process kept
+  running with no runtime record of it.
+
+      semantic membership ended  ≠  process ended
+
+  This is the other half. It is called from outside `Ampd.Peer` and never
+  inside it: making a channel-close path wait on machine latency would put an
+  8-second timeout in front of every disconnect.
+  """
+  def reap_orphans(incarnations) when is_list(incarnations) do
+    Enum.map(incarnations, fn inc ->
+      case Ampd.Carrier.Machine.Gate.terminate_carrier(inc, %{"host_process_ref" => inc["host_process_ref"]}) do
+        :ok -> {:ok, inc["carrier_ref"]}
+        {:error, why} -> {:error, inc["carrier_ref"], why}
+      end
+    end)
   end
 
   # ------------------------------------------------------------ reading
@@ -360,11 +493,30 @@ defmodule Ampd.Carrier do
     end
   end
 
-  @doc "Attempts that were admitted and never reached a terminal state."
-  def in_flight do
+  @doc """
+  Attempts for which a physical Carrier **may exist**.
+
+  `INDETERMINATE` is in this set, and that is the correction review forced.
+  It gated on `START_ADMITTED` alone, so an ambiguous start stopped blocking
+  the moment it was recorded as ambiguous — which meant the one state that
+  exists to say *a process may be out there* was the state that permitted
+  starting a second one.
+
+  > If a physical Carrier may exist, a second is not admitted until the
+  > absence of the first has been established.
+
+  This can wedge a Worker, and that is the intended trade: an ambiguous
+  machine effect gives up availability to keep uniqueness. `reconcile/1` is
+  how it is un-wedged, and it un-wedges by establishing absence rather than
+  by relabelling the record.
+  """
+  def unresolved do
     Loci.attempts()
-    |> Enum.filter(&(&1["state"] == "START_ADMITTED"))
+    |> Enum.filter(&(&1["state"] in ~w(START_ADMITTED INDETERMINATE)))
   end
+
+  @doc "Deprecated alias retained so no caller silently changes meaning."
+  def in_flight, do: unresolved()
 
   @doc """
   Boot-time sweep: an attempt that was in flight when the runtime stopped
@@ -376,7 +528,7 @@ defmodule Ampd.Carrier do
   reported and a person decides.
   """
   def recover! do
-    stale = in_flight()
+    stale = Loci.attempts() |> Enum.filter(&(&1["state"] == "START_ADMITTED"))
 
     Enum.each(stale, fn a ->
       AuthorityCoordinator.transact(fn ->
@@ -415,23 +567,20 @@ defmodule Ampd.Carrier do
   end
 
   defp no_pending_attempt(worker_ref) do
-    if Enum.any?(in_flight(), &(&1["worker_ref"] == worker_ref)),
+    if Enum.any?(unresolved(), &(&1["worker_ref"] == worker_ref)),
       do: {:refused, refuse("carrier-start-unreconciled", %{})},
       else: :ok
   end
 
-  # The observed profile must actually show the floor D.1.3b·1 installs.
-  # Read from what the host measured out of `/proc/<pid>/`, never from what
-  # it configured — the gap between those two is the only thing worth
-  # checking, and a source file containing the word "landlock" is not
-  # evidence that a domain exists.
-  defp confinement_acceptable?(obs) do
-    o = obs["observed"] || %{}
-
-    o["no_new_privs"] == true and
-      o["seccomp_mode"] == 2 and
-      is_integer(o["seccomp_filters"]) and o["seccomp_filters"] >= 1 and
-      Map.keys(o["fds"] || %{}) |> Enum.sort() == ~w(0 1 2 3)
+  # Delegated to `Ampd.Carrier.Floor`, which is versioned and names the rows
+  # it failed. This was four inline booleans and review found the hole: they
+  # did not require Landlock, so a process with no filesystem confinement at
+  # all satisfied the check that D.1.3b·1 existed to make meaningful.
+  defp floor_failures(obs) do
+    case Ampd.Carrier.Floor.verify(obs) do
+      :ok -> nil
+      {:error, rows} -> rows
+    end
   end
 
   defp mint(prefix), do: prefix <> (:crypto.strong_rand_bytes(6) |> Base.encode16(case: :lower))

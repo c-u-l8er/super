@@ -306,6 +306,14 @@ defmodule Ampd.Control do
   # Admit → machine → commit, with the machine phase outside the total order.
   # This call can therefore take as long as starting a process takes without
   # holding the coordinator, which is the entire point of the shape.
+  defp dispatch(_peer, :reconcile_carrier_attempt, [ticket_id]) do
+    case Ampd.Carrier.reconcile(ticket_id) do
+      {:refused, r} -> %{"allow" => false, "refusal" => r}
+      {:ok, a} -> %{"allow" => true, "attempt" => a}
+      other -> %{"allow" => true, "attempt" => other}
+    end
+  end
+
   defp dispatch(peer, :start_carrier, [locus_ref]) do
     case Ampd.Carrier.start(peer["id"], locus_ref) do
       {:ok, inc} ->

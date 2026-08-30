@@ -236,7 +236,7 @@ probe "removing no_new_privs is noticed" \
 probe "a Carrier with no seccomp filter is noticed" \
   "seccomp is observed in filter mode with at least one filter attached" \
   host/src/carrier.rs \
-  's|                prepared.install()|                { let _ = \&prepared; Ok(()) }|'
+  's|                prepared.install(expected_parent)|                { let _ = (\&prepared, expected_parent); Ok(()) }|'
 
 # 16 · The environment, inherited rather than constructed. `env_clear` is one
 #      call and its absence hands the Carrier `AMPD_BRIDGE_FD` by name.
@@ -287,6 +287,15 @@ probe "fork left reachable is noticed" \
   "fork is refused inside a Carrier" \
   host/src/confine.rs \
   's|^    57,  // fork$|    // 57,  // fork|'
+
+# 20 · The Carrier's control endpoint, leaked instead of dropped. This is the
+#      exact residue of the handshake bug source review found: the channel
+#      works, the descriptor is never freed, and only a many-cycle census
+#      notices.
+probe "a leaked control endpoint is noticed" \
+  "100 start/stop cycles leave the host descriptor table at baseline" \
+  host/src/carrier.rs \
+  's|        drop(self.control.take());|        std::mem::forget(self.control.take());|'
 
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.

@@ -41,6 +41,17 @@ defmodule Ampd.CarrierTest do
 
   # ==================================================================== setup
   setup do
+    # **Drain first, then reset.**
+    #
+    # The reaper is a cast by design — nothing about a channel closing should
+    # wait on machine latency — so the previous test's `Peer.reset/0` may have
+    # announced an orphan that has not been processed yet. Draining *after*
+    # `Ampd.reset()` writes that orphan's unresolved attempt into the freshly
+    # reset world, where it blocks a Worker it has nothing to do with. Draining
+    # first flushes it into the world it belongs to, which the reset then
+    # clears.
+    if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.drain()
+
     Ampd.reset()
     Bridge.reset()
     Peer.reset()
@@ -54,6 +65,11 @@ defmodule Ampd.CarrierTest do
       Harness.reset()
     end)
 
+    # And once more after the resets, since `Peer.reset/0` above announces the
+    # carriers it just dropped.
+    if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.drain()
+    Ampd.AuthorityCoordinator.transact(fn -> Loci.reset() end)
+
     Process.sleep(120)
     Authority.install_worktree()
 
@@ -66,7 +82,7 @@ defmodule Ampd.CarrierTest do
     lane = ok!(Control.command(control, :open_lane, [goal["id"], "kestrel", r["ref"], nil]), "lane")
     worker = occupy!(control, agent, lane["id"])
 
-    %{control: control, agent: agent, goal: goal, lane: lane, worker: worker}
+    %{control: control, agent: agent, goal: goal, lane: lane, worker: worker, repo_ref: r["ref"]}
   end
 
   defp occupy!(control, agent, lane_id, purpose \\ "work") do
@@ -597,6 +613,230 @@ defmodule Ampd.CarrierTest do
       r = Control.command(ctx.control, :start_carrier, [ctx.lane["id"]])
       assert r["allow"] == false
       assert Harness.started() == []
+    end
+  end
+
+  # =================================================================== E20
+  describe "E20 · an unresolved start blocks a second one" do
+    # The defect this closes: `in_flight/0` gated on START_ADMITTED alone, so
+    # an ambiguous start stopped blocking the moment it was recorded as
+    # ambiguous. The one state whose meaning is *a process may be out there*
+    # was the state that permitted starting a second one.
+    test "INDETERMINATE refuses a second admission for the same Worker", ctx do
+      Harness.put_policy(fn _t -> {:error, "no answer"} end)
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert [a] = Loci.attempts()
+      assert a["state"] == "INDETERMINATE"
+
+      Harness.put_policy(fn t -> {:ok, Harness.observation(t)} end)
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-start-unreconciled"
+
+      # And the machine was never asked a second time.
+      assert length(Harness.started()) == 1
+      assert Peer.carriers() == []
+    end
+
+    test "the wedge is real — nothing clears it on its own", ctx do
+      Harness.put_policy(fn _t -> {:error, "no answer"} end)
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+
+      # Three more attempts, all refused, no new attempts recorded.
+      for _ <- 1..3 do
+        assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+        assert r["code"] == "carrier-start-unreconciled"
+      end
+
+      assert length(Loci.attempts()) == 1
+      assert length(Harness.started()) == 1
+    end
+  end
+
+  # =================================================================== E21
+  describe "E21 · reconciliation establishes absence, it does not relabel" do
+    test "a confirmed stop resolves the attempt and unblocks admission", ctx do
+      Harness.put_policy(fn _t -> {:error, "no answer"} end)
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      [a] = Loci.attempts()
+
+      Harness.put_policy(fn t -> {:ok, Harness.observation(t)} end)
+      Carrier.reconcile(a["ticket_id"])
+
+      assert attempt_state(a["ticket_id"]) == "RESOLVED"
+      # The host was asked to make it absent, not merely told about it.
+      assert a["carrier_ref"] in Harness.terminated()
+
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+    end
+
+    test "an ambiguous stop leaves the attempt unresolved and still blocking", ctx do
+      Harness.put_policy(fn _t -> {:error, "no answer"} end)
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      [a] = Loci.attempts()
+
+      Harness.stop_returns({:error, "the host did not answer"})
+      assert {:refused, r} = Carrier.reconcile(a["ticket_id"])
+      assert r["code"] == "carrier-reconcile-indeterminate"
+
+      assert attempt_state(a["ticket_id"]) == "INDETERMINATE"
+      assert {:refused, r2} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r2["code"] == "carrier-start-unreconciled"
+    end
+
+    test "reconciliation is human control and not reachable by the agent", ctx do
+      Harness.put_policy(fn _t -> {:error, "no answer"} end)
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      [a] = Loci.attempts()
+
+      r = Control.command(ctx.agent, :reconcile_carrier_attempt, [a["ticket_id"]])
+      assert r["allow"] == false
+
+      ok = Control.command(ctx.control, :reconcile_carrier_attempt, [a["ticket_id"]])
+      assert ok["allow"] == true
+    end
+  end
+
+  # =================================================================== E22
+  describe "E22 · a stop whose outcome is unknown is not a stop" do
+    test "an unconfirmed stop blocks replacement until reconciled", ctx do
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      Harness.stop_returns({:error, "the host did not answer"})
+
+      assert {:indeterminate, _} = Carrier.stop(ctx.agent)
+
+      # Membership is gone — the runtime has decided this is not its Carrier.
+      assert Peer.carriers() == []
+      # But a replacement is refused, because the process may still exist.
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-start-unreconciled"
+    end
+
+    test "a confirmed stop permits replacement immediately", ctx do
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert Carrier.stop(ctx.agent) == :ok
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+    end
+  end
+
+  # =================================================================== E23
+  describe "E23 · losing the Peer terminates the process, not only the record" do
+    test "a dropped Peer causes a reap request to the machine", ctx do
+      assert {:ok, inc} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert Harness.terminated() == []
+
+      Peer.detach(ctx.agent)
+      :ok = Ampd.Carrier.Reaper.drain()
+
+      # Membership ended AND the machine was asked to make the process absent.
+      # The old E13 asserted only the first, and passed while the OS process
+      # kept running — the two are different events.
+      assert Peer.carriers() == []
+      assert inc["carrier_ref"] in Harness.terminated(),
+             "the process was orphaned: membership ended and nothing reaped it"
+    end
+
+    test "an unconfirmed orphan reap records an unresolved attempt", ctx do
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      Harness.stop_returns({:error, "the host did not answer"})
+
+      Peer.detach(ctx.agent)
+      :ok = Ampd.Carrier.Reaper.drain()
+
+      assert Enum.any?(Loci.attempts(), &(&1["state"] == "INDETERMINATE")),
+             "an unconfirmed orphan reap left no record that a process may exist"
+    end
+  end
+
+  # =================================================================== E24
+  describe "E24 · the confinement floor is required in full" do
+    # The defect: the commit predicate checked no_new_privs, seccomp and the
+    # descriptor set — and NOT Landlock. A process with no filesystem
+    # confinement at all satisfied the check that b·1 existed to make
+    # meaningful. Each row below is sabotaged independently.
+    for {label, path, value} <- [
+          {"landlock absent", ["attested", "landlock_handled_fs"], "0x0"},
+          {"landlock abi unreported", ["attested", "landlock_abi"], nil},
+          {"network not none", ["attested", "network"], "tcp"},
+          {"parent death not bound", ["attested", "pdeathsig"], "none"},
+          {"refusal not attributable", ["attested", "seccomp_deny_errno"], 1},
+          {"attestor is not the host", ["attested", "attestor"], "someone-else"},
+          {"environment not exact", ["observed", "env_keys"], ["PATH"]},
+          {"stdin is not null", ["observed", "fds"], %{"0" => "/etc/passwd", "1" => "l", "2" => "l", "3" => "socket:[1]"}}
+        ] do
+      test "a Carrier cannot commit with #{label}", ctx do
+        path = unquote(Macro.escape(path))
+        value = unquote(Macro.escape(value))
+
+        Harness.put_policy(fn t -> {:ok, put_in(Harness.observation(t), path, value)} end)
+
+        assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+        assert r["code"] == "carrier-confinement-unacceptable"
+        assert Peer.carriers() == []
+        assert length(Harness.terminated()) == 1, "the refused process was not reaped"
+      end
+    end
+
+    test "the floor names which rows failed, not merely that it failed", ctx do
+      Harness.put_policy(fn t ->
+        {:ok, put_in(Harness.observation(t), ["attested", "landlock_handled_fs"], "0x0")}
+      end)
+
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      [a] = Loci.attempts()
+      assert is_list(a["floor_failures"])
+      assert "attested:landlock_governs_filesystem" in a["floor_failures"]
+    end
+
+    test "changing the floor invalidates an admission taken under the old one", _ctx do
+      # The floor digest is derived from the row NAMES, so adding or removing
+      # a requirement moves it. A ticket admitted under the old digest then
+      # cannot commit — `carrier-floor-basis-changed` — rather than being
+      # silently judged by a rule it was not admitted under.
+      d = Ampd.Carrier.Floor.digest()
+      assert is_binary(d) and byte_size(d) > 8
+      assert d == Ampd.Carrier.Floor.digest(), "the floor digest is not stable"
+
+      names = Enum.map(Ampd.Carrier.Floor.rows(), fn {_, n, _} -> n end)
+      assert "no_new_privs" in names
+      assert "descriptor_set_exact" in names
+
+      att = Enum.map(Ampd.Carrier.Floor.attested_rows(), fn {_, n, _} -> n end)
+      assert "landlock_governs_filesystem" in att,
+             "the floor does not require Landlock, which is the defect this closure exists to fix"
+    end
+  end
+
+  # =================================================================== E25
+  describe "E25 · the machine channel has exactly one submitter" do
+    test "concurrent starts are serialized and each gets its own observation", ctx do
+      # A second Worker at a second Locus, so two admissions are legitimately
+      # concurrent rather than racing the same seat.
+      lane2 = ok!(Control.command(ctx.control, :open_lane, [ctx.goal["id"], "kestrel", ctx.repo_ref, nil]), "lane")
+      {:ok, agent2} = Peer.attach_agent("kestrel")
+      w2 = ok!(Control.command(ctx.control, :open_worker, [lane2["id"], "second"]), "worker")
+      ok!(Control.command(agent2, :attach_worker, [w2["id"]]), "worker")
+
+      # The harness answers slowly, so the two machine phases overlap in
+      # wall-clock unless something serializes them.
+      Harness.put_policy(fn t ->
+        Process.sleep(120)
+        {:ok, Harness.observation(t)}
+      end)
+
+      tasks =
+        for {p, l} <- [{ctx.agent, ctx.lane["id"]}, {agent2, lane2["id"]}] do
+          Task.async(fn -> Carrier.start(p, l) end)
+        end
+
+      results = Task.await_many(tasks, 20_000)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1)),
+             "a concurrent start failed: #{inspect(results)}"
+
+      [{:ok, a}, {:ok, b}] = results
+      refute a["carrier_ref"] == b["carrier_ref"]
+      assert length(Peer.carriers()) == 2
+      assert length(Harness.started()) == 2
     end
   end
 end

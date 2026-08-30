@@ -44,6 +44,18 @@ defmodule Ampd.Application do
       # Losing it costs one re-measurement, which is why it holds no dets
       # table and is absent from `Ampd.World.authority_stores/0`.
       Ampd.Embodiment,
+      # The one owner of Carrier lifecycle submissions, so that two Peers
+      # starting Carriers concurrently cannot interleave on one stream.
+      # Before the bridge, which binds the channel it will submit on: a gate
+      # reachable before its endpoint exists would answer "no channel
+      # possessed" for a reason that is a startup race and not a policy.
+      Ampd.Carrier.Machine.Gate,
+      # Reaps the physical process when its owning Peer dies. Separate from
+      # the gate because it is a *source* of machine requests rather than the
+      # serializer of them, and because `Ampd.Peer` casts to it from inside
+      # its own `:DOWN` path — a reaper that were also the gate would be
+      # waiting on itself.
+      Ampd.Carrier.Reaper,
       # Last: the bridge creates the sockets the outside world arrives on,
       # and nothing should be reachable before the registries that answer
       # it are up. A channel that accepted a connection during boot would

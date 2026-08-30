@@ -273,6 +273,7 @@ function argsFor(intent) {
   if (intent === 'open_worker') return { locus_ref: draft.worker_lane, purpose: trim(draft.worker_purpose) };
   if (intent === 'close_worker') return { worker_ref: draft.worker_close };
   if (intent === 'reopen_worker') return { worker_ref: draft.worker_reopen };
+  if (intent === 'reconcile_carrier_attempt') return { ticket_id: draft.attempt_reconcile };
   return {};
 }
 
@@ -444,6 +445,11 @@ export function render(frame) {
   const laneOptions = Object.values(p.lanes ?? {}).map((l) => ({ value: l.id, text: `${l.id} · ${l.actor}` }));
   const openWorkerOptions = openWorkers.map((w) => ({ value: w.id, text: `${w.id} · ${w.occupancy ?? ''}` }));
   const closedWorkerOptions = closedWorkers.map((w) => ({ value: w.id, text: `${w.id} · closed` }));
+  /* Unresolved Carrier starts. The projection sends only these — a committed
+     attempt is history and belongs in a receipt, not in a list of things a
+     person has to unstick. */
+  const unresolvedAttemptOptions = Object.values(p.carrier_attempts ?? {})
+    .map((a) => ({ value: a.ticket_id, text: `${a.ticket_id} · ${a.worker_ref} · ${a.state}` }));
 
   const wsOptions = wsList.map((w) => ({ value: w.id, text: `${w.name ?? w.id}` }));
   const goalOptions = goalList.map((g) => ({ value: g.id, text: `${g.title ?? g.id}` }));
@@ -487,6 +493,17 @@ export function render(frame) {
     formNode('reopen-worker', 'reopen_worker',
       [selectNode('worker_reopen', 'restore', closedWorkerOptions, 'no closed worker')],
       'reopen', closedWorkerOptions.length === 0),
+
+    /* An ambiguous Carrier start blocks every later start for that Worker.
+       This is how a person ends that, and it is the only way: nothing clears
+       it on a timer, because the thing it is waiting on is a process that may
+       still exist. Disabled when there is nothing unresolved, so the surface
+       says "nothing is stuck" rather than offering an action with no
+       subject. */
+    formNode('reconcile-carrier', 'reconcile_carrier_attempt',
+      [selectNode('attempt_reconcile', 'resolve', unresolvedAttemptOptions,
+                  'no unresolved carrier start')],
+      'reconcile', unresolvedAttemptOptions.length === 0),
   ];
 
   const sections = [

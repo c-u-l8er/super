@@ -33,9 +33,23 @@ defmodule Ampd.Carrier.Machine do
   machinery exactly — the same socketpair, the same `SCM_RIGHTS`, the same
   adoption path, the same framing. **No new descriptor mechanism.**
 
-  Within this channel there is exactly one submitter, so `await`'s filter
-  semantics remain sufficient and are not being relied on to do more than
-  they do.
+  ## The half this originally got wrong
+
+  A separate channel fixes concurrency **between** protocols and does nothing
+  about concurrency **within** one. This moduledoc used to end:
+
+      Within this channel there is exactly one submitter, so `await`'s filter
+      semantics remain sufficient.
+
+  That was an aspiration stated as a fact. `Bridge.carrier_endpoint/0` is one
+  shared socket and the machine phase runs in the calling process, so two
+  Peers starting Carriers at once both drove `send → recv(4) → recv(n)` on one
+  stream — able to interleave *between the header and the body*, so a frame
+  can be torn rather than merely misdelivered.
+
+  `Ampd.Carrier.Machine.Gate` is what makes the sentence true: one process
+  owns every submission, so there is one submitter by construction rather than
+  by hope. Nothing calls `Channel.start/1` directly.
   """
 
   @type ticket :: map()
@@ -49,11 +63,17 @@ defmodule Ampd.Carrier.Machine do
 
   Takes the ticket-or-incarnation and the observation, because a stop may be
   needed for a process that never became an incarnation — the refused-commit
-  path. Returns `:ok` even when there was nothing to stop: a reap that
-  insisted on having something to kill would fail exactly in the
-  INDETERMINATE case where it matters least and is understood least.
+  path.
+
+  `:ok` means **the host confirmed the process is gone**, including the case
+  where there was nothing to stop. `{:error, why}` means the outcome is
+  unknown, and the caller must treat that the way an ambiguous start is
+  treated: no replacement until absence is established. An earlier version
+  returned `:ok` unconditionally, which made a lost confirmation
+  indistinguishable from a confirmed reap — the same defect on the stop side
+  that `unresolved/0` closes on the start side.
   """
-  @callback terminate(map(), observation) :: :ok
+  @callback terminate(map(), observation) :: :ok | {:error, String.t()}
 end
 
 defmodule Ampd.Carrier.Machine.Channel do
@@ -98,16 +118,17 @@ defmodule Ampd.Carrier.Machine.Channel do
 
   @impl true
   def terminate(subject, obs) do
-    _ =
-      submit(%{
-        "schema" => "carrier-stop-request@1",
-        "op" => "stop",
-        "carrier_ref" => subject["carrier_ref"],
-        "carrier_epoch" => subject["carrier_epoch"],
-        "host_process_ref" => obs["host_process_ref"]
-      })
-
-    :ok
+    case submit(%{
+           "schema" => "carrier-stop-request@1",
+           "op" => "stop",
+           "carrier_ref" => subject["carrier_ref"],
+           "carrier_epoch" => subject["carrier_epoch"],
+           "host_process_ref" => obs["host_process_ref"]
+         }) do
+      {:ok, %{"stopped" => true}} -> :ok
+      {:ok, other} -> {:error, "the host did not confirm the stop: #{inspect(other)}"}
+      {:error, why} -> {:error, why}
+    end
   end
 
   defp submit(body) do
@@ -147,6 +168,7 @@ defmodule Ampd.Carrier.Machine.Harness do
 
   def reset do
     clear_policy()
+    :persistent_term.erase({__MODULE__, :stop_result})
     :persistent_term.put({__MODULE__, :started}, [])
     :persistent_term.put({__MODULE__, :terminated}, [])
   end
@@ -160,8 +182,11 @@ defmodule Ampd.Carrier.Machine.Harness do
   @impl true
   def terminate(subject, _obs) do
     :persistent_term.put({__MODULE__, :terminated}, terminated() ++ [subject["carrier_ref"]])
-    :ok
+    :persistent_term.get({__MODULE__, :stop_result}, :ok)
   end
+
+  @doc "Make the next stop report an unknown outcome, for the ambiguity tests."
+  def stop_returns(v), do: :persistent_term.put({__MODULE__, :stop_result}, v)
 
   @doc """
   What a healthy host returns: the ticket's own identity echoed back, and a
@@ -180,10 +205,111 @@ defmodule Ampd.Carrier.Machine.Harness do
           "no_new_privs" => true,
           "seccomp_mode" => 2,
           "seccomp_filters" => 1,
-          "fds" => %{"0" => "/dev/null", "1" => "log", "2" => "log", "3" => "socket:[1]"}
+          "fds" => %{"0" => "/dev/null", "1" => "log", "2" => "log", "3" => "socket:[1]"},
+          "env_keys" => ["SUPER_CARRIER_CONTROL_FD", "SUPER_CARRIER_INCARNATION"],
+          "uid" => 1000,
+          "starttime" => 1
+        },
+        # The attestation the real host makes. Present here so the harness
+        # exercises `Ampd.Carrier.Floor` rather than bypassing it — a fault
+        # matrix that skipped the floor would be testing a different commit
+        # path from the one production uses.
+        "attested" => %{
+          "schema" => "carrier-confinement-attested@1",
+          "landlock_abi" => 9,
+          "landlock_handled_fs" => "0x1ffff",
+          "landlock_handled_net" => "0x3",
+          "landlock_scoped" => "0x3",
+          "landlock_grants" => [%{"path" => "/tmp/x", "access" => "0x41be"}],
+          "seccomp_deny_errno" => 130,
+          "pdeathsig" => "SIGKILL",
+          "network" => "none",
+          "attestor" => "super-host"
         }
       },
       overrides
     )
   end
+end
+
+
+defmodule Ampd.Carrier.Machine.Gate do
+  @moduledoc """
+  One owner for the Carrier lifecycle channel.
+
+  ## The claim this exists to make true
+
+  `Ampd.Carrier.Machine.Channel` said, in a comment:
+
+      Within this channel there is exactly one submitter, so `await`'s filter
+      semantics remain sufficient.
+
+  **That was not true, and review caught it.** The machine phase deliberately
+  runs outside the total order, and `Bridge.carrier_endpoint/0` is one shared
+  socket, so two Peers starting Carriers at the same time both executed
+
+      :socket.send  →  :socket.recv(4)  →  :socket.recv(n)
+
+  against one stream. Two readers can interleave *between the header and the
+  body*, so it is not merely that a reply could go to the wrong caller — a
+  frame can be torn in half. `EffectChannel.await/4` discards a non-matching
+  observation rather than routing it, which is safe with one submitter and is
+  not a demultiplexer.
+
+  Giving the Carrier its own channel fixed cross-protocol concurrency and did
+  nothing for concurrency *within* the protocol. This is the part that was
+  missing.
+
+  ## Why a serializer and not a demultiplexer
+
+  A demultiplexer is the right answer when many starts must overlap. Nothing
+  needs that yet: a Carrier start is a fixture spawn and a one-line handshake.
+  A serializer is the smaller thing that makes the precondition true, and it
+  makes it true *structurally* — there is one process, so there is one
+  submitter, so the sentence in `Channel` stops being an aspiration.
+
+  **Machine duration still leaves the global total order.** This serializes
+  Carrier lifecycle submissions against each other and nothing else; worktree
+  effects are on their own channel and are unaffected. The cost is that N
+  concurrent starts take N times one start, which is recorded rather than
+  hidden — if that ever matters, build the demultiplexer then.
+
+  This is +1 supervised process and is counted as such in the census.
+  """
+  use GenServer
+
+  # Longer than the machine's own deadline, and by more than one machine
+  # wait, because a caller may be queued behind one other start. A caller
+  # whose timeout is shorter than the work it is waiting for produces a
+  # `GenServer.call` exit rather than the typed refusal the machine returns.
+  @call_timeout_ms 20_000
+  def call_timeout_ms, do: @call_timeout_ms
+
+  def start_link(_ \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  @impl true
+  def init(:ok), do: {:ok, %{}}
+
+  def start(ticket), do: call({:start, ticket})
+  def terminate_carrier(subject, obs), do: call({:terminate, subject, obs})
+
+  # A gate that is not running must refuse by name rather than crash its
+  # caller, for the reason `Ampd.Embodiment` gives: a crash masks a probe.
+  defp call(msg) do
+    if Process.whereis(__MODULE__) do
+      try do
+        GenServer.call(__MODULE__, msg, @call_timeout_ms)
+      catch
+        :exit, _ -> {:error, "the carrier machine gate did not answer in time"}
+      end
+    else
+      {:error, "the carrier machine gate is not running"}
+    end
+  end
+
+  @impl true
+  def handle_call({:start, ticket}, _f, st), do: {:reply, Ampd.Carrier.machine().start(ticket), st}
+
+  def handle_call({:terminate, subject, obs}, _f, st),
+    do: {:reply, Ampd.Carrier.machine().terminate(subject, obs), st}
 end

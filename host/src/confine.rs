@@ -76,6 +76,7 @@ extern "C" {
     fn open(path: *const u8, flags: i32, mode: i32) -> i32;
     fn close(fd: i32) -> i32;
     fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+    fn getppid() -> i32;
 }
 
 const F_DUPFD_CLOEXEC: i32 = 1030;
@@ -115,6 +116,8 @@ const SYS_SECCOMP: i64 = 317;
 
 const PR_SET_NO_NEW_PRIVS: i32 = 38;
 const PR_GET_NO_NEW_PRIVS: i32 = 39;
+const PR_SET_PDEATHSIG: i32 = 1;
+const SIGKILL: u64 = 9;
 
 const O_PATH: i32 = 0o10000000;
 const O_CLOEXEC: i32 = 0o2000000;
@@ -498,7 +501,32 @@ impl Prepared {
     ///
     /// # Safety
     /// Call only from `pre_exec`.
-    pub unsafe fn install(&self) -> io::Result<()> {
+    /// # Safety
+    /// Call only from `pre_exec`.
+    pub unsafe fn install(&self, expected_parent: i32) -> io::Result<()> {
+        // **Bind this child's life to its parent, in the kernel.**
+        //
+        // `serve_carrier` reaps its map when the lifecycle channel closes, and
+        // `Carrier::drop` covers every in-process path — but neither runs if
+        // the host is `SIGKILL`ed. Without this, killing `super-host` leaves
+        // Carriers reparented to init: alive, unowned, and invisible to a
+        // runtime whose only record of them is an INDETERMINATE attempt.
+        //
+        // The race is real and is why `expected_parent` is passed in rather
+        // than read here: if the parent dies between `fork` and this line, the
+        // signal is already spent and the child would never receive it. So
+        // after arming, re-read `getppid()` — if we have already been
+        // reparented, the parent is gone and this process must not continue
+        // into the payload.
+        if prctl(PR_SET_PDEATHSIG, SIGKILL, 0, 0, 0) != 0 {
+            return Err(io::Error::last_os_error());
+        }
+        if getppid() != expected_parent {
+            return Err(io::Error::other(
+                "the carrier host exited before the death signal was armed",
+            ));
+        }
+
         if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
             return Err(io::Error::last_os_error());
         }
