@@ -142,24 +142,86 @@ pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
     use std::collections::HashMap;
     let mut live: HashMap<String, carrier::Carrier> = HashMap::new();
 
+    // **Which runtime incarnation this physical set belongs to.**
+    //
+    // D.1.3b·2d. The runtime's `Ampd.Peer` can die and be restarted by its
+    // supervisor while this process, this channel and every Carrier in the
+    // map above go on existing — so the map can outlive the semantic
+    // membership that admitted every entry in it. `Ampd.Carrier.Machine.Gate`
+    // is what notices, and this is the second line of defence for the case
+    // where the Gate restarts at the same moment and has nothing to compare.
+    //
+    // Not authority. This never decides whether a Carrier *may* run; it
+    // refuses to let a physical set survive across a discontinuity in the
+    // runtime that owns it.
+    let mut set_epoch: Option<String> = None;
+
     loop {
         let req = match read_frame(fd) { Ok(v) => v, Err(_) => break };
         let carrier_ref = req["carrier_ref"].as_str().unwrap_or("").to_string();
 
         let mut obs = match req["op"].as_str() {
-            Some("start") => match start_one(&workdir, &carrier_ref, &req) {
-                Ok((c, o)) => { live.insert(carrier_ref.clone(), c); o }
-                Err(e) => {
-                    // The host says why on its own stream. The runtime's
-                    // refusal is disclosure-graded and an agent never sees
-                    // this text; an operator reading the host's log should.
-                    eprintln!("  carrier start refused: {e}");
-                    json!({
-                        "schema": "carrier-start-observation@1",
-                        "refused": e,
-                    })
+            // **Absence is the whole request.** No actor, no Locus, no
+            // Worker, no grant — there is nothing here to authorize, because
+            // the operation only ever subtracts. That is also why the runtime
+            // may retry it: see the note on `drain` in
+            // `Ampd.Carrier.Machine`.
+            Some("drain") => {
+                let asked = live.len();
+                for (_, mut c) in live.drain() {
+                    // `terminate` is SIGTERM, awaited, then SIGKILL, and it
+                    // returns only once the child has been reaped. Replying
+                    // before that would make this "the stop was requested",
+                    // which is the distinction three rounds of this lane have
+                    // been about.
+                    c.terminate(3_000);
                 }
-            },
+                set_epoch = None;
+
+                json!({
+                    "schema": "carrier-runtime-drain-observation@1",
+                    "reaped": asked,
+                    "remaining": live.len(),
+                })
+            }
+
+            Some("start") => {
+                let want = req["runtime_epoch"].as_str().unwrap_or("").to_string();
+
+                match &set_epoch {
+                    // A start under a different runtime incarnation while
+                    // this one still holds processes. The runtime should have
+                    // drained first; refusing is what makes that not merely a
+                    // convention.
+                    Some(cur) if *cur != want && !live.is_empty() => json!({
+                        "schema": "carrier-start-observation@1",
+                        "refused": format!(
+                            "the physical carrier set belongs to runtime incarnation {cur} and \
+                             holds {} carrier(s); drain it before starting under {want}",
+                            live.len()
+                        ),
+                    }),
+
+                    _ => {
+                        set_epoch = Some(want);
+                        match start_one(&workdir, &carrier_ref, &req) {
+                            Ok((c, o)) => { live.insert(carrier_ref.clone(), c); o }
+                            Err(e) => {
+                                // The host says why on its own stream. The
+                                // runtime's refusal is disclosure-graded and
+                                // an agent never sees this text; an operator
+                                // reading the host's log should.
+                                eprintln!("  carrier start refused: {e}");
+                                json!({
+                                    "schema": "carrier-start-observation@1",
+                                    "refused": e,
+                                })
+                            }
+                        }
+                    }
+                }
+            }
+
             Some("stop") => {
                 // Absence is success. A reap that insisted on having
                 // something to kill would fail exactly in the INDETERMINATE
@@ -442,7 +504,11 @@ fn fd_inode(fd: RawFd) -> Option<u64> {
         .and_then(|p| socket_inode(&p.to_string_lossy()))
 }
 
-fn read_frame(fd: RawFd) -> io::Result<Value> {
+/// `pub(crate)` so `verify` can drive a Carrier channel as the runtime end
+/// would. The battery needs to issue a real drain against a real
+/// `serve_carrier` holding real processes; nothing outside the BEAM can make
+/// `Ampd.Peer` die, so the physical half of that proof is measured here.
+pub(crate) fn read_frame(fd: RawFd) -> io::Result<Value> {
     let len = read_exact(fd, 4)?;
     let n = u32::from_be_bytes([len[0], len[1], len[2], len[3]]) as usize;
     if n > MAX_FRAME {
@@ -455,7 +521,7 @@ fn read_frame(fd: RawFd) -> io::Result<Value> {
     serde_json::from_slice(&body).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-fn write_frame(fd: RawFd, v: &Value) -> io::Result<()> {
+pub(crate) fn write_frame(fd: RawFd, v: &Value) -> io::Result<()> {
     let body = serde_json::to_vec(v)?;
     if body.len() > MAX_FRAME {
         return Err(io::Error::new(

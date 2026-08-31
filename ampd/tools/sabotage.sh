@@ -652,6 +652,46 @@ probe "the confinement floor requires a well-formed execution basis" test/carrie
   's|      {:attested, "execution_basis_is_well_formed", &execution_basis_ok?(&1\["execution_basis"\])}|      {:attested, "execution_basis_is_well_formed", \&is_map(\&1["execution_basis"])}|' \
   lib/ampd/carrier/floor.ex
 
+# --- D.1.3b·2d · the runtime incarnation fence ----------------------------
+#
+# J1 and its neighbours. The BEAM half of the fence — the part that notices
+# the incarnation changed and refuses to start anything until the physical
+# set has been established empty.
+
+# J1 · The Gate ignores the death of the registry it is bound to. Every
+#      other mechanism still works: membership still ends, the Reaper still
+#      runs, the supervisor still restarts Ampd.Peer. Only the physical set
+#      of the dead incarnation is left standing — which is E29 exactly.
+#      NOTE: `@` delimiter, not `|`. Both of these expressions carry an
+#      Elixir map-update `%{st | ...}`, and with `s|…|…|` sed reads that pipe
+#      as the end of the pattern. Both reported SABOTAGE MISSED — which is the
+#      harness refusing to score a probe whose sed matched nothing, exactly as
+#      it should, rather than counting it as a pass.
+probe "the gate notices the peer registry dying" test/carrier_test.exs \
+  's@    {:noreply, converge(%{st | lifecycle: :fenced, peer_pid: nil})}@    {:noreply, st}@' \
+  lib/ampd/carrier/machine.ex
+
+# The transition itself. Leaving the monitor in place but treating a NEW
+# incarnation as already-synchronized is the subtler version of J1: the Gate
+# reacts, and reacts by doing nothing.
+probe "an incarnation transition drains before it unfences" test/carrier_test.exs \
+  's@                drain_then_ready(st, pid, epoch)@                (publish(:ready, epoch); %{st | lifecycle: :ready, peer_pid: monitor(pid, st), peer_epoch: epoch})@' \
+  lib/ampd/carrier/machine.ex
+
+# The drain must actually be asked for. A fence that unfences on a reply it
+# never requested is a fence in name only.
+probe "the fence asks the machine to empty the physical set" test/carrier_test.exs \
+  's|    case Ampd.Carrier.machine().drain(epoch) do|    case {:ok, %{"remaining" => 0}} do|' \
+  lib/ampd/carrier/machine.ex
+
+# H · admission refuses BEFORE persisting a ticket. Without this every
+# innocent start during the restart window writes START_ADMITTED, meets a
+# fenced Gate, and wedges its Worker on a reconciliation the runtime's own
+# recovery manufactured.
+probe "admission refuses while the machine is unsynchronized" test/carrier_test.exs \
+  's|         :ok <- machine_synchronized(),|         :ok <- :ok,|' \
+  lib/ampd/carrier.ex
+
 # NOT probed, and not counted: `Ampd.Peer`'s `dead?/1` guard.
 #
 # Stubbing it leaves the suite GREEN, and the reason is worth writing down

@@ -60,6 +60,13 @@ defmodule Ampd.CarrierTest do
     Application.put_env(:ampd, :worktree_effector, Ampd.Worktree.Effector.Host)
     Application.put_env(:ampd, :carrier_machine, Harness)
 
+    # The resets above minted a fresh peer epoch, which fences the Gate until
+    # it has established the physical carrier set empty under the new one.
+    # Convergence is asynchronous in production — it is a recovery, not a
+    # request path — so a test that wants to observe the settled state needs
+    # the barrier, exactly as it needs `Reaper.drain/1`.
+    Ampd.Carrier.Machine.Gate.sync()
+
     on_exit(fn ->
       Application.delete_env(:ampd, :carrier_machine)
       Harness.reset()
@@ -1135,62 +1142,181 @@ defmodule Ampd.CarrierTest do
 
   # =================================================================== E29
   #
-  # **A declared seam, measured, and deliberately not closed in this round.**
+  # **This falsifier was written the other way up one round ago.**
   #
-  # `Ampd.Carrier`'s moduledoc listed *supervisor restart* among the events
-  # after which "the host reaps the process". It does not, and nothing had
-  # ever asked. The docstring is corrected; this is the falsifier that keeps
-  # it corrected, and it asserts **what is true** rather than what would be
-  # preferable — the shape `E9`'s second test uses for the same reason.
+  # It recorded the seam: `Ampd.Carrier`'s moduledoc claimed a supervisor
+  # restart made the host reap, measurement said it did not, and E29 asserted
+  # the leak so the docstring could not quietly re-acquire the claim. Review
+  # ruled that a BLOCKER — a Carrier may not physically outlive the runtime
+  # incarnation whose semantic membership admitted it, and a PTY turns the
+  # three-word fixture into exactly the process that must not become
+  # semantically ownerless.
   #
-  # If a later round closes the seam, the last two assertions here flip and
-  # this test is where that is noticed.
-  describe "E29 · a Peer supervisor restart ends membership and does NOT reap" do
-    test "the process outlives the runtime incarnation that admitted it", ctx do
-      assert {:ok, inc} = Carrier.start(ctx.agent, ctx.lane["id"])
+  # So it is flipped, not deleted. What was `refute` is now the invariant.
+  describe "E29 · a Peer incarnation cannot leave a Carrier behind" do
+    test "killing the peer registry fences the machine and drains the set", ctx do
+      assert {:ok, _inc} = Carrier.start(ctx.agent, ctx.lane["id"])
       assert length(Peer.carriers()) == 1
+      before = length(Harness.drained())
 
-      pid = Process.whereis(Ampd.Peer)
-      ref = Process.monitor(pid)
-      Process.exit(pid, :kill)
+      old_epoch = Peer.epoch()
+      kill_peer!()
 
-      receive do
-        {:DOWN, ^ref, _, _, _} -> :ok
-      after
-        2_000 -> flunk("Ampd.Peer did not die")
-      end
+      # **Converges on its own.** No `Gate.sync()` here: the recovery is
+      # asynchronous by design, and a test that forced it would be proving
+      # the barrier works rather than the recovery.
+      assert {:ready, new_epoch} = await_ready(old_epoch)
 
-      Enum.reduce_while(1..100, nil, fn _, _ ->
-        if is_pid(Process.whereis(Ampd.Peer)) do
-          {:halt, :ok}
-        else
-          Process.sleep(20)
-          {:cont, nil}
-        end
-      end)
+      refute new_epoch == old_epoch,
+             "the peer registry came back with the epoch that died, so nothing was invalidated"
 
-      Process.sleep(200)
-      if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.drain()
+      assert length(Harness.drained()) > before,
+             "the machine was never asked to establish an empty physical carrier set"
 
-      # TRUE, and it is the half that was always true.
-      assert Peer.carriers() == [], "membership survived the incarnation that held it"
+      assert new_epoch in Harness.drained(),
+             "the drain did not name the incarnation it was synchronizing to"
 
-      # TRUE, and it is the half the docstring claimed was not the case.
-      # `terminate/2` does not run on `:kill`, and the pending-reap ledger
-      # lives in the process that died — along with every record of which
-      # Carriers existed, so a ledger held elsewhere would not know what to
-      # sweep either.
-      assert Peer.pending_reaps() == [],
-             "a pending reap survived Ampd.Peer, which would change the analysis in the moduledoc"
+      # Membership is gone, and so is the physical set — which is the half
+      # that was missing.
+      assert Peer.carriers() == []
 
-      refute inc["carrier_ref"] in Harness.terminated(),
-             "the seam is CLOSED — a Peer supervisor restart now reaps. " <>
-               "Update Ampd.Carrier's moduledoc and this falsifier together."
-
-      # And the position is untouched, which is what makes this a leak rather
-      # than a loss: the Worker and the Locus are in dets and Ampd.Peer has
-      # never been able to reach them.
+      # And the position is untouched. This is a control-plane incarnation
+      # discontinuity, not a World reboot: the Worker and the Locus are in
+      # dets and Ampd.Peer has never been able to reach them.
       assert Loci.worker(ctx.worker["id"])["status"] == "open"
+      assert Loci.lane(ctx.lane["id"]) != nil
     end
+
+    test "a fresh epoch with no death fences too", ctx do
+      # `Peer.reset/0` re-mints identity in place — a world reset, a lineage
+      # advance — so no `:DOWN` fires and a monitor cannot see it. The Gate
+      # would otherwise stay bound to an epoch no handle carries.
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      before = length(Harness.drained())
+      old = Peer.epoch()
+
+      Peer.reset()
+
+      assert {:ready, new} = await_ready(old)
+      refute new == old
+      assert length(Harness.drained()) > before
+    end
+
+    test "a start during the fence is refused before any ticket exists", ctx do
+      # J4. The window is a recovery, not an outage to be papered over: an
+      # admission that wrote START_ADMITTED and then met a fenced Gate would
+      # come back INDETERMINATE and wedge its Worker — a reconciliation
+      # requirement manufactured by the runtime's own restart.
+      Harness.drain_fails(50)
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      attempts_before = length(Loci.attempts())
+      started_before = length(Harness.started())
+
+      kill_peer!()
+      await_peer!()
+
+      # Still fenced — the drain cannot confirm.
+      assert {:fenced, _} = Ampd.Carrier.Machine.Gate.readiness()
+
+      {:ok, agent2} = Peer.attach_agent("kestrel")
+      r2 = Control.command(agent2, :attach_worker, [ctx.worker["id"]])
+      assert r2["allow"] == true
+
+      assert {:refused, r} = Carrier.start(agent2, ctx.lane["id"])
+      assert r["code"] == "carrier-runtime-incarnation-unready"
+
+      assert length(Loci.attempts()) == attempts_before,
+             "a durable attempt was written while the machine was fenced"
+
+      assert length(Harness.started()) == started_before,
+             "a start reached the machine while it was fenced"
+    end
+
+    test "a lost drain confirmation keeps the fence up and is retried", ctx do
+      # J3. The host really emptied its set and the answer went missing. From
+      # the runtime's side that is indistinguishable from a refusal, so the
+      # fence stays up — and unlike a start, this request may be retried,
+      # because it carries no actor, Locus, Worker or grant and can only
+      # subtract.
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      Harness.drain_fails(2)
+      before = length(Harness.drained())
+
+      old = Peer.epoch()
+      kill_peer!()
+
+      assert {:ready, _} = await_ready(old),
+             "the fence never lifted, so a lost confirmation is a permanent outage"
+
+      assert length(Harness.drained()) >= before + 3,
+             "the drain was not retried after its confirmation was lost"
+    end
+
+    test "one drain answers for every Carrier the registry was holding", ctx do
+      # J5. `Ampd.Peer` dying loses every semantic membership at once, so
+      # there are no victims left to name. `terminate_all` is not a blunt
+      # instrument here — reconstructing victim IDs from records that
+      # deliberately no longer exist is the thing that cannot be done.
+      lane2 = ok!(Control.command(ctx.control, :open_lane, [ctx.goal["id"], "kestrel", ctx.repo_ref, nil]), "lane")
+      {:ok, agent2} = Peer.attach_agent("kestrel")
+      w2 = ok!(Control.command(ctx.control, :open_worker, [lane2["id"], "second"]), "worker")
+      ok!(Control.command(agent2, :attach_worker, [w2["id"]]), "worker")
+
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert {:ok, _} = Carrier.start(agent2, lane2["id"])
+      assert length(Peer.carriers()) == 2
+
+      before = length(Harness.drained())
+      old = Peer.epoch()
+      kill_peer!()
+      assert {:ready, _} = await_ready(old)
+
+      assert Peer.carriers() == []
+
+      # ONE drain, not one per Carrier. The request names no carrier_ref.
+      assert length(Harness.drained()) == before + 1,
+             "the fence issued a drain per Carrier rather than emptying the set"
+    end
+  end
+
+  # ------------------------------------------------------------- fence helpers
+  defp kill_peer! do
+    pid = Process.whereis(Ampd.Peer)
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+
+    receive do
+      {:DOWN, ^ref, _, _, _} -> :ok
+    after
+      2_000 -> flunk("Ampd.Peer did not die")
+    end
+  end
+
+  defp await_peer!(n \\ 200) do
+    Enum.reduce_while(1..n, nil, fn _, _ ->
+      if is_pid(Process.whereis(Ampd.Peer)), do: {:halt, :ok}, else: (Process.sleep(20); {:cont, nil})
+    end) || flunk("Ampd.Peer never came back")
+
+    Process.sleep(50)
+  end
+
+  # **Waits for readiness under a DIFFERENT incarnation.**
+  #
+  # Polling for `{:ready, _}` returns instantly on the state published before
+  # the kill — the Gate has not processed the `:DOWN` yet — so the first
+  # version of this helper measured nothing and three tests failed for that
+  # reason rather than for the reason they name. Convergence is a transition,
+  # so the barrier has to be one too.
+  defp await_ready(was, n \\ 400) do
+    Enum.reduce_while(1..n, nil, fn _, _ ->
+      case Ampd.Carrier.Machine.Gate.readiness() do
+        {:ready, e} when e != was -> {:halt, {:ready, e}}
+        _ -> Process.sleep(25); {:cont, nil}
+      end
+    end) ||
+      flunk(
+        "the gate never unfenced under a new incarnation " <>
+          "(was #{inspect(was)}, now #{inspect(Ampd.Carrier.Machine.Gate.readiness())})"
+      )
   end
 end

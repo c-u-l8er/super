@@ -647,6 +647,16 @@ defmodule Ampd.Peer do
       for {_id, inc} <- st.carriers, do: Ampd.Carrier.Reaper.orphaned(inc)
     end
 
+    # **A fresh epoch is an incarnation change even though nothing died.**
+    # `Ampd.Carrier.Machine.Gate` watches this process with a monitor, and a
+    # monitor cannot see a registry that re-mints its identity in place — so
+    # the Gate would stay bound to an epoch no handle carries and refuse every
+    # admission until something else nudged it. A cast, for the same reason as
+    # the orphan announcements above.
+    if Process.whereis(Ampd.Carrier.Machine.Gate) do
+      Ampd.Carrier.Machine.Gate.peer_incarnation_changed()
+    end
+
     {:reply, :ok,
      %{
        st

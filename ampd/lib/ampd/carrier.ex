@@ -90,10 +90,10 @@ defmodule Ampd.Carrier do
   explicit occupancy, a new admission and a new incarnation. A recovery
   protocol can be designed when something needs one.
 
-  ## One exception, measured, and NOT closed here — `E29`
+  ## The one exception, and how it is closed — `E29`
 
   This paragraph used to list **supervisor restart** beside the others and say
-  the host reaps. Measured: it does not.
+  the host reaps. Measured: it did not.
 
   ```text
   Ampd.Peer is killed
@@ -119,14 +119,36 @@ defmodule Ampd.Carrier do
   them at once without pending any. A ledger elsewhere would still not know
   what to sweep.
 
-  The information does survive, in one place: the host's `serve_carrier` map,
-  which already terminates every Carrier it holds when its channel closes. So
-  the two candidate closures both make the carrier channel not outlive the
-  `Ampd.Peer` incarnation that owns it — `:rest_for_one` so a Peer restart
-  takes `Ampd.Bridge` with it, or a runtime-incarnation epoch on the carrier
-  channel that the host revalidates. Both change restart semantics for
-  sixteen supervised children, or add a rebind protocol the host does not
-  have; neither is a micro-closure. **Declared, not fixed.**
+  The information survives in one place: the host's `serve_carrier` map. So
+  the closure gives that map an owner on this side —
+  `Ampd.Carrier.Machine.Gate`, which already survives `Ampd.Peer` under
+  `:one_for_one` and already owns every lifecycle submission:
+
+      Peer incarnation dies (or re-mints its epoch in place)
+            ↓
+      Gate FENCES carrier lifecycle
+            ↓
+      drain: the physical set is established EMPTY
+            ↓
+      the replacement incarnation is bound
+            ↓
+      Gate READY, and only now may a Carrier start
+
+  and the host holds the same invariant independently, refusing a start whose
+  runtime epoch is not the one its non-empty set belongs to. **No victims are
+  named** — the records that named them are what died — so the operation
+  empties the set rather than reaping a list.
+
+  Deliberately **not** `:rest_for_one`: restarting the fourteen children after
+  `Ampd.Peer` would restart authority coordinators, durable registries, Loci,
+  Worktree and the Bridge — a World reboot to express one relationship. What
+  is preserved is
+
+      Peer restart             ≠  World restart
+      Peer incarnation death   →  Carrier physical death
+
+  `E29` is the falsifier and it was written the other way up: it asserted the
+  leak, review ruled that a blocker, and it now asserts the invariant.
   """
 
   alias Ampd.{AuthorityCoordinator, Core, Loci, Locus, Peer, Refusal, Worker, World}
@@ -197,6 +219,7 @@ defmodule Ampd.Carrier do
          {:ok, worker} <- current_worker(peer, lane),
          :ok <- no_live_carrier(peer),
          :ok <- no_pending_attempt(worker["id"]),
+         :ok <- machine_synchronized(),
          {:ok, basis} <- execution_basis() do
       att = Peer.attachment(peer["id"])
 
@@ -788,6 +811,40 @@ defmodule Ampd.Carrier do
       [] -> nil
       moved -> moved
     end
+  end
+
+  # Is the machine side synchronized to the runtime incarnation that is
+  # asking?
+  #
+  # **Checked before the ticket is persisted, and that placement is the
+  # point.** During the window in which `Ampd.Carrier.Machine.Gate` is
+  # draining after a Peer-registry restart, every innocent start would
+  # otherwise write a durable `START_ADMITTED`, reach a fenced Gate, come back
+  # INDETERMINATE, and wedge its Worker until a person reconciled it — a
+  # reconciliation requirement manufactured by the runtime's own recovery.
+  #
+  # `ready_for?/1` reads a published term. No message to the Gate, which may
+  # be in the middle of an 8-second drain; no host round trip. The same
+  # argument `execution_basis/0` makes one clause down, for the same reason.
+  defp machine_synchronized do
+    epoch = peer_epoch()
+
+    if epoch != nil and Ampd.Carrier.Machine.Gate.ready_for?(epoch) do
+      :ok
+    else
+      {:refused,
+       refuse("carrier-runtime-incarnation-unready", %{
+         "reason" =>
+           "the carrier machine has not established an empty physical carrier set since the " <>
+             "runtime incarnation changed"
+       })}
+    end
+  end
+
+  defp peer_epoch do
+    Peer.epoch()
+  catch
+    :exit, _ -> nil
   end
 
   # The basis the selected machine would launch. Reads channel metadata; makes

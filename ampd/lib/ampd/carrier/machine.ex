@@ -78,6 +78,34 @@ defmodule Ampd.Carrier.Machine do
   @callback execution_basis() :: {:ok, map()} | {:error, String.t()}
 
   @doc """
+  Make the machine's physical Carrier set empty, and answer only once it is.
+
+  For one failure cut and no other: the runtime's `Ampd.Peer` incarnation
+  itself is lost, taking every semantic membership and the pending-reap ledger
+  with it, while the machine side goes on holding processes. There are no
+  victims to name because the records that named them are gone — so this
+  names none, and empties the set.
+
+  ## Why this one may be retried when a start may not
+
+      start    constructive     retrying it might make a second process
+      drain    subtractive      retrying it cannot create or widen anything
+
+  Every successful execution moves toward the same no-authority state, and
+  the request carries no actor, Locus, Worker or grant because there is
+  nothing here to authorize. So a lost confirmation is retried until absence
+  is established, where a lost *start* confirmation is never retried and
+  becomes `INDETERMINATE` instead.
+
+  > Constructive effects are not silently replayed. Idempotent destructive
+  > convergence may be retried, because every successful execution moves only
+  > toward the same no-authority state.
+
+  `{:ok, %{"remaining" => 0}}` is the only answer that ends a fence.
+  """
+  @callback drain(runtime_epoch :: String.t()) :: {:ok, map()} | {:error, String.t()}
+
+  @doc """
   Stop a Carrier.
 
   Takes the ticket-or-incarnation and the observation, because a stop may be
@@ -131,8 +159,26 @@ defmodule Ampd.Carrier.Machine.Channel do
       "schema" => "carrier-start-request@1",
       "op" => "start",
       "carrier_ref" => ticket["carrier_ref"],
-      "carrier_epoch" => ticket["carrier_epoch"]
+      "carrier_epoch" => ticket["carrier_epoch"],
+      # Stamped by `Ampd.Carrier.Machine.Gate`, which is the process that
+      # knows which runtime incarnation the machine side is synchronized to.
+      # The host refuses a start under an epoch other than the one its
+      # physical set belongs to while that set is non-empty.
+      "runtime_epoch" => ticket["runtime_epoch"]
     })
+  end
+
+  @impl true
+  def drain(runtime_epoch) do
+    case submit(%{
+           "schema" => "carrier-runtime-drain-request@1",
+           "op" => "drain",
+           "runtime_epoch" => runtime_epoch
+         }) do
+      {:ok, %{"remaining" => 0} = o} -> {:ok, o}
+      {:ok, other} -> {:error, "the host did not confirm an empty carrier set: #{inspect(other)}"}
+      {:error, why} -> {:error, why}
+    end
   end
 
   @basis_schema "carrier-execution-basis@1"
@@ -190,6 +236,7 @@ defmodule Ampd.Carrier.Machine.Channel do
         expect =
           case body["op"] do
             "stop" -> "carrier-stop-observation@1"
+            "drain" -> "carrier-runtime-drain-observation@1"
             _ -> "carrier-start-observation@1"
           end
 
@@ -221,12 +268,44 @@ defmodule Ampd.Carrier.Machine.Harness do
   def started, do: :persistent_term.get({__MODULE__, :started}, [])
   def terminated, do: :persistent_term.get({__MODULE__, :terminated}, [])
 
+  @doc "Runtime epochs this harness was asked to drain, in order."
+  def drained, do: :persistent_term.get({__MODULE__, :drained}, [])
+
+  @doc """
+  Make the next N drains report a lost confirmation.
+
+  For the lost-acknowledgement fence test: the machine really emptied its set
+  and the answer did not come back, which must leave the Gate fenced and
+  retrying rather than believing itself converged.
+  """
+  def drain_fails(n), do: :persistent_term.put({__MODULE__, :drain_fails}, n)
+
   def reset do
     clear_policy()
     :persistent_term.erase({__MODULE__, :stop_result})
     :persistent_term.erase({__MODULE__, :basis})
+    :persistent_term.erase({__MODULE__, :drain_fails})
     :persistent_term.put({__MODULE__, :started}, [])
     :persistent_term.put({__MODULE__, :terminated}, [])
+    :persistent_term.put({__MODULE__, :drained}, [])
+  end
+
+  @impl true
+  def drain(runtime_epoch) do
+    :persistent_term.put({__MODULE__, :drained}, drained() ++ [runtime_epoch])
+
+    case :persistent_term.get({__MODULE__, :drain_fails}, 0) do
+      n when n > 0 ->
+        # **The set really is emptied first.** A harness that skipped the work
+        # when it was told to lose the reply would model a host that refused,
+        # not a host whose answer went missing — and the fence's whole point
+        # is that those two are indistinguishable from the runtime's side.
+        :persistent_term.put({__MODULE__, :drain_fails}, n - 1)
+        {:error, "the host did not answer the drain"}
+
+      _ ->
+        {:ok, %{"schema" => "carrier-runtime-drain-observation@1", "remaining" => 0, "reaped" => 0}}
+    end
   end
 
   @doc """
@@ -411,8 +490,64 @@ defmodule Ampd.Carrier.Machine.Gate do
 
   Not built here. The first PTY slice does not materially raise Carrier-start
   concurrency, so this holds for it; it does not hold for Motor.
+
+  ## The incarnation fence — D.1.3b·2d
+
+  `Ampd.Peer` can die and be restarted by the supervisor while this process,
+  `Ampd.Bridge`, the Carrier channel and the host all go on existing. Its
+  replacement starts with empty `carriers` and empty `pending_reaps`, so:
+
+  ```text
+  World / Worker / Locus     still exist
+  the new Peer knows         no Carrier
+  the host knows             the old Carrier is still running
+  ```
+
+  which is the split-brain the whole D.1.x sequence exists to remove. The
+  Reaper's `pending_reaps` cannot reach it: that ledger lives in the process
+  that died, along with every record of which Carriers existed.
+
+  **This process is where it is closed, and the reason is structural**: it
+  already survives `Ampd.Peer` under `:one_for_one`, it is already the single
+  owner of Carrier lifecycle submissions, and it holds no product authority.
+  It gains one responsibility and no authority:
+
+  ```text
+  Peer incarnation P1                     Gate READY, bound to P1
+        ↓ dies
+  Gate :DOWN                              Gate FENCED
+        ↓
+  drain: make the physical set empty      retried until it answers empty
+        ↓
+  replacement Peer P2 observed            Gate binds P2
+        ↓
+  Gate READY                              starts admitted again
+  ```
+
+  **Not `:rest_for_one`.** Coupling the physical Carrier lifetime to the Peer
+  incarnation by restarting the fourteen children after `Ampd.Peer` would
+  restart authority coordinators, durable registries, Loci, Worktree and the
+  Bridge — a World reboot to express one relationship. The distinction being
+  preserved is exactly:
+
+  ```text
+  Peer restart  ≠  World restart
+  Peer incarnation death  →  Carrier physical death
+  ```
+
+  **No victims are named.** `Ampd.Peer` dying loses every semantic membership
+  at once, so `terminate_all` is not a blunt instrument here — it is the only
+  correct one. Reconstructing victim IDs from records that deliberately no
+  longer exist is the thing that cannot be done.
+
+  This is distinct from `pending_reaps`, which remains correct for a Reaper
+  restart, an individual session loss, `detach`, `close_worker` and ordinary
+  membership convergence. Two different failure cuts, two mechanisms; merging
+  them into one vague "cleanup" would lose which one protects what.
   """
   use GenServer
+
+  require Logger
 
   # Longer than the machine's own deadline, and by more than one machine
   # wait, because a caller may be queued behind one other start. A caller
@@ -421,10 +556,68 @@ defmodule Ampd.Carrier.Machine.Gate do
   @call_timeout_ms 20_000
   def call_timeout_ms, do: @call_timeout_ms
 
+  # How long to wait before retrying an unresolved drain. A drain is
+  # idempotent and subtractive, so retrying is safe; see the `drain/1`
+  # callback docs for why that is not true of `start`.
+  @refence_ms 250
+
+  @readiness {__MODULE__, :readiness}
+
   def start_link(_ \\ []), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
+  @doc """
+  Is the machine side synchronized to this runtime incarnation?
+
+  **Local, bounded, and no message to this process.** `Ampd.Carrier.admit/2`
+  calls it from inside `AuthorityCoordinator.transact/1`, and this process may
+  be in the middle of an 8-second drain — a `GenServer.call` here would put
+  machine latency inside the total order by the one route the whole
+  admit/machine/commit shape exists to close.
+
+  It reads a term this process publishes on every transition. That also makes
+  it correct while this process is *down*: the published epoch is the one the
+  machine side was last synchronized to, so a Peer that has since been
+  replaced fails the comparison whoever is or is not alive.
+  """
+  def ready_for?(peer_epoch) do
+    :persistent_term.get(@readiness, {:fenced, nil}) == {:ready, peer_epoch}
+  end
+
+  @doc "The fence state, for falsifiers and the operator projection."
+  def readiness, do: :persistent_term.get(@readiness, {:fenced, nil})
+
+  @doc """
+  The peer registry's incarnation changed without the process dying.
+
+  `Ampd.Peer.reset/0` mints a fresh epoch in place — a world reset, a lineage
+  advance — so no `:DOWN` fires and the monitor cannot see it. Without this
+  the Gate would stay bound to an epoch nobody is using and `ready_for?/1`
+  would refuse every admission until something else nudged it.
+
+  A cast: `Peer.reset/0` runs inside the `Ampd.Peer` GenServer, and nothing
+  about re-establishing identity may wait on a machine deadline. That is the
+  same rule the orphan announcement two lines above it follows.
+  """
+  def peer_incarnation_changed, do: GenServer.cast(__MODULE__, :peer_incarnation_changed)
+
+  @doc """
+  Force convergence and report the fence state. **Not a production path.**
+
+  The recovery above is asynchronous by design, so a test or a battery that
+  wants to observe the state *after* it settles needs a barrier — the same
+  role `Ampd.Carrier.Reaper.drain/1` plays for the reaper.
+  """
+  def sync(timeout \\ @call_timeout_ms), do: GenServer.call(__MODULE__, :sync, timeout)
+
   @impl true
-  def init(:ok), do: {:ok, %{}}
+  def init(:ok) do
+    # Fenced until proven otherwise. The alternative — assume ready and let
+    # the first start find out — is the direction that starts a process.
+    {:ok, %{peer_pid: nil, peer_epoch: nil, lifecycle: :fenced}, {:continue, :bind_peer}}
+  end
+
+  @impl true
+  def handle_continue(:bind_peer, st), do: {:noreply, converge(st)}
 
   def start(ticket), do: call({:start, ticket})
   def terminate_carrier(subject, obs), do: call({:terminate, subject, obs})
@@ -444,8 +637,155 @@ defmodule Ampd.Carrier.Machine.Gate do
   end
 
   @impl true
-  def handle_call({:start, ticket}, _f, st), do: {:reply, Ampd.Carrier.machine().start(ticket), st}
+  def handle_call({:start, _ticket}, _f, %{lifecycle: :fenced} = st) do
+    # Belt to `Ampd.Carrier.admit/2`'s braces. Admission refuses before it
+    # writes a ticket, so this should be unreachable — but "should be
+    # unreachable" is how a start reaches a machine that is not synchronized
+    # with the runtime that is asking.
+    {:reply,
+     {:error,
+      "the carrier machine is fenced: the physical carrier set has not been " <>
+        "established empty since the runtime incarnation changed"}, st}
+  end
 
+  def handle_call({:start, ticket}, _f, st) do
+    # The runtime epoch is stamped here and nowhere else, because this is the
+    # process that knows which incarnation the machine side is synchronized
+    # to. A ticket carrying its own would be a ticket asserting something the
+    # admission had no way to check.
+    ticket = Map.put(ticket, "runtime_epoch", st.peer_epoch)
+    {:reply, Ampd.Carrier.machine().start(ticket), st}
+  end
+
+  # **Reachable while fenced, deliberately.** A stop only subtracts physical
+  # execution, and refusing it during a fence would strand exactly the
+  # processes the fence exists to remove.
   def handle_call({:terminate, subject, obs}, _f, st),
     do: {:reply, Ampd.Carrier.machine().terminate(subject, obs), st}
+
+  def handle_call(:sync, _f, st) do
+    st = converge(st)
+    {:reply, {st.lifecycle, st.peer_epoch}, st}
+  end
+
+  @impl true
+  def handle_cast(:peer_incarnation_changed, st), do: {:noreply, converge(st)}
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, pid, reason}, %{peer_pid: pid} = st) do
+    Logger.warning(
+      "ampd: the peer registry incarnation died (#{inspect(reason)}) — fencing carrier " <>
+        "lifecycle and draining the physical carrier set before any replacement may start"
+    )
+
+    {:noreply, converge(%{st | lifecycle: :fenced, peer_pid: nil})}
+  end
+
+  def handle_info(:refence, st), do: {:noreply, converge(st)}
+  def handle_info(_, st), do: {:noreply, st}
+
+  # ------------------------------------------------------------- the fence
+  #
+  # One function for every way of arriving here — boot, a `:DOWN`, a retry
+  # after a lost confirmation. A convergence with one entry point per cause
+  # is a convergence with one chance per cause of being got wrong.
+  defp converge(st) do
+    case Process.whereis(Ampd.Peer) do
+      nil ->
+        # No registry to be synchronized *to*. Stay fenced and look again;
+        # this is the boot ordering and the middle of a supervisor restart,
+        # and neither is a state to start a process in.
+        publish(:fenced, nil)
+        Process.send_after(self(), :refence, @refence_ms)
+        %{st | lifecycle: :fenced, peer_pid: nil, peer_epoch: nil}
+
+      pid ->
+        case peer_epoch() do
+          nil ->
+            publish(:fenced, nil)
+            Process.send_after(self(), :refence, @refence_ms)
+            %{st | lifecycle: :fenced, peer_pid: nil, peer_epoch: nil}
+
+          epoch ->
+            # **The fence is a transition, not a starting state**, and getting
+            # that wrong cost a whole verify run. The first version fenced
+            # until a drain succeeded, including at boot — where this process
+            # starts *before* `Ampd.Bridge`, so no Carrier channel is
+            # possessed, so no drain can succeed, so the runtime spent its
+            # startup refusing Carrier starts for a discontinuity that had not
+            # happened. `super-host verify` failed the production World join
+            # on `carrier-runtime-incarnation-unready`.
+            #
+            # What must be drained is a physical set belonging to an
+            # incarnation we are *leaving*. The published term is what we were
+            # last synchronized to; if there is none, this runtime has never
+            # started a Carrier and there is nothing of its making to empty.
+            #
+            # Safe because the host holds the same invariant independently: it
+            # refuses a start whose `runtime_epoch` differs from the one its
+            # non-empty set belongs to. This process makes the convergence
+            # prompt; the host is what makes it true.
+            case :persistent_term.get(@readiness, nil) do
+              {_, ^epoch} ->
+                # Same incarnation. Re-monitor, in case we arrived here from a
+                # restart of *this* process rather than of the Peer.
+                publish(:ready, epoch)
+                %{st | lifecycle: :ready, peer_pid: monitor(pid, st), peer_epoch: epoch}
+
+              nil ->
+                publish(:ready, epoch)
+                %{st | lifecycle: :ready, peer_pid: monitor(pid, st), peer_epoch: epoch}
+
+              {_, _left_behind} ->
+                drain_then_ready(st, pid, epoch)
+            end
+        end
+    end
+  end
+
+  defp drain_then_ready(st, pid, epoch) do
+    case Ampd.Carrier.machine().drain(epoch) do
+      {:ok, %{"remaining" => 0}} ->
+        publish(:ready, epoch)
+
+        Logger.info(
+          "ampd: the physical carrier set is empty; carrier lifecycle is unfenced for " <>
+            "runtime incarnation #{epoch}"
+        )
+
+        %{st | lifecycle: :ready, peer_pid: monitor(pid, st), peer_epoch: epoch}
+
+      other ->
+        # **Retried, and this is the one lifecycle operation that may be.**
+        # A drain carries no actor, Locus, Worker or grant and can only
+        # subtract, so a second execution cannot make a process or widen an
+        # authority — where a second *start* against an unknown first one is
+        # exactly how you get two. Stay fenced until absence is established.
+        Logger.warning(
+          "ampd: the carrier drain did not confirm an empty set (#{inspect(other)}) — " <>
+            "staying fenced and retrying; no carrier will start under #{epoch} until it does"
+        )
+
+        publish(:fenced, nil)
+        Process.send_after(self(), :refence, @refence_ms)
+        %{st | lifecycle: :fenced, peer_pid: monitor(pid, st), peer_epoch: nil}
+    end
+  end
+
+  defp monitor(pid, %{peer_pid: pid}), do: pid
+
+  defp monitor(pid, _st) do
+    Process.monitor(pid)
+    pid
+  end
+
+  # A `GenServer.call` to a process that may be mid-restart. Its absence is a
+  # fence, not a crash — the `Ampd.Embodiment` rule again.
+  defp peer_epoch do
+    Ampd.Peer.epoch()
+  catch
+    :exit, _ -> nil
+  end
+
+  defp publish(state, epoch), do: :persistent_term.put(@readiness, {state, epoch})
 end

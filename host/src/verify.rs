@@ -1840,12 +1840,156 @@ pub fn run(ampd_dir: &Path) -> i32 {
 
     let adopted_inodes = rt.adopted_channel_inodes();
     carrier_confinement(&mut b, &scratch, &adopted_inodes);
+    carrier_runtime_fence(&mut b, &scratch);
 
     println!("\n  {} held · {} failed", b.pass, b.fail);
     rt.shutdown();
     let _ = std::fs::remove_dir_all(&scratch);
 
     if b.fail == 0 { 0 } else { 1 }
+}
+
+/// D.1.3b·2d — the physical half of the incarnation fence.
+///
+/// # What this measures, and what it deliberately does not
+///
+/// The fence is a chain:
+///
+/// ```text
+/// Ampd.Peer dies → Gate fences → drain → host empties its set → /proc agrees
+/// ```
+///
+/// The first three arrows are BEAM-side and are proved by `E29`, which kills
+/// the real `Ampd.Peer`, lets the real supervisor restart it, and requires the
+/// real Gate to converge. The last two are physical and are proved here,
+/// against real confined Carrier processes on a real `serve_carrier`.
+///
+/// **The composition is not run in one process, and the reason is a door I
+/// declined to add.** Nothing outside the BEAM can kill `Ampd.Peer`: the
+/// world-reset path that re-mints its epoch also resets `Ampd.Bridge`, which
+/// disposes the Carrier channel — so `serve_carrier` already drains through
+/// channel death and the interesting case never arises. Reaching it from the
+/// battery would need a runtime command that kills a supervised process on
+/// request, which is a denial-of-service primitive reachable by whoever holds
+/// human control. The transport between the halves is the same possessed
+/// channel, the same framing and the same `EffectChannel.request` that the
+/// production World-join exercises end-to-end for start and stop.
+fn carrier_runtime_fence(b: &mut Battery, scratch: &Path) {
+    use crate::{carrier, fdpass, read_frame, write_frame};
+
+    println!("\n  D.1.3b·2d · the runtime incarnation fence");
+
+    if carrier::fixture_path().is_none() {
+        b.check("the fence falsifier could run", false, "no carrier fixture");
+        return;
+    }
+
+    let dir = scratch.join("fence");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let Ok(fdpass::Pair(mine, theirs)) = fdpass::pair_stream() else {
+        b.check("the fence falsifier could run", false, "no socketpair");
+        return;
+    };
+
+    let served = dir.clone();
+    std::thread::spawn(move || crate::serve_carrier(theirs, served));
+
+    // Three real Carriers under runtime incarnation A. Three rather than one
+    // because `Ampd.Peer` dying loses every membership at once, and a drain
+    // that emptied a set of one would not distinguish "empties the set" from
+    // "stops the Carrier it was told about".
+    let mut pids: Vec<(u32, Option<u64>)> = Vec::new();
+    for i in 0..3 {
+        let req = json!({
+            "schema": "carrier-start-request@1", "op": "start",
+            "carrier_ref": format!("cr_fence{i}"),
+            "carrier_epoch": format!("fence-epoch-{i}"),
+            "runtime_epoch": "runtime-A",
+        });
+        if write_frame(mine, &req).is_err() { break }
+        let Ok(obs) = read_frame(mine) else { break };
+        let hpr = obs["host_process_ref"].as_str().unwrap_or("").to_string();
+        if let Some(p) = hpr.strip_prefix("hp_").and_then(|r| r.split('_').next())
+            .and_then(|v| v.parse::<u32>().ok())
+        {
+            pids.push((p, carrier::observe(p).starttime));
+        }
+    }
+
+    b.check(
+        "three real Carriers are running under runtime incarnation A",
+        pids.len() == 3 && pids.iter().all(|(_, st)| st.is_some()),
+        format!("{pids:?}"),
+    );
+
+    // **The second line of defence, before the drain.** A start under a
+    // different incarnation while the set is non-empty is refused by the host
+    // itself, so a Gate that restarted alongside the Peer and had nothing to
+    // compare still cannot start a process into somebody else's set.
+    let _ = write_frame(mine, &json!({
+        "schema": "carrier-start-request@1", "op": "start",
+        "carrier_ref": "cr_fence_wrong", "carrier_epoch": "e",
+        "runtime_epoch": "runtime-B",
+    }));
+    let wrong = read_frame(mine).unwrap_or(Value::Null);
+    b.check(
+        "a start under a NEW incarnation is refused while the old set is non-empty",
+        wrong["refused"].as_str().unwrap_or("").contains("runtime-A"),
+        format!("{wrong}"),
+    );
+
+    // The drain. It names no carrier_ref, carries no actor, Locus, Worker or
+    // grant, and answers only once the set is physically empty.
+    let _ = write_frame(mine, &json!({
+        "schema": "carrier-runtime-drain-request@1", "op": "drain",
+        "runtime_epoch": "runtime-B",
+    }));
+    let drained = read_frame(mine).unwrap_or(Value::Null);
+
+    b.check(
+        "one drain empties the whole physical Carrier set",
+        drained["schema"] == "carrier-runtime-drain-observation@1"
+            && drained["remaining"] == 0
+            && drained["reaped"] == 3,
+        format!("{drained}"),
+    );
+
+    // **Asked of the kernel, not of the reply.** `terminate` is awaited
+    // before the drain answers, so this needs no polling — and if it ever
+    // does, the host answered before the processes were gone, which is the
+    // distinction this whole lane is about.
+    let survivors: Vec<u32> = pids
+        .iter()
+        .filter(|(p, st)| carrier::observe(*p).starttime == *st)
+        .map(|(p, _)| *p)
+        .collect();
+
+    b.check(
+        "every drained Carrier is gone from /proc when the drain answers",
+        pids.len() == 3 && survivors.is_empty(),
+        format!("still alive: {survivors:?}"),
+    );
+
+    // And the set now belongs to nobody, so the new incarnation may start.
+    let _ = write_frame(mine, &json!({
+        "schema": "carrier-start-request@1", "op": "start",
+        "carrier_ref": "cr_fence_after", "carrier_epoch": "after",
+        "runtime_epoch": "runtime-B",
+    }));
+    let after = read_frame(mine).unwrap_or(Value::Null);
+    b.check(
+        "after the drain the replacement incarnation may start a Carrier",
+        after["host_process_ref"].is_string() && after["refused"].is_null(),
+        format!("{after}"),
+    );
+
+    let _ = write_frame(mine, &json!({
+        "schema": "carrier-runtime-drain-request@1", "op": "drain",
+        "runtime_epoch": "runtime-B",
+    }));
+    let _ = read_frame(mine);
+    fdpass::close_fd(mine);
 }
 
 /// The Carrier processes this host currently has as direct children.

@@ -339,6 +339,38 @@ probe "an orphaned Carrier that is never reaped is noticed" \
   ampd/lib/ampd/carrier/reaper.ex \
   's|def handle_cast({:orphaned, inc}, st), do: {:noreply, reap(inc, st)}|def handle_cast({:orphaned, _inc}, st), do: {:noreply, st}|'
 
+# --- D.1.3b·2d · the runtime incarnation fence -----------------------
+#
+# J2 and the host-side half of E. Both leave the fence's BEAM machinery
+# intact and break only the host's side of it, which is the half a
+# BEAM-only battery cannot see at all.
+
+# 24 · The drain answers without doing anything. This is the failure mode
+#      that matters most, because every record-shaped assertion still
+#      passes: the map is emptied, the reply says `remaining: 0`, and the
+#      processes are still there. Only /proc can tell the difference.
+#
+#      **`mem::forget`, not "skip the terminate".** The first version of this
+#      probe swapped `live.drain()` for `std::mem::take(&mut live)`, which
+#      empties the map exactly as `drain` does — it sabotaged nothing and the
+#      battery said so. Removing the `terminate` call alone would not work
+#      either: `Carrier`'s `Drop` reaps anything still holding its control
+#      endpoint, which is the invariant D.1.3b·2a added on purpose. Leaking
+#      the value is the only way to make the host truly not reap.
+probe "a drain that reports success without reaping is noticed" \
+  "every drained Carrier is gone from /proc when the drain answers" \
+  host/src/lib.rs \
+  's|                    c.terminate(3_000);|                    std::mem::forget(c);|'
+
+# 25 · The host's own epoch guard, removed. This is the second line of
+#      defence: even with the Gate fenced correctly, a Gate that restarted
+#      alongside the Peer has nothing to compare, and this is what stops a
+#      start landing in a set that belongs to a dead incarnation.
+probe "a start into another incarnation's physical set is noticed" \
+  "a start under a NEW incarnation is refused while the old set is non-empty" \
+  host/src/lib.rs \
+  's|                    Some(cur) if \*cur != want \&\& !live.is_empty() => json!({|                    Some(cur) if false \&\& *cur != want \&\& !live.is_empty() => json!({|'
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.
