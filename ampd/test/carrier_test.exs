@@ -1083,7 +1083,7 @@ defmodule Ampd.CarrierTest do
       # an in-flight admission would commit under a rule it was not admitted
       # under. The version is the only thing that can carry that — so this
       # asserts it exactly, and changing a row's meaning has to come here.
-      assert Ampd.Carrier.Floor.version() == 3
+      assert Ampd.Carrier.Floor.version() == 4
       assert Ampd.Carrier.Floor.schema() == "carrier-confinement-floor@1"
 
       names =
@@ -1091,8 +1091,8 @@ defmodule Ampd.CarrierTest do
            Ampd.Carrier.Floor.attested_rows() ++ Ampd.Carrier.Floor.correspondence_rows())
         |> Enum.map(fn {_, n, _} -> n end)
 
-      assert length(names) == 25
-      assert length(Enum.uniq(names)) == 25, "two floor rows share a name, so one cannot be reported"
+      assert length(names) == 26
+      assert length(Enum.uniq(names)) == 26, "two floor rows share a name, so one cannot be reported"
 
       # v2's exercise of the rule: the row that claimed to bind the payload
       # and did not is gone, and the one that replaced it is attested rather
@@ -1123,6 +1123,11 @@ defmodule Ampd.CarrierTest do
       assert "terminal_is_controlling" in names
       assert "terminal_is_the_hosts_master" in names
       assert "terminal_resize_is_the_hosts" in names
+
+      # v4. Review found that v3 proved "stdio is a terminal" and "the ctty
+      # is the host's" without ever joining them — two relationships Unix
+      # keeps separate, so both could be true of two different terminals.
+      assert "terminal_stdio_is_the_hosts_slave" in names
 
       att = Enum.map(Ampd.Carrier.Floor.attested_rows(), fn {_, n, _} -> n end)
       assert "execution_basis_is_well_formed" in att
@@ -1536,6 +1541,27 @@ defmodule Ampd.CarrierTest do
       assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
       assert r["code"] == "carrier-confinement-unacceptable"
       assert Peer.carriers() == []
+    end
+
+    test "a Carrier whose stdio is not the host's own slave cannot commit", ctx do
+      # **The state v3 admitted.** Every other row passes: 0/1/2 are one
+      # pseudoterminal, the descriptor set is exactly {0,1,2,3}, the process
+      # is a session leader, it has a controlling terminal, and that
+      # controlling terminal IS the one whose master the host holds. What is
+      # false is the join — the Carrier is *reading and writing* a terminal
+      # the host does not possess while its ctty is one the host does.
+      #
+      # Unix keeps those two relationships apart, so nothing but this row can
+      # see it. That is why the row exists and why the floor went to v4.
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        {:ok, put_in(obs, ["attested", "terminal", "stdio_is_this_host_slave"], false)}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
+      assert length(Harness.terminated()) == 1
     end
 
     test "a terminal with no controlling relationship cannot commit", ctx do

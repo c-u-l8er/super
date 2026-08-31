@@ -71,7 +71,7 @@ defmodule Ampd.Carrier.Floor do
   """
 
   @schema "carrier-confinement-floor@1"
-  @version 3
+  @version 4
 
   def schema, do: @schema
   def version, do: @version
@@ -216,6 +216,29 @@ defmodule Ampd.Carrier.Floor do
        &(get_in(&1, ["terminal", "controlling_terminal"]) == true)},
       {:attested, "terminal_is_the_hosts_master",
        &(get_in(&1, ["terminal", "is_this_host_master"]) == true)},
+      # **v4, and the row v3 was missing.**
+      #
+      # The two rows around this one prove different relationships and Unix
+      # does not join them. `stdio_is_the_possessed_terminal` says 0/1/2 are
+      # *a* pseudoterminal; `terminal_is_the_hosts_master` says the
+      # *controlling terminal* is the one this host holds. A process may have
+      # controlling terminal A while its standard descriptors refer to
+      # terminal B — both rows pass, and the terminal the Carrier is using is
+      # not the terminal the host possesses.
+      #
+      # So the chain
+      #
+      #     host owns master → that master minted this slave
+      #       → the Carrier's 0/1/2 ARE that slave → and it is its ctty
+      #
+      # had its middle link proved only in `super-host verify` and not
+      # required at admission. The host compares `st_rdev` of each of
+      # `/proc/<pid>/fd/{0,1,2}` against the slave it minted — a device
+      # number, never the `/dev/pts/N` symlink text, which is a name and
+      # would be equally true of another namespace's terminal with the same
+      # index. The runtime requires the boolean and is handed no pathname.
+      {:attested, "terminal_stdio_is_the_hosts_slave",
+       &(get_in(&1, ["terminal", "stdio_is_this_host_slave"]) == true)},
       # Resize is an operation performed *on* a Carrier by the holder of the
       # master, never an authority the Carrier holds over its own terminal.
       # `TIOCSWINSZ` is off the seccomp allow-list; this is the row that says

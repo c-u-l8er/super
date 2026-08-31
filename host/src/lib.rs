@@ -449,6 +449,16 @@ fn terminal_attestation(c: &carrier::Carrier) -> Value {
         "controlling_terminal": t.has_controlling_terminal(),
         "foreground": t.is_foreground(),
         "is_this_host_master": p.session().is_some() && p.session() == t.session,
+        // **The join, added at c·1a after review found it missing.**
+        //
+        // `is_this_host_master` says the Carrier's *controlling terminal* is
+        // the one this host holds. It says nothing about what is on 0/1/2 —
+        // and a process may have ctty A while its standard descriptors refer
+        // to terminal B, so the floor could be satisfied by a Carrier using
+        // a terminal the host does not possess. `super-host verify` already
+        // proved this correspondence with a decoy master; it simply was not
+        // part of what the World requires before admitting *this* process.
+        "stdio_is_this_host_slave": crate::pty::stdio_is_slave(c.pid, p.slave_rdev()),
         "master_held_by": "super-host",
         "resize_authority": "super-host",
     })

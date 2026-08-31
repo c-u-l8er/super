@@ -407,6 +407,10 @@ defmodule Ampd.Carrier.Machine.Harness do
             "controlling_terminal" => true,
             "foreground" => true,
             "is_this_host_master" => true,
+            # c·1a. The join between "stdio is a terminal" and "the ctty is
+            # the host's": without it both can be true of two *different*
+            # terminals.
+            "stdio_is_this_host_slave" => true,
             "master_held_by" => "super-host",
             "resize_authority" => "super-host"
           },

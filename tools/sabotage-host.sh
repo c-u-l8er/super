@@ -465,6 +465,36 @@ probe "a host that never lets go of the slave is noticed" \
   host/src/carrier.rs \
   's|                p.close_slave();|                let _ = \&p;|'
 
+# --- D.1.3c·1a · the exact-slave correspondence -----------------------------
+
+# 33 · **The join, removed.** The predicate answers `true` for any terminal,
+#      which is what the v3 floor amounted to: stdio is *a* pty and the ctty
+#      is the host's, with nothing saying they are the same one. Caught only
+#      by the decoy row — the positive row still passes, because the Carrier
+#      really is on the host's slave.
+probe "a stdio-is-my-slave predicate that accepts any terminal is noticed" \
+  "answers FALSE for a terminal this host holds but did not give the Carrier" \
+  host/src/pty.rs \
+  's|            fstat_rdev_of_path(\&format!("/proc/{pid}/fd/{fd}")) == Some(slave_rdev)|            fstat_rdev_of_path(\&format!("/proc/{pid}/fd/{fd}")).is_some()|'
+
+# 34 · The predicate is right and the attestation does not carry it, so the
+#      floor has nothing to require. That is the D.1.3b·2a shape exactly —
+#      an attested object the runtime demanded and the host never emitted —
+#      and it is caught at the World join rather than in the terminal
+#      section, because the refusal is an admission refusal.
+probe "an attestation that omits the stdio correspondence is noticed" \
+  "a real agent starts a real confined Carrier and it JOINS THE WORLD" \
+  host/src/lib.rs \
+  's|        "stdio_is_this_host_slave": crate::pty::stdio_is_slave(c.pid, p.slave_rdev()),|        "stdio_is_this_host_slave_OMITTED": false,|'
+
+# 35 · Only fd 0 is checked. A Carrier reading the host's terminal and
+#      writing somewhere else satisfies every other row: 0/1/2 are still one
+#      displayed target to the observed census, the ctty is still the host's.
+probe "a correspondence that checks only fd 0 is noticed" \
+  "a split stdio is refused" \
+  host/src/pty.rs \
+  's|        && (0..=2).all(\|fd\| {|        \&\& (0..=0).all(\|fd\| {|'
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.

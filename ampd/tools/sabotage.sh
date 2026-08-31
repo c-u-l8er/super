@@ -734,6 +734,16 @@ probe "a host claiming resize authority for the Carrier is refused" test/carrier
   's@       &(get_in(&1, \["terminal", "resize_authority"\]) == "super-host")},@       \&(is_map(\&1) or get_in(\&1, ["terminal", "resize_authority"]) == "super-host")},@' \
   lib/ampd/carrier/floor.ex
 
+# L5 · **The join.** c·1a's row, and the one the other four cannot cover for:
+#      weakened, a Carrier whose controlling terminal is the host's while its
+#      0/1/2 are somebody else's commits. Every other row passes that state —
+#      one pty on stdio, exact descriptor set, session leader, ctty present,
+#      and the ctty really is the host's. Unix keeps "what I am using" and
+#      "what is my controlling terminal" apart, so only this row joins them.
+probe "stdio that is not the host's own slave is refused" test/carrier_test.exs \
+  's@       &(get_in(&1, \["terminal", "stdio_is_this_host_slave"\]) == true)},@       \&(is_map(\&1) or get_in(\&1, ["terminal", "stdio_is_this_host_slave"]) == true)},@' \
+  lib/ampd/carrier/floor.ex
+
 # --- D.1.3b·2e · the token is not the transition ---------------------------
 #
 # Review's closing objection to 2d. The four probes above all falsify through

@@ -1650,6 +1650,97 @@ pub fn run(ampd_dir: &Path) -> i32 {
                     format!("stopped={stopped} pid={cpid:?} still alive"),
                 );
 
+                // ---- D.1.3c·1a · closing the Worker takes the terminal too
+                //
+                // The freeze criterion says *every* Carrier-lifetime
+                // discontinuity removes the terminal, and this was one of two
+                // paths argued structurally rather than measured. The
+                // structure is sound — the `Pty` is a field of `Carrier`, so
+                // whatever drops one drops the other — but "sound" and
+                // "observed" are the distinction this whole lane is about.
+                //
+                // **Its own Worker and its own agent.** The first version
+                // closed the Worker every later check depends on, and four of
+                // them went red with `worker-not-open` — a test that consumes
+                // the fixture the tests after it need. Nothing new is
+                // exercised: `close_worker` already converges its Carriers.
+                // What is new is counting the host's masters across it.
+                // **Its own Lane, too.** Occupancy is per *Locus*, not per
+                // Worker — a second Worker on `lane_id` refused with
+                // `locus-already-occupied`, which is D.1.2 working exactly as
+                // specified and worth writing down here rather than
+                // rediscovering.
+                let ptmx_base = host_ptmx_count();
+                let lane2 = ctl
+                    .call(
+                        "open_lane",
+                        json!({"goal_ref": goal_id, "actor": "kestrel",
+                               "repository_ref": repo_ref, "base_revision": Value::Null}),
+                    )
+                    .unwrap_or(Value::Null);
+                let lane2_id = lane2["result"]["lane"]["id"].as_str().unwrap_or("").to_string();
+                let w2 = ctl
+                    .call("open_worker", json!({"locus_ref": lane2_id, "purpose": "review"}))
+                    .unwrap_or(Value::Null);
+                let w2_id = w2["result"]["worker"]["id"].as_str().unwrap_or("").to_string();
+
+                if let Ok(mut a2) = rt.agent_channel("kestrel") {
+                    let att2 = a2.call("attach_worker", json!({"worker_ref": w2_id}))
+                        .unwrap_or(Value::Null);
+                    let started2 = a2
+                        .call("start_carrier", json!({"locus_ref": lane2_id}))
+                        .unwrap_or(Value::Null);
+                    let pid3 = started2["result"]["carrier"]["host_process_ref"]
+                        .as_str()
+                        .and_then(|r| r.strip_prefix("hp_"))
+                        .and_then(|r| r.split('_').next())
+                        .and_then(|v| v.parse::<u32>().ok());
+                    let st3 = pid3.and_then(|p| crate::carrier::observe(p).starttime);
+
+                    b.check(
+                        "a second real Carrier runs and the host holds one more master",
+                        st3.is_some() && host_ptmx_count() == ptmx_base + 1,
+                        format!("attach={} started={started2} pid={pid3:?} masters {ptmx_base} → {}",
+                                att2["result"], host_ptmx_count()),
+                    );
+
+                    let closed = ctl
+                        .call("close_worker", json!({"worker_ref": w2_id}))
+                        .unwrap_or(Value::Null);
+
+                    let mut closed_gone = false;
+                    let mut closed_ptmx = false;
+                    for _ in 0..80 {
+                        if !closed_gone
+                            && pid3
+                                .map(|p| crate::carrier::observe(p).starttime != st3)
+                                .unwrap_or(false)
+                        {
+                            closed_gone = true;
+                        }
+                        if closed_gone && host_ptmx_count() == ptmx_base {
+                            closed_ptmx = true;
+                            break;
+                        }
+                        std::thread::sleep(std::time::Duration::from_millis(100));
+                    }
+
+                    b.check(
+                        "closing the Worker really ends its Carrier's OS process",
+                        closed["result"]["allow"] == true && closed_gone,
+                        format!("closed={closed} pid={pid3:?} still alive"),
+                    );
+                    b.check(
+                        "and the Carrier's terminal dies with the Worker that was closed",
+                        closed_ptmx,
+                        format!("host held {ptmx_base} masters before, {} after the close",
+                                host_ptmx_count()),
+                    );
+                } else {
+                    b.check("a second agent channel is available for the close-worker path",
+                            false, "rt.agent_channel failed");
+                }
+
                 // ======== D.1.3b·2c · THE ADMITTED PAYLOAD CANNOT BECOME ANOTHER
                 //
                 // Review's finding: the ticket bound `profile_basis` and
@@ -1782,6 +1873,13 @@ pub fn run(ampd_dir: &Path) -> i32 {
                 let sub2 = ctl.call("subscribe", json!({})).unwrap_or(Value::Null);
                 let cursor2 = ProjectionCursor::of(&sub2["result"]);
 
+                // D.1.3c·1a. The freeze criterion says *every* Carrier-lifetime
+                // discontinuity removes the terminal, and this path was
+                // argued structurally — the `Pty` is a field of `Carrier`, so
+                // dropping one drops the other. True, and an argument is not
+                // a measurement. The host's own master count is.
+                let ptmx_owned = host_ptmx_count();
+
                 // **The channel, not the command.** `stop_carrier` would be
                 // the runtime being asked; this destroys the agent's transport
                 // underneath it, which is what losing a Peer actually is.
@@ -1804,6 +1902,28 @@ pub fn run(ampd_dir: &Path) -> i32 {
                     orphan_gone,
                     format!(
                         "pid {pid2:?} still shows starttime {st2:?} after its agent channel died"
+                    ),
+                );
+
+                // The terminal goes with it. Counted rather than inferred:
+                // a reap that ended the process and kept the master would
+                // leave the host accumulating a descriptor per lost Peer,
+                // and every other check on this path would stay green.
+                let mut ptmx_back = false;
+                for _ in 0..40 {
+                    if host_ptmx_count() < ptmx_owned {
+                        ptmx_back = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                b.check(
+                    "and the Carrier's terminal dies with the Peer that owned it",
+                    ptmx_back,
+                    format!(
+                        "host held {ptmx_owned} pty masters with the Carrier up, \
+                         {} after its Peer was lost",
+                        host_ptmx_count()
                     ),
                 );
 
@@ -3335,6 +3455,71 @@ fn pty_possession(b: &mut Battery, scratch: &Path) {
             fd0_rdev != Some(d.slave_rdev()) && d.session().is_none(),
             format!("decoy slave st_rdev={:#x}", d.slave_rdev()),
         );
+    }
+
+    // ------------------- the join, on the PRODUCTION attestation object
+    //
+    // **Asked of `carrier_attestation` and not of the helper.** c·1 proved
+    // this correspondence here and did not put it in what the runtime
+    // requires — so the World could admit a Carrier whose controlling
+    // terminal was the host's while its 0/1/2 were somebody else's. Testing
+    // `stdio_is_slave` alone would repeat that mistake one level down: a
+    // predicate that is right and unwired is worth nothing, which is the
+    // shape of the missing attestation D.1.3b·2a found.
+    let att = crate::carrier_attestation(&c, &dir);
+    b.check(
+        "the production attestation says the Carrier's stdio IS this host's slave",
+        att["terminal"]["stdio_is_this_host_slave"] == true,
+        format!("{}", att["terminal"]),
+    );
+
+    // And the same predicate, against the decoy. Without this the check
+    // above passes for a predicate hardcoded to `true` — which is exactly
+    // what the `st_rdev` offset bug amounted to, and exactly what the decoy
+    // caught the first time.
+    if let Some(d) = decoy.as_ref() {
+        b.check(
+            "and answers FALSE for a terminal this host holds but did not give the Carrier",
+            !pty::stdio_is_slave(cpid, d.slave_rdev()),
+            format!("decoy slave st_rdev={:#x} · carrier fd0 {fd0_rdev:?}", d.slave_rdev()),
+        );
+    }
+
+    // **All three descriptors, and this is the case that proves it.**
+    //
+    // A Carrier reading the host's terminal and writing somewhere else
+    // satisfies every other row: the observed census sees one displayed
+    // target on 0/1/2 only because it is asked about a Carrier that has one,
+    // and the ctty is still the host's. Nothing but `stdio_is_slave`'s
+    // insistence on all three can see the split — and the decoy cannot,
+    // because fd 0 is correct in that case.
+    //
+    // So it is built: a process given the host's slave on fd 0 alone, with
+    // 1 and 2 left on the log file. The predicate must refuse it.
+    if let Ok(split) = Pty::open() {
+        let split_rdev = split.slave_rdev();
+        let split_slave = split.slave().unwrap_or(-1);
+        let sdir = dir.join("split");
+        let _ = std::fs::create_dir_all(&sdir);
+        let r = carrier::spawn_with(&fixture, &sdir, &sdir.join("s.log"), &crate::new_epoch(),
+                                    None, &[], &[(split_slave, 0)], None);
+        match r {
+            Ok(mut sc) => {
+                let split_pid = sc.pid;
+                b.check(
+                    "a split stdio is refused — the slave on fd 0 alone is not possession",
+                    !pty::stdio_is_slave(split_pid, split_rdev),
+                    format!(
+                        "fd0={:?} fd1={:?} fd2={:?} host slave st_rdev={split_rdev:#x}",
+                        pty::fstat_rdev_of_path(&format!("/proc/{split_pid}/fd/0")),
+                        pty::fstat_rdev_of_path(&format!("/proc/{split_pid}/fd/1")),
+                        pty::fstat_rdev_of_path(&format!("/proc/{split_pid}/fd/2")),
+                    ),
+                );
+                sc.terminate(2_000);
+            }
+            Err(e) => b.check("the split-stdio falsifier could run", false, e),
+        }
     }
 
     // ------------------------------------------------ the descriptor table

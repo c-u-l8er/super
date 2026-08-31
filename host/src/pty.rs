@@ -342,6 +342,31 @@ pub fn decode_tty_nr(t: u32) -> (u32, u32) {
     ((t >> 8) & 0xff, (t & 0xff) | ((t >> 12) & 0xfff00))
 }
 
+/// Are this process's 0, 1 and 2 the *exact* slave of a given master?
+///
+/// **The equality the v3 floor was missing.** v3 required that stdio be a
+/// pseudoterminal, that 0/1/2 be one terminal, and — separately — that the
+/// process's *controlling terminal* be the one whose master this host holds.
+/// Those are two facts about two relationships and Unix does not join them:
+/// a process may have controlling terminal A while its standard descriptors
+/// refer to terminal B. Both halves would pass and the terminal the Carrier
+/// is *using* need not be the terminal the host says it possesses.
+///
+/// Compared by `st_rdev` rather than by the `/proc/<pid>/fd/N` symlink text,
+/// for the reason recorded on [`fstat_rdev_of_path`]: the string
+/// `/dev/pts/36` is a name, equally true of another mount namespace's
+/// terminal with the same index. The device number is the resource.
+///
+/// All three descriptors, not just fd 0. A Carrier reading from the host's
+/// terminal and writing somewhere else is exactly the split this exists to
+/// refuse.
+pub fn stdio_is_slave(pid: u32, slave_rdev: u64) -> bool {
+    slave_rdev != 0
+        && (0..=2).all(|fd| {
+            fstat_rdev_of_path(&format!("/proc/{pid}/fd/{fd}")) == Some(slave_rdev)
+        })
+}
+
 /// The four terminal properties of a process, read separately.
 ///
 /// **They are not synonyms and this struct exists so that nothing can treat
