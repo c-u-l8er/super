@@ -2643,6 +2643,25 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         ("perf_event_open", 298, "the performance counters"),
         ("mount", 165, "the mount table"),
         ("pivot_root", 155, "the root of the filesystem"),
+        // --- the same numbers in the other numbering space ---------------
+        //
+        // D.1.3b·2e. Every row above compares a syscall number, and until
+        // this block existed they all compared it in one of the *two* spaces
+        // an x86-64 process can issue. x32 sets bit 30 of `nr` and reports
+        // `AUDIT_ARCH_X86_64`, so `confine::build_filter`'s architecture
+        // check passed it through and every `BPF_JEQ` below missed.
+        //
+        // Measured against the frozen filter: 23 of the 28 numbers in
+        // `DENIED` reached their handler this way. These five are the ones
+        // worth a standing row — `fork_x32` and `clone_x32` because they
+        // *made processes*, which is the physical-lifetime claim rather than
+        // a confinement one, and the rest because they succeed unconfined
+        // and so earn a real DIFFERENTIAL rather than an ambient excuse.
+        ("fork_x32", 57 | 0x4000_0000, "a second process, by the x32 number"),
+        ("clone_x32", 56 | 0x4000_0000, "a second process, by the x32 number"),
+        ("unshare_user_ns_x32", 272 | 0x4000_0000, "a new user namespace, by the x32 number"),
+        ("kill_x32", 62 | 0x4000_0000, "signalling, by the x32 number"),
+        ("pidfd_open_x32", 434 | 0x4000_0000, "a pidfd, by the x32 number"),
     ];
 
     let mut covered = 0usize;

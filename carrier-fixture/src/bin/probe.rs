@@ -326,6 +326,72 @@ fn main() {
     // `vfork` is not here. It is the last thing this probe does, and the
     // reason is measured — see the end of `main`.
 
+    // 6b′ · The SAME syscalls, through the x32 numbering space.
+    //
+    // **A denylist keyed on a syscall number is keyed on a number in one of
+    // two spaces.** x32 — 32-bit pointers, 64-bit instruction set — reports
+    // `AUDIT_ARCH_X86_64` like everything else here, and is distinguished
+    // only by `__X32_SYSCALL_BIT` (1 << 30) set in `nr`. So a filter that
+    // checks the architecture and then compares bare numbers passes the
+    // first test and misses every comparison after it.
+    //
+    // These rows exist because the census's own principle demanded them:
+    // *the fixture's inability to exploit something is not evidence that it
+    // is unavailable*. The list said `fork` was denied. Nobody had called
+    // `fork` by its other number. Measured before the guard existed, this
+    // one **forked** — a live descendant of a Carrier, which is the whole
+    // physical-lifetime claim failing, not merely a confinement row.
+    //
+    // The bare control is what makes these gradeable. `ptrace`,
+    // `process_vm_readv`/`writev`, `sysfs` and `execveat` answer `ENOSYS`
+    // through this entry on any kernel — they need compat wrappers nobody
+    // wired — so a refusal there is AMBIENT-PRECLUDED and says nothing about
+    // Super. `fork`, `clone` and `unshare` alias straight to the native
+    // implementation and succeed unconfined, so they earn a DIFFERENTIAL.
+    const X32: i64 = 0x4000_0000;
+
+    {
+        // Reaped like its native twin above, and for the same reason: a
+        // probe that forks and walks away is a fork bomb with a changelog
+        // entry. Before the guard this printed ALLOWED — and printed the
+        // rest of the report twice, once from each process.
+        let (pid, e) = sysc(57 | X32, 0, 0, 0);
+        if pid == 0 {
+            sysc(60, 0, 0, 0);
+            unreachable!();
+        }
+        if pid > 0 {
+            let mut status: i32 = 0;
+            sysc(61, pid, &mut status as *mut i32 as i64, 0);
+        }
+        r("fork_x32", pid > 0, e);
+    }
+
+    {
+        let (pid, e) = sysc6(56 | X32, 17 /* SIGCHLD */, 0, 0, 0, 0, 0);
+        if pid == 0 {
+            sysc(60, 0, 0, 0);
+            unreachable!();
+        }
+        if pid > 0 {
+            let mut status: i32 = 0;
+            sysc(61, pid, &mut status as *mut i32 as i64, 0);
+        }
+        r("clone_x32", pid > 0, e);
+    }
+
+    let (v, e) = sysc(272 | X32, 0x1000_0000 /* CLONE_NEWUSER */, 0, 0);
+    r("unshare_user_ns_x32", v == 0, e);
+
+    // Signal 0 — the existence check, which sends nothing. It is the safest
+    // member of `DENIED` to call with real arguments, and it succeeded
+    // through this entry against the frozen filter.
+    let (v, e) = sysc(62 | X32, 0, 0, 0);
+    r("kill_x32", v == 0, e);
+
+    let (v, e) = sysc(434 | X32, 0, 0, 0);
+    r("pidfd_open_x32", v >= 0, e);
+
     // 6c · Anonymous execution.
     //
     // `memfd_create` makes a file with no name on any filesystem. Paired with

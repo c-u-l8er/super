@@ -573,6 +573,7 @@ const BPF_RET: u16 = 0x06;
 const BPF_W: u16 = 0x00;
 const BPF_ABS: u16 = 0x20;
 const BPF_JEQ: u16 = 0x10;
+const BPF_JGE: u16 = 0x30;
 const BPF_K: u16 = 0x00;
 
 const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
@@ -586,6 +587,11 @@ const OFF_ARCH: u32 = 4;
 const OFF_ARG0: u32 = 16;
 
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+
+/// `__X32_SYSCALL_BIT` — bit 30, set in `nr` by every x32 syscall. x32
+/// reports `AUDIT_ARCH_X86_64`, so this is the *only* thing distinguishing
+/// the two numbering spaces inside a filter. See `build_filter`.
+const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
 const AF_UNIX: u32 = 1;
 
@@ -683,7 +689,19 @@ const DENIED: &[u32] = &[
 /// something that is not this filter, which is exactly the confusion
 /// `SUPER_DENY_ERRNO` exists to make visible.
 pub fn denies(nr: u32) -> bool {
-    DENIED.contains(&nr)
+    // **Two clauses, because `build_filter` has two**, and this function's
+    // only job is to answer the same question the filter answers. It exists
+    // so `verify` can ask *"does the policy say what the measurement
+    // found?"* — a syscall that returned 130 without being denied here, or
+    // is denied here without returning 130, means something other than this
+    // filter answered. That check is only as good as this model.
+    //
+    // The numbering-space guard is first and is not a list membership: every
+    // number with `__X32_SYSCALL_BIT` set is refused, whatever it is. A
+    // model that enumerated `DENIED | x32` instead would go stale the moment
+    // a syscall was added to `DENIED`, and would say nothing at all about
+    // the 2³⁰ numbers that are not on either list.
+    nr >= X32_SYSCALL_BIT || DENIED.contains(&nr)
 }
 
 fn stmt(code: u16, k: u32) -> SockFilter {
@@ -711,6 +729,41 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
         jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
         stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR),
+        // **The architecture check above is not an ABI check, and every
+        // comparison below this line assumed it was.**
+        //
+        // x32 is a third ABI: 32-bit pointers, the 64-bit instruction set,
+        // and — the part that matters — it reports `AUDIT_ARCH_X86_64`. The
+        // only thing separating an x32 call from a native one is
+        // `__X32_SYSCALL_BIT` (1 << 30) set in the syscall number. So the
+        // arch check passes, `nr` arrives as `101 | 0x40000000`, and every
+        // `BPF_JEQ nr, 101` below misses. `seccomp(2)` names this trap
+        // outright; the filter did not act on it.
+        //
+        // **Measured on this kernel (7.1.6, `CONFIG_X86_X32_ABI=y`), against
+        // this filter's exact shape**: 23 of the 28 numbers in `DENIED`
+        // reached their real handler through the x32 entry. Five return
+        // `ENOSYS` because they need compat wrappers nobody wired
+        // (`ptrace`, `process_vm_readv`/`writev`, `sysfs`, `execveat`); the
+        // rest simply alias to the native implementation.
+        //
+        // **This is a process-lifetime defect, not only a confinement one,**
+        // which is why it reopened a frozen slice rather than waiting for
+        // D.1.3c. `fork` and `clone` are on the list precisely so that the
+        // physical-lifetime guarantee only has to cover the one process the
+        // host owns — and under the x32 bit they did not merely bypass the
+        // filter, they *forked*: the probe printed its table three times and
+        // died in its own children. A Carrier that can make descendants is a
+        // Carrier whose death is not the death of what it started.
+        //
+        // Two instructions, and they are unconditional rather than a
+        // denylist entry: the guard is on the *numbering space*, so it keeps
+        // holding for every syscall added to `DENIED` later, including ones
+        // nobody has thought of. Nothing legitimate reaches here — the
+        // fixture is a static-pie x86-64 binary and glibc/musl never emit an
+        // x32 call from a 64-bit process.
+        jump(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1),
+        stmt(BPF_RET | BPF_K, deny),
     ];
     for nr in DENIED {
         f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, *nr, 0, 1));

@@ -1,0 +1,26 @@
+# **The fixture must link statically, and until now nothing in the tree said so.**
+#
+# `-C target-feature=+crt-static` was passed as a `RUSTFLAGS` environment
+# variable when D.1.3b·1 built this, and was recorded in a review bundle and
+# in a comment in `host/src/confine.rs` — but not anywhere `cargo` would read.
+# So a plain `cargo build --release` produced a *dynamically linked* binary
+# that looks identical by name, size and timestamp, and every Carrier start
+# then failed with `EACCES` from `execve`.
+#
+# The reason is measured and is the whole argument for static linking here:
+#
+#     dynamic   the interpreter is /lib64/ld-linux-x86-64.so.2, so Landlock
+#               must grant LANDLOCK_ACCESS_FS_EXECUTE on all of /usr/lib
+#     static    the execute grant names exactly one inode — this file
+#
+# A confinement whose execute right has to cover the entire system library
+# directory is not a confinement, so the linkage is a policy decision and
+# belongs in version control rather than in a shell history.
+#
+# Deliberately not `--target x86_64-unknown-linux-gnu`: that would move the
+# artifact to `target/x86_64-unknown-linux-gnu/release/`, and
+# `carrier::fixture_path()` looks in `target/release/`. There are no build
+# scripts to contaminate — the package has zero dependencies — so applying
+# the flag to the host target directly is safe here.
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

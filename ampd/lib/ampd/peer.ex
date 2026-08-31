@@ -176,7 +176,49 @@ defmodule Ampd.Peer do
      }}
   end
 
-  defp new_epoch, do: :crypto.strong_rand_bytes(4) |> Base.encode16(case: :lower)
+  # **128 bits, and the width is load-bearing since D.1.3b·2d.**
+  #
+  # This was four bytes for as long as the epoch only prefixed a handle: a
+  # freshness token, where a collision costs one stale handle resolving that
+  # should not have. `Ampd.Carrier.Machine.Gate` and the Rust host then made
+  # it the fence between *physical Carrier universes* — the value on which
+  # "an old physical set must be drained before a replacement incarnation may
+  # execute" depends — and thirty-two random bits is not a scale on which to
+  # rest an absolute lifetime claim. It now matches the discipline
+  # `Ampd.Worktree.EffectChannel.new_epoch/0` and `carrier_epoch` already
+  # use.
+  #
+  # **The width is the second line, not the first.** The Gate drains on a
+  # *witnessed* discontinuity regardless of what the replacement mints, so a
+  # collision cannot by itself defeat the fence; see `converge/1` there. What
+  # 128 bits buys is the residue that has no witness — a Gate that restarted
+  # across the transition and has only the published term to compare.
+  defp new_epoch, do: mint_epoch()
+
+  if Mix.env() == :test do
+    # **Test-controlled minting, compiled out of every other environment.**
+    #
+    # The fence's invariant is "a witnessed discontinuity drains regardless
+    # of the token", and the only way to falsify that on purpose is to make
+    # the replacement mint the value that died. 128 bits will not collide on
+    # request, and a falsifier that waits for one is not a falsifier. See
+    # `E30` in `test/carrier_test.exs`.
+    #
+    # **A door that forges runtime identity, so prose is not its gate.**
+    # `Mix.env()` is evaluated at compile time, so outside `:test` the clause
+    # below is the whole function and the atom is not in the module at all —
+    # `tools/check-epoch-mint.sh` measures that in the built BEAM rather than
+    # reading this comment, and measures the `:test` build too, because a
+    # check that would pass against a module with no door is not a check.
+    defp mint_epoch do
+      case :persistent_term.get({__MODULE__, :forced_epoch}, nil) do
+        nil -> :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+        forced when is_binary(forced) -> forced
+      end
+    end
+  else
+    defp mint_epoch, do: :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower)
+  end
 
   @doc "This incarnation's epoch. Every live handle carries it as a prefix."
   def epoch, do: GenServer.call(__MODULE__, :epoch)

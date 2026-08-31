@@ -613,6 +613,12 @@ defmodule Ampd.Carrier.Machine.Gate do
   def init(:ok) do
     # Fenced until proven otherwise. The alternative — assume ready and let
     # the first start find out — is the direction that starts a process.
+    #
+    # **Nothing about witnessing lives here.** A fresh Gate has witnessed
+    # nothing and must not manufacture a discontinuity out of its own restart
+    # — that is the boot regression recorded in `converge/1`. The record of a
+    # transition lives in the published term, which outlives this process
+    # precisely so that a Gate arriving here after one still finds it.
     {:ok, %{peer_pid: nil, peer_epoch: nil, lifecycle: :fenced}, {:continue, :bind_peer}}
   end
 
@@ -669,7 +675,7 @@ defmodule Ampd.Carrier.Machine.Gate do
   end
 
   @impl true
-  def handle_cast(:peer_incarnation_changed, st), do: {:noreply, converge(st)}
+  def handle_cast(:peer_incarnation_changed, st), do: {:noreply, converge(witness(st))}
 
   @impl true
   def handle_info({:DOWN, _ref, :process, pid, reason}, %{peer_pid: pid} = st) do
@@ -678,7 +684,7 @@ defmodule Ampd.Carrier.Machine.Gate do
         "lifecycle and draining the physical carrier set before any replacement may start"
     )
 
-    {:noreply, converge(%{st | lifecycle: :fenced, peer_pid: nil})}
+    {:noreply, converge(witness(%{st | peer_pid: nil}))}
   end
 
   def handle_info(:refence, st), do: {:noreply, converge(st)}
@@ -686,6 +692,51 @@ defmodule Ampd.Carrier.Machine.Gate do
 
   # ------------------------------------------------------------- the fence
   #
+  # **An observed transition outranks a compared token.**
+  #
+  # Both ways of learning that the incarnation changed — the monitor's
+  # `:DOWN` and `Ampd.Peer.reset/0`'s cast — are themselves the proof that a
+  # discontinuity happened. Until this existed, `converge/1` threw that
+  # evidence away and re-derived the same conclusion from epoch *inequality*,
+  # which is a strictly weaker source: if the replacement minted the value
+  # that died, the identifier said `P1 == P2` while the event said
+  # `P1 ≠ P2`, and the fence the whole slice exists for did not go up.
+  # Widening the epoch to 128 bits (`Ampd.Peer.new_epoch/0`) makes that
+  # collision negligible; it does not make deducing a fact we were *told*
+  # from the accidental inequality of a random number the right shape.
+  #
+  # **One line, and it was written as two.** The first draft carried a
+  # `witnessed` flag in this process's state *as well as* this publish, on
+  # the theory that two mechanisms are safer than one. They are not, and the
+  # sabotage battery is what says so: with both present neither can be
+  # deleted and observed, because each silently does the other's job. A pair
+  # of mechanisms that cannot be falsified apart is one mechanism and one
+  # piece of decoration, and there is no way to tell from the source which is
+  # which.
+  #
+  # The publish is the one that survives on its own merits:
+  #
+  #   · it decides the drain — `{:fenced, nil}` cannot match `{_, ^epoch}`
+  #     for any epoch, so `converge/1` below reaches the drain branch no
+  #     matter what the replacement minted;
+  #   · it outlives *this process*, where a state field does not. A Gate that
+  #     dies between witnessing and draining leaves the record behind in the
+  #     `:persistent_term`, and the replacement Gate re-derives the fence
+  #     from it rather than from a memory it never had;
+  #   · it fences admission *immediately*. `drain/1` may block for the
+  #     machine's whole deadline, and `Ampd.Carrier.admit/2` reads this term
+  #     rather than messaging this process — so without this line an
+  #     admission whose epoch happened to equal the published one is let
+  #     through during the drain window and writes a durable
+  #     `START_ADMITTED` ticket into an incarnation that is being left.
+  #
+  # Deleting it restores the defect exactly: the fence goes back to being
+  # decided by comparing two random numbers.
+  defp witness(st) do
+    publish(:fenced, nil)
+    %{st | lifecycle: :fenced}
+  end
+
   # One function for every way of arriving here — boot, a `:DOWN`, a retry
   # after a lost confirmation. A convergence with one entry point per cause
   # is a convergence with one chance per cause of being got wrong.
@@ -727,8 +778,16 @@ defmodule Ampd.Carrier.Machine.Gate do
             # prompt; the host is what makes it true.
             case :persistent_term.get(@readiness, nil) do
               {_, ^epoch} ->
-                # Same incarnation. Re-monitor, in case we arrived here from a
-                # restart of *this* process rather than of the Peer.
+                # Same incarnation and nothing witnessed: this is a restart of
+                # *this* process, not of the Peer. Re-monitor and carry on.
+                #
+                # **Reachable after a witnessed transition only by collision
+                # of a 128-bit token**, because `witness/1` above sets the
+                # term to `{:fenced, nil}`, which never matches this. That is
+                # the arithmetic the epoch's width is now sized for: the fence
+                # rests on an *event* that was published, and the token only
+                # has to distinguish incarnations for a Gate that restarted
+                # with no memory of the event at all.
                 publish(:ready, epoch)
                 %{st | lifecycle: :ready, peer_pid: monitor(pid, st), peer_epoch: epoch}
 
@@ -753,6 +812,11 @@ defmodule Ampd.Carrier.Machine.Gate do
             "runtime incarnation #{epoch}"
         )
 
+        # **The witness is discharged here and nowhere else** — by the thing
+        # it was demanding, an established empty physical set. Not by time,
+        # not by a retry, and not by the replacement happening to be spelled
+        # like the incarnation that died. The failure branch below republishes
+        # `{:fenced, nil}`, so the demand outlives every unconfirmed attempt.
         %{st | lifecycle: :ready, peer_pid: monitor(pid, st), peer_epoch: epoch}
 
       other ->

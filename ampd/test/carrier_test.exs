@@ -1279,6 +1279,153 @@ defmodule Ampd.CarrierTest do
     end
   end
 
+  # =================================================================== E30
+  #
+  # **The epoch is a token; the transition is a fact. E29 proves the fact
+  # follows from the token, and that is the weaker direction.**
+  #
+  # Every assertion in E29 above turns on `refute new_epoch == old_epoch` —
+  # it establishes that a *randomly different* identifier produces a drain.
+  # Review's objection: `Ampd.Peer.new_epoch/0` minted thirty-two random
+  # bits, and `converge/1` decided drainage by comparing them, so an actual
+  # discontinuity could be represented as equality:
+  #
+  #     P1 epoch = X · P1 dies · P2 mints X  ⟹  identifier says P1 == P2
+  #
+  # while the `:DOWN` said otherwise. The published claim — "a Carrier's
+  # physical lifetime cannot outlive the current runtime/Peer incarnation" —
+  # is absolute, so a *small* probability of misrepresenting the fence is a
+  # defect in it rather than an acceptable rate.
+  #
+  # Two repairs shipped, and these tests separate them on purpose:
+  #
+  #   · the epoch widened to 128 bits, which shrinks the residue that has no
+  #     witness (a Gate restarted across the transition) to nothing;
+  #   · `converge/1` reads `witnessed` *before* the published term, so a
+  #     transition this process was told about is never re-derived from the
+  #     accidental inequality of a random number.
+  #
+  # These falsify the second. A test that waited for a natural collision
+  # would not be a test, so minting is pinned — `Ampd.Peer.mint_epoch/0` has
+  # a `:test`-only clause, compiled out everywhere else and asserted absent
+  # by `tools/verify.sh`.
+  describe "E30 · a witnessed discontinuity fences even when the token collides" do
+    setup do
+      on_exit(fn -> :persistent_term.erase({Ampd.Peer, :forced_epoch}) end)
+      :ok
+    end
+
+    test "a Peer death whose replacement mints the epoch that died still drains", ctx do
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      before = length(Harness.drained())
+
+      old = Peer.epoch()
+      :persistent_term.put({Ampd.Peer, :forced_epoch}, old)
+
+      # **Suspended so that the `:DOWN` is processed against a Peer that is
+      # back**, which is what makes this a falsifier rather than a coin
+      # toss. Without the suspend the Gate races the supervisor: if it
+      # converges while `Ampd.Peer` is still down it takes the
+      # `Process.whereis/1 == nil` branch, publishes `{:fenced, nil}` for
+      # boot-ordering reasons, and reaches the drain on the retry *whether
+      # or not* the repair is present. The probe would then score NOT A
+      # FALSIFIER on some runs and `falsified` on others, which is worse
+      # than either.
+      :sys.suspend(Ampd.Carrier.Machine.Gate)
+      kill_peer!()
+      await_peer!()
+
+      # **The test is vacuous unless the collision actually happened**, so
+      # this is asserted rather than assumed. It is the exact inverse of
+      # E29's `refute` — same event, the identifier landing the other way.
+      assert Peer.epoch() == old,
+             "the collision was not reproduced, so this proves only what E29 already proves"
+
+      # The queued `:DOWN` is delivered now, into a world where the registry
+      # is alive and answering with the epoch that died. Nothing but the
+      # published record of the transition distinguishes this from normality.
+      :sys.resume(Ampd.Carrier.Machine.Gate)
+
+      await_drained(before)
+      assert {:ready, ^old} = await_readiness({:ready, old})
+      assert old in Harness.drained()
+      assert Peer.carriers() == []
+    end
+
+    test "an in-place reset to the same epoch still drains", ctx do
+      # The `Peer.reset/0` half. No `:DOWN` fires here — the notification is
+      # the only evidence there is — so this is the path where discarding it
+      # in favour of the token leaves nothing at all.
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      before = length(Harness.drained())
+
+      old = Peer.epoch()
+      :persistent_term.put({Ampd.Peer, :forced_epoch}, old)
+
+      Peer.reset()
+      assert Peer.epoch() == old, "the collision was not reproduced"
+
+      await_drained(before)
+      assert {:ready, ^old} = await_readiness({:ready, old})
+    end
+
+    test "no start reaches the old physical set before it is drained", ctx do
+      # The consequence the fence exists for, under collision. The drain is
+      # held open so the window is observable rather than raced for.
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      Harness.drain_fails(50)
+      attempts_before = length(Loci.attempts())
+      started_before = length(Harness.started())
+
+      old = Peer.epoch()
+      :persistent_term.put({Ampd.Peer, :forced_epoch}, old)
+      kill_peer!()
+      await_peer!()
+      assert Peer.epoch() == old, "the collision was not reproduced"
+
+      # Without the fix this reads `{:ready, old}`: the published term and the
+      # replacement's epoch are the same string, so nothing looked changed.
+      assert {:fenced, _} = Ampd.Carrier.Machine.Gate.readiness()
+
+      {:ok, agent2} = Peer.attach_agent("kestrel")
+      assert Control.command(agent2, :attach_worker, [ctx.worker["id"]])["allow"] == true
+
+      assert {:refused, r} = Carrier.start(agent2, ctx.lane["id"])
+      assert r["code"] == "carrier-runtime-incarnation-unready"
+
+      assert length(Loci.attempts()) == attempts_before,
+             "a durable attempt was written into an incarnation that is being left"
+
+      assert length(Harness.started()) == started_before,
+             "a start reached the old physical set before it was established empty"
+    end
+
+    test "the fence is not manufactured out of this process's own restart", ctx do
+      # The other side of the same edit, and the regression it could
+      # reintroduce. `witnessed` must be false in a fresh Gate: a `:fenced`
+      # starting state cost a whole `verify` run once, because this process
+      # boots before `Ampd.Bridge` and no drain can succeed with no channel
+      # possessed. A Gate restart under an unchanged Peer must go straight to
+      # ready and ask the machine for nothing.
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      epoch = Peer.epoch()
+      before = length(Harness.drained())
+
+      pid = Process.whereis(Ampd.Carrier.Machine.Gate)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+      assert_receive {:DOWN, ^ref, _, _, _}, 2_000
+
+      # `sync/0` and not a poll on `readiness/0`: the published term outlives
+      # the process, so polling it would return the pre-kill value and
+      # measure nothing.
+      assert {:ready, ^epoch} = await_gate_sync()
+
+      assert length(Harness.drained()) == before,
+             "a Gate restart drained a set that no discontinuity had left behind"
+    end
+  end
+
   # ------------------------------------------------------------- fence helpers
   defp kill_peer! do
     pid = Process.whereis(Ampd.Peer)
@@ -1318,5 +1465,51 @@ defmodule Ampd.CarrierTest do
         "the gate never unfenced under a new incarnation " <>
           "(was #{inspect(was)}, now #{inspect(Ampd.Carrier.Machine.Gate.readiness())})"
       )
+  end
+
+  # **The barrier E30 needs, and why `await_ready/2` cannot be it.**
+  #
+  # Every barrier above is spelled "wait until the epoch is not the one that
+  # died". Under a collision the epoch converged to is spelled exactly like
+  # the one that died, so that helper returns on the state published *before*
+  # the kill and measures nothing — the same trap its own docstring records,
+  # arriving by a different road. The drain count is monotone, is incremented
+  # by the harness before it decides whether to answer, and does not mention
+  # the identifier under test.
+  defp await_drained(before, n \\ 400) do
+    Enum.reduce_while(1..n, nil, fn _, _ ->
+      if length(Harness.drained()) > before do
+        {:halt, :ok}
+      else
+        Process.sleep(25)
+        {:cont, nil}
+      end
+    end) ||
+      flunk(
+        "the machine was never asked to empty the physical set — the fence was decided by " <>
+          "comparing epochs and the replacement minted the one that died (drains still #{before})"
+      )
+  end
+
+  defp await_readiness(target, n \\ 400) do
+    Enum.reduce_while(1..n, nil, fn _, _ ->
+      case Ampd.Carrier.Machine.Gate.readiness() do
+        ^target -> {:halt, target}
+        _ -> Process.sleep(25); {:cont, nil}
+      end
+    end) ||
+      flunk(
+        "the gate never reached #{inspect(target)} " <>
+          "(now #{inspect(Ampd.Carrier.Machine.Gate.readiness())})"
+      )
+  end
+
+  defp await_gate_sync(n \\ 200) do
+    Enum.reduce_while(1..n, nil, fn _, _ ->
+      case Process.whereis(Ampd.Carrier.Machine.Gate) do
+        nil -> Process.sleep(20); {:cont, nil}
+        _ -> {:halt, Ampd.Carrier.Machine.Gate.sync()}
+      end
+    end) || flunk("the carrier machine gate never came back")
   end
 end

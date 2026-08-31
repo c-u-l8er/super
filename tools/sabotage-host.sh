@@ -371,6 +371,33 @@ probe "a start into another incarnation's physical set is noticed" \
   host/src/lib.rs \
   's|                    Some(cur) if \*cur != want \&\& !live.is_empty() => json!({|                    Some(cur) if false \&\& *cur != want \&\& !live.is_empty() => json!({|'
 
+# 26 · D.1.3b·2e. The numbering-space guard, removed — which restores the
+#      filter exactly as D.1.3b froze it. `fork` is on `DENIED`, the
+#      architecture check passes because x32 *reports* `AUDIT_ARCH_X86_64`,
+#      and `BPF_JEQ nr, 57` then misses `57 | 0x40000000`. Measured before
+#      the guard: 23 of the 28 numbers in `DENIED` reached their handler this
+#      way, and `fork` did not merely bypass the filter — it forked.
+#
+#      The expectation names `fork_x32` rather than the count, because that
+#      is the row where a Carrier gained a descendant, and a descendant is
+#      the physical-lifetime claim failing rather than a confinement row.
+probe "a denylist that covers only one syscall numbering space is noticed" \
+  "fork_x32 is refused inside a Carrier" \
+  host/src/confine.rs \
+  's|        jump(BPF_JMP \| BPF_JGE \| BPF_K, X32_SYSCALL_BIT, 0, 1),|        jump(BPF_JMP \| BPF_JGE \| BPF_K, 0xffff_ffff, 0, 1),|'
+
+# 27 · The model the consistency check compares against, not the filter
+#      itself. `confine::denies/1` answers "does the policy SAY this is
+#      refused"; `verify` cross-references it against what the census
+#      MEASURED. Reverting it to bare list membership leaves the filter
+#      correct and the description of it stale, which is the failure mode
+#      that check exists for — and is why it is probed separately from the
+#      guard above.
+probe "a policy description that has gone stale against the filter is noticed" \
+  "the filter's configured deny list names every syscall the census measured refused" \
+  host/src/confine.rs \
+  's|    nr >= X32_SYSCALL_BIT \|\| DENIED.contains(&nr)|    DENIED.contains(\&nr)|'
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.

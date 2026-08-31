@@ -668,7 +668,7 @@ probe "the confinement floor requires a well-formed execution basis" test/carrie
 #      harness refusing to score a probe whose sed matched nothing, exactly as
 #      it should, rather than counting it as a pass.
 probe "the gate notices the peer registry dying" test/carrier_test.exs \
-  's@    {:noreply, converge(%{st | lifecycle: :fenced, peer_pid: nil})}@    {:noreply, st}@' \
+  's@    {:noreply, converge(witness(%{st | peer_pid: nil}))}@    {:noreply, st}@' \
   lib/ampd/carrier/machine.ex
 
 # The transition itself. Leaving the monitor in place but treating a NEW
@@ -691,6 +691,43 @@ probe "the fence asks the machine to empty the physical set" test/carrier_test.e
 probe "admission refuses while the machine is unsynchronized" test/carrier_test.exs \
   's|         :ok <- machine_synchronized(),|         :ok <- :ok,|' \
   lib/ampd/carrier.ex
+
+# --- D.1.3b·2e · the token is not the transition ---------------------------
+#
+# Review's closing objection to 2d. The four probes above all falsify through
+# a *different* epoch, which is the same weakness the E29 tests had: they
+# establish that the fence works when the identifier happens to disagree.
+# `Ampd.Peer.new_epoch/0` minted 32 bits, and `converge/1` decided drainage by
+# comparing them, so a real discontinuity could be represented as equality.
+#
+# K1 · The whole repair, in one line. Without the publish, `converge/1` finds
+#      the term it published before the death — `{:ready, X}` — compares it
+#      against a replacement that also minted X, concludes "same incarnation",
+#      and unfences over a physical set belonging to the dead one. Every
+#      other probe in this block stays green while it does, because they all
+#      arrange for the epochs to differ.
+#      NOTE: a range address, because `publish(:fenced, nil)` appears in four
+#      places and the other three are the boot-ordering retries. `s@…@@`
+#      alone would stub all of them, and a probe that disables more than the
+#      fix it names cannot say which one the red came from.
+probe "a witnessed transition fences whatever the replacement minted" test/carrier_test.exs \
+  '/defp witness(st) do/,/^  end/{s@    publish(:fenced, nil)@    :ok@}' \
+  lib/ampd/carrier/machine.ex
+
+# K2 · The same defect reached the other way. `Peer.reset/0` re-mints in
+#      place, so no `:DOWN` fires and the cast is the *only* evidence that
+#      exists; dropping it leaves the Gate with nothing but the comparison.
+probe "an in-place incarnation change is not inferred from the token" test/carrier_test.exs \
+  's@  def handle_cast(:peer_incarnation_changed, st), do: {:noreply, converge(witness(st))}@  def handle_cast(:peer_incarnation_changed, st), do: {:noreply, converge(st)}@' \
+  lib/ampd/carrier/machine.ex
+
+# K3 · The width, which is the second line rather than the first. It protects
+#      the one residue the published term cannot: a Gate that died across the
+#      transition, whose only evidence is the comparison. Narrowing the mint
+#      back to four bytes is not observable from a test — a collision would
+#      have to occur — so this is NOT probed here and NOT counted. It is
+#      gated by `tools/check-epoch-mint.sh`, which reads the built BEAM, and
+#      recorded here so the absence is a decision rather than an oversight.
 
 # NOT probed, and not counted: `Ampd.Peer`'s `dead?/1` guard.
 #
