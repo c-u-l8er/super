@@ -68,16 +68,65 @@ defmodule Ampd.Carrier do
       identity is not position            D.1.2
       naming is not possession            D.1.3a
       a successful spawn is not admission D.1.3b
+      an attestation is not an agreement  D.1.3b·2c
+
+  The last one is the one review had to force. Three bases are re-read by
+  `commit_start/2` — the host profile, the confinement floor, and now the
+  Carrier execution identity — and until `carrier_basis` existed the third was
+  missing while these docs claimed it was covered. What stood in its place was
+  a host attestation that *some* payload digest had been produced, which
+  answers "what did the host say ran" and never "did the World agree to that".
+  Both are needed:
+
+      attested payload identity  ≠  admission-bound payload identity
 
   ## Losing the runtime incarnation terminates the Carrier
 
   A live Carrier belongs to the `Ampd.Peer` incarnation that admitted it. If
-  that incarnation is lost — supervisor restart, world reset, lineage advance
-  — the Carrier's membership ends and the host reaps the process. There is
+  that incarnation is lost — channel death, world reset, lineage advance — the
+  Carrier's membership ends and the host reaps the process. There is
   deliberately **no survival across a control-plane restart** and therefore no
   persistent Carrier-recovery registry: replacement requires a new Peer, a new
   explicit occupancy, a new admission and a new incarnation. A recovery
   protocol can be designed when something needs one.
+
+  ## One exception, measured, and NOT closed here — `E29`
+
+  This paragraph used to list **supervisor restart** beside the others and say
+  the host reaps. Measured: it does not.
+
+  ```text
+  Ampd.Peer is killed
+      ↓
+  the supervisor restarts it with empty state
+      ↓
+  membership is gone            ← Peer.carriers() == []
+  pending reaps are gone        ← they lived in the process that died
+  nothing was announced         ← terminate/2 does not run on :kill
+      ↓
+  the OS process is still running
+  ```
+
+  It is the same shape D.1.3b·2a found and closed for channel death —
+  *semantic membership ended ≠ process ended* — surviving in the one path
+  nothing had ever measured, under a docstring asserting the opposite.
+
+  **The `pending_reaps` ledger cannot close it**, and it is worth being exact
+  about why rather than filing this as "more of the same". That ledger lives
+  in `Ampd.Peer` so it survives a `Ampd.Carrier.Reaper` restart; when
+  `Ampd.Peer` is the process that dies, the ledger dies with it, *and so does
+  every record of which Carriers existed* — a crash ends membership for all of
+  them at once without pending any. A ledger elsewhere would still not know
+  what to sweep.
+
+  The information does survive, in one place: the host's `serve_carrier` map,
+  which already terminates every Carrier it holds when its channel closes. So
+  the two candidate closures both make the carrier channel not outlive the
+  `Ampd.Peer` incarnation that owns it — `:rest_for_one` so a Peer restart
+  takes `Ampd.Bridge` with it, or a runtime-incarnation epoch on the carrier
+  channel that the host revalidates. Both change restart semantics for
+  sixteen supervised children, or add a rebind protocol the host does not
+  have; neither is a micro-closure. **Declared, not fixed.**
   """
 
   alias Ampd.{AuthorityCoordinator, Core, Loci, Locus, Peer, Refusal, Worker, World}
@@ -98,7 +147,15 @@ defmodule Ampd.Carrier do
   # so there is no instant at which an attempt is observed-but-not-decided.
   # A state with no executable distinction is a state a reader has to be told
   # to ignore.
-  @attempt_states ~w(START_ADMITTED COMMITTED STALE FAILED INDETERMINATE)
+  #
+  # **`RESOLVED` was missing and was being written anyway.** `reconcile/1`
+  # has always ended at `"state" => "RESOLVED"` and this list has never named
+  # it, so a public vocabulary and the durable records disagreed — in the
+  # direction where the records are right and the declaration is the lie. The
+  # inverse error of `OBSERVED`, which was declared and never written, and the
+  # reason `E28` now drives every state and asserts membership rather than
+  # asserting a list against itself.
+  @attempt_states ~w(START_ADMITTED COMMITTED STALE FAILED INDETERMINATE RESOLVED)
   def attempt_states, do: @attempt_states
 
   # Projected Carrier status. `OFFLINE` is the answer for an occupied Worker
@@ -139,7 +196,8 @@ defmodule Ampd.Carrier do
          :ok <- Worker.occupancy(peer, lane),
          {:ok, worker} <- current_worker(peer, lane),
          :ok <- no_live_carrier(peer),
-         :ok <- no_pending_attempt(worker["id"]) do
+         :ok <- no_pending_attempt(worker["id"]),
+         {:ok, basis} <- execution_basis() do
       att = Peer.attachment(peer["id"])
 
       ticket = %{
@@ -163,6 +221,21 @@ defmodule Ampd.Carrier do
         # change to the other.
         "profile_basis" => Locus.profile_digest(),
         "floor_basis" => Ampd.Carrier.Floor.digest(),
+        # Three bases now, and the third is the one review found missing.
+        #
+        # `profile_basis` binds the host embodiment; `floor_basis` binds the
+        # rules a Carrier must satisfy. Neither binds **what is going to be
+        # run**, and without that "an implementation admitted as A cannot
+        # silently become B" was a sentence the source did not support — the
+        # only payload identity anywhere was a digest the host produced
+        # *after* the spawn, which is an attestation about the outcome and not
+        # a term of the agreement.
+        #
+        #     attested payload identity  ≠  admission-bound payload identity
+        #
+        # Both are needed and this is the second one. It is the Carrier
+        # equivalent of D.1.1's embodiment-basis problem, one object down.
+        "carrier_basis" => basis,
         "state" => "START_ADMITTED",
         "admitted_at" => DateTime.utc_now() |> DateTime.to_iso8601()
       }
@@ -249,6 +322,12 @@ defmodule Ampd.Carrier do
         # must invalidate an admission accepted under the previous one rather
         # than silently applying a new rule to it.
         Ampd.Carrier.Floor.digest() != ticket["floor_basis"] -> "carrier-floor-basis-changed"
+        # **Before the floor, not after.** The floor asks whether this is a
+        # Carrier; this asks whether it is the one we agreed to. Asking the
+        # cheaper, more specific question first means a payload swap is
+        # refused as a payload swap rather than as whichever floor row the
+        # replacement happened to also miss.
+        basis_moved(ticket, obs) != nil -> "carrier-execution-basis-changed"
         floor_failures(obs) != nil -> "carrier-confinement-unacceptable"
         true -> nil
       end
@@ -267,11 +346,16 @@ defmodule Ampd.Carrier do
           "refused_as" => reason,
           # Which rows, not just that it failed. "Confinement unacceptable" is
           # not a diagnosis, and this is where a person finds out which of
-          # seventeen things it was.
-          "floor_failures" => floor_failures(obs)
+          # twenty things it was.
+          "floor_failures" => floor_failures(obs),
+          # And which *field* of the basis moved, for the same reason. "The
+          # execution basis changed" does not distinguish a redeployed payload
+          # from a protocol version bump, and those want different responses
+          # from the person reading it.
+          "basis_moved" => basis_moved(ticket, obs)
         })
 
-      {:refused, refuse(reason, ticket)}
+      {:refused, refuse(reason, Map.put(ticket, "basis_moved", basis_moved(ticket, obs)))}
     else
       inc = %{
         "schema" => @incarnation_schema,
@@ -503,7 +587,13 @@ defmodule Ampd.Carrier do
       # confirmed dead is a separate question with its own answer; leaving
       # membership in place until it is answered would mean a Carrier stayed
       # RUNNING because the host was slow.
-      Peer.detach_carrier(c["peer_ref"])
+      #
+      # One call, not two: `detach_carrier_pending/1` ends the membership and
+      # records the reap debt in the same message, so this process dying
+      # between them cannot lose the only reference to a running Carrier.
+      # `Ampd.Carrier.Reaper` may be down — the announcement below is
+      # conditional and always was — and the debt is what survives that.
+      Peer.detach_carrier_pending(c["peer_ref"])
       if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.orphaned(c)
     end)
 
@@ -664,6 +754,62 @@ defmodule Ampd.Carrier do
       else: :ok
   end
 
+  # The fields of `carrier-execution-basis@1` that are bound, named exactly.
+  #
+  # A whole-map comparison would bind whatever the host happened to include,
+  # which makes the set of things that can invalidate an admission a property
+  # of the host's current JSON rather than a decision. Comparing a named
+  # subset means adding a field to the basis is a deliberate act with a
+  # falsifier attached, and an unknown field cannot silently start refusing
+  # every start after a host upgrade.
+  @basis_fields ~w(schema payload_digest carrier_protocol carrier_protocol_version)
+  def basis_fields, do: @basis_fields
+
+  @doc """
+  Which bound fields of the Carrier execution basis differ between what was
+  admitted and what actually ran, or `nil` if they agree.
+
+  `nil` is only returned when both bases are present and every bound field
+  matches. **An absent basis on either side is a mismatch, not a skip** — the
+  whole point of the object is that there is no path where nothing is
+  compared, and a `nil == nil` that read as agreement would be exactly that
+  path.
+  """
+  def basis_moved(ticket, obs) do
+    admitted = ticket["carrier_basis"]
+    actual = get_in(obs, ["attested", "execution_basis"])
+
+    cond do
+      not is_map(admitted) -> ["admitted-basis-absent"]
+      not is_map(actual) -> ["actual-basis-absent"]
+      true -> Enum.reject(@basis_fields, &(Map.get(admitted, &1) == Map.get(actual, &1)))
+    end
+    |> case do
+      [] -> nil
+      moved -> moved
+    end
+  end
+
+  # The basis the selected machine would launch. Reads channel metadata; makes
+  # no request and takes no deadline — see the callback docs. Safe inside the
+  # order for that reason and for no other.
+  defp execution_basis do
+    case machine().execution_basis() do
+      {:ok, b} when is_map(b) ->
+        {:ok, b}
+
+      {:error, why} ->
+        {:refused, refuse("carrier-execution-basis-unavailable", %{"reason" => why})}
+
+      # Anything else is a machine that answered the wrong shape, and it
+      # refuses rather than raising. A raise here would be inside
+      # `AuthorityCoordinator.transact/1`, and a crash masks a probe.
+      other ->
+        {:refused,
+         refuse("carrier-execution-basis-unavailable", %{"reason" => inspect(other)})}
+    end
+  end
+
   # Delegated to `Ampd.Carrier.Floor`, which is versioned and names the rows
   # it failed. This was four inline booleans and review found the hole: they
   # did not require Landlock, so a process with no filesystem confinement at
@@ -687,7 +833,8 @@ defmodule Ampd.Carrier do
           "ticket_id" => ticket["ticket_id"],
           "carrier_ref" => ticket["carrier_ref"],
           "reason" => ticket["machine_reason"] || ticket["reason"],
-          "floor_failures" => ticket["floor_failures"]
+          "floor_failures" => ticket["floor_failures"],
+          "basis_moved" => ticket["basis_moved"]
         }
         |> Enum.reject(fn {_, v} -> v == nil end)
         |> Map.new()

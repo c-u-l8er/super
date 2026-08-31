@@ -42,6 +42,28 @@ defmodule Ampd.Carrier.Reaper do
   is. It blocks a replacement until `Ampd.Carrier.reconcile/1` establishes
   absence. A reaper that logged a failure and moved on would be the
   duplicate-spawn hole reopened from a third direction.
+
+  ## And an announcement this process was not up to hear is not a reap
+
+  Every caller announces conditionally — `if Process.whereis(__MODULE__)` —
+  which is right, because a crash must not take the disconnect path with it.
+  It also means a Peer lost during the gap between this process crashing and
+  the supervisor restarting it removed the membership and told nobody:
+
+      semantic membership ended  ≠  process ended       ← the D.1.3b·2a gap
+      termination requested     ≠  termination established
+      the announcement was made ≠  the announcement was heard   ← this one
+
+  `Ampd.Carrier.converge/1` cannot recover it, because it re-derives victims
+  from live incarnations and the incarnation is already gone — removal is
+  immediate and has to stay immediate. So the debt is recorded in
+  `Ampd.Peer.pending_reaps/0` *before* each announcement, and `init/1` sweeps
+  it. A restart is therefore a convergence, not a fresh start.
+
+  `Ampd.Peer` is started before this process under a `:one_for_one`
+  supervisor, so it is still standing across any restart of this one. That is
+  the whole mechanism; there is no durable queue, because the failure it
+  guards against is a supervised restart and not a machine reboot.
   """
   use GenServer
 
@@ -59,13 +81,55 @@ defmodule Ampd.Carrier.Reaper do
   def unconfirmed, do: GenServer.call(__MODULE__, :unconfirmed)
 
   @impl true
-  def init(:ok), do: {:ok, %{unconfirmed: []}}
+  def init(:ok) do
+    # **The convergence sweep, and it is why a restart is safe.**
+    #
+    # In `handle_continue` rather than here, because `init/1` runs inside
+    # `Supervisor.start_child` and machine latency in this function is machine
+    # latency in front of the whole supervisor — the same argument `Ampd.Peer`
+    # makes for announcing rather than reaping.
+    {:ok, %{unconfirmed: []}, {:continue, :converge}}
+  end
 
   @impl true
-  def handle_cast({:orphaned, inc}, st) do
+  def handle_continue(:converge, st) do
+    case Ampd.Peer.pending_reaps() do
+      [] ->
+        {:noreply, st}
+
+      pending ->
+        Logger.warning(
+          "ampd: the carrier reaper restarted with #{length(pending)} unsettled reap(s) — " <>
+            "converging them; each lost its announcement while this process was down"
+        )
+
+        # **Performed here, not cast to self, and the difference is
+        # observable.** A `handle_continue` runs after `init/1` has returned —
+        # the supervisor is already unblocked — but *before* anything in the
+        # mailbox, so doing the work here keeps `drain/0` a real barrier.
+        #
+        # Casting instead put the sweep's own messages *behind* whatever
+        # arrived while the restart was in flight: `E27` called `drain/0`
+        # immediately after `restart_child`, the drain call was already queued
+        # ahead of the self-casts, and it returned `:ok` while every reap was
+        # still pending. Measured — the test read `terminated() == []` and the
+        # convergence was working. A barrier a later message can skip past is
+        # not a barrier.
+        {:noreply, Enum.reduce(pending, st, &reap/2)}
+    end
+  end
+
+  @impl true
+  def handle_cast({:orphaned, inc}, st), do: {:noreply, reap(inc, st)}
+
+  # The one body both entry points share. An orphan lost to a restart and an
+  # orphan announced normally are the same event arriving by two routes, and
+  # two copies of this would be two chances to fix only one.
+  defp reap(inc, st) do
     case Ampd.Carrier.reap_orphans([inc]) do
       [{:ok, _ref}] ->
-        {:noreply, st}
+        settle(inc)
+        st
 
       [{:error, ref, why}] ->
         Logger.warning(
@@ -93,13 +157,24 @@ defmodule Ampd.Carrier.Reaper do
           )
         end
 
-        {:noreply, %{st | unconfirmed: [inc["carrier_ref"] | st.unconfirmed]}}
+        # Settled either way. The debt exists to survive a lost announcement,
+        # and this announcement was heard: the outcome is now either a durable
+        # unresolved attempt that blocks replacement, or a deliberate decision
+        # not to write one into a world the Carrier does not belong to. A
+        # later sweep re-reaping it would ask the host a second time about a
+        # process it has already answered for.
+        settle(inc)
+
+        %{st | unconfirmed: [inc["carrier_ref"] | st.unconfirmed]}
     end
   end
 
   @impl true
   def handle_call(:drain, _f, st), do: {:reply, :ok, st}
   def handle_call(:unconfirmed, _f, st), do: {:reply, st.unconfirmed, st}
+
+  defp settle(%{"carrier_ref" => ref}) when is_binary(ref), do: Ampd.Peer.reap_settled(ref)
+  defp settle(_), do: :ok
 
   # Same shape as an ambiguous stop, and deliberately a new attempt rather
   # than a mutation of the committed start: the start really did commit, and

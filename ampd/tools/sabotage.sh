@@ -613,6 +613,45 @@ probe "the ordered cursor is sampled after the content, never before" test/cockp
   's|  defp sample_after(st, _before), do: cursor_of(st)|  defp sample_after(st, before), do: Map.put(cursor_of(st), "view_revision", before)|' \
   lib/ampd/authority_coordinator.ex
 
+# --- D.1.3b·2c ------------------------------------------------------------
+#
+# The execution basis, unbound at admission. The ticket goes back to carrying
+# `profile_basis` and `floor_basis` only, and a payload that changed between
+# admission and commit becomes indistinguishable from the one that was agreed
+# to — which is the state review found the source in.
+probe "the carrier execution basis is bound at admission" test/carrier_test.exs \
+  's|        "carrier_basis" => basis,|        "carrier_basis_unbound" => basis,|' \
+  lib/ampd/carrier.ex
+
+# Absent reading as agreement. `basis_moved/2` returns `nil` for "they agree",
+# so a comparison that skipped when either side was missing would let a host
+# opt out of the whole check by omitting a field — the direction that fails
+# open, which is the only direction that is a lie about an identity claim.
+probe "an absent execution basis is a mismatch, never a skip" test/carrier_test.exs \
+  's|      not is_map(actual) -> \["actual-basis-absent"\]|      not is_map(actual) -> []|' \
+  lib/ampd/carrier.ex
+
+# The reap debt, not recorded before the announcement. This is the TCB race:
+# `Ampd.Peer` still ends membership, the announcement is still dropped when
+# the reaper is down, and nothing survives the gap for a restarted one to
+# find. Every record-shaped assertion still passes.
+probe "a reap debt outlives the announcement that was lost" test/carrier_test.exs \
+  's|    st = pend(st, inc)|    st = st|' \
+  lib/ampd/peer.ex
+
+# And the sweep that reads it. With `handle_continue` gone the debt is
+# recorded and never acted on, which is a durable leak rather than a race —
+# strictly worse than the bug it replaced, and the reason the probe is here.
+probe "a restarted reaper converges what it did not hear" test/carrier_test.exs \
+  's|    {:ok, %{unconfirmed: \[\]}, {:continue, :converge}}|    {:ok, %{unconfirmed: []}}|' \
+  lib/ampd/carrier/reaper.ex
+
+# The floor row that replaced the one which claimed to bind the payload and
+# did not. Reverted to the old predicate, a placeholder digest passes.
+probe "the confinement floor requires a well-formed execution basis" test/carrier_test.exs \
+  's|      {:attested, "execution_basis_is_well_formed", &execution_basis_ok?(&1\["execution_basis"\])}|      {:attested, "execution_basis_is_well_formed", \&is_map(\&1["execution_basis"])}|' \
+  lib/ampd/carrier/floor.ex
+
 # NOT probed, and not counted: `Ampd.Peer`'s `dead?/1` guard.
 #
 # Stubbing it leaves the suite GREEN, and the reason is worth writing down

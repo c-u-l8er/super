@@ -205,18 +205,83 @@ extern "C" {
     fn getuid() -> u32;
 }
 
-/// Content identity of the Carrier payload.
+/// Content identity of the Carrier payload **as installed**.
 ///
-/// A pathname says which file was *named*; a digest says which bytes ran. The
-/// runtime binds this at admission so that "admitted Carrier implementation A"
-/// cannot silently become implementation B between admission and commit.
-fn fixture_digest(p: &Path) -> String {
+/// Read from the pathname, and that is correct *here and only here*: this is
+/// asked at Carrier-channel establishment, when no Carrier is running and the
+/// question is which implementation is installed to be launched. It is the
+/// admission basis, not an attestation about a process.
+fn installed_payload_digest(p: &Path) -> String {
     match std::fs::read(p) {
         Ok(b) => crate::sha256::digest(&b),
         // Unreadable is not "no digest" — a missing value must not be able to
         // satisfy a comparison, so it is a value nothing else can equal.
         Err(e) => format!("unreadable:{e}"),
     }
+}
+
+/// Content identity of the executable **that is actually running**.
+///
+/// # Why not the pathname
+///
+/// The previous version digested `payload` *after* `spawn` had already
+/// `execve`d it, which is a TOCTOU with no attacker required:
+///
+/// ```text
+/// exec(A)  →  something replaces the pathname  →  read(path) → digest(B)
+/// ```
+///
+/// and the host would attest B while the live process is A. An ordinary
+/// package update or a concurrent build is enough. The host is trusted; being
+/// trusted is not the same as being asked the right question.
+///
+/// # Why `/proc/<pid>/exe`
+///
+/// It is a magic link to the *inode of the executed image*, not a path to be
+/// re-resolved. Opening it reaches the bytes that are running even after the
+/// directory entry has been replaced or unlinked.
+///
+/// **Measured on this kernel**, with a static binary A installed, running, and
+/// then atomically renamed over by B:
+///
+/// ```text
+///                      readlink /proc/<pid>/exe    bytes through it
+/// before the rename    <path>                      digest(A)
+/// after the rename     <path> (deleted)            digest(A)     ← still A
+/// the pathname now                                 digest(B)
+/// ```
+///
+/// So the **link target is the wrong evidence** — it goes stale and says
+/// `(deleted)` — and the **bytes read through the link are the right
+/// evidence**. This reads the bytes and never the target.
+fn running_image_digest(pid: u32) -> String {
+    match std::fs::read(format!("/proc/{pid}/exe")) {
+        Ok(b) => crate::sha256::digest(&b),
+        Err(e) => format!("unreadable:{e}"),
+    }
+}
+
+/// `carrier-execution-basis@1` — what a Carrier implementation *is*.
+///
+/// Two callers, deliberately measuring two different things through one
+/// constructor so the shapes cannot drift apart:
+///
+/// ```text
+/// carrier_channel()   payload = the installed pathname   → the admission basis
+/// start_one()         payload = /proc/<pid>/exe          → what actually ran
+/// ```
+///
+/// `Ampd.Carrier.commit_start/2` compares them. Every field is one whose
+/// discontinuity is exercised by a falsifier; nothing decorative is bound,
+/// because a field nobody can move is a field that only makes the comparison
+/// look stronger than it is.
+fn execution_basis(payload_digest: String) -> Value {
+    json!({
+        "schema": "carrier-execution-basis@1",
+        "payload_digest": payload_digest,
+        "carrier_protocol": "carrier-lifecycle",
+        "carrier_protocol_version": 1,
+    })
 }
 
 fn start_one(
@@ -270,38 +335,62 @@ fn start_one(
         "schema": "carrier-start-observation@1",
         "host_process_ref": format!("hp_{}_{}", c.pid, c.starttime.unwrap_or(0)),
         "observed": o.to_json(),
-        "attested": {
-            "schema": "carrier-confinement-attested@1",
-            "landlock_abi": cfg["landlock_abi"].clone(),
-            "landlock_handled_fs": cfg["handled_access_fs"].clone(),
-            "landlock_handled_net": cfg["handled_access_net"].clone(),
-            "landlock_scoped": cfg["scoped"].clone(),
-            "landlock_grants": cfg["grants"].clone(),
-            "seccomp_deny_errno": cfg["seccomp_deny_errno"].clone(),
-            "pdeathsig": "SIGKILL",
-            "network": "none",
-            "attestor": "super-host",
-            // Identity of what was actually launched, so the runtime can bind
-            // it rather than trusting a pathname. Content identity, not path.
-            "payload_digest": fixture_digest(&fixture),
-            "expected_uid": unsafe { getuid() },
-            "control_inode": c.control_inode(),
-            // **Canonicalized before digesting.** `/proc/<pid>/cwd` is a
-            // resolved path; `dir` may contain a symlink component, and
-            // `carrier::spawn` canonicalizes it before `current_dir` anyway.
-            // Digesting the unresolved form compared two spellings of the
-            // same directory and refused every real start on
-            // `cwd_is_the_allocated_workdir` — sixteen of seventeen floor
-            // rows passing, which is the shape of a correspondence bug rather
-            // than a policy one.
-            "workdir_identity": crate::sha256::digest(
-                dir.canonicalize().unwrap_or_else(|_| dir.clone()).to_string_lossy().as_bytes()
-            ),
-        },
+        "attested": carrier_attestation(&c, &dir),
         "configured": cfg,
     });
 
     Ok((c, obs))
+}
+
+/// The `carrier-confinement-attested@1` object, for a live Carrier.
+///
+/// **Extracted so the battery measures this and not a reimplementation of
+/// it.** The executable-TOCTOU falsifier used to call `running_image_digest`
+/// directly, which meant it measured the *function* while its name claimed it
+/// measured "what the host attests" — so sabotaging the attestation's digest
+/// source left the check green. `tools/sabotage-host.sh` reported it as
+/// **NOT A FALSIFIER**, which is exactly what that battery is for.
+///
+/// One function, both callers. A check that cannot be moved by breaking the
+/// production path is not a check on the production path.
+pub fn carrier_attestation(c: &carrier::Carrier, dir: &Path) -> Value {
+    let cfg = c.configured().clone();
+
+    json!({
+        "schema": "carrier-confinement-attested@1",
+        "landlock_abi": cfg["landlock_abi"].clone(),
+        "landlock_handled_fs": cfg["handled_access_fs"].clone(),
+        "landlock_handled_net": cfg["handled_access_net"].clone(),
+        "landlock_scoped": cfg["scoped"].clone(),
+        "landlock_grants": cfg["grants"].clone(),
+        "seccomp_deny_errno": cfg["seccomp_deny_errno"].clone(),
+        "pdeathsig": "SIGKILL",
+        "network": "none",
+        "attestor": "super-host",
+        // **The identity of the image that is running, measured through the
+        // process rather than through the pathname it was launched from.**
+        // This was `fixture_digest(&fixture)` — a read of the installation
+        // path *after* `execve` had already happened, so a replacement
+        // landing in that window would have been attested as the running
+        // Carrier. See `running_image_digest`.
+        //
+        // Emitted as a basis object rather than a bare digest because the
+        // runtime does not compare digests, it compares *bases*: the ticket
+        // bound one at admission and this is the one to hold it against.
+        "execution_basis": execution_basis(running_image_digest(c.pid)),
+        "expected_uid": unsafe { getuid() },
+        "control_inode": c.control_inode(),
+        // **Canonicalized before digesting.** `/proc/<pid>/cwd` is a resolved
+        // path; `dir` may contain a symlink component, and `carrier::spawn`
+        // canonicalizes it before `current_dir` anyway. Digesting the
+        // unresolved form compared two spellings of the same directory and
+        // refused every real start on `cwd_is_the_allocated_workdir` —
+        // sixteen of seventeen floor rows passing, which is the shape of a
+        // correspondence bug rather than a policy one.
+        "workdir_identity": crate::sha256::digest(
+            dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf()).to_string_lossy().as_bytes()
+        ),
+    })
 }
 
 pub fn serve_effects(fd: RawFd) {
@@ -1488,6 +1577,33 @@ impl Runtime {
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("carrier socketpair: {e}"))?;
 
+        // **The Carrier execution basis rides the possessed channel.**
+        //
+        // The runtime must bind, at admission, the identity of the Carrier
+        // implementation it is admitting — otherwise "admitted as A" is not a
+        // fact about anything and A can silently become B before commit. The
+        // question is where that identity comes from, and the answer must not
+        // be a second ambient lookup: a runtime that resolved the payload by
+        // name would have re-acquired exactly the authority D.1.3a took away.
+        //
+        // This channel is already host-originated and already possessed, so
+        // its establishment is the one moment that is both trusted and
+        // *before* any admission. Measuring here also means a host restart or
+        // a rebind naturally establishes a fresh basis, which is the correct
+        // behaviour for a redeployed payload and needs no invalidation
+        // protocol of its own.
+        //
+        // No raw pathname crosses: the basis carries a digest.
+        let carrier_basis = match carrier::fixture_path() {
+            Some(p) => execution_basis(installed_payload_digest(&p)),
+            // A host with no fixture installed still binds the channel — it
+            // can still serve `stop` — but every admission against this basis
+            // will refuse, which is the right direction. A basis that was
+            // absent rather than unequal would be a basis a comparison could
+            // skip.
+            None => execution_basis("uninstalled".to_string()),
+        };
+
         let cmd = json!({
             "schema": "bridge-command@1",
             "command": "bind_carrier_channel",
@@ -1497,6 +1613,7 @@ impl Runtime {
                 "protocol": "carrier-lifecycle",
                 "protocol_version": 1,
                 "host_identity": effect::identity(),
+                "carrier_basis": carrier_basis,
             }
         });
 

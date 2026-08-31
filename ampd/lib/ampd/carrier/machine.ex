@@ -59,6 +59,25 @@ defmodule Ampd.Carrier.Machine do
   @callback start(ticket) :: {:ok, observation} | {:error, String.t()}
 
   @doc """
+  The identity of the Carrier implementation this machine would launch.
+
+  `carrier-execution-basis@1`. Bound into the ticket by Transaction A and
+  compared against what actually ran by Transaction B.
+
+  **This submits nothing and waits for nothing.** It reads metadata the host
+  supplied when the channel was established, which is why it is safe to call
+  from inside the total order and does not go through
+  `Ampd.Carrier.Machine.Gate` — a basis question that took a machine round
+  trip would put machine latency back inside the coordinator by the one route
+  the whole admit/machine/commit shape exists to close.
+
+  `{:error, why}` refuses the admission. A basis that cannot be established is
+  not a basis that may be skipped: an admission with nothing bound is exactly
+  the state this callback exists to make impossible.
+  """
+  @callback execution_basis() :: {:ok, map()} | {:error, String.t()}
+
+  @doc """
   Stop a Carrier.
 
   Takes the ticket-or-incarnation and the observation, because a stop may be
@@ -114,6 +133,33 @@ defmodule Ampd.Carrier.Machine.Channel do
       "carrier_ref" => ticket["carrier_ref"],
       "carrier_epoch" => ticket["carrier_epoch"]
     })
+  end
+
+  @basis_schema "carrier-execution-basis@1"
+  def basis_schema, do: @basis_schema
+
+  @doc """
+  The Carrier execution basis the host measured when it established this
+  channel.
+
+  Read off the possessed endpoint's incarnation — no frame, no deadline, no
+  ambient lookup. `Ampd.Bridge` accepted it at the boundary or refused the
+  channel, so anything reaching here is already shaped; the guard is here
+  anyway because a basis that is `nil` must refuse an admission rather than
+  bind a `nil`, and that is a different failure from a malformed bind.
+  """
+  @impl true
+  def execution_basis do
+    case Bridge.carrier_endpoint() do
+      nil ->
+        {:error, "no host carrier channel is possessed, so no carrier implementation is admitted"}
+
+      %{incarnation: inc} ->
+        case inc["carrier_basis"] do
+          %{"schema" => @basis_schema} = b -> {:ok, b}
+          other -> {:error, "the carrier channel carries no execution basis: #{inspect(other)}"}
+        end
+    end
   end
 
   @impl true
@@ -178,9 +224,33 @@ defmodule Ampd.Carrier.Machine.Harness do
   def reset do
     clear_policy()
     :persistent_term.erase({__MODULE__, :stop_result})
+    :persistent_term.erase({__MODULE__, :basis})
     :persistent_term.put({__MODULE__, :started}, [])
     :persistent_term.put({__MODULE__, :terminated}, [])
   end
+
+  @doc """
+  The basis a healthy harness installs.
+
+  `payload_digest` is a fixed value rather than a random one so that
+  `observation/2` and `execution_basis/0` agree by construction. A harness
+  whose two halves minted independent identities would refuse every commit and
+  the falsifiers would all pass for the wrong reason.
+  """
+  def default_basis do
+    %{
+      "schema" => Ampd.Carrier.Machine.Channel.basis_schema(),
+      "payload_digest" => "sha256:" <> String.duplicate("ab", 32),
+      "carrier_protocol" => "carrier-lifecycle",
+      "carrier_protocol_version" => 1
+    }
+  end
+
+  @doc "Script the admission-time basis, for the execution-identity falsifiers."
+  def put_basis(b), do: :persistent_term.put({__MODULE__, :basis}, b)
+
+  @impl true
+  def execution_basis, do: :persistent_term.get({__MODULE__, :basis}, {:ok, default_basis()})
 
   @impl true
   def start(ticket) do
@@ -242,7 +312,11 @@ defmodule Ampd.Carrier.Machine.Harness do
           # attestation at all.
           "expected_uid" => 1000,
           "control_inode" => 4242,
-          "payload_digest" => String.duplicate("ab", 32),
+          # What the harness says actually ran. Equal to `default_basis/0` by
+          # construction — a start whose execution basis matched nothing would
+          # refuse every commit, and the fault matrix would then be measuring
+          # this module rather than the runtime.
+          "execution_basis" => default_basis(),
           "workdir_identity" =>
             :crypto.hash(:sha256, "/tmp/harness-carrier-workdir") |> Base.encode16(case: :lower)
         }
@@ -295,6 +369,48 @@ defmodule Ampd.Carrier.Machine.Gate do
   hidden — if that ever matters, build the demultiplexer then.
 
   This is +1 supervised process and is counted as such in the census.
+
+  ## A DECLARED SCALABILITY SEAM — read this before Motor startup
+
+  Two numbers bound this, and they do not compose the way a reader expects:
+
+  ```text
+  machine request deadline    8 s     Ampd.Carrier.Machine.Channel
+  gate caller timeout        20 s     here
+  ```
+
+  A caller queued behind two slow starts waits ~16 s before its own ~8 s
+  begins, so with three or more concurrent slow starts a `GenServer.call`
+  here can time out. That is caught and typed:
+
+  ```text
+  caller timeout  →  INDETERMINATE  →  replacement blocked  →  reconciliation
+  ```
+
+  which fails safe, and is why this is a seam and not a defect.
+
+  **The part worth knowing is Erlang-specific.** A timed-out `GenServer.call`
+  does not cancel the queued request. This process will still reach that
+  message and still ask the host to start a Carrier, *after* the caller has
+  already classified the attempt as indeterminate. So a physical process can
+  come into existence for an attempt the runtime has given up on. Uniqueness
+  survives — `INDETERMINATE` is in `Ampd.Carrier.unresolved/0`, so no
+  replacement is admitted, and reconciliation establishes absence by asking
+  the host to kill it — but the safety comes from the *ambiguity handling*,
+  not from the queue.
+
+  **A fixed caller timeout wrapped around an unbounded serializer queue is
+  not the architecture for concurrent Motor or model startup**, where a start
+  is expensive rather than a fixture spawn and a one-line handshake. Before
+  that boundary, one of:
+
+    * queued asynchronous lifecycle requests with durable correlation, so a
+      caller that stops waiting is a caller that can still be answered; or
+    * the real single-reader demultiplexer, so starts overlap instead of
+      queueing.
+
+  Not built here. The first PTY slice does not materially raise Carrier-start
+  concurrency, so this holds for it; it does not hold for Motor.
   """
   use GenServer
 

@@ -297,6 +297,48 @@ probe "a leaked control endpoint is noticed" \
   host/src/carrier.rs \
   's|        drop(self.control.take());|        std::mem::forget(self.control.take());|'
 
+# --- D.1.3b·2c · execution identity and the physical reap ------------
+#
+# Three probes for the three claims this closure adds. Each removes one
+# fix and expects the check that exists to catch it to go RED — the
+# alternative being twelve new green rows whose green nobody has tested.
+
+# 21 · The TOCTOU itself, restored. Digesting the pathname *after* exec is
+#      exactly what the source did, and it needs no attacker: an ordinary
+#      concurrent build in that window is enough. With this reverted the
+#      host attests B while the live process is A.
+#
+#      **This probe reported NOT A FALSIFIER on its first run and the probe
+#      was right.** The check it names called `running_image_digest` directly,
+#      so it measured the function while claiming to measure "what the host
+#      attests", and reverting the attestation left it green. The attestation
+#      is built by one shared `carrier_attestation`, which both `start_one`
+#      and the battery now read — so this line is the production path.
+probe "attesting the pathname instead of the running image is noticed" \
+  "replacing the pathname after exec does not change what the host attests" \
+  host/src/lib.rs \
+  's|"execution_basis": execution_basis(running_image_digest(c.pid)),|"execution_basis": execution_basis(installed_payload_digest(\&carrier::fixture_path().unwrap())),|'
+
+# 22 · The admission basis, removed from the channel. Without it the
+#      runtime has nothing to bind at admission, so a payload swapped
+#      between admission and commit is indistinguishable from the one that
+#      was agreed to. The runtime refuses the channel outright — which is
+#      the fail-closed direction — so the production join is what goes red.
+probe "a carrier channel carrying no execution basis is noticed" \
+  "the host creates the Carrier lifecycle channel and passes it over the bridge" \
+  host/src/lib.rs \
+  's|                "carrier_basis": carrier_basis,|                "carrier_basis_disabled": carrier_basis,|'
+
+# 23 · The reap of an orphaned Carrier, stubbed. `Ampd.Peer` still drops
+#      the incarnation, so membership still ends and every record-shaped
+#      assertion still passes — which is precisely the D.1.3b·2a defect,
+#      and precisely why the freeze criterion needed a check that asks the
+#      kernel instead.
+probe "an orphaned Carrier that is never reaped is noticed" \
+  "losing the real owning Peer really ends the Carrier's OS process" \
+  ampd/lib/ampd/carrier/reaper.ex \
+  's|def handle_cast({:orphaned, inc}, st), do: {:noreply, reap(inc, st)}|def handle_cast({:orphaned, _inc}, st), do: {:noreply, st}|'
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.

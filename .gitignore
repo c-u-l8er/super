@@ -13,6 +13,12 @@ erl_crash.dump
 # Node
 node_modules/
 
+# A world's authority state. `scripts/make-super-source-tar.sh` already
+# excludes these from a source audit for the reason that applies here too —
+# a dets table is a world, not source — and until now nothing stopped a
+# `git add -A` from committing somebody's Loci and worktrees into history.
+*.dets
+
 # Packaged revision bundles — regenerable release freight, not history.
 and-super-rev-*.zip
 *.tar.gz

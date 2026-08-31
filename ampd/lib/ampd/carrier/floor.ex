@@ -43,10 +43,35 @@ defmodule Ampd.Carrier.Floor do
   attestation together describe a process at or above the floor, and refuses
   otherwise. Whether the *policy itself* is adequate is b·1's question and is
   answered by the gate, not per-start.
+
+  **It does not decide whether this is the Carrier that was admitted.** The
+  floor asks "is this a Carrier"; `Ampd.Carrier.commit_start/2` asks "is this
+  *the* Carrier we agreed to", by comparing the ticket's bound
+  `carrier-execution-basis@1` against the one the host measured off the
+  running process. The floor can require the basis to be *present and
+  well-formed* — it does, below — and cannot require it to be *the right one*,
+  because the floor has never seen the ticket.
+
+  ## The versioning rule
+
+  > Changing the semantics of an existing named row requires a version change,
+  > even when the row's name does not change.
+
+  `digest/0` derives from the version and the row *names*. It cannot see a
+  function body, so a row rewritten in place would keep its digest and an
+  in-flight admission taken under the old meaning would commit under the new
+  one — silently, which is the one failure mode a basis exists to prevent.
+  The version is the only thing that can carry that, so it is the thing that
+  must move. `E28` asserts it as an exact constant, so a semantic change to a
+  row cannot be made without also failing a test that names the version.
+
+  Version 2 is the first exercise of that rule: `payload_is_the_attested_bytes`
+  became `execution_basis_is_well_formed`, moved from the correspondence class
+  to the attested class, and stopped accepting a bare digest.
   """
 
   @schema "carrier-confinement-floor@1"
-  @version 1
+  @version 2
 
   def schema, do: @schema
   def version, do: @version
@@ -85,8 +110,16 @@ defmodule Ampd.Carrier.Floor do
   *together*, which neither of the other two lists has.
 
   This is the difference between a process that is Carrier-shaped and the
-  process we intended, and it is what stops an admitted implementation A
-  silently becoming implementation B between admission and commit.
+  process we intended.
+
+  **It is not what stops an admitted implementation A becoming implementation
+  B.** This docstring said it was, and review was right that the source did
+  not establish it: the row that claimed the payload was checked read only
+  `att["payload_digest"]` and established that *the host supplied a
+  SHA-shaped string*, which is a fact about the host's output format and not
+  about which bytes ran. Nothing here has ever seen the ticket, so nothing
+  here can compare against the admission. That comparison is
+  `carrier-execution-basis-changed` in `Ampd.Carrier.commit_start/2`.
   """
   def correspondence_rows do
     [
@@ -101,12 +134,6 @@ defmodule Ampd.Carrier.Floor do
            _ ->
              false
          end
-       end},
-      {:correspondence, "payload_is_the_attested_bytes",
-       fn _obs, att ->
-         is_binary(att["payload_digest"]) and
-           not String.starts_with?(att["payload_digest"], "unreadable:") and
-           byte_size(String.trim_leading(att["payload_digest"], "sha256:")) >= 32
        end},
       {:correspondence, "cwd_is_the_allocated_workdir",
        fn obs, att ->
@@ -143,9 +170,47 @@ defmodule Ampd.Carrier.Floor do
       {:attested, "seccomp_refusal_is_attributable", &(&1["seccomp_deny_errno"] == 130)},
       {:attested, "parent_death_is_kernel_bound", &(&1["pdeathsig"] == "SIGKILL")},
       {:attested, "no_network", &(&1["network"] == "none")},
-      {:attested, "attestor_is_the_host", &(&1["attestor"] == "super-host")}
+      {:attested, "attestor_is_the_host", &(&1["attestor"] == "super-host")},
+      # **The row this replaces was the weakest thing in the floor.**
+      #
+      # `payload_is_the_attested_bytes` accepted any string that was 32 bytes
+      # or longer after an optional `sha256:` prefix and did not begin
+      # `unreadable:`. So it held for `"aaaa…"`, and what it actually
+      # established was:
+      #
+      #     the host supplied a nonempty SHA-like payload digest
+      #
+      # while its name and the docs above it claimed:
+      #
+      #     the payload running now == the payload admitted in Transaction A
+      #
+      # It was also in the correspondence class while reading only the
+      # attestation, so it was misfiled as well as weak.
+      #
+      # This requires the whole basis object, exactly spelled, with a digest
+      # of the width sha256 actually produces. It still cannot say the basis
+      # is the *admitted* one — see the moduledoc — but a malformed or absent
+      # basis can no longer reach the comparison that does.
+      {:attested, "execution_basis_is_well_formed", &execution_basis_ok?(&1["execution_basis"])}
     ]
   end
+
+  # 64 hex characters, `sha256:`-prefixed, and nothing else accepted. The host
+  # emits `sha256:<hex>`; `>= 32` bytes after an *optional* prefix was wide
+  # enough to admit a placeholder, and the placeholder is what a hand-written
+  # attestation reaches for.
+  defp execution_basis_ok?(%{"schema" => "carrier-execution-basis@1"} = b) do
+    d = b["payload_digest"]
+
+    is_binary(d) and
+      String.starts_with?(d, "sha256:") and
+      byte_size(d) == 71 and
+      String.match?(String.trim_leading(d, "sha256:"), ~r/\A[0-9a-f]{64}\z/) and
+      b["carrier_protocol"] == "carrier-lifecycle" and
+      is_integer(b["carrier_protocol_version"])
+  end
+
+  defp execution_basis_ok?(_), do: false
 
   defp nonzero_hex?(v) when is_binary(v) do
     case Integer.parse(String.replace_prefix(v, "0x", ""), 16) do
@@ -161,7 +226,9 @@ defmodule Ampd.Carrier.Floor do
 
   Returns `:ok` or `{:error, [failed_row_names]}`. **Names the rows that
   failed**, because "confinement unacceptable" is not a diagnosis and the
-  operator detail is where a person finds out which of fifteen things it was.
+  operator detail is where a person finds out which of twenty things it was.
+  (This said *fifteen* through two rounds that changed the row set — the count
+  is derived by `E28` now, so a stale one fails a test rather than a reading.)
   """
   def verify(observation) when is_map(observation) do
     obs = observation["observed"] || %{}

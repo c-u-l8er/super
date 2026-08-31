@@ -5,7 +5,7 @@
 //! ever produce the commands its identity is allowed to produce, and that
 //! nothing which was not handed a descriptor can produce any.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -1649,6 +1649,186 @@ pub fn run(ampd_dir: &Path) -> i32 {
                     stopped["result"]["allow"] == true && gone,
                     format!("stopped={stopped} pid={cpid:?} still alive"),
                 );
+
+                // ======== D.1.3b·2c · THE ADMITTED PAYLOAD CANNOT BECOME ANOTHER
+                //
+                // Review's finding: the ticket bound `profile_basis` and
+                // `floor_basis` and nothing that said *what would be run*, so
+                //
+                //     an implementation admitted as A cannot silently become B
+                //
+                // was a claim the source did not establish. The only payload
+                // identity anywhere was a digest the host produced after the
+                // spawn — an attestation about the outcome, not a term of the
+                // agreement.
+                //
+                // The adversary is A with one byte appended: measured to
+                // `execve` and behave identically (both exit 65 with no
+                // output when run bare), so **nothing but the execution basis
+                // can refuse it**. If the swap made B unrunnable this check
+                // would pass on the handshake failing and prove nothing.
+                let fixture_before = crate::carrier::fixture_path();
+                let baseline_digest = fixture_before.as_ref().map(|p| digest_of(p));
+
+                match fixture_before.as_ref().and_then(|p| SwappedFixture::install(p)) {
+                    None => b.check(
+                        "the payload-swap falsifier could run",
+                        false,
+                        format!("could not install a B over {fixture_before:?}"),
+                    ),
+                    Some(swap) => {
+                        let before = carrier_children();
+
+                        // The channel measured A when it was established. The
+                        // installed bytes are now B. Nothing else moved.
+                        let swapped = a
+                            .call("start_carrier", json!({"locus_ref": lane_id}))
+                            .unwrap_or(Value::Null);
+
+                        let code = swapped["result"]["refusal"]["code"]
+                            .as_str()
+                            .or_else(|| swapped["result"]["reason"].as_str())
+                            .unwrap_or("")
+                            .to_string();
+
+                        b.check(
+                            "a payload swapped after admission is REFUSED at commit, by name",
+                            swapped["result"]["allow"] == false
+                                && code == "carrier-execution-basis-changed",
+                            format!("{swapped}"),
+                        );
+
+                        // It may well have physically started — that is what
+                        // the machine phase being outside the total order
+                        // means. The property is that it does not survive as
+                        // a Carrier, which is a statement about processes and
+                        // not about records.
+                        let mut reaped = false;
+                        for _ in 0..40 {
+                            if carrier_children().len() <= before.len() {
+                                reaped = true;
+                                break;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                        b.check(
+                            "the refused payload is reaped, leaving no Carrier process behind",
+                            reaped,
+                            format!("before={before:?} after={:?}", carrier_children()),
+                        );
+
+                        drop(swap);
+                    }
+                }
+
+                // Restored, and proved restored: a falsifier that mutates the
+                // installed payload has to leave the tree the way it found it,
+                // and "it should have" is not a measurement.
+                let restored = fixture_before.as_ref().map(|p| digest_of(p));
+                b.check(
+                    "the payload-swap falsifier restored the installed fixture",
+                    restored.is_some() && restored == baseline_digest,
+                    format!("baseline={baseline_digest:?} now={restored:?}"),
+                );
+
+                // And a fresh admission under the restored payload succeeds —
+                // otherwise the refusal above would be indistinguishable from
+                // the swap having broken Carrier starts outright.
+                let again = a
+                    .call("start_carrier", json!({"locus_ref": lane_id}))
+                    .unwrap_or(Value::Null);
+                let inc2 = &again["result"]["carrier"];
+                b.check(
+                    "restoring the admitted payload lets a fresh admission commit",
+                    again["result"]["allow"] == true && inc2["status"] == "RUNNING",
+                    format!("{again}"),
+                );
+
+                // ======== D.1.3b·2c · PEER LOSS ENDS THE PROCESS, PHYSICALLY
+                //
+                // The one freeze criterion D.1.3b·2b left open in its own
+                // words: `E23` proved the reap was *requested against the
+                // harness*. The load-bearing proposition is the last arrow,
+                // and nothing had ever run it:
+                //
+                //     real Carrier RUNNING
+                //         ↓  the actual owning Peer disappears
+                //     semantic membership ends
+                //         ↓  Reaper
+                //     real host stop
+                //         ↓
+                //     the actual pid/starttime disappears
+                //
+                // Not "the reaper received an event". The kernel is asked.
+                let hpr2 = inc2["host_process_ref"].as_str().unwrap_or("").to_string();
+                let pid2: Option<u32> = hpr2
+                    .strip_prefix("hp_")
+                    .and_then(|r| r.split('_').next())
+                    .and_then(|v| v.parse().ok());
+                let st2 = pid2.and_then(|p| crate::carrier::observe(p).starttime);
+
+                b.check(
+                    "the Carrier about to be orphaned is a live OS process",
+                    st2.is_some(),
+                    format!("host_process_ref={hpr2:?}"),
+                );
+
+                // Subscribed *before* the loss, so the projection read
+                // afterwards is one the runtime pushed in response to it.
+                // `latest()` on an unsubscribed channel is `None`, and a check
+                // that read `None` as "the Worker is gone" would have been a
+                // check measuring its own setup — which is what it did on the
+                // first run of this section.
+                let sub2 = ctl.call("subscribe", json!({})).unwrap_or(Value::Null);
+                let cursor2 = ProjectionCursor::of(&sub2["result"]);
+
+                // **The channel, not the command.** `stop_carrier` would be
+                // the runtime being asked; this destroys the agent's transport
+                // underneath it, which is what losing a Peer actually is.
+                fdpass::shutdown_fd(a.fd());
+
+                let mut orphan_gone = false;
+                for _ in 0..80 {
+                    if pid2
+                        .map(|p| crate::carrier::observe(p).starttime != st2)
+                        .unwrap_or(false)
+                    {
+                        orphan_gone = true;
+                        break;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+
+                b.check(
+                    "losing the real owning Peer really ends the Carrier's OS process",
+                    orphan_gone,
+                    format!(
+                        "pid {pid2:?} still shows starttime {st2:?} after its agent channel died"
+                    ),
+                );
+
+                // And the position outlives the process. A Carrier dying must
+                // not take the Worker or the Locus with it — that asymmetry
+                // is the whole of `OCCUPIED ∧ OFFLINE` being legitimate, and
+                // the reason `Ampd.Peer` holds carriers in a map the Loci
+                // store has never been able to reach.
+                let after = ctl
+                    .projection_after(&cursor2, Duration::from_secs(10))
+                    .or_else(|| ctl.latest())
+                    .map(|v| v.to_string())
+                    .unwrap_or_default();
+
+                b.check(
+                    "the Worker and the Locus outlive the Peer that occupied them",
+                    !after.is_empty() && after.contains(&worker_id) && after.contains(&lane_id),
+                    format!(
+                        "worker={worker_id} lane={lane_id} projection_bytes={} \
+                         worker_present={} lane_present={}",
+                        after.len(),
+                        after.contains(&worker_id),
+                        after.contains(&lane_id)
+                    ),
+                );
             }
             (ag, g) => b.check(
                 "the production effect path could be exercised at all",
@@ -1666,6 +1846,96 @@ pub fn run(ampd_dir: &Path) -> i32 {
     let _ = std::fs::remove_dir_all(&scratch);
 
     if b.fail == 0 { 0 } else { 1 }
+}
+
+/// The Carrier processes this host currently has as direct children.
+///
+/// Read from `/proc` rather than from the host's own `live` map, for the
+/// reason the descriptor census is taken from outside: the map is the record
+/// and the record is what a leak would be missing from. A refused start that
+/// left a process behind would be invisible to anything that asked the host
+/// what it thinks it is holding.
+fn carrier_children() -> Vec<u32> {
+    let me = std::process::id();
+    let mut out = Vec::new();
+
+    let Ok(rd) = std::fs::read_dir("/proc") else { return out };
+
+    for e in rd.flatten() {
+        let Ok(pid) = e.file_name().to_string_lossy().parse::<u32>() else { continue };
+        let Ok(s) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else { continue };
+        // Field 2 (comm) may contain spaces and parentheses; split after the
+        // last ')' — the same rule `carrier::observe` uses for starttime.
+        let Some(tail) = s.rsplit_once(')') else { continue };
+        let ppid: Option<u32> = tail.1.split_whitespace().nth(1).and_then(|v| v.parse().ok());
+
+        if ppid == Some(me) {
+            let exe = std::fs::read_link(format!("/proc/{pid}/exe"))
+                .map(|p| p.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            if exe.contains("super-carrier-fixture") {
+                out.push(pid);
+            }
+        }
+    }
+
+    out
+}
+
+fn digest_of(p: &Path) -> String {
+    std::fs::read(p)
+        .map(|b| crate::sha256::digest(&b))
+        .unwrap_or_else(|e| format!("unreadable:{e}"))
+}
+
+/// The installed Carrier payload, temporarily replaced, restored on `Drop`.
+///
+/// **B is A with one trailing byte.** The kernel's ELF loader ignores bytes
+/// past the last mapped segment, so B `execve`s and behaves exactly as A does
+/// — measured: both exit 65 with no output when run without a control
+/// descriptor. That is deliberate and load-bearing. An adversary that failed
+/// to start would be refused by the handshake, and the falsifier would pass
+/// while proving nothing about the execution basis.
+///
+/// `Drop` rather than a cleanup call: this replaces a file in the developer's
+/// build tree, and a panic between install and restore would leave it
+/// replaced. The battery also *measures* that the restore happened, because
+/// a destructive falsifier that only usually cleans up is a falsifier that
+/// eventually costs somebody a confusing afternoon.
+struct SwappedFixture {
+    path: PathBuf,
+    original: Vec<u8>,
+}
+
+impl SwappedFixture {
+    fn install(path: &Path) -> Option<SwappedFixture> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let original = std::fs::read(path).ok()?;
+        let mut modified = original.clone();
+        modified.push(0);
+
+        let tmp = path.with_extension("swap-b");
+        std::fs::write(&tmp, &modified).ok()?;
+        std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).ok()?;
+        // Atomic: the pathname holds A or it holds B, never a partial write
+        // that would make an exec failure the thing under test.
+        std::fs::rename(&tmp, path).ok()?;
+
+        Some(SwappedFixture { path: path.to_path_buf(), original })
+    }
+}
+
+impl Drop for SwappedFixture {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = self.path.with_extension("swap-a");
+        if std::fs::write(&tmp, &self.original).is_ok() {
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::rename(&tmp, &self.path);
+        }
+    }
 }
 
 // ==================================== D.1.3b · THE CONFINED CARRIER PROCESS
@@ -1900,6 +2170,95 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         c.same_process() && o.starttime.is_some(),
         format!("starttime = {:?}", o.starttime),
     );
+
+    // ---------------------------- the executable that ran, not the pathname
+    //
+    // Review found a TOCTOU inside the host's own attestation, needing no
+    // attacker:
+    //
+    //     resolve fixture path → spawn → handshake → fixture_digest(path)
+    //
+    // The digest was taken from the pathname *after* the process had already
+    // executed, so anything replacing the file in that window — an ordinary
+    // package update, a concurrent `cargo build` — would be attested as the
+    // running Carrier while the live process was the previous binary.
+    //
+    // The fix reads the bytes through `/proc/<pid>/exe`, which is a magic link
+    // to the executed *inode*. This is the negative test: A is running, the
+    // pathname is atomically replaced by B, and the host must still identify
+    // A. Note that the check two rows above — `exe` by link target — goes
+    // stale here on purpose; the link target becomes `<path> (deleted)`, which
+    // is exactly why the target is the wrong evidence and the bytes are right.
+    //
+    // **Read out of the attestation the host actually builds**, not by
+    // calling the digest function. The first version of this section called
+    // `running_image_digest` directly, so its name claimed it measured "what
+    // the host attests" while it measured a function the attestation happens
+    // to use — and `tools/sabotage-host.sh` scored it **NOT A FALSIFIER**:
+    // reverting `start_one` to digest the pathname left it green. That is the
+    // same class of defect as every other one this round found, in the check
+    // written to catch it.
+    {
+        let attested = |c: &carrier::Carrier| -> String {
+            crate::carrier_attestation(c, &dir)["execution_basis"]["payload_digest"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+
+        let running = attested(&c);
+        let a_bytes = digest_of(&fixture);
+
+        b.check(
+            "the running Carrier's image digest is measured through its own /proc",
+            running == a_bytes && !running.starts_with("unreadable:"),
+            format!("attested={running} installed={a_bytes}"),
+        );
+
+        match SwappedFixture::install(&fixture) {
+            None => b.check(
+                "the executable-TOCTOU falsifier could run",
+                false,
+                format!("could not install a B over {}", fixture.display()),
+            ),
+            Some(swap) => {
+                let b_bytes = digest_of(&fixture);
+                let after = attested(&c);
+
+                b.check(
+                    "replacing the pathname after exec does not change what the host attests",
+                    after == a_bytes && after != b_bytes && a_bytes != b_bytes,
+                    format!("after_swap={after} A={a_bytes} B={b_bytes}"),
+                );
+
+                // The counterexample, stated as a measurement rather than as
+                // a claim about what the old code would have done: the
+                // pathname now yields B while the process is still A.
+                b.check(
+                    "and the pathname the Carrier was launched from now yields the OTHER binary",
+                    b_bytes != a_bytes && !b_bytes.starts_with("unreadable:"),
+                    format!("path={b_bytes} running={after}"),
+                );
+
+                // `(deleted)`: the link target is no longer usable evidence,
+                // which is the whole argument for reading bytes through it.
+                let relinked = crate::carrier::observe(c.pid).exe.unwrap_or_default();
+                b.check(
+                    "the /proc/<pid>/exe link TARGET goes stale while its bytes do not",
+                    relinked.ends_with("(deleted)"),
+                    format!("exe link = {relinked:?}"),
+                );
+
+                drop(swap);
+            }
+        }
+
+        b.check(
+            "the executable-TOCTOU falsifier restored the installed fixture",
+            digest_of(&fixture) == a_bytes,
+            format!("fixture is now {}", digest_of(&fixture)),
+        );
+    }
 
     let clean = c.terminate(3_000);
     b.check(

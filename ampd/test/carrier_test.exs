@@ -419,9 +419,24 @@ defmodule Ampd.CarrierTest do
       Application.delete_env(:ampd, :carrier_machine)
       Bridge.drop_carrier_endpoint()
 
+      # **This used to be `carrier-start-indeterminate`, and the change is the
+      # property getting stronger rather than moving.**
+      #
+      # Before D.1.3b·2c the admission had nothing to bind, so it succeeded,
+      # wrote a durable attempt, asked a machine that had no channel, and came
+      # back INDETERMINATE — which wedges the Worker until a person
+      # reconciles it, over a runtime that was never able to start anything.
+      # Now the basis is a term of the admission, so a runtime that cannot say
+      # which Carrier implementation it is admitting does not admit one.
       assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
-      assert r["code"] == "carrier-start-indeterminate"
+      assert r["code"] == "carrier-execution-basis-unavailable"
       assert Peer.carriers() == []
+
+      # And no wedge: refusing before the ticket means there is nothing to
+      # reconcile. This is the `E1` property — a refusal reaches no machine —
+      # holding for a new refusal reason.
+      assert Loci.attempts() == []
+      assert Harness.started() == []
     end
   end
 
@@ -837,6 +852,345 @@ defmodule Ampd.CarrierTest do
       refute a["carrier_ref"] == b["carrier_ref"]
       assert length(Peer.carriers()) == 2
       assert length(Harness.started()) == 2
+    end
+  end
+
+  # =================================================================== E26
+  #
+  # The defect this closes, in review's words:
+  #
+  #     `payload_digest` appears only in the host's post-spawn attestation.
+  #     Therefore this claim is currently false: an implementation admitted
+  #     as A cannot silently become B before commit.
+  #
+  # The ticket bound `profile_basis` and `floor_basis` and nothing that said
+  # *what would be run*. The floor's `payload_is_the_attested_bytes` row read
+  # like the missing check and established only that the host had produced a
+  # SHA-shaped string — a fact about the host's output format.
+  describe "E26 · the Carrier execution identity is bound at admission" do
+    test "a payload that changed between admission and commit cannot join", ctx do
+      # Admitted under basis A; the machine runs something whose execution
+      # basis is B. Everything else — profile, floor, occupancy, epochs — is
+      # untouched, so this is the payload swap in isolation.
+      b = %{Harness.default_basis() | "payload_digest" => "sha256:" <> String.duplicate("cd", 32)}
+
+      Harness.put_policy(fn t ->
+        obs = Harness.observation(t)
+        {:ok, put_in(obs, ["attested", "execution_basis"], b)}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-execution-basis-changed"
+
+      # Refused, and reaped: the process may well have started — that is the
+      # whole reason the machine phase is outside the order — and the point is
+      # that it does not become a Carrier, not that it never ran.
+      assert Peer.carriers() == []
+      assert length(Harness.terminated()) == 1, "the swapped payload was not reaped"
+
+      # And the refusal names which field moved, not merely that something did.
+      assert r["operator_detail"]["basis_moved"] == ["payload_digest"]
+    end
+
+    test "restoring the admitted payload lets a fresh admission succeed", ctx do
+      b = %{Harness.default_basis() | "payload_digest" => "sha256:" <> String.duplicate("cd", 32)}
+      Harness.put_policy(fn t -> {:ok, put_in(Harness.observation(t), ["attested", "execution_basis"], b)} end)
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+
+      # The refused attempt is terminal — STALE, not INDETERMINATE — because
+      # the commit *knows* what happened. So it does not wedge the Worker and
+      # a re-admission under the restored payload is admitted normally.
+      Harness.put_policy(fn t -> {:ok, Harness.observation(t)} end)
+      assert {:ok, inc} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert inc["status"] == "RUNNING"
+    end
+
+    test "a protocol version change is a discontinuity too", ctx do
+      b = %{Harness.default_basis() | "carrier_protocol_version" => 2}
+      Harness.put_policy(fn t -> {:ok, put_in(Harness.observation(t), ["attested", "execution_basis"], b)} end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-execution-basis-changed"
+      assert r["operator_detail"]["basis_moved"] == ["carrier_protocol_version"]
+    end
+
+    test "an observation carrying no execution basis at all is refused", ctx do
+      # The direction that matters: absent must never read as agreement. A
+      # comparison that skipped when one side was missing would be a
+      # comparison a host could opt out of by omitting a field.
+      Harness.put_policy(fn t ->
+        obs = Harness.observation(t)
+        {:ok, put_in(obs, ["attested"], Map.delete(obs["attested"], "execution_basis"))}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-execution-basis-changed"
+      assert r["operator_detail"]["basis_moved"] == ["actual-basis-absent"]
+      assert Peer.carriers() == []
+    end
+
+    test "the basis question submits nothing to the machine", _ctx do
+      # It reads channel metadata. If it took a machine round trip it would be
+      # machine latency inside the total order, which is the one thing the
+      # admit/machine/commit shape exists to keep out — and `Ampd.Carrier`
+      # calls it from inside `AuthorityCoordinator.transact/1`.
+      assert {:ok, _} = Harness.execution_basis()
+      assert Harness.started() == []
+      assert Harness.terminated() == []
+    end
+
+    test "a machine that cannot state a basis admits nothing", ctx do
+      Harness.put_basis({:error, "the host has not said what it would run"})
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-execution-basis-unavailable"
+      assert Loci.attempts() == [], "an admission was recorded with nothing bound"
+      assert Harness.started() == []
+    end
+  end
+
+  # =================================================================== E27
+  #
+  # The TCB race review found in the new reaper architecture: every caller
+  # announces under `if Process.whereis(Reaper)`, so a Peer lost while the
+  # supervisor is between restarts removes the membership and loses the
+  # announcement — a live process with nothing referring to it.
+  describe "E27 · a lost reap announcement survives a Reaper restart" do
+    test "a Carrier orphaned while the Reaper is down is still reaped", ctx do
+      assert {:ok, inc} = Carrier.start(ctx.agent, ctx.lane["id"])
+
+      # Deterministically down, rather than killed and raced against the
+      # supervisor: `Process.whereis` must be nil at the instant the Peer is
+      # lost, and a `Process.exit` would be restarted in microseconds.
+      :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Carrier.Reaper)
+      assert Process.whereis(Ampd.Carrier.Reaper) == nil
+
+      Peer.detach(ctx.agent)
+
+      # The hole is real: membership ended and nothing reaped it.
+      assert Peer.carriers() == []
+      assert Harness.terminated() == [], "something reaped it while the reaper was down"
+
+      # But the debt was recorded where a restart can find it.
+      assert Enum.any?(Peer.pending_reaps(), &(&1["carrier_ref"] == inc["carrier_ref"]))
+
+      {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Ampd.Carrier.Reaper)
+      :ok = Ampd.Carrier.Reaper.drain()
+
+      assert inc["carrier_ref"] in Harness.terminated(),
+             "the restarted reaper did not converge a Carrier orphaned during its downtime"
+
+      # And the debt is discharged, so a second restart does not re-reap it.
+      assert Peer.pending_reaps() == []
+    end
+
+    test "an orphan the Reaper could not confirm is settled, not swept forever", ctx do
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      Harness.stop_returns({:error, "the host did not answer"})
+
+      Peer.detach(ctx.agent)
+      :ok = Ampd.Carrier.Reaper.drain()
+
+      # An unresolved attempt exists — that is what blocks replacement — and
+      # the pending entry is gone, because the announcement was heard. The
+      # debt exists to survive a *lost* announcement and not to outlive a
+      # delivered one.
+      assert Enum.any?(Loci.attempts(), &(&1["state"] == "INDETERMINATE"))
+      assert Peer.pending_reaps() == []
+    end
+
+    test "an unconfirmed orphan reap blocks the replacement it should block", ctx do
+      # E23 proved the attempt gets recorded and stopped there. The
+      # load-bearing consequence is the refusal of a second process for the
+      # same Worker, which nothing asserted.
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      Harness.stop_returns({:error, "the host did not answer"})
+
+      Peer.detach(ctx.agent)
+      :ok = Ampd.Carrier.Reaper.drain()
+
+      {:ok, agent2} = Peer.attach_agent("kestrel")
+      ok!(Control.command(agent2, :attach_worker, [ctx.worker["id"]]), "worker")
+
+      Harness.stop_returns(:ok)
+      assert {:refused, r} = Carrier.start(agent2, ctx.lane["id"])
+      assert r["code"] == "carrier-start-unreconciled"
+    end
+  end
+
+  # =================================================================== E28
+  #
+  # A public schema vocabulary that disagrees with the durable records is a
+  # reader being told to trust the wrong list. `reconcile/1` has always
+  # written RESOLVED and `attempt_states/0` has never named it.
+  describe "E28 · the declared vocabularies match what is written" do
+    test "every state the module writes is in the declared vocabulary", ctx do
+      # Driven, not asserted against a literal list: a list checked against
+      # itself proves the list is spelled the way it is spelled. These four
+      # scenarios are the ones that write a state to disk.
+      Harness.put_policy(fn _t -> {:error, "no answer"} end)
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      [ind] = Loci.attempts()
+      assert ind["state"] == "INDETERMINATE"
+
+      Harness.put_policy(fn t -> {:ok, Harness.observation(t)} end)
+      Carrier.reconcile(ind["ticket_id"])
+      assert attempt_state(ind["ticket_id"]) == "RESOLVED"
+
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert Carrier.stop(ctx.agent) == :ok
+
+      Harness.put_policy(fn t ->
+        {:ok, put_in(Harness.observation(t), ["observed", "no_new_privs"], false)}
+      end)
+
+      assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+
+      written = Loci.attempts() |> Enum.map(& &1["state"]) |> Enum.uniq() |> Enum.sort()
+      assert written != []
+
+      for s <- written do
+        assert s in Carrier.attempt_states(),
+               "#{s} is written to durable records and is not in attempt_states/0"
+      end
+
+      # Both directions. RESOLVED and FAILED are the two this run must have
+      # produced, and RESOLVED is the one that was missing from the list.
+      assert "RESOLVED" in written
+      assert "FAILED" in written
+      assert "RESOLVED" in Carrier.attempt_states()
+    end
+
+    test "reconcile's terminal set and the vocabulary do not disagree", _ctx do
+      # `reconcile/1` short-circuits on a state it considers already settled.
+      # Every name in that guard must be a name the vocabulary declares, or
+      # the guard is matching on a state that cannot occur.
+      for s <- ~w(COMMITTED STALE FAILED RESOLVED) do
+        assert s in Carrier.attempt_states()
+      end
+    end
+
+    test "the confinement floor version is an exact constant", _ctx do
+      # The digest derives from the version and the row NAMES and cannot see a
+      # function body, so a row rewritten in place would keep its digest and
+      # an in-flight admission would commit under a rule it was not admitted
+      # under. The version is the only thing that can carry that — so this
+      # asserts it exactly, and changing a row's meaning has to come here.
+      assert Ampd.Carrier.Floor.version() == 2
+      assert Ampd.Carrier.Floor.schema() == "carrier-confinement-floor@1"
+
+      names =
+        (Ampd.Carrier.Floor.rows() ++
+           Ampd.Carrier.Floor.attested_rows() ++ Ampd.Carrier.Floor.correspondence_rows())
+        |> Enum.map(fn {_, n, _} -> n end)
+
+      assert length(names) == 20
+      assert length(Enum.uniq(names)) == 20, "two floor rows share a name, so one cannot be reported"
+
+      # v2's exercise of the rule: the row that claimed to bind the payload
+      # and did not is gone, and the one that replaced it is attested rather
+      # than correspondence, because it reads only the attestation.
+      refute "payload_is_the_attested_bytes" in names
+      assert "execution_basis_is_well_formed" in names
+
+      att = Enum.map(Ampd.Carrier.Floor.attested_rows(), fn {_, n, _} -> n end)
+      assert "execution_basis_is_well_formed" in att
+    end
+
+    test "the declared basis field set is what the comparison actually uses", _ctx do
+      assert Carrier.basis_fields() ==
+               ~w(schema payload_digest carrier_protocol carrier_protocol_version)
+
+      # Every declared field must be one a discontinuity can move, or the
+      # comparison is wider on paper than in fact. Driven, not asserted.
+      for f <- Carrier.basis_fields() do
+        moved = Map.put(Harness.default_basis(), f, "moved")
+        obs = put_in(Harness.observation(%{}), ["attested", "execution_basis"], moved)
+
+        assert Carrier.basis_moved(%{"carrier_basis" => Harness.default_basis()}, obs) == [f],
+               "#{f} is declared bound and moving it changes nothing"
+      end
+    end
+
+    test "the floor refuses a basis-shaped placeholder", _ctx do
+      # What the old row accepted: 32-plus bytes after an optional prefix. The
+      # replacement requires the full object and 64 hex characters, so the
+      # value a hand-written attestation reaches for no longer passes.
+      for bad <- [
+            %{"schema" => "carrier-execution-basis@1", "payload_digest" => String.duplicate("a", 40)},
+            %{"schema" => "carrier-execution-basis@1", "payload_digest" => "sha256:" <> String.duplicate("z", 64),
+              "carrier_protocol" => "carrier-lifecycle", "carrier_protocol_version" => 1},
+            %{"payload_digest" => "sha256:" <> String.duplicate("ab", 32)},
+            "sha256:" <> String.duplicate("ab", 32)
+          ] do
+        obs = put_in(Harness.observation(%{}), ["attested", "execution_basis"], bad)
+
+        assert {:error, rows} = Ampd.Carrier.Floor.verify(obs)
+
+        assert "attested:execution_basis_is_well_formed" in rows,
+               "the floor accepted #{inspect(bad)} as an execution basis"
+      end
+    end
+  end
+
+  # =================================================================== E29
+  #
+  # **A declared seam, measured, and deliberately not closed in this round.**
+  #
+  # `Ampd.Carrier`'s moduledoc listed *supervisor restart* among the events
+  # after which "the host reaps the process". It does not, and nothing had
+  # ever asked. The docstring is corrected; this is the falsifier that keeps
+  # it corrected, and it asserts **what is true** rather than what would be
+  # preferable — the shape `E9`'s second test uses for the same reason.
+  #
+  # If a later round closes the seam, the last two assertions here flip and
+  # this test is where that is noticed.
+  describe "E29 · a Peer supervisor restart ends membership and does NOT reap" do
+    test "the process outlives the runtime incarnation that admitted it", ctx do
+      assert {:ok, inc} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert length(Peer.carriers()) == 1
+
+      pid = Process.whereis(Ampd.Peer)
+      ref = Process.monitor(pid)
+      Process.exit(pid, :kill)
+
+      receive do
+        {:DOWN, ^ref, _, _, _} -> :ok
+      after
+        2_000 -> flunk("Ampd.Peer did not die")
+      end
+
+      Enum.reduce_while(1..100, nil, fn _, _ ->
+        if is_pid(Process.whereis(Ampd.Peer)) do
+          {:halt, :ok}
+        else
+          Process.sleep(20)
+          {:cont, nil}
+        end
+      end)
+
+      Process.sleep(200)
+      if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.drain()
+
+      # TRUE, and it is the half that was always true.
+      assert Peer.carriers() == [], "membership survived the incarnation that held it"
+
+      # TRUE, and it is the half the docstring claimed was not the case.
+      # `terminate/2` does not run on `:kill`, and the pending-reap ledger
+      # lives in the process that died — along with every record of which
+      # Carriers existed, so a ledger held elsewhere would not know what to
+      # sweep either.
+      assert Peer.pending_reaps() == [],
+             "a pending reap survived Ampd.Peer, which would change the analysis in the moduledoc"
+
+      refute inc["carrier_ref"] in Harness.terminated(),
+             "the seam is CLOSED — a Peer supervisor restart now reaps. " <>
+               "Update Ampd.Carrier's moduledoc and this falsifier together."
+
+      # And the position is untouched, which is what makes this a leak rather
+      # than a loss: the Worker and the Locus are in dets and Ampd.Peer has
+      # never been able to reach them.
+      assert Loci.worker(ctx.worker["id"])["status"] == "open"
     end
   end
 end

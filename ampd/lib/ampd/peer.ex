@@ -134,7 +134,45 @@ defmodule Ampd.Peer do
        # "losing the runtime incarnation terminates the Carrier" rule — it
        # is a consequence of where the map lives, not a policy anything has
        # to remember to apply.
-       carriers: %{}
+       carriers: %{},
+       # carrier_ref => carrier-incarnation@1, for Carriers whose membership
+       # has ended and whose *process* has not yet been established absent.
+       #
+       # ## The race this closes
+       #
+       # Every announcement to `Ampd.Carrier.Reaper` was guarded by
+       # `if Process.whereis(Reaper)`, which is correct — a crash must not
+       # mask a probe — and silently lossy:
+       #
+       #     Reaper crashes
+       #         ↓
+       #     before the supervisor restarts it
+       #         ↓
+       #     a Peer loses its Carrier
+       #         ↓
+       #     membership removed, announcement dropped on the floor
+       #         ↓
+       #     a live OS process with nothing in the runtime referring to it
+       #
+       # A restarted Reaper could not converge it either, because
+       # `Ampd.Carrier.converge/1` re-derives victims from `carriers` and the
+       # incarnation has already left that map. Removal is immediate by
+       # design and must stay immediate, so the thing that has to survive the
+       # gap is a *separate* record of the debt.
+       #
+       # **It lives here rather than in the Reaper for one structural reason**:
+       # `Ampd.Peer` is started before `Ampd.Carrier.Reaper` under a
+       # `:one_for_one` supervisor, so a Reaper restart cannot take this with
+       # it. It is still ephemeral — losing `Ampd.Peer` loses every
+       # incarnation anyway, which is the existing "no survival across a
+       # control-plane restart" rule and not a new hole.
+       #
+       # **Deliberately not durable.** A disk-backed pending-reap queue would
+       # be a second recovery protocol with its own boot sweep and its own
+       # ambiguity, built on the strength of a race nothing has yet observed
+       # in the wild. `E27` is the falsifier; if it ever proves insufficient,
+       # build the queue then.
+       pending_reaps: %{}
      }}
   end
 
@@ -328,6 +366,30 @@ defmodule Ampd.Peer do
 
   @doc "Drop the live execution Carrier. Does not stop the process."
   def detach_carrier(peer_id), do: GenServer.call(__MODULE__, {:detach_carrier, peer_id})
+
+  @doc """
+  End a Carrier's membership **and** record that its process is owed a reap,
+  in one call.
+
+  For every path that ends membership because the admitting relationship
+  died — as opposed to `Ampd.Carrier.stop/1`, which ends it because somebody
+  asked and does its own terminating. Two separate calls would leave a window
+  in which the caller could die between them, having removed the only
+  reference to a running process; this is one message to one process, so
+  there is no window.
+  """
+  def detach_carrier_pending(peer_id),
+    do: GenServer.call(__MODULE__, {:detach_carrier_pending, peer_id})
+
+  @doc "Carriers whose membership has ended and whose process is not yet established absent."
+  def pending_reaps, do: GenServer.call(__MODULE__, :pending_reaps)
+
+  @doc """
+  The reap of this Carrier has been settled — confirmed, or recorded as
+  unconfirmed against the Worker. Either way the debt is discharged and a
+  later sweep must not act on it again.
+  """
+  def reap_settled(carrier_ref), do: GenServer.call(__MODULE__, {:reap_settled, carrier_ref})
 
   @doc """
   Tear down every binding and free the control claim.
@@ -544,6 +606,22 @@ defmodule Ampd.Peer do
     {:reply, :ok, %{st | carriers: Map.delete(st.carriers, peer_id)}}
   end
 
+  def handle_call({:detach_carrier_pending, peer_id}, _f, st) do
+    case Map.get(st.carriers, peer_id) do
+      nil ->
+        {:reply, {:ok, nil}, st}
+
+      inc ->
+        touched()
+        {:reply, {:ok, inc}, pend(%{st | carriers: Map.delete(st.carriers, peer_id)}, inc)}
+    end
+  end
+
+  def handle_call(:pending_reaps, _f, st), do: {:reply, Map.values(st.pending_reaps), st}
+
+  def handle_call({:reap_settled, ref}, _f, st),
+    do: {:reply, :ok, %{st | pending_reaps: Map.delete(st.pending_reaps, ref)}}
+
   # A new epoch too: a world reset invalidates every channel, and a handle
   # from before it must not resolve into the world that replaced it.
   def handle_call(:reset, _f, st) do
@@ -558,6 +636,13 @@ defmodule Ampd.Peer do
     #
     # A cast, from inside this GenServer, to a different process: nothing
     # about resetting identity may wait on a machine deadline.
+    #
+    # Recorded first, and for the same reason as `announce_orphan/2`: a world
+    # reset does not make a running process stop existing, so if the Reaper is
+    # not up to hear this, the debt has to be somewhere a restarted one can
+    # find it.
+    pending = Enum.reduce(Map.values(st.carriers), st.pending_reaps, &Map.put(&2, &1["carrier_ref"], &1))
+
     if Process.whereis(Ampd.Carrier.Reaper) do
       for {_id, inc} <- st.carriers, do: Ampd.Carrier.Reaper.orphaned(inc)
     end
@@ -565,7 +650,11 @@ defmodule Ampd.Peer do
     {:reply, :ok,
      %{
        st
-       | peers: %{},
+       # **Deliberately survives the reset.** Everything else here is identity
+       # and identity is what a reset invalidates; a pending reap is a fact
+       # about the OS, and the OS did not attend the reset.
+       | pending_reaps: pending,
+         peers: %{},
          control_claimed: false,
          epoch: new_epoch(),
          owners: %{},
@@ -677,12 +766,25 @@ defmodule Ampd.Peer do
 
   # Cast, not call: nothing about a channel closing should wait for a
   # process to die. `Ampd.Carrier.Reaper` owns the retry and the ambiguity.
+  #
+  # **Recorded before it is announced**, because the announcement can be lost
+  # and the debt cannot be allowed to go with it — see `pending_reaps` in
+  # `init/1`. The order matters: pending first, then the cast. Announcing
+  # first would leave an interval in which a Reaper that answered immediately
+  # settled a debt that had not been written yet, and the entry would outlive
+  # the reap it describes.
   defp announce_orphan(st, nil), do: st
 
   defp announce_orphan(st, inc) do
+    st = pend(st, inc)
     if Process.whereis(Ampd.Carrier.Reaper), do: Ampd.Carrier.Reaper.orphaned(inc)
     st
   end
+
+  defp pend(st, %{"carrier_ref" => ref} = inc) when is_binary(ref),
+    do: %{st | pending_reaps: Map.put(st.pending_reaps, ref, inc)}
+
+  defp pend(st, _), do: st
 
   defp owner_gone do
     Ampd.Refusal.new("channel-owner-gone",

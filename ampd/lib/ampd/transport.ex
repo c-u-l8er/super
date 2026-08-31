@@ -717,6 +717,24 @@ defmodule Ampd.Transport do
           close_fd(fd)
           err("invalid-carrier-channel", %{"reason" => "unknown carrier protocol"})
 
+        # **The execution basis is checked here or it is never checked.**
+        #
+        # It is what every later admission binds, and the same argument the
+        # clause above makes applies with more force: a malformed value that
+        # reaches storage becomes a malformed value in every ticket minted
+        # against this channel, and a basis nobody can compare is worse than
+        # no channel — it would refuse every commit for a reason that reads
+        # like a payload swap.
+        not carrier_basis?(inc["carrier_basis"]) ->
+          close_fd(fd)
+
+          err("invalid-carrier-channel", %{
+            "reason" => "no well-formed carrier-execution-basis@1 accompanies the channel",
+            "hint" =>
+              "the host measures the installed Carrier payload when it establishes this " <>
+                "channel; without it an admission binds nothing and cannot refuse a swap"
+          })
+
         true ->
           case Ampd.Bridge.bind_carrier_endpoint(fd, inc) do
             {:ok, _} -> ok(%{"channel" => "carrier", "channel_epoch" => epoch})
@@ -815,6 +833,17 @@ defmodule Ampd.Transport do
 
     defp installed({:refused, r}, _), do: %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
     defp installed(_, pack), do: ok(%{"pack" => pack})
+
+    # The shape only. Whether the basis is *the right one* is a question with
+    # no answer at bind time — there is nothing yet to compare it to, and the
+    # comparison belongs to `Ampd.Carrier.commit_start/2`, which has a ticket.
+    defp carrier_basis?(%{"schema" => "carrier-execution-basis@1"} = b) do
+      is_binary(b["payload_digest"]) and b["payload_digest"] != "" and
+        b["carrier_protocol"] == Ampd.Carrier.Machine.Channel.protocol() and
+        is_integer(b["carrier_protocol_version"])
+    end
+
+    defp carrier_basis?(_), do: false
 
     defp ok(map), do: Map.merge(%{"schema" => "bridge-reply@1", "ok" => true}, map)
 
