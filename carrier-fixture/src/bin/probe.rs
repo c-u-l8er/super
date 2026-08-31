@@ -160,6 +160,48 @@ fn main() {
     let target: i32 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     let preopen: i32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(-1);
     let workdir = args.get(3).cloned().unwrap_or_else(|| ".".into());
+    // D.1.3c·1. The host passes this only when it spawned this probe on a
+    // real possessed terminal; see the `pty` section below for why the rows
+    // are worthless without one.
+    let is_pty_run = args.get(4).map(|s| s == "pty").unwrap_or(false);
+
+    // 0 · D.1.3c·1 · the four terminal properties, staged.
+    //
+    // **Run UNCONFINED and on purpose.** This measures Linux, not Super: that
+    // a process can hold a terminal on 0/1/2 and have no session of its own,
+    // and can then become a session leader and *still* have no controlling
+    // terminal. `setsid(2)` says the second one outright and it is the stage
+    // that matters — it is the whole reason `TIOCSCTTY` is a separate,
+    // deliberate act the host performs rather than something that falls out
+    // of putting a pty on stdio.
+    //
+    // A confined run could not do this: `setsid` and `TIOCSCTTY` are exactly
+    // what Super refuses a Carrier. So the staging is the bare control's job,
+    // and the confined census next door is what shows Super refuses the same
+    // two calls to a payload.
+    if args.get(1).map(|s| s == "stages").unwrap_or(false) {
+        let stat = || -> String {
+            let s = std::fs::read_to_string("/proc/self/stat").unwrap_or_default();
+            let tail = s.rsplit_once(')').map(|t| t.1.to_string()).unwrap_or_default();
+            let f: Vec<&str> = tail.split_whitespace().collect();
+            // fields 5, 6, 7, 8 — pgrp, session, tty_nr, tpgid
+            format!("{} {} {} {}",
+                f.get(2).unwrap_or(&"?"), f.get(3).unwrap_or(&"?"),
+                f.get(4).unwrap_or(&"?"), f.get(5).unwrap_or(&"?"))
+        };
+        let mut o = std::io::stdout();
+        let _ = writeln!(o, "STAGE dup {}", stat());
+        let _ = o.flush();
+
+        unsafe { syscall(112 /* setsid */) };
+        let _ = writeln!(o, "STAGE setsid {}", stat());
+        let _ = o.flush();
+
+        unsafe { syscall(16 /* ioctl */, 0i64, 0x540ei64 /* TIOCSCTTY */, 0i64) };
+        let _ = writeln!(o, "STAGE ctty {}", stat());
+        let _ = o.flush();
+        std::process::exit(0);
+    }
 
     // 1 · The inherited pre-open. Landlock does not reach a descriptor that
     //     was already open when the domain was installed; this measures it on
@@ -391,6 +433,104 @@ fn main() {
 
     let (v, e) = sysc(434 | X32, 0, 0, 0);
     r("pidfd_open_x32", v >= 0, e);
+
+    // 6c′ · D.1.3c·1 · the terminal, when this probe was given one.
+    //
+    // **Issued, not asserted from the allow-list.** `confine::IOCTL_ALLOWED`
+    // is a *description* of the policy; these rows are the policy answering.
+    // The census's founding objection applies here more than anywhere — a
+    // terminal is the largest operation surface a Carrier has ever been
+    // handed, and a list nobody calls is a list of intentions.
+    //
+    // Only run under a PTY: without one, TCGETS answers `ENOTTY` and every
+    // row below would grade AMBIENT-PRECLUDED for a reason that has nothing
+    // to do with Super. The host spawns this a second time on a real
+    // possessed terminal and reads the report from the master.
+    if is_pty_run {
+        const TCGETS: i64 = 0x5401;
+        const TCSETS: i64 = 0x5402;
+        const TIOCSCTTY: i64 = 0x540e;
+        const TIOCGPGRP: i64 = 0x540f;
+        const TIOCSPGRP: i64 = 0x5410;
+        const TIOCSTI: i64 = 0x5412;
+        const TIOCGWINSZ: i64 = 0x5413;
+        const TIOCSWINSZ: i64 = 0x5414;
+        const TIOCNOTTY: i64 = 0x5422;
+        const TIOCSETD: i64 = 0x5423;
+        const TIOCGPTPEER: i64 = 0x5441;
+
+        let mut big = [0u8; 128];
+
+        // Allowed — and they must still WORK. An allow-list that refused
+        // everything would pass every negative row below and be useless.
+        let (v, e) = sysc(16, 0, TCGETS, big.as_mut_ptr() as i64);
+        r("pty_tcgets", v == 0, e);
+        let (v, e) = sysc(16, 0, TIOCGWINSZ, big.as_mut_ptr() as i64);
+        r("pty_tiocgwinsz", v == 0, e);
+        let (v, e) = sysc(16, 0, TIOCGPGRP, big.as_mut_ptr() as i64);
+        r("pty_tiocgpgrp", v == 0, e);
+
+        // Refused.
+        let mut ch = b'x';
+        let (v, e) = sysc(16, 0, TIOCSTI, &mut ch as *mut u8 as i64);
+        r("pty_tiocsti", v == 0, e);
+
+        // The same request with a garbage high half. Under an ALLOW-list
+        // this is refused whichever half the filter compares — it is not on
+        // the list either way — so it proves the refusal is robust and it
+        // does NOT distinguish the two filters. The row that does is
+        // `pty_tcgets_high_bits` below.
+        let (v, e) = sysc6(16, 0, TIOCSTI | -1i64 << 32, &mut ch as *mut u8 as i64, 0, 0, 0);
+        r("pty_tiocsti_high_bits", v == 0, e);
+
+        // **The row that actually measures the comparison width.**
+        //
+        // The kernel takes `unsigned int cmd` and truncates it — but only
+        // *after* seccomp has read `args[1]`. So this is `TCGETS` as far as
+        // the kernel is concerned and must succeed. A filter comparing the
+        // wrong 32 bits refuses it, which is a filter whose model of the
+        // syscall disagrees with the syscall.
+        //
+        // It has to be a PERMITTED request. A denied one is denied under
+        // either width and tells you nothing — which is what the host
+        // sabotage battery reported when the probe for this was pointed at
+        // `TIOCSTI` instead: NOT A FALSIFIER, correctly.
+        let (v, e) = sysc6(16, 0, TCGETS | -1i64 << 32, big.as_mut_ptr() as i64, 0, 0, 0);
+        r("pty_tcgets_high_bits", v == 0, e);
+
+        let (v, e) = sysc(16, 0, TIOCSCTTY, 0);
+        r("pty_tiocsctty", v == 0, e);
+        let (v, e) = sysc(16, 0, TIOCSWINSZ, big.as_mut_ptr() as i64);
+        r("pty_tiocswinsz", v == 0, e);
+        let (v, e) = sysc(16, 0, TCSETS, big.as_mut_ptr() as i64);
+        r("pty_tcsets", v == 0, e);
+        let (v, e) = sysc(16, 0, TIOCSPGRP, big.as_mut_ptr() as i64);
+        r("pty_tiocspgrp", v == 0, e);
+        let (v, e) = sysc(16, 0, TIOCSETD, big.as_mut_ptr() as i64);
+        r("pty_tiocsetd", v == 0, e);
+        // Minting a second terminal from the one it holds. `TIOCGPTPEER` on
+        // a *slave* is `EIO` even unconfined, so this grades
+        // AMBIENT-PRECLUDED — recorded anyway, because the interesting
+        // question is whether possessing one terminal is a route to another
+        // and the answer should be visible rather than inferred.
+        let (v, e) = sysc(16, 0, TIOCGPTPEER, 0);
+        r("pty_tiocgptpeer_from_slave", v >= 0, e);
+
+        // Landlock: the namespace, not the descriptor.
+        //
+        // The Carrier's terminal arrived as an already-open fd, which
+        // Landlock does not govern — the right is bound at `open` and the
+        // host opened it outside any domain. So seccomp is the only thing
+        // standing between the payload and the ioctls above. What Landlock
+        // *does* govern is everything below: the Carrier may use this
+        // terminal and may not go looking for another.
+        let (v, e) = sysc(257, -100, b"/dev/ptmx\0".as_ptr() as i64, 2);
+        r("open_dev_ptmx", v >= 0, e);
+        let (v, e) = sysc(257, -100, b"/dev/pts/0\0".as_ptr() as i64, 2);
+        r("open_dev_pts_0", v >= 0, e);
+        let (v, e) = sysc(257, -100, b"/dev/pts\0".as_ptr() as i64, 0);
+        r("open_dev_pts_dir", v >= 0, e);
+    }
 
     // 6c · Anonymous execution.
     //

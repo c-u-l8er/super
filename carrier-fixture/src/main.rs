@@ -35,8 +35,69 @@
 //! command channel and must not be able to become one by having the same
 //! shape. `Ampd.Frame` is avoided one layer up for exactly this reason.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::os::fd::FromRawFd;
+
+// --------------------------------------------------------- D.1.3c·1 · tty
+//
+// **`TCGETS` is `isatty`.** Not a call to libc's `isatty(3)`, which is that
+// ioctl plus an errno convention: the fixture issues the request itself so
+// that what the census sees is the request, and so that a refusal by Super's
+// seccomp allow-list is indistinguishable here from the terminal not being
+// one — which is correct, because from inside the Carrier those really are
+// the same observation. The host is what can tell them apart.
+//
+// Both requests are on Super's `IOCTL_ALLOWED`. Everything else this file
+// could ask for is refused, including `TIOCSWINSZ`: the payload may read its
+// terminal's dimensions and may not choose them.
+extern "C" {
+    fn syscall(num: i64, ...) -> i64;
+}
+
+const SYS_IOCTL: i64 = 16;
+const TCGETS: u64 = 0x5401;
+const TIOCGWINSZ: u64 = 0x5413;
+
+fn is_tty(fd: i32) -> bool {
+    // `struct termios` is 60 bytes on x86-64; over-sized so a short write by
+    // a kernel that disagrees cannot corrupt the stack.
+    let mut buf = [0u8; 128];
+    unsafe { syscall(SYS_IOCTL, fd as i64, TCGETS, buf.as_mut_ptr()) == 0 }
+}
+
+fn winsize(fd: i32) -> Option<(u16, u16)> {
+    let mut ws = [0u16; 4];
+    if unsafe { syscall(SYS_IOCTL, fd as i64, TIOCGWINSZ, ws.as_mut_ptr()) } == 0 {
+        Some((ws[0], ws[1]))
+    } else {
+        None
+    }
+}
+
+/// One canonical line from fd 0, byte at a time.
+///
+/// Not `BufReader`: a buffered reader would consume whatever else the
+/// terminal had ready, and the next `HEAR` would answer out of a buffer
+/// rather than out of the line discipline. Reading to the newline is also
+/// what proves the discipline is *doing* something — in canonical mode the
+/// kernel does not deliver a byte until the line is complete.
+fn read_line_fd0() -> Option<String> {
+    let mut fd0 = unsafe { std::fs::File::from_raw_fd(0) };
+    let mut out = Vec::new();
+    let mut b = [0u8; 1];
+    let r = loop {
+        match fd0.read(&mut b) {
+            Ok(0) => break if out.is_empty() { None } else { Some(()) },
+            Ok(_) if b[0] == b'\n' => break Some(()),
+            Ok(_) => out.push(b[0]),
+            Err(_) => break None,
+        }
+    };
+    // fd 0 stays open: `File` would close it on drop, and this process is
+    // asserted to hold exactly {0,1,2,3} for its whole life.
+    std::mem::forget(fd0);
+    r.map(|_| String::from_utf8_lossy(&out).trim_end_matches('\r').to_string())
+}
 
 /// The control descriptor. Fixed at 3 by the host's `dup_onto`, never
 /// discovered, never searched for. A Carrier that hunted for its own control
@@ -94,7 +155,47 @@ fn main() {
         let reply = match verb {
             "IDENT" => format!("IDENT {PROTOCOL} {PROTOCOL_VERSION} {incarnation}"),
             "ECHO" => format!("ECHO {rest}"),
-            "EXIT" => break,
+            // --- D.1.3c·1 · terminal semantics ---------------------------
+            //
+            // **Three verbs, and they are on the CONTROL channel on purpose.**
+            // The host drives; the terminal carries only the bytes under
+            // test. That keeps the two directions separable — a failure says
+            // which one broke — and it keeps this fixture from ever writing
+            // to a descriptor it was not just told to write to, which is the
+            // rule the HELLO handshake above already follows.
+            //
+            // `TTY` is deliberately not "am I sandboxed". It reports what
+            // this process can observe *about the terminal it was handed*,
+            // and the host checks it against what the host itself created.
+            // The moduledoc's rule still holds: a Carrier's self-report is
+            // never the evidence, only a second reading of it.
+            "TTY" => {
+                let (ok0, ok1, ok2) = (is_tty(0), is_tty(1), is_tty(2));
+                match winsize(0) {
+                    Some((r, c)) => format!("TTY {ok0} {ok1} {ok2} {r} {c}"),
+                    None => format!("TTY {ok0} {ok1} {ok2} - -"),
+                }
+            }
+            // Carrier → host. Written to fd 1, read by whoever holds the
+            // master; a `\n` because the line discipline is what makes this
+            // a terminal rather than a pipe, and the host asserts on the
+            // `\r\n` the discipline turns it into.
+            "SAY" => {
+                let mut o = std::io::stdout();
+                if write!(o, "{rest}\n").is_err() || o.flush().is_err() {
+                    format!("SAY-FAILED")
+                } else {
+                    format!("SAID {}", rest.len())
+                }
+            }
+            // Host → Carrier. One canonical line from fd 0, echoed back over
+            // the *control* channel rather than the terminal, so that a
+            // reply proves the read happened and cannot be confused with the
+            // terminal's own echo of what the host just wrote.
+            "HEAR" => match read_line_fd0() {
+                Some(l) => format!("HEARD {l}"),
+                None => "HEARD-EOF".to_string(),
+            },
             "" => continue,
             // A closed vocabulary. An unknown word is refused by name rather
             // than ignored, so a host that thinks it is talking to a newer

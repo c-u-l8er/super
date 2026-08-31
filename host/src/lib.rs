@@ -32,6 +32,7 @@ pub mod effect;
 pub mod sha256;
 pub mod fdpass;
 pub mod confine;
+pub mod pty;
 pub mod carrier;
 
 use std::collections::HashMap;
@@ -363,7 +364,25 @@ fn start_one(
     // opposite side from the one that checks it.
     let epoch = req["carrier_epoch"].as_str().unwrap_or("").to_string();
 
-    let mut c = carrier::spawn(&fixture, &dir, &log, &epoch, None)?;
+    // **D.1.3c·1 — a served Carrier possesses a terminal.**
+    //
+    // Allocated here rather than requested, and that is the authority
+    // boundary: no field of `carrier-start-request@1` selects, names or
+    // configures this. The runtime asks for a Carrier; the host decides that
+    // a Carrier is a confined process with a controlling terminal it did not
+    // choose. Nothing an agent can say reaches this line.
+    //
+    // The `Pty` is moved into the `Carrier`, so its lifetime is the
+    // Carrier's — every path that already disposes of a Carrier (a stop, a
+    // drain, the Peer-incarnation fence, `Drop`) now disposes of the
+    // terminal too, with no path having to remember. See `Carrier::pty`.
+    //
+    // Failure is a refusal and not a fallback. On a kernel without
+    // `TIOCGPTPEER` this is `pty-peer-descriptor-unavailable` and no Carrier
+    // starts — resolving the slave by pathname instead would trade the
+    // slice's entire claim for compatibility.
+    let term = crate::pty::Pty::open()?;
+    let mut c = carrier::spawn_on_pty(&fixture, &dir, &log, &epoch, None, term)?;
     if let Err(e) = c.handshake(5_000) {
         // A Carrier that cannot prove it is this incarnation is not left
         // running. The runtime will see the refusal, but the process is this
@@ -415,6 +434,26 @@ fn start_one(
 ///
 /// One function, both callers. A check that cannot be moved by breaking the
 /// production path is not a check on the production path.
+/// What the host can say about a Carrier's terminal.
+///
+/// Deliberately *not* the pts index or a pathname. Nothing downstream is
+/// given a name it could try to open; what crosses the wire is whether the
+/// relationships hold, which is the only part a floor can check and the only
+/// part that is not an invitation.
+fn terminal_attestation(c: &carrier::Carrier) -> Value {
+    let Some(p) = c.pty() else { return Value::Null };
+    let t = crate::pty::TermProps::read(c.pid);
+    json!({
+        "schema": "carrier-terminal-attested@1",
+        "session_leader": t.is_session_leader(c.pid),
+        "controlling_terminal": t.has_controlling_terminal(),
+        "foreground": t.is_foreground(),
+        "is_this_host_master": p.session().is_some() && p.session() == t.session,
+        "master_held_by": "super-host",
+        "resize_authority": "super-host",
+    })
+}
+
 pub fn carrier_attestation(c: &carrier::Carrier, dir: &Path) -> Value {
     let cfg = c.configured().clone();
 
@@ -429,6 +468,22 @@ pub fn carrier_attestation(c: &carrier::Carrier, dir: &Path) -> Value {
         "pdeathsig": "SIGKILL",
         "network": "none",
         "attestor": "super-host",
+        // **D.1.3c·1 — the terminal relationship, attested and observed
+        // together, because half of it can only be one and half only the
+        // other.**
+        //
+        // `session_leader`, `controlling_terminal` and `foreground` are read
+        // out of the child's own `/proc/<pid>/stat` — genuine observations.
+        // `is_this_host_master` is the one that matters and it is a
+        // *correspondence*: `TIOCGSID` asked of the descriptor this host
+        // holds, compared against the session the child reports. It answers
+        // ENOTTY until a slave-side session leader has claimed the terminal,
+        // so it cannot be satisfied by any terminal other than this one.
+        //
+        // `null` when the Carrier has no terminal. The floor distinguishes
+        // absent from false — a Carrier that was never given a terminal and
+        // one whose terminal did not take are not the same fact.
+        "terminal": terminal_attestation(c),
         // **The identity of the image that is running, measured through the
         // process rather than through the pathname it was launched from.**
         // This was `fixture_digest(&fixture)` — a read of the installation

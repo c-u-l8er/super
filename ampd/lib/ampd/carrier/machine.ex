@@ -363,7 +363,19 @@ defmodule Ampd.Carrier.Machine.Harness do
           "no_new_privs" => true,
           "seccomp_mode" => 2,
           "seccomp_filters" => 1,
-          "fds" => %{"0" => "/dev/null", "1" => "log", "2" => "log", "3" => "socket:[4242]"},
+          # **D.1.3c·1 — one terminal on 0/1/2, not `/dev/null` and a log.**
+          # This said `%{"0" => "/dev/null", "1" => "log", "2" => "log", …}`
+          # and every falsifier in this file went red the moment a served
+          # Carrier gained a terminal. That is the harness doing its job: it
+          # exercises the real `Ampd.Carrier.Floor`, so a floor whose meaning
+          # moved has to be met here too or the fault matrix would be testing
+          # a shape production no longer produces.
+          "fds" => %{
+            "0" => "/dev/pts/7",
+            "1" => "/dev/pts/7",
+            "2" => "/dev/pts/7",
+            "3" => "socket:[4242]"
+          },
           "env_keys" => ["SUPER_CARRIER_CONTROL_FD", "SUPER_CARRIER_INCARNATION"],
           "uid" => 1000,
           "cwd" => "/tmp/harness-carrier-workdir",
@@ -384,6 +396,20 @@ defmodule Ampd.Carrier.Machine.Harness do
           "pdeathsig" => "SIGKILL",
           "network" => "none",
           "attestor" => "super-host",
+          # The terminal half of the attestation. `is_this_host_master` is the
+          # row a Carrier holding *some other* terminal could not satisfy —
+          # the real host derives it from `TIOCGSID` on the descriptor it
+          # holds, which answers ENOTTY until that exact terminal has been
+          # claimed.
+          "terminal" => %{
+            "schema" => "carrier-terminal-attested@1",
+            "session_leader" => true,
+            "controlling_terminal" => true,
+            "foreground" => true,
+            "is_this_host_master" => true,
+            "master_held_by" => "super-host",
+            "resize_authority" => "super-host"
+          },
           # The correspondence rows compare observation against attestation,
           # so the harness has to supply both halves consistently — otherwise
           # it would exercise a shorter floor than production does, which is

@@ -87,6 +87,14 @@ pub struct Carrier {
     control: Option<UnixStream>,
     control_inode: Option<u64>,
     configured: serde_json::Value,
+    /// D.1.3c·1. **The terminal is owned here so that it cannot outlive the
+    /// Carrier**, in exactly the way `Ampd.Peer.carriers` makes "losing the
+    /// runtime incarnation terminates the Carrier" true by construction
+    /// rather than by policy. Every path that disposes of a Carrier — a
+    /// normal stop, a drain, the `Drop` that catches the rest — closes the
+    /// master with it, and closing the master is what hangs up the terminal.
+    /// There is no code anywhere that has to remember to do it.
+    pty: Option<crate::pty::Pty>,
 }
 
 /// Everything the host measured about a started Carrier.
@@ -258,7 +266,24 @@ pub fn spawn(
     incarnation: &str,
     policy: Option<Policy>,
 ) -> Result<Carrier, String> {
-    spawn_with(payload, workdir, log, incarnation, policy, &[], &[])
+    spawn_with(payload, workdir, log, incarnation, policy, &[], &[], None)
+}
+
+/// As [`spawn`], with a possessed terminal. D.1.3c·1.
+///
+/// The `Pty`'s slave becomes the Carrier's 0/1/2 and the host establishes the
+/// session and controlling-terminal relationship on its behalf, before the
+/// payload runs. See [`spawn_with`]'s `pre_exec` for why that order is what
+/// lets `setsid` and `TIOCSCTTY` then be *denied* to the payload.
+pub fn spawn_on_pty(
+    payload: &Path,
+    workdir: &Path,
+    log: &Path,
+    incarnation: &str,
+    policy: Option<Policy>,
+    pty: crate::pty::Pty,
+) -> Result<Carrier, String> {
+    spawn_with(payload, workdir, log, incarnation, policy, &[], &[], Some(pty))
 }
 
 /// As [`spawn`], plus argv tail and extra inherited descriptors.
@@ -277,6 +302,7 @@ pub fn spawn_with(
     policy: Option<Policy>,
     args: &[String],
     extra_fds: &[(RawFd, RawFd)],
+    mut pty: Option<crate::pty::Pty>,
 ) -> Result<Carrier, String> {
     let payload_s = payload
         .canonicalize()
@@ -303,6 +329,10 @@ pub fn spawn_with(
         .map_err(|e| format!("carrier log dup: {e}"))?;
 
     let extra: Vec<(RawFd, RawFd)> = extra_fds.to_vec();
+    // Copied out before the closure so that `pre_exec` captures a plain
+    // number and not a borrow of the `Pty`. The host keeps ownership; the
+    // child only ever sees the descriptor.
+    let pty_slave: Option<RawFd> = pty.as_ref().and_then(|p| p.slave());
     // Read before the fork. `getppid()` inside `pre_exec` answers "who is my
     // parent now", which is the question; this is "who did we mean", which is
     // what it has to be compared against.
@@ -337,6 +367,44 @@ pub fn spawn_with(
                 // 3. `install` last of all, so nothing between it and `exec`
                 //    needs an authority the policy denies.
                 fdpass::ensure_std_fds()?;
+
+                // **The host establishes the terminal relationship; the
+                // payload is then denied the means to.** D.1.3c·1.
+                //
+                // Order inside this block is as load-bearing as the order
+                // around it, and each step is a *different* property — they
+                // are not synonyms and the falsifier stages them apart:
+                //
+                //   setsid()      a new session, of which this is the leader.
+                //                 It begins with NO controlling terminal —
+                //                 measured, and it is why step two exists.
+                //   TIOCSCTTY     the controlling terminal, deliberately
+                //                 acquired. Requires a session leader that
+                //                 has none, which step one just made us.
+                //   dup 0/1/2     and only now the descriptors, so that
+                //                 stdio being a tty is a consequence of
+                //                 possessing this terminal rather than the
+                //                 definition of it.
+                //
+                // Both are async-signal-safe syscalls, which `pre_exec`
+                // requires. Doing them here rather than in the payload is the
+                // whole doctrinal move: a Carrier that could call `setsid`
+                // and `TIOCSCTTY` for itself could also detach from this
+                // terminal and steal another, so the host spends the
+                // authority once, before the payload exists, and seccomp
+                // refuses both from then on.
+                if let Some(s) = pty_slave {
+                    if setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    if ioctl_int(s, crate::pty::TIOCSCTTY, 0) < 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    fdpass::dup_onto(s, 0)?;
+                    fdpass::dup_onto(s, 1)?;
+                    fdpass::dup_onto(s, 2)?;
+                }
+
                 fdpass::dup_onto(theirs, 3)?;
                 for (from, to) in extra.iter() {
                     fdpass::dup_onto(*from, *to)?;
@@ -369,10 +437,30 @@ pub fn spawn_with(
         control: Some(control),
         control_inode,
         configured,
+        // **The host's copy of the slave is dropped here and not by the
+        // caller.** The child has it now, and until the host lets go the
+        // slave has two holders — so the master would never see a hangup,
+        // because the hangup is on the LAST close. Doing it inside the
+        // constructor means no caller can forget.
+        pty: {
+            if let Some(p) = pty.as_mut() {
+                p.close_slave();
+            }
+            pty
+        },
     })
 }
 
 impl Carrier {
+    /// The terminal this Carrier possesses, if it was given one.
+    ///
+    /// Borrowed, never handed over: the `Pty` belongs to the `Carrier` so
+    /// that its lifetime is the Carrier's, and a caller that could take it
+    /// would be a caller that could outlive the thing it belongs to.
+    pub fn pty(&self) -> Option<&crate::pty::Pty> {
+        self.pty.as_ref()
+    }
+
     pub fn control_inode(&self) -> Option<u64> {
         self.control_inode
     }
@@ -490,6 +578,23 @@ impl Carrier {
 extern "C" {
     #[link_name = "kill"]
     fn libc_kill(pid: i32, sig: i32) -> i32;
+    /// D.1.3c·1. Both are called only from inside `pre_exec`, where the rule
+    /// is async-signal-safety — and both are bare syscalls, which satisfies
+    /// it. `syscall(2)` is declared here with the same signature `confine.rs`
+    /// and `pty.rs` use.
+    fn setsid() -> i32;
+    fn syscall(num: i64, ...) -> i64;
+}
+
+/// `ioctl` with an integer argument, for the two `pre_exec` calls.
+///
+/// Through `syscall(2)` rather than a fourth `extern` declaration of `ioctl`:
+/// `confine.rs:73` already records why two blocks describing one symbol
+/// differently is a calling-convention bug in waiting, and `ioctl`'s
+/// variadic tail is exactly the shape that goes wrong quietly.
+unsafe fn ioctl_int(fd: RawFd, request: u64, arg: i64) -> i64 {
+    const SYS_IOCTL: i64 = 16;
+    syscall(SYS_IOCTL, fd as i64, request, arg)
 }
 
 impl Drop for Carrier {

@@ -1841,6 +1841,7 @@ pub fn run(ampd_dir: &Path) -> i32 {
     let adopted_inodes = rt.adopted_channel_inodes();
     carrier_confinement(&mut b, &scratch, &adopted_inodes);
     carrier_runtime_fence(&mut b, &scratch);
+    pty_possession(&mut b, &scratch);
 
     println!("\n  {} held · {} failed", b.pass, b.fail);
     rt.shutdown();
@@ -1874,6 +1875,27 @@ pub fn run(ampd_dir: &Path) -> i32 {
 /// human control. The transport between the halves is the same possessed
 /// channel, the same framing and the same `EffectChannel.request` that the
 /// production World-join exercises end-to-end for start and stop.
+/// How many descriptors this host holds that are pseudoterminal masters.
+///
+/// A master opened from `/dev/ptmx` resolves back to `/dev/ptmx` in
+/// `/proc/self/fd`, so this counts them without needing a handle on any
+/// `Pty` — which is the point: the fence's Carriers live inside
+/// `serve_carrier`'s own map and this battery cannot reach them. It can ask
+/// the kernel what the host is holding, which is the better question anyway.
+fn host_ptmx_count() -> usize {
+    std::fs::read_dir("/proc/self/fd")
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| {
+                    std::fs::read_link(e.path())
+                        .map(|p| p.to_string_lossy() == "/dev/ptmx")
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
 fn carrier_runtime_fence(b: &mut Battery, scratch: &Path) {
     use crate::{carrier, fdpass, read_frame, write_frame};
 
@@ -1899,6 +1921,15 @@ fn carrier_runtime_fence(b: &mut Battery, scratch: &Path) {
     // because `Ampd.Peer` dying loses every membership at once, and a drain
     // that emptied a set of one would not distinguish "empties the set" from
     // "stops the Carrier it was told about".
+    // D.1.3c·1. Each of these Carriers now possesses a terminal, and the
+    // claim under test grows accordingly: the drain empties the physical
+    // Carrier set, and the terminals go with it. Counted from the host's own
+    // descriptor table rather than from any `Pty` handle, because the
+    // Carriers belong to `serve_carrier`'s map and this battery cannot reach
+    // them — and because "what is this host still holding" is the question
+    // a leaked master would answer wrongly.
+    let ptmx_before = host_ptmx_count();
+
     let mut pids: Vec<(u32, Option<u64>)> = Vec::new();
     for i in 0..3 {
         let req = json!({
@@ -1921,6 +1952,13 @@ fn carrier_runtime_fence(b: &mut Battery, scratch: &Path) {
         "three real Carriers are running under runtime incarnation A",
         pids.len() == 3 && pids.iter().all(|(_, st)| st.is_some()),
         format!("{pids:?}"),
+    );
+
+    let ptmx_live = host_ptmx_count();
+    b.check(
+        "each of the three Carriers possesses a terminal the host holds the master of",
+        ptmx_live == ptmx_before + 3,
+        format!("host held {ptmx_before} pty masters before, {ptmx_live} with three Carriers up"),
     );
 
     // **The second line of defence, before the drain.** A start under a
@@ -1969,6 +2007,19 @@ fn carrier_runtime_fence(b: &mut Battery, scratch: &Path) {
         "every drained Carrier is gone from /proc when the drain answers",
         pids.len() == 3 && survivors.is_empty(),
         format!("still alive: {survivors:?}"),
+    );
+
+    // **The terminals go with them, and this is measured rather than
+    // inferred from the `Pty` being a field of `Carrier`.** A drain that
+    // emptied the process set and left three masters open would be a host
+    // accumulating a descriptor per Carrier for the life of the runtime —
+    // and every other check here would still be green.
+    let ptmx_after = host_ptmx_count();
+    b.check(
+        "and their terminals are gone with them — the host holds no leftover master",
+        ptmx_after == ptmx_before,
+        format!("host held {ptmx_before} pty masters before, {ptmx_live} with three Carriers \
+                 up, {ptmx_after} after the drain"),
     );
 
     // And the set now belongs to nobody, so the new incarnation may start.
@@ -2457,6 +2508,7 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
     let leak_visible: bool = {
         let r = carrier::spawn_with(
             &fixture, &dir, &dir.join("f3.log"), &crate::new_epoch(), None, &[], &[(leak_fd, 9)],
+            None,
         );
         match r {
             Ok(mut r) => {
@@ -2488,6 +2540,7 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         Some(pol),
         &args.iter().map(|s| s.to_string()).collect::<Vec<_>>(),
         &[(leak_fd, 9)],
+        None,
     );
     match probe_run {
         Err(e) => {
@@ -3140,4 +3193,623 @@ impl Chan {
         std::thread::sleep(Duration::from_millis(120));
         Ok(self.last_reply().unwrap_or(Value::Null))
     }
+}
+
+// ============================================================ D.1.3c·1
+//
+// **Possessed PTY.** The question is narrow on purpose:
+//
+//   > Can a currently admitted Carrier possess one deliberately established
+//   > terminal without acquiring terminal-selection, terminal-namespace,
+//   > executable-selection or ambient host authority?
+//
+// It is *possession*, not attachment. Nothing here gives the runtime or the
+// cockpit a terminal data plane — the master stays in this process and this
+// battery is the only thing that reads it. Who else may hold an attachment
+// is c·2's question and probably another mechanism.
+fn pty_possession(b: &mut Battery, scratch: &Path) {
+    use crate::carrier;
+    use crate::pty::{self, Pty, TermProps};
+
+    println!("\n  D.1.3c·1 · the possessed terminal");
+
+    let Some(fixture) = carrier::fixture_path() else {
+        b.check("the pty falsifiers could run", false, "no carrier fixture");
+        return;
+    };
+    let dir = scratch.join("pty");
+    let _ = std::fs::create_dir_all(&dir);
+
+    // ------------------------------------------------ allocation, no name
+    let mut p = match Pty::open() {
+        Ok(p) => p,
+        Err(e) => {
+            b.check("a pty pair is allocated from /dev/ptmx", false, e);
+            return;
+        }
+    };
+    b.check(
+        "a pty pair is allocated by possession — TIOCGPTPEER, never ptsname",
+        p.slave().is_some() && p.slave_rdev() != 0,
+        format!("pts index {} · slave st_rdev {:#x}", p.ptn(), p.slave_rdev()),
+    );
+
+    // **The decoy.** A second pair the host also holds, so that a predicate
+    // which accepts *any* master cannot pass the provenance checks below.
+    let decoy = Pty::open().ok();
+    b.check(
+        "an unclaimed master answers TIOCGSID with ENOTTY, so the probe can be wrong",
+        decoy.as_ref().map(|d| d.session()).unwrap_or(Some(0)).is_none(),
+        format!("decoy session={:?}", decoy.as_ref().and_then(|d| d.session())),
+    );
+
+    // A deterministic size, set by the host before the Carrier exists. The
+    // payload is refused TIOCSWINSZ, so this is the only way it can be so.
+    let _ = p.set_winsize(pty::WinSize { rows: 24, cols: 80, xpixel: 0, ypixel: 0 });
+
+    let ptn = p.ptn();
+    let slave_rdev = p.slave_rdev();
+    let mut c = match carrier::spawn_on_pty(&fixture, &dir, &dir.join("pty.log"),
+                                            &crate::new_epoch(), None, p) {
+        Ok(c) => c,
+        Err(e) => {
+            b.check("a Carrier starts on a possessed pty", false, e);
+            return;
+        }
+    };
+    // **Every reading below re-borrows.** The `Pty` is a field of the
+    // Carrier now, and holding one long borrow of it would lock out
+    // `speak`, which needs the Carrier mutably. `spawn_with` has already
+    // dropped the host's copy of the slave — the hangup is on the last
+    // close, so that had to happen before any of this could mean anything.
+    let master_fd = c.pty().map(|q| q.master()).unwrap_or(-1);
+    // **Non-blocking, for the same reason the census is.** Every read below
+    // has a terminating condition that is itself under test — the reply
+    // arriving, the hangup arriving — and a blocking read turns a failed
+    // property into a wedged battery instead of a red row. The host
+    // sabotage battery has a probe that withholds the hangup on purpose.
+    let _ = c.pty().map(|q| q.set_nonblocking());
+
+    let handshook = c.handshake(5_000);
+    let pid = c.observe();
+    let cpid = c.pid;
+    b.check(
+        "a Carrier starts on a possessed pty and still proves its incarnation",
+        handshook.is_ok(),
+        format!("{handshook:?}"),
+    );
+
+    // ------------------------------------- the four properties, separately
+    let t = TermProps::read(cpid);
+    b.check(
+        "the Carrier is the leader of its own session",
+        t.is_session_leader(cpid),
+        format!("session={:?} pid={cpid}", t.session),
+    );
+    b.check(
+        "the Carrier has a controlling terminal, deliberately established",
+        t.has_controlling_terminal(),
+        format!("tty_nr={:?} (0 would mean none)", t.tty_nr),
+    );
+    b.check(
+        "the Carrier is the foreground process group of that terminal",
+        t.is_foreground(),
+        format!("tpgid={:?} pgrp={:?}", t.tpgid, t.pgrp),
+    );
+
+    // ------------------------------------------------- provenance, 3 ways
+    //
+    // Asked of the descriptor the host possesses, never of a pathname.
+    // `/proc/<pid>/fd/0` resolves to `/dev/pts/N` and that string is a NAME:
+    // it would be equally true of somebody else's terminal with the same
+    // number in another mount namespace.
+    b.check(
+        "the master's session id IS the Carrier's session — TIOCGSID on the held descriptor",
+        c.pty().and_then(|q| q.session()).is_some()
+            && c.pty().and_then(|q| q.session()) == t.session,
+        format!("TIOCGSID(master)={:?} carrier session={:?}",
+                c.pty().and_then(|q| q.session()), t.session),
+    );
+    b.check(
+        "the master's foreground group IS the Carrier's process group",
+        c.pty().and_then(|q| q.foreground_pgrp()).is_some()
+            && c.pty().and_then(|q| q.foreground_pgrp()) == t.pgrp,
+        format!("TIOCGPGRP(master)={:?} carrier pgrp={:?}",
+                c.pty().and_then(|q| q.foreground_pgrp()), t.pgrp),
+    );
+    let (maj, min) = pty::decode_tty_nr(t.tty_nr.unwrap_or(0));
+    b.check(
+        "the Carrier's controlling terminal is the pts this master minted",
+        min == ptn && maj == 136,
+        format!("tty_nr decodes to {maj}:{min} · TIOCGPTN(master)={ptn}"),
+    );
+    let fd0_rdev = pty::fstat_rdev_of_path(&format!("/proc/{cpid}/fd/0"));
+    b.check(
+        "the Carrier's fd 0 is the same device the host created, by st_rdev not by name",
+        fd0_rdev.is_some() && fd0_rdev == Some(slave_rdev),
+        format!("fd0 st_rdev={fd0_rdev:?} host slave st_rdev={slave_rdev:#x}"),
+    );
+    if let Some(d) = decoy.as_ref() {
+        b.check(
+            "and it is NOT the decoy master's terminal",
+            fd0_rdev != Some(d.slave_rdev()) && d.session().is_none(),
+            format!("decoy slave st_rdev={:#x}", d.slave_rdev()),
+        );
+    }
+
+    // ------------------------------------------------ the descriptor table
+    let fds: Vec<i32> = pid.fds.keys().copied().collect();
+    b.check(
+        "the Carrier holds exactly {0,1,2,3} — the terminal added no descriptor",
+        fds == vec![0, 1, 2, 3],
+        format!("{:?}", pid.fds),
+    );
+    let three_same = ["0", "1", "2"]
+        .iter()
+        .filter_map(|k| pid.fds.get(&k.parse::<i32>().unwrap()))
+        .collect::<std::collections::BTreeSet<_>>();
+    b.check(
+        "0, 1 and 2 are one terminal, not three",
+        three_same.len() == 1,
+        format!("{three_same:?}"),
+    );
+    b.check(
+        "the Carrier does not hold the master",
+        !pid.fds.values().any(|v| v.contains("ptmx")),
+        format!("{:?}", pid.fds),
+    );
+
+    // ------------------------------------ what the payload can observe
+    let tty = c.speak("TTY", 3_000).unwrap_or_default();
+    b.check(
+        "the payload's own stdio is a terminal and it can read its size",
+        tty == "TTY true true true 24 80",
+        format!("{tty:?} (expected the 24x80 the host set before it existed)"),
+    );
+
+    // --------------------------------------------- bytes, in both directions
+    //
+    // `isatty` is not the proof; the line discipline is. The host writes a
+    // bare `\n` and reads back `\r\n`, which only a terminal does — a pipe
+    // would return the bytes unchanged, and nothing would be echoed at all.
+    let mut mfile = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(master_fd) };
+    use std::io::{Read, Write};
+    let wrote = mfile.write_all(b"ping\n").and_then(|_| mfile.flush()).is_ok();
+    let heard = c.speak("HEAR", 3_000).unwrap_or_default();
+    b.check(
+        "a byte written to the master is read by the Carrier from its stdin",
+        wrote && heard == "HEARD ping",
+        format!("{heard:?}"),
+    );
+
+    let said = c.speak("SAY pong", 3_000).unwrap_or_default();
+
+    // **Accumulated, not read once.** The terminal delivers the discipline's
+    // echo of "ping" and the Carrier's "pong" as separate readable chunks,
+    // and a single `read` returns whichever arrived first — which made this
+    // check fail against a working terminal, reporting the echo as a missing
+    // reply. Drain until the reply appears or the budget runs out.
+    let mut seen = String::new();
+    for _ in 0..40 {
+        let mut buf = [0u8; 256];
+        match mfile.read(&mut buf) {
+            Ok(n) if n > 0 => seen.push_str(&String::from_utf8_lossy(&buf[..n])),
+            _ => {}
+        }
+        if seen.contains("pong") {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    b.check(
+        "a byte written by the Carrier is read by the host from the master",
+        said == "SAID 4" && seen.contains("pong"),
+        format!("speak={said:?} master saw {seen:?}"),
+    );
+    b.check(
+        "the master saw the line discipline echo the input as CRLF — a pipe cannot",
+        seen.contains("ping\r\n"),
+        format!("{seen:?} — expected the terminal's own echo of \"ping\" before \"pong\""),
+    );
+
+    // The host resizes; the Carrier observes the change it could not make.
+    let _ = c.pty().map(|q| q.set_winsize(pty::WinSize { rows: 40, cols: 100, xpixel: 0, ypixel: 0 }));
+    let tty2 = c.speak("TTY", 3_000).unwrap_or_default();
+    b.check(
+        "the holder of the master resizes the terminal and the Carrier sees it",
+        tty2 == "TTY true true true 40 100",
+        format!("{tty2:?}"),
+    );
+
+    // ---------------------------------------------------------- the hangup
+    //
+    // Linux does NOT return 0 here. When the last slave closes, `read` on the
+    // master returns `EIO` — a reader testing for EOF as `== 0` spins
+    // forever — and `poll` reports `POLLHUP`. Both are asserted because a
+    // future refactor is likelier to get the errno wrong than the poll.
+    let starttime = pid.starttime;
+    c.terminate(3_000);
+    let gone = carrier::observe(cpid).starttime != starttime;
+    // Drain whatever the terminal still had buffered before asking about the
+    // hangup: a leftover byte is a successful read, and reading it as
+    // "not EIO" would report a working hangup as a broken one.
+    // Bounded and EAGAIN-tolerant: on a non-blocking master, "nothing to
+    // read yet" and "hung up" are different answers and only the second
+    // ends the loop. A budget bounds the case where the hangup never comes
+    // — which is precisely what probe 32 arranges.
+    let mut eio = false;
+    for _ in 0..80 {
+        let mut after = [0u8; 256];
+        match mfile.read(&mut after) {
+            Ok(n) if n > 0 => continue,
+            Err(ref e) if e.raw_os_error() == Some(5) => {
+                eio = true;
+                break;
+            }
+            Err(ref e) if e.raw_os_error() == Some(11) => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => break,
+        }
+    }
+    b.check(
+        "the Carrier's death is the end of the terminal — master reads EIO, never 0",
+        gone && eio,
+        format!("carrier gone={gone} · master reached EIO={eio}"),
+    );
+
+    // The host still owns the master after the Carrier is gone; dropping `p`
+    // is what ends the pair, and it is the host that does it.
+    let sid_after = c.pty().and_then(|q| q.session());
+    b.check(
+        "an unclaimed master no longer names a session once its Carrier is gone",
+        sid_after.is_none() || sid_after == Some(0),
+        format!("TIOCGSID(master)={sid_after:?}"),
+    );
+
+    // **Dropping the Carrier is what disposes of the terminal.** Nothing here
+    // closes the master; `Carrier`'s `Drop` owns it because the `Pty` is a
+    // field. That is the lifecycle binding by construction, and this is its
+    // falsifier: afterwards the number is gone from this process entirely.
+    std::mem::forget(mfile); // the Carrier's Pty owns the master, not this File.
+    drop(c);
+    let reused = crate::pty::fstat_rdev_of_path(&format!("/proc/self/fd/{master_fd}"));
+    b.check(
+        "dropping the Carrier disposes of its terminal — the host holds no master afterwards",
+        reused.is_none(),
+        format!("/proc/self/fd/{master_fd} still resolves: {reused:?}"),
+    );
+    drop(decoy);
+
+    pty_ioctl_census(b, scratch);
+    pty_property_stages(b, scratch);
+}
+
+/// The four terminal properties, staged apart.
+///
+/// ```text
+///   dup only      tty fds   ·  no new session  ·  NO ctty  ·  no fg group
+///   + setsid      tty fds   ·  session leader  ·  NO ctty  ·  no fg group
+///   + TIOCSCTTY   tty fds   ·  session leader  ·  ctty     ·  fg group
+/// ```
+///
+/// **The middle row is the whole point.** It is why `spawn_with`'s `pre_exec`
+/// does two separate things rather than one, and why "the Carrier has a
+/// terminal on stdio" and "the Carrier has a controlling terminal" are
+/// different sentences that a single `has_pty` boolean would have merged.
+///
+/// Run **unconfined**, because it measures Linux rather than Super: `setsid`
+/// and `TIOCSCTTY` are precisely the two calls a Carrier is refused, so a
+/// confined run could not reach the second and third rows at all. The
+/// confined census next door is what shows Super refusing them.
+fn pty_property_stages(b: &mut Battery, scratch: &Path) {
+    use crate::carrier;
+    use crate::pty::Pty;
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+
+    let Some(fixture) = carrier::fixture_path() else { return };
+    let Some(probe) = fixture.parent().map(|d| d.join("probe")) else { return };
+    if !probe.is_file() {
+        return;
+    }
+    let dir = scratch.join("pty-stages");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let mut p = match Pty::open() {
+        Ok(p) => p,
+        Err(e) => {
+            b.check("the pty staging control could run", false, e);
+            return;
+        }
+    };
+    let slave = p.slave().unwrap_or(-1);
+    let child = unsafe {
+        std::process::Command::new(&probe)
+            .arg("stages")
+            .current_dir(&dir)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .pre_exec(move || {
+                // dup ONLY. No setsid, no TIOCSCTTY — the child performs
+                // those itself, one at a time, reporting between each.
+                crate::fdpass::dup_onto(slave, 0)?;
+                crate::fdpass::dup_onto(slave, 1)?;
+                crate::fdpass::dup_onto(slave, 2)?;
+                Ok(())
+            })
+            .spawn()
+    };
+    let Ok(mut child) = child else {
+        b.check("the pty staging control could run", false, format!("{child:?}"));
+        return;
+    };
+    p.close_slave();
+
+    let mut mf = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(p.master()) };
+    let mut all = String::new();
+    let mut buf = [0u8; 2048];
+    loop {
+        match mf.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(_) => break,
+        }
+    }
+    std::mem::forget(mf);
+    let _ = child.wait();
+
+    let stage = |name: &str| -> Option<(i32, i32, u32, i32)> {
+        for l in all.lines() {
+            let l = l.trim_end_matches('\r');
+            let f: Vec<&str> = l.split_whitespace().collect();
+            if f.len() == 6 && f[0] == "STAGE" && f[1] == name {
+                return Some((
+                    f[2].parse().ok()?, f[3].parse().ok()?,
+                    f[4].parse::<i32>().ok()? as u32, f[5].parse().ok()?,
+                ));
+            }
+        }
+        None
+    };
+
+    let a = stage("dup");
+    let bb = stage("setsid");
+    let cc = stage("ctty");
+    b.check(
+        "the staging control reported all three stages",
+        a.is_some() && bb.is_some() && cc.is_some(),
+        format!("{all:?}"),
+    );
+
+    b.check(
+        "stage 1 · a pty on 0/1/2 confers NO session and NO controlling terminal",
+        matches!(a, Some((_, _, tty, tpgid)) if tty == 0 && tpgid == -1),
+        format!("{a:?} — (pgrp, session, tty_nr, tpgid); tty_nr 0 means none"),
+    );
+    b.check(
+        "stage 2 · setsid makes a session leader and STILL confers no controlling terminal",
+        matches!((a, bb), (Some((_, sa, _, _)), Some((_, sb, tty, tpgid)))
+                 if sb != sa && tty == 0 && tpgid == -1),
+        format!("before={a:?} after={bb:?} — the stage the whole pre_exec order exists for"),
+    );
+    b.check(
+        "stage 3 · TIOCSCTTY is what establishes the controlling terminal and foreground group",
+        matches!(cc, Some((pgrp, _, tty, tpgid)) if tty != 0 && tpgid == pgrp),
+        format!("{cc:?}"),
+    );
+    b.check(
+        "and the terminal it established is this master's",
+        matches!(cc, Some((_, _, tty, _)) if crate::pty::decode_tty_nr(tty).1 == p.ptn()),
+        format!("tty_nr decodes to {:?} · TIOCGPTN(master)={}",
+                cc.map(|c| crate::pty::decode_tty_nr(c.2)), p.ptn()),
+    );
+
+    drop(p);
+}
+
+/// The ioctl policy, **issued rather than described**.
+///
+/// The rows above prove a Carrier possesses a terminal. These prove what it
+/// may do with it, and they do it by calling — `confine::IOCTL_ALLOWED` is a
+/// description of the policy, and the census's founding objection is that a
+/// list nobody calls is a list of intentions.
+///
+/// The probe is spawned on a real possessed terminal and its report is read
+/// **from the master**, because its stdout is now that terminal. That is also
+/// a second, incidental proof that the byte path carries real payload output
+/// and not just the two words the fixture says.
+fn pty_ioctl_census(b: &mut Battery, scratch: &Path) {
+    use crate::carrier;
+    use crate::pty::Pty;
+    use std::io::Read;
+
+    let Some(fixture) = carrier::fixture_path() else { return };
+    let Some(probe) = fixture.parent().map(|d| d.join("probe")) else { return };
+    if !probe.is_file() {
+        b.check("the pty ioctl census could run", false, format!("no probe at {probe:?}"));
+        return;
+    }
+    let dir = scratch.join("pty-census");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let p = match Pty::open() {
+        Ok(p) => p,
+        Err(e) => {
+            b.check("the pty ioctl census could run", false, e);
+            return;
+        }
+    };
+    let args = ["0".to_string(), "-1".to_string(), dir.to_string_lossy().into_owned(),
+                "pty".to_string()];
+    let master_fd = p.master();
+    let run = carrier::spawn_with(&probe, &dir, &dir.join("c.log"), &crate::new_epoch(),
+                                  None, &args, &[], Some(p));
+    let Ok(mut c) = run else {
+        b.check("the pty ioctl census could run", false, format!("{:?}", run.err()));
+        return;
+    };
+
+    // Read until the probe exits and the last slave closes — which is `EIO`
+    // on a master, never 0. A `read() == 0` loop here would never terminate.
+    // **Bounded, and non-blocking, because the terminating condition used to
+    // be the thing under test.** This read until the hangup, which is right
+    // when the Carrier is the only slave holder and an unbounded block when
+    // it is not — and the host battery has a probe that deliberately makes
+    // the host keep its copy. That probe scored `TIMED OUT` after 240s and
+    // proved nothing, correctly. A budget and `EAGAIN` make the wedge a
+    // short row instead of a dead battery.
+    let _ = c.pty().map(|q| q.set_nonblocking());
+    let mut mf = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(master_fd) };
+    let mut all = String::new();
+    let mut buf = [0u8; 4096];
+    let mut quiet = 0;
+    for _ in 0..400 {
+        match mf.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                quiet = 0;
+                all.push_str(&String::from_utf8_lossy(&buf[..n]));
+            }
+            Err(ref e) if e.raw_os_error() == Some(11) => {
+                // EAGAIN — nothing ready yet. The probe writes and exits
+                // quickly, so a run of empty polls after output has started
+                // means it is done even if the hangup is being withheld.
+                quiet += 1;
+                if !all.is_empty() && quiet > 20 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(_) => break, // EIO — the real hangup
+        }
+    }
+    std::mem::forget(mf);
+    c.terminate(2_000);
+
+    // The line discipline turns every `\n` into `\r\n` on the way out, which
+    // is the one place this slice has to *undo* the thing it just proved.
+    let rows: std::collections::BTreeMap<String, (bool, i32)> = all
+        .lines()
+        .filter_map(|l| {
+            let mut it = l.trim_end_matches('\r').split('\t');
+            let n = it.next()?.to_string();
+            let allowed = it.next()? == "ALLOWED";
+            let e: i32 = it.next()?.parse().ok()?;
+            Some((n, (allowed, e)))
+        })
+        .collect();
+
+    b.check(
+        "the probe ran on a possessed terminal and its report reached the master",
+        rows.len() >= 10,
+        format!("{} rows read from the master", rows.len()),
+    );
+
+    // **The allow-list must still permit a working terminal.** Without these
+    // three, every refusal below would be satisfied by a policy that refused
+    // `ioctl` outright — which is not a terminal, it is a pipe with extra
+    // steps.
+    for (name, what) in [
+        ("pty_tcgets", "read the line discipline"),
+        ("pty_tiocgwinsz", "read the window size"),
+        ("pty_tiocgpgrp", "read the foreground group"),
+    ] {
+        b.check(
+            &format!("a Carrier may {what} of the terminal it possesses — {name}"),
+            matches!(rows.get(name), Some((true, _))),
+            format!("{:?}", rows.get(name)),
+        );
+    }
+
+    // Refused, and attributably: errno 130 is Super's filter and nothing else
+    // on this path returns it. `ENOTTY` would mean the terminal said no,
+    // `EPERM` that the kernel did; only 130 names Super.
+    for (name, what) in [
+        ("pty_tiocsti", "inject bytes into its own input queue"),
+        ("pty_tiocsctty", "steal or re-establish a controlling terminal"),
+        ("pty_tiocswinsz", "choose its own terminal's size"),
+        ("pty_tcsets", "rewrite the line discipline"),
+        ("pty_tiocspgrp", "seize the foreground process group"),
+        ("pty_tiocsetd", "swap the line discipline"),
+    ] {
+        let row = rows.get(name);
+        b.check(
+            &format!("a Carrier may NOT {what} — ATTRIBUTED, errno 130"),
+            matches!(row, Some((false, e)) if *e as u32 == crate::confine::SUPER_DENY_ERRNO),
+            format!("{row:?} — expected a refusal carrying {}", crate::confine::SUPER_DENY_ERRNO),
+        );
+    }
+
+    // **The comparison width, and the first version of this measured the
+    // wrong thing.**
+    //
+    // A denied request with a garbage high half is refused under either
+    // width — it is not on the allow-list either way — so it says the
+    // refusal is robust and nothing about the filter's arithmetic. The host
+    // sabotage battery said so: pointing the width probe at `TIOCSTI`
+    // scored NOT A FALSIFIER, because sabotaging the load offset left the
+    // row green.
+    //
+    // The distinguishing case is a *permitted* request. The kernel
+    // truncates `cmd` to 32 bits after seccomp has read `args[1]`, so
+    // `TCGETS | garbage<<32` **is** `TCGETS` to the kernel and must
+    // succeed. A filter comparing the wrong half refuses a call the kernel
+    // would have run — its model of the syscall disagreeing with the
+    // syscall.
+    let plain = rows.get("pty_tiocsti");
+    let high = rows.get("pty_tiocsti_high_bits");
+    b.check(
+        "a refused ioctl stays refused with a garbage high half",
+        matches!(high, Some((false, e)) if *e as u32 == crate::confine::SUPER_DENY_ERRNO)
+            && high.map(|h| h.1) == plain.map(|p| p.1),
+        format!("plain={plain:?} high-bits={high:?}"),
+    );
+    b.check(
+        "a PERMITTED ioctl still runs with a garbage high half — the filter compares the \
+         32 bits the kernel acts on",
+        matches!(rows.get("pty_tcgets_high_bits"), Some((true, _))),
+        format!("{:?} — a filter comparing the other half would refuse a call the kernel runs",
+                rows.get("pty_tcgets_high_bits")),
+    );
+
+    // **An allow-list is immune to the CVE-2019-7303 bypass by shape.**
+    // That vulnerability is a deny-list property: the comparison misses and
+    // the request falls through to ALLOW. Here a request that matches
+    // nothing is refused, which is the whole reason the ruling called for
+    // an allow-list. Recorded as a check so the reasoning is measured
+    // rather than remembered.
+    b.check(
+        "an unlisted ioctl is refused rather than falling through — allow-list, not deny-list",
+        matches!(rows.get("pty_tiocsetd"), Some((false, e))
+                 if *e as u32 == crate::confine::SUPER_DENY_ERRNO),
+        format!("{:?} — TIOCSETD appears on no list in confine.rs", rows.get("pty_tiocsetd")),
+    );
+
+    // Landlock governs the namespace; possession governs the descriptor.
+    //
+    // The inherited slave is ungoverned by Landlock — the right is bound at
+    // `open` and the host opened it outside any domain — which is exactly
+    // why the seccomp rows above are load-bearing. What Landlock still does
+    // is stop the Carrier going looking for a *different* terminal.
+    for (name, what) in [
+        ("open_dev_ptmx", "mint a terminal of its own"),
+        ("open_dev_pts_0", "open somebody else's terminal by name"),
+        ("open_dev_pts_dir", "enumerate the terminal namespace"),
+    ] {
+        b.check(
+            &format!("a Carrier may NOT {what} — {name}"),
+            matches!(rows.get(name), Some((false, _))),
+            format!("{:?}", rows.get(name)),
+        );
+    }
+
+    b.check(
+        "possessing one terminal is not a route to another — TIOCGPTPEER from the slave",
+        matches!(rows.get("pty_tiocgptpeer_from_slave"), Some((false, _))),
+        format!("{:?}", rows.get("pty_tiocgptpeer_from_slave")),
+    );
+
+    drop(c);
 }

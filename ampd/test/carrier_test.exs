@@ -1083,7 +1083,7 @@ defmodule Ampd.CarrierTest do
       # an in-flight admission would commit under a rule it was not admitted
       # under. The version is the only thing that can carry that — so this
       # asserts it exactly, and changing a row's meaning has to come here.
-      assert Ampd.Carrier.Floor.version() == 2
+      assert Ampd.Carrier.Floor.version() == 3
       assert Ampd.Carrier.Floor.schema() == "carrier-confinement-floor@1"
 
       names =
@@ -1091,14 +1091,38 @@ defmodule Ampd.CarrierTest do
            Ampd.Carrier.Floor.attested_rows() ++ Ampd.Carrier.Floor.correspondence_rows())
         |> Enum.map(fn {_, n, _} -> n end)
 
-      assert length(names) == 20
-      assert length(Enum.uniq(names)) == 20, "two floor rows share a name, so one cannot be reported"
+      assert length(names) == 25
+      assert length(Enum.uniq(names)) == 25, "two floor rows share a name, so one cannot be reported"
 
       # v2's exercise of the rule: the row that claimed to bind the payload
       # and did not is gone, and the one that replaced it is attested rather
       # than correspondence, because it reads only the attestation.
       refute "payload_is_the_attested_bytes" in names
       assert "execution_basis_is_well_formed" in names
+
+      # **v3's exercise of the rule, and it is the cleaner example.**
+      # D.1.3c·1 gave a served Carrier a possessed terminal, which made
+      # `stdin_is_null` false — not obsolete, *false*. Renaming rather than
+      # rewriting is what stops an admission taken under "stdin is
+      # /dev/null" from committing under "stdin is a terminal": the digest
+      # cannot see a function body, so the name and the version are the only
+      # things that can carry the change.
+      #
+      # The production path found this without being asked. Giving the
+      # served Carrier a terminal turned `super-host verify` seven checks red
+      # on `carrier-confinement-unacceptable` — the floor refusing an
+      # embodiment whose shape nobody had told it about.
+      refute "stdin_is_null" in names
+      assert "stdio_is_the_possessed_terminal" in names
+      assert "stdio_is_one_terminal" in names
+
+      # The terminal relationship. Three readings and one correspondence:
+      # only `terminal_is_the_hosts_master` could not be satisfied by a
+      # Carrier that had got hold of some *other* terminal.
+      assert "terminal_session_established" in names
+      assert "terminal_is_controlling" in names
+      assert "terminal_is_the_hosts_master" in names
+      assert "terminal_resize_is_the_hosts" in names
 
       att = Enum.map(Ampd.Carrier.Floor.attested_rows(), fn {_, n, _} -> n end)
       assert "execution_basis_is_well_formed" in att
@@ -1423,6 +1447,140 @@ defmodule Ampd.CarrierTest do
 
       assert length(Harness.drained()) == before,
              "a Gate restart drained a set that no discontinuity had left behind"
+    end
+  end
+
+  # =================================================================== E31
+  #
+  # **D.1.3c·1 — the possessed terminal, at the admission boundary.**
+  #
+  # `super-host verify` proves the mechanism: that the host mints the pair,
+  # that the Carrier's controlling terminal is the one whose master the host
+  # holds, that the payload may read its terminal and not reconfigure it.
+  # These prove the other half — that the *runtime* refuses to admit a
+  # Carrier whose terminal relationship does not hold, rather than believing
+  # a host that says it does.
+  #
+  # That distinction has bitten this slice once already, one layer up: the
+  # attested object was missing from the real host entirely while the Elixir
+  # harness fabricated it, so every falsifier passed over a production path
+  # that could not have committed a single Carrier. Two halves proved
+  # separately and a join proved by nobody. So each row below is refused
+  # *here*, with the harness supplying an observation the real host would
+  # never produce.
+  describe "E31 · a Carrier is not admitted on a terminal the host does not hold" do
+    test "stdio that is not a terminal cannot commit", ctx do
+      # **One consistent non-terminal on all three, and the uniformity is
+      # the point.** The obvious input is the literal pre-D.1.3c shape —
+      # `/dev/null`, log, log — and it is the wrong one: those are three
+      # *different* targets, so `stdio_is_one_terminal` refuses it and the
+      # row this test names never gets consulted. The sabotage battery said
+      # so, scoring the probe for that row NOT A FALSIFIER because its
+      # neighbour was covering for it.
+      #
+      # `/dev/null` three times passes every other row — the set is still
+      # exactly {0,1,2,3}, fd 3 is still a socket, all three stdio entries
+      # are still identical — so exactly one row can refuse it.
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        fds = %{
+          "0" => "/dev/null",
+          "1" => "/dev/null",
+          "2" => "/dev/null",
+          "3" => "socket:[4242]"
+        }
+        {:ok, put_in(obs, ["observed", "fds"], fds)}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
+      assert length(Harness.terminated()) == 1
+    end
+
+    test "three different terminals on 0, 1 and 2 cannot commit", ctx do
+      # Each descriptor is a terminal and the set is still exactly {0,1,2,3},
+      # so `descriptor_set_exact` and `stdio_is_the_possessed_terminal` both
+      # pass. Only `stdio_is_one_terminal` can see it. A Carrier holding
+      # three terminals is a Carrier the host handed two it did not mean to.
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        fds = %{
+          "0" => "/dev/pts/7",
+          "1" => "/dev/pts/8",
+          "2" => "/dev/pts/9",
+          "3" => "socket:[4242]"
+        }
+        {:ok, put_in(obs, ["observed", "fds"], fds)}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
+    end
+
+    test "a terminal that is not the host's master cannot commit", ctx do
+      # **The row that matters.** Every other terminal row is a reading of
+      # the child's own `/proc`, and a Carrier that had got hold of somebody
+      # else's terminal would satisfy all of them: it would be a session
+      # leader, it would have a controlling terminal, it would be in the
+      # foreground. `is_this_host_master` is the only one it could not
+      # satisfy, because the host derives it from `TIOCGSID` on the
+      # descriptor it holds — which answers ENOTTY until that exact terminal
+      # has been claimed.
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        {:ok, put_in(obs, ["attested", "terminal", "is_this_host_master"], false)}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
+    end
+
+    test "a terminal with no controlling relationship cannot commit", ctx do
+      # `setsid` without `TIOCSCTTY`. The staged falsifier in `super-host
+      # verify` proves this state is reachable on Linux — a session leader
+      # with a pty on its stdio and `tty_nr == 0` — so it is a shape the
+      # runtime has to refuse rather than one that cannot occur.
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        {:ok, put_in(obs, ["attested", "terminal", "controlling_terminal"], false)}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
+    end
+
+    test "a host that claims resize authority for the Carrier cannot commit", ctx do
+      # Resize is done *to* a Carrier by the holder of the master. A host
+      # that had started permitting `TIOCSWINSZ` to payloads would be
+      # offering a different bargain, and the basis is where the runtime
+      # gets to notice rather than be told.
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        {:ok, put_in(obs, ["attested", "terminal", "resize_authority"], "carrier")}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
+    end
+
+    test "a Carrier with no terminal at all cannot commit", ctx do
+      # Absent is not false and the floor has to distinguish them. A host
+      # that stopped allocating terminals would produce `terminal: null`,
+      # and silently admitting that would be the fence-shaped mistake: a
+      # property quietly stopping rather than failing.
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        {:ok, put_in(obs, ["attested", "terminal"], nil)}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
     end
   end
 

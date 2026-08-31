@@ -588,6 +588,61 @@ const OFF_ARG0: u32 = 16;
 
 const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
 
+// offset of `args[1]` — the `ioctl` request. See `IOCTL_ALLOWED`.
+const OFF_ARG1: u32 = 24;
+const NR_IOCTL: u32 = 16;
+
+/// The **only** `ioctl` requests a Carrier may issue. Everything else is
+/// refused, including requests that do not exist yet.
+///
+/// # An allowlist, and the reason is one directory up in this file
+///
+/// D.1.3b·2e found a process-lifetime bypass caused by a syscall *denylist*
+/// missing an alternate representation of a number it already knew about. A
+/// terminal is a far larger operation surface than a syscall table, `ioctl`
+/// requests are added to the kernel continuously, and the first PTY Carrier
+/// is a deterministic fixture whose entire vocabulary is known. Reaching for
+/// a denylist here — refuse `TIOCSTI` and nine friends, permit everything
+/// else — would be repeating the mistake in the one place we have just
+/// finished paying for it. `seccomp(2)` recommends allow-listing for exactly
+/// this reason.
+///
+/// # Why these three and nothing else
+///
+/// They are the operations that let a payload *observe* the terminal it was
+/// given. Every write to a terminal's own configuration is out, deliberately:
+///
+/// ```text
+///   TCGETS       read the line discipline settings
+///   TIOCGWINSZ   read the window size
+///   TIOCGPGRP    read the foreground process group
+/// ```
+///
+/// `TCSETS`/`TCSETSW`/`TCSETSF` are **not** here. They are the obvious next
+/// candidates and the argument for them — "a terminal you cannot configure is
+/// not a terminal" — is an argument about shells, and there is no shell. They
+/// go in when a falsifier shows this fixture needs a termios transition to
+/// demonstrate terminal semantics, and not before.
+///
+/// `TIOCSWINSZ` is **not** here either, and that is a positive decision
+/// rather than an omission: resize is an operation performed *on* a Carrier
+/// by the holder of the master, not an authority the Carrier holds over its
+/// own terminal. See `pty::Pty::set_winsize`.
+///
+/// Refused by name and therefore attributable: `TIOCSTI`, `TIOCSCTTY`,
+/// `TIOCNOTTY`, `TIOCSPGRP`, `TIOCCONS`, `TIOCSETD`, `TIOCLINUX`,
+/// `TIOCVHANGUP`, `TIOCPKT`, `TIOCSIG` — not because each is listed, but
+/// because nothing is permitted that is not listed here.
+const IOCTL_ALLOWED: &[u32] = &[
+    0x5401, // TCGETS
+    0x5413, // TIOCGWINSZ
+    0x540f, // TIOCGPGRP
+];
+
+pub fn ioctl_allowed(request: u32) -> bool {
+    IOCTL_ALLOWED.contains(&request)
+}
+
 /// `__X32_SYSCALL_BIT` — bit 30, set in `nr` by every x32 syscall. x32
 /// reports `AUDIT_ARCH_X86_64`, so this is the *only* thing distinguishing
 /// the two numbering spaces inside a filter. See `build_filter`.
@@ -791,6 +846,60 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
     f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 1 /* PR_SET_PDEATHSIG */, 0, 1));
     f.push(stmt(BPF_RET | BPF_K, deny));
     f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
+
+    // ---------------------------------------------------- the ioctl clause
+    //
+    // **Allow-list, and the request is compared as 32 bits.**
+    //
+    // The kernel declares `SYSCALL_DEFINE3(ioctl, unsigned int fd, unsigned
+    // int cmd, unsigned long arg)`. `cmd` is truncated to 32 bits — but the
+    // truncation happens *after* the seccomp check, so `seccomp_data.args[1]`
+    // still holds whatever the caller left in the whole register.
+    //
+    // **What that costs depends on which way round the list is, and the
+    // first draft of this comment got it wrong.**
+    //
+    // For a DENY-list it is a bypass, and a famous one: the comparison
+    // against `TIOCSTI` fails, the request falls through to ALLOW, and the
+    // kernel executes the low half anyway. That is CVE-2019-7303 — snapd,
+    // this syscall, this request number.
+    //
+    // For an ALLOW-list it is not. `0xffffffff00005412` is not on the list
+    // under any comparison width, so it is refused either way. **Choosing
+    // the allow-list removed the vulnerability class**, which is worth
+    // saying plainly rather than claiming credit for defeating it.
+    //
+    // The width still has to be right, for a different reason: the filter's
+    // model of `ioctl` must agree with the kernel's. Measured both ways —
+    //
+    //     compare LOW 32   TCGETS | garbage<<32  → reaches the kernel  ✓
+    //     compare HIGH 32  TCGETS plain          → REFUSED             ✗
+    //
+    // — so a filter comparing the wrong half refuses a call the kernel
+    // would have run. The falsifier is therefore a *permitted* request with
+    // a garbage high half, not a denied one; a denied one cannot tell the
+    // two filters apart. See `pty_tcgets_high_bits`.
+    //
+    // `BPF_LD | BPF_W | BPF_ABS` at offset 24 loads exactly the low 32 bits
+    // on little-endian, which is the half the kernel will act on. That is
+    // also why the `prctl` and `socket` clauses below are correct at
+    // `OFF_ARG0` — their arguments are declared `int` and truncated the same
+    // way — and the reasoning is written here because it was previously true
+    // by luck rather than by decision.
+    //
+    // Layout: `jf` on the first jump skips the whole clause and lands on the
+    // trailing reload, which is harmless when the accumulator already holds
+    // `nr`. Each allow arm jumps forward to that same reload.
+    {
+        let n = IOCTL_ALLOWED.len() as u8;
+        f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, NR_IOCTL, 0, n + 2));
+        f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARG1));
+        for (i, req) in IOCTL_ALLOWED.iter().enumerate() {
+            f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, *req, n - i as u8, 0));
+        }
+        f.push(stmt(BPF_RET | BPF_K, deny));
+        f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
+    }
 
     // ABI 9 has no UDP right, so the network policy cannot be completed in
     // Landlock on this kernel. Close the family at `socket(2)` instead:

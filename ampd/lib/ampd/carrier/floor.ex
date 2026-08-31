@@ -71,7 +71,7 @@ defmodule Ampd.Carrier.Floor do
   """
 
   @schema "carrier-confinement-floor@1"
-  @version 2
+  @version 3
 
   def schema, do: @schema
   def version, do: @version
@@ -88,7 +88,32 @@ defmodule Ampd.Carrier.Floor do
       {:observed, "seccomp_filter_mode", &(&1["seccomp_mode"] == 2)},
       {:observed, "seccomp_filter_present", &(is_integer(&1["seccomp_filters"]) and &1["seccomp_filters"] >= 1)},
       {:observed, "descriptor_set_exact", &(Map.keys(&1["fds"] || %{}) |> Enum.sort() == ~w(0 1 2 3))},
-      {:observed, "stdin_is_null", &(get_in(&1, ["fds", "0"]) == "/dev/null")},
+      # **`stdin_is_null` was here and D.1.3c·1 made it false.**
+      #
+      # The row is renamed rather than rewritten, because the versioning rule
+      # above is the whole reason this file has a version: `digest/0` cannot
+      # see a function body, so a row that kept its name and changed its
+      # meaning would keep its digest and an in-flight admission taken under
+      # "stdin is /dev/null" would commit under "stdin is a terminal".
+      #
+      # The production path caught this itself. Giving a served Carrier a
+      # terminal turned `super-host verify` seven checks red on
+      # `carrier-confinement-unacceptable`, which is the floor doing exactly
+      # what it is for — refusing an embodiment whose shape it was not told
+      # about, rather than accepting a Carrier that had quietly become
+      # something else.
+      {:observed, "stdio_is_the_possessed_terminal",
+       &(String.starts_with?(get_in(&1, ["fds", "0"]) || "", "/dev/pts/"))},
+      # And it is ONE terminal on all three, not three descriptors that each
+      # happen to be a terminal. A Carrier holding two would be a Carrier the
+      # host handed something it did not mean to.
+      {:observed, "stdio_is_one_terminal",
+       fn obs ->
+         case Enum.map(~w(0 1 2), &get_in(obs, ["fds", &1])) do
+           [t, t, t] when is_binary(t) -> true
+           _ -> false
+         end
+       end},
       {:observed, "control_is_a_socket", &String.starts_with?(get_in(&1, ["fds", "3"]) || "", "socket:")},
       # **Exactly these two names.** This accepted "any two keys beginning
       # SUPER_CARRIER_", so `SUPER_CARRIER_ANYTHING` passed. A row called
@@ -171,6 +196,33 @@ defmodule Ampd.Carrier.Floor do
       {:attested, "parent_death_is_kernel_bound", &(&1["pdeathsig"] == "SIGKILL")},
       {:attested, "no_network", &(&1["network"] == "none")},
       {:attested, "attestor_is_the_host", &(&1["attestor"] == "super-host")},
+      # --- D.1.3c·1 · the terminal relationship ---------------------------
+      #
+      # **Four rows, and the fourth is the only one that could not be forged
+      # by a Carrier that got hold of some other terminal.** The first three
+      # are read out of the child's own `/proc/<pid>/stat`, so they say a
+      # controlling-terminal relationship exists; only `is_this_host_master`
+      # says it is *this* one — `TIOCGSID` asked of the descriptor the host
+      # holds, which answers `ENOTTY` until a slave-side session leader has
+      # claimed that exact terminal.
+      #
+      # They live in the attested class rather than the observed one because
+      # the runtime cannot reach `/proc` or the master; the host is the only
+      # party that can measure either, and the class says so rather than
+      # letting the runtime believe it observed them.
+      {:attested, "terminal_session_established",
+       &(get_in(&1, ["terminal", "session_leader"]) == true)},
+      {:attested, "terminal_is_controlling",
+       &(get_in(&1, ["terminal", "controlling_terminal"]) == true)},
+      {:attested, "terminal_is_the_hosts_master",
+       &(get_in(&1, ["terminal", "is_this_host_master"]) == true)},
+      # Resize is an operation performed *on* a Carrier by the holder of the
+      # master, never an authority the Carrier holds over its own terminal.
+      # `TIOCSWINSZ` is off the seccomp allow-list; this is the row that says
+      # so in the basis, so a host that quietly started permitting it would
+      # be refused rather than believed.
+      {:attested, "terminal_resize_is_the_hosts",
+       &(get_in(&1, ["terminal", "resize_authority"]) == "super-host")},
       # **The row this replaces was the weakest thing in the floor.**
       #
       # `payload_is_the_attested_bytes` accepted any string that was 32 bytes

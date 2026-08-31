@@ -398,6 +398,73 @@ probe "a policy description that has gone stale against the filter is noticed" \
   host/src/confine.rs \
   's|    nr >= X32_SYSCALL_BIT \|\| DENIED.contains(&nr)|    DENIED.contains(\&nr)|'
 
+# --- D.1.3c·1 · the possessed terminal --------------------------------------
+
+# 28 · The host stops establishing the controlling terminal, and does
+#      everything else. The Carrier still gets a pty on 0/1/2 and still
+#      becomes a session leader — which is exactly the middle stage the
+#      staged falsifier exists to name, and exactly the state that "it has a
+#      terminal" would have accepted.
+probe "a pty on stdio that is nobody's controlling terminal is noticed" \
+  "the Carrier has a controlling terminal, deliberately established" \
+  host/src/carrier.rs \
+  's|                    if ioctl_int(s, crate::pty::TIOCSCTTY, 0) < 0 {|                    if false \&\& ioctl_int(s, crate::pty::TIOCSCTTY, 0) < 0 {|'
+
+# 29 · The allow-list becomes a pass-through. Every terminal ioctl is then
+#      permitted, including TIOCSTI — which is input injection into the
+#      Carrier's own terminal, and the operation CVE-2019-7303 was about.
+#      NOTE: a range address. `f.push(stmt(BPF_RET | BPF_K, deny));` occurs
+#      in three clauses and only the ioctl one is under test; the first
+#      version of this probe tried to wrap the block in `if true {} else`
+#      and produced invalid Rust, which the battery scored BROKE THE BUILD —
+#      correctly, since red-because-it-did-not-compile proves nothing.
+probe "an ioctl allow-list that permits everything is noticed" \
+  "a Carrier may NOT inject bytes into its own input queue" \
+  host/src/confine.rs \
+  '/let n = IOCTL_ALLOWED.len() as u8;/,/OFF_NR));/{s|        f.push(stmt(BPF_RET \| BPF_K, deny));|        f.push(stmt(BPF_RET \| BPF_K, SECCOMP_RET_ALLOW));|}'
+
+# 30 · **The comparison width, and this probe had to be re-aimed.**
+#
+#      It first expected `TIOCSTI with a garbage high half` to go red and
+#      scored NOT A FALSIFIER — correctly. Under an ALLOW-list a request
+#      with garbage high bits is refused whichever half is compared, because
+#      it is on no list either way. The CVE-2019-7303 bypass is a DENY-list
+#      property, and the ruling's choice of an allow-list removed it.
+#
+#      What the width still decides is whether the filter agrees with the
+#      kernel, and only a PERMITTED request can show it: `TCGETS |
+#      garbage<<32` IS `TCGETS` to a kernel that truncates `cmd`, so a
+#      filter reading the other half refuses a call the kernel would run.
+probe "an ioctl filter that reads the half the kernel discards is noticed" \
+  "a PERMITTED ioctl still runs with a garbage high half" \
+  host/src/confine.rs \
+  's|        f.push(stmt(BPF_LD \| BPF_W \| BPF_ABS, OFF_ARG1));|        f.push(stmt(BPF_LD \| BPF_W \| BPF_ABS, OFF_ARG1 + 4));|'
+
+# 31 · The terminal is handed over but not owned, so nothing disposes of it
+#      when the Carrier goes. `Carrier`'s `Drop` is what makes "the PTY
+#      cannot outlive the Carrier" true by construction rather than by a
+#      cleanup somebody has to remember.
+#      NOTE: this attacks `Pty`'s disposal, not `Carrier`'s field. Nulling
+#      the field instead — `std::mem::forget(pty.take())` — scored NOT A
+#      FALSIFIER, and the reason is worth keeping: with no `Pty` there is no
+#      master fd, `master_fd` falls back to -1, and "the host holds no
+#      master afterwards" becomes vacuously true. A sabotage destructive
+#      enough to break the checks *before* the one it targets can satisfy
+#      that one by accident.
+probe "a terminal that outlives its Carrier is noticed" \
+  "dropping the Carrier disposes of its terminal" \
+  host/src/pty.rs \
+  's|        unsafe { close(self.master) };|        let _ = self.master;|'
+
+# 32 · The host keeps its copy of the slave. Everything works — the Carrier
+#      has its terminal, bytes flow both ways — and the hangup never fires,
+#      because a pty hangs up on the LAST close and the host is still
+#      holding one. A death signal that never arrives.
+probe "a host that never lets go of the slave is noticed" \
+  "the Carrier's death is the end of the terminal" \
+  host/src/carrier.rs \
+  's|                p.close_slave();|                let _ = \&p;|'
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.

@@ -692,6 +692,48 @@ probe "admission refuses while the machine is unsynchronized" test/carrier_test.
   's|         :ok <- machine_synchronized(),|         :ok <- :ok,|' \
   lib/ampd/carrier.ex
 
+# --- D.1.3c·1 · the possessed terminal, at the admission boundary ----------
+#
+# `super-host verify` proves the mechanism; `E31` proves the runtime refuses
+# an embodiment whose terminal relationship does not hold. These attack the
+# floor rows that do the refusing.
+#
+# **Every one WEAKENS a predicate rather than deleting a row**, and that is
+# not tidiness. `E28` asserts the row count as an exact constant, so removing
+# a row turns the file red through E28 and the probe would score `falsified`
+# for a reason that has nothing to do with the row it names — the same defect
+# as a sabotage that disables more than the fix it targets. Names unchanged
+# means `digest/0` unchanged, so only the intended falsifier moves.
+
+# L1 · The row that notices stdio is not a terminal at all. Weakened, a
+#      Carrier built the pre-D.1.3c way — /dev/null and a log file — commits.
+probe "stdio that is not a terminal is refused" test/carrier_test.exs \
+  's@       &(String.starts_with?(get_in(&1, \["fds", "0"\]) || "", "/dev/pts/"))},@       \&(is_map(\&1) or String.starts_with?(get_in(\&1, ["fds", "0"]) || "", "/dev/pts/"))},@' \
+  lib/ampd/carrier/floor.ex
+
+# L2 · Three terminals on 0/1/2 instead of one. The descriptor set is still
+#      exactly {0,1,2,3} and each entry is still a pts, so every other row
+#      passes — this is the only one that can see it.
+probe "three different terminals on 0, 1 and 2 are refused" test/carrier_test.exs \
+  's@           \[t, t, t\] when is_binary(t) -> true@           [t, _u, _v] when is_binary(t) -> true@' \
+  lib/ampd/carrier/floor.ex
+
+# L3 · **The load-bearing one.** A Carrier that had got hold of somebody
+#      else's terminal satisfies session_leader, controlling_terminal and
+#      foreground — all three are readings of its own /proc. Only this row,
+#      which is TIOCGSID asked of the descriptor the host holds, can refuse
+#      it.
+probe "a terminal that is not the host's master is refused" test/carrier_test.exs \
+  's@       &(get_in(&1, \["terminal", "is_this_host_master"\]) == true)},@       \&(is_map(\&1) or get_in(\&1, ["terminal", "is_this_host_master"]) == true)},@' \
+  lib/ampd/carrier/floor.ex
+
+# L4 · Resize authority. A host that had started permitting TIOCSWINSZ to
+#      payloads is offering a different bargain, and the basis is where the
+#      runtime gets to notice rather than be told.
+probe "a host claiming resize authority for the Carrier is refused" test/carrier_test.exs \
+  's@       &(get_in(&1, \["terminal", "resize_authority"\]) == "super-host")},@       \&(is_map(\&1) or get_in(\&1, ["terminal", "resize_authority"]) == "super-host")},@' \
+  lib/ampd/carrier/floor.ex
+
 # --- D.1.3b·2e · the token is not the transition ---------------------------
 #
 # Review's closing objection to 2d. The four probes above all falsify through
