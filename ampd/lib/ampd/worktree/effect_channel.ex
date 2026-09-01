@@ -264,6 +264,127 @@ defmodule Ampd.Worktree.EffectChannel do
     send_and_await(sock, req, request_id, epoch, timeout, expect)
   end
 
+  @doc """
+  As `request/5`, for the one operation whose answer carries a **descriptor**.
+
+  ## Why this is a second path and not a flag
+
+  `recv_frame/2` is `:socket.recv/3`, and a plain `recv` on a message
+  carrying `SCM_RIGHTS` **silently destroys the descriptor** — the kernel
+  drops it, sets `MSG_CTRUNC`, and the body arrives looking complete.
+  Measured on this VM: the open-descriptor count is unchanged across such a
+  call.
+
+  That makes "teach the shared reader about ancillary data" the wrong shape
+  twice over. `Ampd.Carrier.Machine.Channel` and the worktree effect path
+  both call `recv_frame/2`, and **the worktree path must never grow an
+  fd-receive** — an effect that could return a descriptor is a different
+  mechanism wearing this one's name. So the ancillary path is separate, and
+  the two readers stay two.
+
+  ## The receive contract, and the three things that falsify a naive one
+
+  1. **The first receive must be `recvmsg`.** Ancillary data rides the first
+     bytes of the message that carried it: it is in the first receive or it
+     is gone.
+
+  2. **It asks for exactly the four-byte length prefix.** `BufSz` is a
+     ceiling, not a demand, so a generous one would happily read *past* this
+     frame into a following one and leave the shared endpoint unaligned for
+     the next reader. Four bytes is the smallest read that still collects
+     the rights.
+
+  3. **`ctrunc` is checked first, unconditionally, and sinks whatever
+     arrived.** Truncation is destructive *and partial* — measured: three
+     descriptors sent into an undersized control buffer produced `ctrunc`
+     **and two of the three installed**. So a truncated receive can present
+     a plausible descriptor count, and "fail on ctrunc" alone leaks the ones
+     that landed. The count is only ever evaluated on a receive that did not
+     truncate.
+
+  Also measured, and the reason `flags != []` is not the test: Linux echoes
+  `MSG_CMSG_CLOEXEC` back into `msg_flags`, so a perfectly successful
+  receive returns `flags: [:cmsg_cloexec]`. Only `:ctrunc` means anything.
+
+  ## What the caller gets
+
+  `{:ok, observation, fds}` — and **the caller owes every descriptor in
+  `fds` to `Ampd.NativeFd`**, on every path out. This function sinks the
+  ones it decides about; it cannot sink the ones it hands over.
+
+  Returns `{:error, reason}` with **no descriptors outstanding**.
+  """
+  def request_with_fd(sock, %{"channel_epoch" => epoch}, body, timeout, expect)
+      when is_map(body) do
+    request_id = new_epoch()
+
+    req =
+      body
+      |> Map.put("request_id", request_id)
+      |> Map.put("channel_epoch", epoch)
+
+    canon = Core.canon(req)
+
+    case :socket.send(sock, <<byte_size(canon)::big-32>> <> canon) do
+      :ok ->
+        await_with_fd(sock, request_id, epoch, deadline(timeout), expect)
+
+      {:error, e} ->
+        {:error, "the carrier channel could not be written: #{inspect(e)}"}
+    end
+  end
+
+  # The correlation discipline of `await/5`, with one addition that is the
+  # whole reason it could not simply be reused: **a skipped frame's
+  # descriptors must be sunk before the skip.** `match/6` drops an
+  # observation that names another request or another incarnation and loops,
+  # which is correct — and if that observation carried a descriptor, looping
+  # past it would leak one per skip, for as long as the deadline allows.
+  defp await_with_fd(sock, request_id, epoch, deadline, expect) do
+    left = deadline - System.monotonic_time(:millisecond)
+
+    if left <= 0 do
+      {:error, "the carrier channel did not answer the attach in time"}
+    else
+      case recv_frame_with_fd(sock, left) do
+        {:ok, obs, fds} ->
+          cond do
+            obs["channel_epoch"] != epoch or obs["request_id"] != request_id ->
+              Enum.each(fds, &Ampd.NativeFd.discard/1)
+              await_with_fd(sock, request_id, epoch, deadline, expect)
+
+            obs["schema"] != expect ->
+              Enum.each(fds, &Ampd.NativeFd.discard/1)
+              {:error, "the host returned an unknown observation schema: #{inspect(obs["schema"])}"}
+
+            true ->
+              {:ok, obs, fds}
+          end
+
+        {:error, :closed} ->
+          {:error,
+           "the carrier channel closed before the attach was answered — " <>
+             "whether a terminal attachment exists is unknown and it will not be resubmitted"}
+
+        # Named apart from a channel fault because it is not one. A
+        # truncated control message means the host attached more
+        # descriptors than this contract permits, or the control buffer is
+        # undersized — both are protocol defects with a specific repair,
+        # and both are indistinguishable from a broken socket once the
+        # reason has been flattened into a sentence. The count is the
+        # measured half: truncation is partial, and this is how many
+        # actually landed before being sunk.
+        {:error, {:ctrunc, n}} ->
+          {:error,
+           "the carrier channel truncated the attach's ancillary data — " <>
+             "#{n} descriptor(s) arrived and were closed, and no attachment was taken"}
+
+        {:error, e} ->
+          {:error, "the carrier channel failed during an attach: #{inspect(e)}"}
+      end
+    end
+  end
+
   # --------------------------------------------------------------- wire
   #
   # **The frozen framing and the frozen canonicalizer, both reused.**
@@ -383,6 +504,86 @@ defmodule Ampd.Worktree.EffectChannel do
 
       {:error, e} ->
         {:error, e}
+    end
+  end
+
+  # Comfortably above the cliff, which is `CMSG_LEN(sizeof(int))` — 20 bytes
+  # for one descriptor, measured: 17 truncates, 20 does not. Sized for a
+  # handful rather than for one, because a control buffer that is exactly
+  # big enough for the expected case turns "the host sent two" from a
+  # refusal into a truncation, and a truncation loses the evidence of what
+  # went wrong along with the descriptors.
+  @ctrl_bytes 128
+
+  defp recv_frame_with_fd(sock, timeout) do
+    # `recvmsg/5` and not `/4`: the fourth argument of the four-arity form is
+    # the **timeout**, not the flags, and passing a flag list there raises
+    # `{:invalid, {:timeout, [...]}}`. This is the only arity that takes
+    # both.
+    case :socket.recvmsg(sock, 4, @ctrl_bytes, [:cmsg_cloexec], timeout) do
+      {:ok, %{iov: iov, ctrl: ctrl, flags: flags}} ->
+        fds = rights(ctrl)
+
+        # First, and before anything reads the body. A truncated control
+        # message may still have installed descriptors, so this sinks
+        # whatever arrived rather than assuming truncation means none.
+        if :ctrunc in flags do
+          Enum.each(fds, &Ampd.NativeFd.discard/1)
+          {:error, {:ctrunc, length(fds)}}
+        else
+          complete_frame(sock, IO.iodata_to_binary(iov), timeout, fds)
+        end
+
+      {:error, e} ->
+        {:error, e}
+    end
+  end
+
+  # OTP hands `SCM_RIGHTS` over undecoded — one control message whose `data`
+  # is N packed native-endian 32-bit descriptors — so this unpacks rather
+  # than pattern-matching a list OTP does not build.
+  defp rights(ctrl) when is_list(ctrl) do
+    for %{level: :socket, type: :rights, data: d} <- ctrl,
+        <<fd::native-integer-size(32) <- d>>,
+        do: fd
+  end
+
+  defp rights(_), do: []
+
+  # The first receive asked for four bytes and may have returned fewer:
+  # `recvmsg` on a stream socket returns short without saying so. Everything
+  # from here is plain `recv`, because the rights are already collected and
+  # nothing later in the frame carries any.
+  #
+  # Every failure below sinks the descriptors first. They are this function's
+  # to lose once the receive succeeded, and an error return that left one
+  # outstanding would be a leak with a reason attached.
+  defp complete_frame(sock, prefix, timeout, fds) do
+    with {:ok, <<n::big-32>>} <- fill(sock, prefix, 4, timeout),
+         :ok <- bounded(n),
+         {:ok, body} <- :socket.recv(sock, n, timeout),
+         {:ok, obs} <- decode(body) do
+      {:ok, obs, fds}
+    else
+      {:error, e} ->
+        Enum.each(fds, &Ampd.NativeFd.discard/1)
+        {:error, e}
+
+      other ->
+        Enum.each(fds, &Ampd.NativeFd.discard/1)
+        {:error, {:unreadable_frame, other}}
+    end
+  end
+
+  defp bounded(n) when n == 0, do: {:error, :empty_frame}
+  defp bounded(n), do: if(n > Ampd.Frame.max_bytes(), do: {:error, {:oversize, n}}, else: :ok)
+
+  defp fill(_sock, have, want, _timeout) when byte_size(have) == want, do: {:ok, have}
+
+  defp fill(sock, have, want, timeout) do
+    case :socket.recv(sock, want - byte_size(have), timeout) do
+      {:ok, more} -> fill(sock, have <> more, want, timeout)
+      {:error, e} -> {:error, e}
     end
   end
 
