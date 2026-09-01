@@ -395,3 +395,80 @@ pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
     buf.truncate(n as usize);
     Ok(buf)
 }
+
+/// Receive one message **and any descriptors it carried**.
+///
+/// D.1.3c·2, and until now this host had no such function: `send_with_fds`
+/// had no counterpart, because every handoff went one way. A terminal
+/// attachment is answered with an endpoint, so the acceptance battery — which
+/// is the thing standing in for the runtime on that channel — has to be able
+/// to take delivery of one.
+///
+/// **The `controllen` is the whole difference from [`recv_msg`], and getting
+/// it wrong is silent.** A `recvmsg` with no control buffer does not fail when
+/// rights arrive: the kernel closes them, sets `MSG_CTRUNC` in `flags`, and
+/// returns the data as though nothing were missing. So `MSG_CTRUNC` is
+/// reported rather than ignored — a truncated control message means a
+/// descriptor was destroyed in transit, and a caller that read past it would
+/// be looking for a reason the attachment did not work in the wrong half of
+/// the system.
+pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<(Vec<u8>, Vec<RawFd>)> {
+    const MSG_CTRUNC: i32 = 0x8;
+
+    let mut buf = vec![0u8; max];
+    let mut iov = IoVec {
+        base: buf.as_mut_ptr(),
+        len: buf.len(),
+    };
+
+    let space = cmsg_align(std::mem::size_of::<CmsgHdr>()) + cmsg_align(max_fds * 4);
+    let mut ctrl = vec![0u8; space];
+
+    let mut msg = MsgHdr {
+        name: std::ptr::null_mut(),
+        namelen: 0,
+        iov: &mut iov,
+        iovlen: 1,
+        control: ctrl.as_mut_ptr(),
+        controllen: ctrl.len(),
+        flags: 0,
+    };
+
+    let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    buf.truncate(n as usize);
+
+    let mut fds: Vec<RawFd> = Vec::new();
+    if msg.controllen >= std::mem::size_of::<CmsgHdr>() {
+        // One control message is all this protocol ever sends. Walking a
+        // chain would be a generality with no second case to keep it honest.
+        let h = unsafe { &*(ctrl.as_ptr() as *const CmsgHdr) };
+        if h.level == SOL_SOCKET && h.ty == SCM_RIGHTS && h.len >= std::mem::size_of::<CmsgHdr>() {
+            let payload = h.len - std::mem::size_of::<CmsgHdr>();
+            let base = unsafe {
+                ctrl.as_ptr()
+                    .add(cmsg_align(std::mem::size_of::<CmsgHdr>()))
+            };
+            for i in 0..(payload / 4) {
+                let mut raw = [0u8; 4];
+                unsafe { std::ptr::copy_nonoverlapping(base.add(i * 4), raw.as_mut_ptr(), 4) };
+                fds.push(i32::from_ne_bytes(raw));
+            }
+        }
+    }
+
+    if (msg.flags & MSG_CTRUNC) != 0 {
+        // Whatever did arrive is still this process's to close.
+        for f in &fds {
+            close_fd(*f);
+        }
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "the control message was truncated — a descriptor was discarded in transit",
+        ));
+    }
+
+    Ok((buf, fds))
+}

@@ -495,6 +495,158 @@ probe "a correspondence that checks only fd 0 is noticed" \
   host/src/pty.rs \
   's|        && (0..=2).all(\|fd\| {|        \&\& (0..=0).all(\|fd\| {|'
 
+echo '  --- D.1.3c·2 · the terminal attachment ---'
+
+# The rule from D.1.3c·1a's §I still governs and it bit twice there: a
+# sabotage destructive enough to break the checks BEFORE the one it targets
+# can satisfy that one by accident. Every probe below is aimed at a check
+# whose neighbours stay green, and the ones that could not be written that way
+# are named at the bottom instead of being faked.
+
+# 36 · The pump keeps its duplicate of the master forever. Everything works —
+#      bytes flow, EOF arrives, the Carrier dies on time — and the host
+#      accumulates one pseudoterminal master per attachment for the life of
+#      the process. This is host probe 31's defect one descriptor along, and
+#      it is invisible to every check that is not a census.
+probe "a pump that never returns its duplicate of the master is noticed" \
+  "detaching returned the pump" \
+  host/src/attach.rs \
+  's|^    unsafe { close(master) };|    let _ = master; // SABOTAGE: leaked|'
+
+# 37 · The stall counter never counts. **This attacks the evidence, and that
+#      is deliberate.** The claim "a consumer that stops reading stalls the
+#      pump instead of growing the host" is only ever visible as a counter,
+#      so a probe that could not turn the counter off would be a probe that
+#      never tested whether the check is anchored to anything.
+probe "a backpressure claim resting on a counter that cannot move is noticed" \
+  "stalls the pump instead of growing the host" \
+  host/src/attach.rs \
+  's|                stats.stalled_out.fetch_add(1, Ordering::Relaxed);|                (); // SABOTAGE: no stall recorded|'
+
+# 38 · The terminal address stops being an address. Every operation names a
+#      terminal and the host agrees with all of them, so a resize minted
+#      against a Carrier that no longer exists lands on whatever holds the
+#      ref now.
+probe "a terminal address that accepts any carrier epoch is noticed" \
+  "wrong carrier epoch is refused" \
+  host/src/carrier.rs \
+  's|        if req\["carrier_epoch"\].as_str().unwrap_or("") != self.incarnation {|        if false {|'
+
+# 39 · The pty epoch specifically. `carrier_epoch` still has to match, which
+#      is why this probe and 39 are separate: today the two move together, so
+#      a single probe could not tell "the pty epoch is checked" from "the
+#      carrier epoch happens to have caught it".
+probe "a terminal address that ignores the pty epoch is noticed" \
+  "another terminal's pty epoch is refused" \
+  host/src/carrier.rs \
+  's|        if want != have {|        if false {|'
+
+# 40 · A second attachment on one terminal. **This slice DOES answer a
+#      cardinality question** — a Carrier has 0..1 live physical attachment —
+#      and the earlier wording here said it "declines to answer", which was
+#      wrong while the host actively refuses. It is a mechanism constraint of
+#      this slice, not a claim that a terminal can never have several
+#      observers: fan-out above one physical attachment stays available.
+probe "a terminal that can be attached twice is noticed" \
+  "cannot be attached twice" \
+  host/src/carrier.rs \
+  's|            if a.live() {|            if false {|'
+
+# 41 · The attach op hands over the MASTER instead of the private stream
+#      endpoint. Bytes still flow in both directions and every functional
+#      check stays green — the holder now has terminal control, a route to
+#      TIOCSWINSZ and TIOCSTI, and the ability to hang up the Carrier. Only
+#      the question "what kind of thing is this" can see it.
+probe "an attachment that hands over the terminal master is noticed" \
+  "received is a socket endpoint" \
+  host/src/carrier.rs \
+  's|        let (a, far) = crate::attach::Attachment::open(p)?;|        let (a, far) = crate::attach::Attachment::open(p)?; let far = p.master();|'
+
+echo '  --- D.1.3c·2a·1 · attachment incarnation and the orphaned endpoint ---'
+
+# 42 · Detach addresses the TERMINAL rather than the attachment. Every one of
+#      the three physical identities is current in a request minted against a
+#      replaced attachment — same Carrier, same incarnation, same terminal —
+#      so a stale detach tears down whatever attachment happens to occupy the
+#      slot now. This is the hole `attachment_epoch` exists to close, and
+#      nothing but the fourth identity can see it.
+probe "a detach that addresses the terminal instead of the attachment is noticed" \
+  "detach replayed from a REPLACED attachment is refused" \
+  host/src/lib.rs \
+  '/Some("pty-detach")/,/Some("pty-resize")/ s|c.attachment_address(\&req)|c.terminal_address(\&req)|'
+
+# 43 · The same for resize, separately, because they are two ops and a probe
+#      that reddened both would not show which one is wired.
+probe "a resize that addresses the terminal instead of the attachment is noticed" \
+  "resize replayed from a REPLACED attachment is refused" \
+  host/src/lib.rs \
+  '/Some("pty-resize")/,$ s|c.attachment_address(\&req)|c.terminal_address(\&req)|'
+
+# 44 · The attach guard refuses on the FIELD being present rather than on the
+#      attachment being live. A holder that vanished without detaching then
+#      occupies the slot forever: the pump is gone, the stream is gone, and
+#      the Carrier is permanently unattachable while otherwise perfectly
+#      alive. Physical fact changed, registry fact did not.
+#
+#      Aimed at `Carrier::attach` and not at the op. Probe 40 was aimed at an
+#      op-level guard and scored NOT A FALSIFIER, because the same rule was
+#      also enforced one layer down; the duplicate guard is gone and both
+#      probes now patch the one place that knows the rule.
+probe "an attachment slot that cannot be reclaimed after its holder vanishes is noticed" \
+  "leaves a RECLAIMABLE slot" \
+  host/src/carrier.rs \
+  's|            if a.live() {|            if true {|'
+
+# 45 · The attachment ref is minted narrow again — a 12-hex slice of the
+#      128-bit source, which is what it was until c·2a·2 and what a future
+#      "shorten it for the cockpit" would reach for. 48 bits was harmless
+#      while no host operation read the ref and the runtime had no name for
+#      an attachment; c·2b indexes `terminal-attachment@1` by it. This is
+#      the deterministic gate against re-truncation: the width is measured
+#      on the minted value, so narrowing it anywhere between the CSPRNG and
+#      the wire turns the check red rather than passing a source grep.
+probe "an attachment ref minted narrower than its source is noticed" \
+  "the attachment ref is a FULL 128-bit mint" \
+  host/src/attach.rs \
+  's|format!("ta_{}", crate::new_epoch())|format!("ta_{}", \&crate::new_epoch()[..12])|'
+
+# NOT probed, and not counted — recorded rather than left as a silence.
+#
+#   `Carrier::terminate`'s call to `Attachment::settle`. **This probe was
+#   written, run, and scored NOT A FALSIFIER**, so it is recorded here rather
+#   than kept as a green line that proves nothing. Removing the settle leaves
+#   "the pump ends because the TERMINAL hung up" passing, because `terminate`
+#   polls `try_wait` on a 20 ms tick and the pump wakes on `POLLHUP`
+#   immediately — the pump has always concluded before `terminate` returns.
+#   The settle is therefore insurance against a timing coincidence rather
+#   than a mechanism with an observable consequence, and saying so is the
+#   honest version of a battery that would otherwise imply it was tested.
+#
+#   Chasing that NOT A FALSIFIER is what found the busy-spin: a hangup seen
+#   while the outbound buffer was full was re-reported by every `poll` and
+#   never concluded, so a pump whose consumer had stopped would hold a core
+#   until it started again. That defect is fixed (`master_hup`), and it too
+#   has no probe — a spinning thread makes no check red. It is measured only
+#   in the sense that the fix is what let this note be written.
+#
+#   The field ORDER in `Carrier` (`attachment` before `pty`). Swapping them
+#   closes the host's master before the pump is joined, which is a real
+#   defect — but `drop(c)` runs both disposals before any check can look, so
+#   the difference is transient and no census can see it. It is a comment on
+#   the struct and a probe that would report NOT A FALSIFIER, which is worse
+#   than an honest gap.
+#
+#   The 64 KiB buffer constant. Every value that is not zero produces the
+#   same green battery; the number is a resource decision, not a property.
+#
+#   The explicit reclaim in `Carrier::attach` — taking and closing a finished
+#   attachment BEFORE opening the new one. Removing it is not observable:
+#   `self.attachment = Some(a)` drops the old value, and `Attachment::drop`
+#   joins the pump and closes the descriptor just as surely. The explicit form
+#   bounds PEAK descriptor use — one duplicate returned before the next is
+#   allocated, rather than two live at once — and no census in this battery
+#   samples during that window. Kept for the bound, recorded as unprobed.
+
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.

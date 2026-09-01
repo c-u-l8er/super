@@ -33,6 +33,7 @@ pub mod sha256;
 pub mod fdpass;
 pub mod confine;
 pub mod pty;
+pub mod attach;
 pub mod carrier;
 
 use std::collections::HashMap;
@@ -96,7 +97,7 @@ fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
 /// 16 bytes of kernel randomness, hex. No crate, and not a counter: an
 /// epoch that can be predicted is an epoch a replaced endpoint's
 /// observation can be stamped with.
-fn new_epoch() -> String {
+pub(crate) fn new_epoch() -> String {
     use std::io::Read;
     let mut b = [0u8; 16];
     match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut b)) {
@@ -157,9 +158,24 @@ pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
     // runtime that owns it.
     let mut set_epoch: Option<String> = None;
 
+    // A typed refusal on the schema the caller was expecting. An attach that
+    // failed must not answer with a start observation: the runtime matches on
+    // the schema it asked for and would report "unknown observation schema"
+    // for what is really a refusal it could have read.
+    fn refused(schema: &str, why: &str) -> Value {
+        json!({"schema": schema, "refused": why})
+    }
+
     loop {
         let req = match read_frame(fd) { Ok(v) => v, Err(_) => break };
         let carrier_ref = req["carrier_ref"].as_str().unwrap_or("").to_string();
+
+        // The descriptor this reply carries, if any. Declared out here so the
+        // single write path below is the only place that can send or close
+        // it — an attachment endpoint returned down one arm and closed down
+        // another is the fourth-exit shape `Ampd.Bridge` was rebuilt to
+        // remove.
+        let mut pass_fd: Option<RawFd> = None;
 
         let mut obs = match req["op"].as_str() {
             // **Absence is the whole request.** No actor, no Locus, no
@@ -230,6 +246,130 @@ pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
                 if let Some(mut c) = live.remove(&carrier_ref) { c.terminate(3_000); }
                 json!({"schema": "carrier-stop-observation@1", "stopped": true})
             }
+
+            // ---------------------------------------------- D.1.3c·2
+            //
+            // **These three consult `carrier_epoch`, and nothing above them
+            // does.** That asymmetry is deliberate rather than an
+            // inconsistency. For `start` and `stop`, reading the correlation
+            // fields would let the machine decide which request it is
+            // answering — the rule `serve_effects` follows. A terminal
+            // operation is the other case: it is addressed *at* a resource
+            // that can be replaced underneath it, and this host is the only
+            // thing that knows which terminal is the current one. The epoch
+            // triple is not correlation here; it is the address.
+            Some("pty-attach") => {
+                let want_ce = req["carrier_epoch"].as_str().unwrap_or("");
+                match live.get_mut(&carrier_ref) {
+                    None => refused("carrier-pty-attach-observation@1", "no such carrier"),
+                    Some(c) if c.incarnation != want_ce => refused(
+                        "carrier-pty-attach-observation@1",
+                        "the carrier epoch does not name the carrier that holds this terminal",
+                    ),
+                    // **The cardinality rule is NOT here, deliberately.**
+                    //
+                    // It was, and it was a second implementation of a rule
+                    // `Carrier::attach` already enforces — which the sabotage
+                    // battery caught the only way that is catchable: probe 40
+                    // disabled this guard and scored NOT A FALSIFIER, because
+                    // the refusal simply happened one layer down and the check
+                    // stayed green. Two guards agreeing is indistinguishable
+                    // from one guard working until exactly one of them is
+                    // wrong.
+                    //
+                    // So the invariant lives with the mutation that can break
+                    // it, the same reason `Ampd.Worker.occupancy/2` is the one
+                    // place that knows what occupying a Locus means. This arm
+                    // reports whatever `attach` decided, under the schema the
+                    // caller asked for.
+                    Some(c) => match c.attach() {
+                        Err(e) => refused("carrier-pty-attach-observation@1", &e),
+                        Ok(far) => {
+                            let a = c.attachment().unwrap();
+                            pass_fd = Some(far);
+                            json!({
+                                "schema": "carrier-pty-attach-observation@1",
+                                "attached": true,
+                                "attachment_ref": a.attachment_ref,
+                                "attachment_epoch": a.attachment_epoch,
+                                "pty_epoch": a.pty_epoch,
+                            })
+                        }
+                    },
+                }
+            }
+
+            // **Detaching is not killing.** The holder letting go of a
+            // terminal says nothing about whether the process behind it
+            // should continue, and a runtime that conflated the two would
+            // have built "close the window, lose the work".
+            Some("pty-detach") => match live.get_mut(&carrier_ref) {
+                None => refused("carrier-pty-detach-observation@1", "no such carrier"),
+                Some(c) => match c.attachment_address(&req) {
+                    Err(e) => refused("carrier-pty-detach-observation@1", &e),
+                    Ok(()) => {
+                        let ending = c.detach();
+                        json!({
+                            "schema": "carrier-pty-detach-observation@1",
+                            "detached": true,
+                            "ending": ending,
+                            "carrier_still_running": c.same_process(),
+                        })
+                    }
+                },
+            },
+
+            // Resize is a **typed control operation on this serialized
+            // channel**, not a message inside the byte stream. It is bounded,
+            // correlated and rare; terminal content is none of those. Mixing
+            // them would mean either parsing the data plane for commands or
+            // giving the data plane an authority it must not have.
+            Some("pty-resize") => match live.get_mut(&carrier_ref) {
+                None => refused("carrier-pty-resize-observation@1", "no such carrier"),
+                // **Attachment-scoped, deliberately.** Resize could have
+                // been addressed at the terminal alone — the host performs it
+                // either way and `terminal_resize_is_the_hosts` is unchanged.
+                // Scoping it to the attachment says something narrower and
+                // truer for this slice: the thing entitled to ask is the
+                // holder of the current attachment, so a Carrier nobody is
+                // watching cannot be resized by a request that merely
+                // remembers its terminal.
+                Some(c) => match c.attachment_address(&req) {
+                    Err(e) => refused("carrier-pty-resize-observation@1", &e),
+                    Ok(()) => {
+                        let rows = req["rows"].as_u64().unwrap_or(0);
+                        let cols = req["cols"].as_u64().unwrap_or(0);
+                        if rows == 0 || cols == 0 || rows > u16::MAX as u64 || cols > u16::MAX as u64
+                        {
+                            refused(
+                                "carrier-pty-resize-observation@1",
+                                "rows and cols must each be 1..65535",
+                            )
+                        } else {
+                            let ws = pty::WinSize {
+                                rows: rows as u16,
+                                cols: cols as u16,
+                                xpixel: 0,
+                                ypixel: 0,
+                            };
+                            match c.pty().map(|p| p.set_winsize(ws)) {
+                                Some(Ok(())) => json!({
+                                    "schema": "carrier-pty-resize-observation@1",
+                                    "resized": true, "rows": rows, "cols": cols,
+                                }),
+                                Some(Err(e)) => {
+                                    refused("carrier-pty-resize-observation@1", &e)
+                                }
+                                None => refused(
+                                    "carrier-pty-resize-observation@1",
+                                    "that carrier has no terminal",
+                                ),
+                            }
+                        }
+                    }
+                },
+            },
+
             _ => json!({"schema": "carrier-start-observation@1", "refused": "unknown carrier op"}),
         };
 
@@ -238,7 +378,13 @@ pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
         obs["carrier_ref"] = req["carrier_ref"].clone();
         obs["carrier_epoch"] = req["carrier_epoch"].clone();
 
-        if write_frame(fd, &obs).is_err() { break }
+        let sent = write_frame_with_fd(fd, &obs, pass_fd);
+        // **Closed on every exit, including the one where the send failed.**
+        // The far end is the runtime's copy from the moment `sendmsg`
+        // succeeds; this host keeping its own would be a second holder of a
+        // stream that is supposed to have exactly one.
+        if let Some(p) = pass_fd { fdpass::close_fd(p); }
+        if sent.is_err() { break }
     }
 
     // The channel is gone, so every Carrier it admitted has lost the
@@ -596,6 +742,71 @@ pub(crate) fn write_frame(fd: RawFd, v: &Value) -> io::Result<()> {
     }
     write_all(fd, &(body.len() as u32).to_be_bytes())?;
     write_all(fd, &body)
+}
+
+/// One frame, and a descriptor beside it, in **one** `sendmsg`.
+///
+/// D.1.3c·2. A terminal attachment is possessed or it is nothing, so the
+/// answer to "you may attach" has to *be* the endpoint rather than name one.
+/// The bridge is where this host normally hands descriptors over, and it is
+/// deliberately not used here: `serve_carrier` is spawned on a bare
+/// socketpair by the acceptance battery with no bridge in existence at all,
+/// and a mechanism the battery cannot drive is a mechanism whose production
+/// path nothing measures.
+///
+/// **The length prefix travels inside the same `sendmsg` as the descriptor,
+/// and that is load-bearing.** On a stream socket the kernel associates
+/// ancillary data with the *first byte* of the message that carried it, so a
+/// reader that took the four length bytes with a plain `read` would be told
+/// nothing and the descriptor would be discarded with `MSG_CTRUNC`. Whoever
+/// asks for an attachment must read the answer with `recvmsg`.
+///
+/// A frame with no descriptor is written the ordinary way, so nothing else on
+/// this channel changes shape.
+///
+/// # The contract the runtime's receiver owes this sender
+///
+/// **Frozen at D.1.3c·2a·1, before c·2b is written**, so that the receiving
+/// half is designed against a stated sender rather than against whatever the
+/// sender happened to do. A specialized `request_with_fd` must:
+///
+/// ```text
+///   recvmsg for the FIRST response bytes    rights ride the first byte
+///   capture SCM_RIGHTS from that call       or they are already gone
+///   tolerate a partial frame afterwards     SOCK_STREAM has no message
+///                                           boundaries; one sendmsg is not
+///                                           one recvmsg
+///   MSG_CMSG_CLOEXEC on receive             the mirror of this host's
+///                                           O_CLOEXEC on everything it opens
+///   REJECT MSG_CTRUNC                       a truncated control message means
+///                                           a descriptor was destroyed in
+///                                           transit; reading past it looks
+///                                           for the fault in the wrong half
+///   exactly ONE fd on a successful attach
+///   exactly ZERO fds on a refusal           this host sends none — measured
+///   close every excess or unexpected fd     "one sink, no fourth exit"
+/// ```
+///
+/// And it must **not** teach the shared `recv_frame` to carry rights. That
+/// function is scarred: a hard-coded observation schema in it once made every
+/// production Carrier start INDETERMINATE, and nothing in 53 harness
+/// falsifiers could see it. A second reader for one new response shape is the
+/// smaller change, and the Gate's single-submitter guarantee is what makes it
+/// safe.
+pub(crate) fn write_frame_with_fd(fd: RawFd, v: &Value, pass: Option<RawFd>) -> io::Result<()> {
+    let Some(p) = pass else { return write_frame(fd, v) };
+
+    let body = serde_json::to_vec(v)?;
+    if body.len() > MAX_FRAME {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("frame of {} bytes exceeds the {MAX_FRAME} byte limit", body.len()),
+        ));
+    }
+    let mut msg = Vec::with_capacity(4 + body.len());
+    msg.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    msg.extend_from_slice(&body);
+    fdpass::send_with_fd(fd, &msg, p)
 }
 
 // ========================================================= demultiplexer

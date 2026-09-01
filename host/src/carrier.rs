@@ -87,6 +87,16 @@ pub struct Carrier {
     control: Option<UnixStream>,
     control_inode: Option<u64>,
     configured: serde_json::Value,
+    /// D.1.3c·2. The terminal attachment, if somebody holds one.
+    ///
+    /// **Declared before `pty` and that is the whole binding.** Fields drop in
+    /// declaration order, so the pump — which holds a *duplicate* of the
+    /// master — is stopped and joined before the `Pty` closes the original.
+    /// The other order would close the master while a second copy of it was
+    /// still open, which is a pseudoterminal that never hangs up: host probe
+    /// 32's defect, moved one descriptor along. Swapping these two lines is
+    /// therefore a real sabotage and there is a probe that does it.
+    attachment: Option<crate::attach::Attachment>,
     /// D.1.3c·1. **The terminal is owned here so that it cannot outlive the
     /// Carrier**, in exactly the way `Ampd.Peer.carriers` makes "losing the
     /// runtime incarnation terminates the Carrier" true by construction
@@ -437,6 +447,11 @@ pub fn spawn_with(
         control: Some(control),
         control_inode,
         configured,
+        // A Carrier is born with a terminal and **without** an attachment.
+        // Possessing a terminal and somebody else watching it are different
+        // relationships, and this is where that stays true: nothing about
+        // starting a Carrier creates an observer.
+        attachment: None,
         // **The host's copy of the slave is dropped here and not by the
         // caller.** The child has it now, and until the host lets go the
         // slave has two holders — so the master would never see a hangup,
@@ -463,6 +478,193 @@ impl Carrier {
 
     pub fn control_inode(&self) -> Option<u64> {
         self.control_inode
+    }
+
+    /// The attachment on this Carrier's terminal, if one exists. Borrowed for
+    /// the same reason the `Pty` is.
+    pub fn attachment(&self) -> Option<&crate::attach::Attachment> {
+        self.attachment.as_ref()
+    }
+
+    /// Create the attachment and return **the far end**, which the caller
+    /// owes to somebody and must then close.
+    ///
+    /// This host decides nothing about who that is. `serve_carrier` holds no
+    /// actor, Worker or Locus and could not form the opinion; the runtime
+    /// re-derives occupancy at the moment it asks, and the answer to "may
+    /// this Peer attach" is spent before the request is written. What is
+    /// enforced *here* is narrower and is the part only this process can
+    /// know: that the terminal being attached is the one this Carrier is
+    /// actually on.
+    /// **Cardinality, stated: a Carrier has 0..1 live physical attachment.**
+    /// That is a constraint of this mechanism in this slice, not a claim that
+    /// a terminal can only ever have one observer. If read-only spectators are
+    /// wanted later they are a fan-out *above* this one physical attachment,
+    /// and nothing here forecloses that.
+    pub fn attach(&mut self) -> Result<RawFd, String> {
+        // **A finished attachment is reclaimed here, and this is the whole
+        // orphaned-endpoint repair.**
+        //
+        // A holder can vanish without ever sending a detach — its process
+        // crashes, its Peer dies, the runtime closes the adopted socket. The
+        // pump sees EOF and stops, correctly. But the slot it occupied is a
+        // *registry* fact, and the physical fact changing does not change it:
+        // an `Option` that is still `Some` after its pump has ended would
+        // refuse every future attach with "already attached" until the Carrier
+        // itself died.
+        //
+        // That is `Ampd.Carrier.Reaper`'s distinction — *semantic membership
+        // ended ≠ process ended* — arriving one layer down, and it is answered
+        // the same way: by re-deriving rather than by remembering. Liveness is
+        // an atomic the pump already sets, so the reclaim needs no callback,
+        // no registry and no second thread.
+        //
+        // **What the state actually is between the loss and the reclaim**,
+        // stated at this precision because "the slot is free" is the easy
+        // sentence and it is not true:
+        //
+        //     Attachment object     still stored, until this reclaim or the
+        //                           Carrier is dropped
+        //     pump                  ENDED
+        //     PTY-master duplicate  RETURNED — the pump closes it as it exits
+        //     the attachment        NON-CURRENT and RECLAIMABLE
+        //
+        // Not *absent*. The distinction is the whole of the repair: what has
+        // gone is the authority — the duplicate of the master is closed by
+        // the pump itself on its way out, so a stale object holds nothing
+        // that can reach the terminal. What remains is one host-side stream
+        // descriptor, owned by an object nobody can operate through.
+        //
+        // That is bounded to **one ended attachment per Carrier**, because
+        // this function reclaims before it allocates and the cardinality
+        // above permits no second. So it is a resource note and not a leak,
+        // and it gets no cleanup thread here: a mechanism added for pressure
+        // nobody has measured would be a second implementation of a rule
+        // this function already enforces, which is the shape probe 40 caught.
+        // If reclamation-on-demand ever proves insufficient, that is a
+        // separate resource falsifier and should arrive as one.
+        if let Some(a) = self.attachment.as_ref() {
+            if a.live() {
+                return Err("this carrier's terminal is already attached".to_string());
+            }
+        }
+        if let Some(mut finished) = self.attachment.take() {
+            // Joins the stopped pump and closes the host's end. Cheap — the
+            // thread has already exited — and it is what returns the
+            // descriptors before the next pump allocates its own.
+            finished.close();
+        }
+
+        let p = self
+            .pty
+            .as_ref()
+            .ok_or_else(|| "that carrier has no terminal".to_string())?;
+        let (a, far) = crate::attach::Attachment::open(p)?;
+        self.attachment = Some(a);
+        Ok(far)
+    }
+
+    /// Drop the attachment. **The Carrier is untouched** — see the note on
+    /// the `pty-detach` op. Returns the pump's ending, so a detach can report
+    /// whether it was letting go of a live terminal or reaping a dead one.
+    pub fn detach(&mut self) -> String {
+        match self.attachment.take() {
+            None => "none".to_string(),
+            Some(mut a) => {
+                let e = a.ending();
+                a.close();
+                // `Live` at the moment of taking it means this detach is what
+                // ended it, which is a different fact from the pump having
+                // already stopped.
+                if e == crate::attach::Ending::Live {
+                    "host-closed".to_string()
+                } else {
+                    e.name().to_string()
+                }
+            }
+        }
+    }
+
+    /// Does this request name the terminal this Carrier is on **right now**?
+    ///
+    /// Three identities, all required, because each excludes a different
+    /// staleness:
+    ///
+    /// ```text
+    ///   carrier_ref     which Carrier — the map key, already resolved
+    ///   carrier_epoch   which incarnation of it, so a replacement started
+    ///                   under the same ref cannot inherit the address
+    ///   pty_epoch       which terminal, so an operation minted against a
+    ///                   PTY that has since been replaced cannot land on
+    ///                   the one that replaced it
+    /// ```
+    ///
+    /// The third is not redundant. A Carrier and its terminal are allocated
+    /// together today, so `carrier_epoch` happens to move whenever the PTY
+    /// does — but "happens to" is the word that makes it a coincidence rather
+    /// than a guarantee, and the guarantee is the thing being claimed.
+    ///
+    /// **This names a terminal and cannot name an attachment.** For anything
+    /// addressed at a particular attachment, see [`Self::attachment_address`]
+    /// — three identities are one short.
+    pub fn terminal_address(&self, req: &serde_json::Value) -> Result<(), String> {
+        if req["carrier_epoch"].as_str().unwrap_or("") != self.incarnation {
+            return Err(
+                "the carrier epoch does not name the carrier that holds this terminal".to_string(),
+            );
+        }
+        let want = req["pty_epoch"].as_str().unwrap_or("");
+        let have = self.pty.as_ref().map(|p| p.epoch()).unwrap_or("");
+        if have.is_empty() {
+            return Err("that carrier has no terminal".to_string());
+        }
+        if want != have {
+            return Err("the pty epoch does not name this carrier's current terminal".to_string());
+        }
+        Ok(())
+    }
+
+    /// Does this request name the attachment that is on this terminal **right
+    /// now**? Four identities, and the fourth is the one the other three
+    /// cannot supply.
+    ///
+    /// ```text
+    ///   Carrier C · epoch C1 · PTY P · epoch P1
+    ///     attach   → A1
+    ///     detach A1
+    ///     attach   → A2          same C, same C1, same P, same P1
+    ///     a late detach naming C/C1/P1 arrives
+    ///       → all three are current
+    ///       → it would detach A2
+    /// ```
+    ///
+    /// Nothing about the Carrier or the terminal changed, so `carrier_epoch`
+    /// and `pty_epoch` cannot tell the two attachments apart. That is what
+    /// `attachment_epoch` is for, and until an operation is required to carry
+    /// it, minting a fresh one on re-attach is bookkeeping rather than an
+    /// identity.
+    ///
+    /// **Liveness is part of the address, not a separate check.** An
+    /// attachment whose pump has ended is not the current attachment even
+    /// though it is still the value in the field — the same re-derivation
+    /// [`Self::attach`] does when it reclaims the slot.
+    pub fn attachment_address(&self, req: &serde_json::Value) -> Result<(), String> {
+        self.terminal_address(req)?;
+
+        let a = self
+            .attachment
+            .as_ref()
+            .ok_or_else(|| "that carrier's terminal has no attachment".to_string())?;
+
+        if !a.live() {
+            return Err("that attachment has ended and is no longer current".to_string());
+        }
+        if req["attachment_epoch"].as_str().unwrap_or("") != a.attachment_epoch {
+            return Err(
+                "the attachment epoch does not name this terminal's current attachment".to_string(),
+            );
+        }
+        Ok(())
     }
 
     pub fn configured(&self) -> &serde_json::Value {
@@ -563,15 +765,36 @@ impl Carrier {
         drop(self.control.take());
         unsafe { libc_kill(self.pid as i32, 15) };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(grace_ms);
+        let mut reaped = false;
         while std::time::Instant::now() < deadline {
             if let Ok(Some(_)) = self.child.try_wait() {
-                return true;
+                reaped = true;
+                break;
             }
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-        false
+        if !reaped {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+
+        // **D.1.3c·2 — the attachment settles here, and is not forced here.**
+        //
+        // The process is reaped, so its slave is closed, so the master has
+        // hung up and the pump is one `poll` return away from noticing. This
+        // waits for that. Forcing it instead would close the duplicate master
+        // just as reliably and would destroy the evidence: the ending would
+        // read `host-closed` on every path and "the terminal dies with the
+        // Carrier" would become unfalsifiable.
+        //
+        // Bounded, because a pump that never notices is a defect and not a
+        // reason to block a reap. `Drop` ends it either way, and `settle`'s
+        // return value is what a check asserts on.
+        if let Some(a) = self.attachment.as_ref() {
+            a.settle(1_000);
+        }
+
+        reaped
     }
 }
 

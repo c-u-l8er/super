@@ -2339,6 +2339,40 @@ fn bare_control(probe: &Path, dir: &Path, log: &Path, target: u32, leak: std::os
     }
 }
 
+/// Does this ELF64 image carry no `PT_INTERP`?
+///
+/// `None` when the file cannot be read or is not an ELF64 little-endian
+/// image at all — which is a different fact from "it is dynamic" and is kept
+/// distinct so the check that consumes this cannot report a missing file as a
+/// linkage verdict.
+fn elf_is_static(path: &Path) -> Option<bool> {
+    const PT_INTERP: u32 = 3;
+    let b = std::fs::read(path).ok()?;
+    // e_ident: magic, EI_CLASS=2 (64-bit), EI_DATA=1 (little-endian).
+    if b.len() < 64 || &b[..4] != b"\x7fELF" || b[4] != 2 || b[5] != 1 {
+        return None;
+    }
+    // Every offset below is inside the 64-byte header the length check above
+    // already guaranteed, so these cannot be out of range.
+    let u16at = |o: usize| u16::from_le_bytes([b[o], b[o + 1]]) as usize;
+    let phoff = u64::from_le_bytes(b[0x20..0x28].try_into().ok()?) as usize;
+    let phentsize = u16at(0x36);
+    let phnum = u16at(0x38);
+    if phentsize < 4 {
+        return None;
+    }
+    for i in 0usize..phnum {
+        let at = phoff.checked_add(i.checked_mul(phentsize)?)?;
+        if at + 4 > b.len() {
+            return None;
+        }
+        if u32::from_le_bytes(b[at..at + 4].try_into().ok()?) == PT_INTERP {
+            return Some(false);
+        }
+    }
+    Some(true)
+}
+
 fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
     use crate::{carrier, confine};
 
@@ -2376,6 +2410,32 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         return;
     };
     let probe = fixture.with_file_name("probe");
+
+    // **The payload's linkage is policy, and a wrong one is silent.**
+    //
+    // The execute grant names one inode: this file. A dynamically linked
+    // payload needs its interpreter — `/lib64/ld-linux-x86-64.so.2` — and
+    // every library it opens, so making one run means granting FS_EXECUTE
+    // across `/usr/lib`, which is not a confinement. `carrier-fixture` says
+    // so in its `.cargo/config.toml` and pins the flag there.
+    //
+    // That pin is defeatable and was defeated: `cargo build --release
+    // --manifest-path carrier-fixture/Cargo.toml` resolves `.cargo/config`
+    // from the *working directory*, not from the manifest, so building the
+    // fixture from the repo root silently drops `+crt-static` and produces a
+    // dynamic binary with the same name in the same place. Every Carrier
+    // start then fails `EACCES`, nineteen checks go red at once, and not one
+    // of them says why — which is what this check is for. It is a diagnosis,
+    // not a new property: the confinement was always correct, and it was the
+    // payload that had stopped being the kind of thing it can admit.
+    b.check(
+        "the Carrier payload is STATICALLY linked — the execute grant names one inode, not /usr/lib",
+        elf_is_static(&fixture) == Some(true),
+        format!(
+            "{} has a PT_INTERP — rebuild it from carrier-fixture/ so its .cargo/config.toml applies",
+            fixture.display()
+        ),
+    );
 
     let dir = scratch.join("carrier");
     let _ = std::fs::create_dir_all(&dir);
@@ -3668,6 +3728,847 @@ fn pty_possession(b: &mut Battery, scratch: &Path) {
 
     pty_ioctl_census(b, scratch);
     pty_property_stages(b, scratch);
+    pty_attachment(b, scratch);
+    pty_attachment_payload(b, scratch);
+}
+
+/// Read one framed observation **and any descriptor it carried**.
+///
+/// D.1.3c·2. The counterpart of `write_frame_with_fd`, and it exists here
+/// rather than in `lib.rs` because this battery is the only thing in this
+/// process that stands on the runtime's side of that channel.
+///
+/// **One `recvmsg` first, then plain reads.** Ancillary data rides the first
+/// byte of the message that carried it, so the descriptor is either in the
+/// first receive or it is gone; the loop afterwards only finishes a body that
+/// the socket buffer split, and cannot resurrect a lost right.
+fn read_frame_with_fds(fd: std::os::fd::RawFd)
+-> std::io::Result<(Value, Vec<std::os::fd::RawFd>)> {
+    let (first, fds) = crate::fdpass::recv_msg_with_fds(fd, 64 * 1024, 4)?;
+    if first.len() < 4 {
+        for f in &fds {
+            crate::fdpass::close_fd(*f);
+        }
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "short frame header",
+        ));
+    }
+    let n = u32::from_be_bytes([first[0], first[1], first[2], first[3]]) as usize;
+    let mut body = first[4..].to_vec();
+    while body.len() < n {
+        let mut buf = vec![0u8; n - body.len()];
+        let got = unsafe {
+            extern "C" {
+                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            }
+            read(fd, buf.as_mut_ptr(), buf.len())
+        };
+        if got <= 0 {
+            for f in &fds {
+                crate::fdpass::close_fd(*f);
+            }
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "short frame body",
+            ));
+        }
+        body.extend_from_slice(&buf[..got as usize]);
+    }
+    let v: Value = serde_json::from_slice(&body[..n])
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok((v, fds))
+}
+
+/// Bounded, non-blocking accumulate from a stream endpoint.
+///
+/// The same discipline every read in this file uses and for the same reason:
+/// each of these has a terminating condition that is itself under test, and a
+/// blocking read turns a failed property into a wedged battery.
+fn slurp(fd: std::os::fd::RawFd, want: &str, tries: usize) -> String {
+    extern "C" {
+        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+        fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
+    }
+    unsafe {
+        let fl = fcntl(fd, 3, 0);
+        if fl >= 0 {
+            fcntl(fd, 4, fl | 0o4000);
+        }
+    }
+    let mut seen = String::new();
+    for _ in 0..tries {
+        let mut buf = [0u8; 4096];
+        let n = unsafe { read(fd, buf.as_mut_ptr(), buf.len()) };
+        if n > 0 {
+            seen.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
+        }
+        if !want.is_empty() && seen.contains(want) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    seen
+}
+
+/// Is this descriptor a terminal? Asked of the kernel.
+fn is_a_terminal(fd: std::os::fd::RawFd) -> bool {
+    extern "C" {
+        fn syscall(num: i64, ...) -> i64;
+    }
+    let mut termios = [0u8; 64];
+    // TCGETS. On anything that is not a terminal this is `ENOTTY`, which is
+    // the entire claim being made about an attachment endpoint.
+    unsafe { syscall(16, fd as i64, 0x5401u64, termios.as_mut_ptr()) >= 0 }
+}
+
+/// D.1.3c·2 — the terminal attachment, over the production lifecycle channel.
+///
+/// ```text
+///   Carrier   POSSESSES            PTY slave        (c·1, unchanged)
+///   host      OWNS                 PTY master       (c·1, unchanged)
+///   holder    POSSESSES            attachment       (this)
+///   attachment TARGETS             that PTY         (this)
+/// ```
+///
+/// **Driven through `serve_carrier`**, on a real socketpair, against real
+/// Carriers this battery cannot otherwise reach — the same standing this
+/// battery has when it measures the drain. That matters more than convenience:
+/// an attachment mechanism proved only against a `Carrier` the test itself
+/// holds would be a mechanism whose production entry point nothing exercised,
+/// which is precisely the defect c·1a was spent repairing one level down.
+fn pty_attachment(b: &mut Battery, scratch: &Path) {
+    use crate::{carrier, fdpass, read_frame, write_frame};
+
+    println!("\n  D.1.3c·2 · the terminal attachment");
+
+    if carrier::fixture_path().is_none() {
+        b.check("the attachment falsifiers could run", false, "no carrier fixture");
+        return;
+    }
+    let dir = scratch.join("attach");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let Ok(fdpass::Pair(mine, theirs)) = fdpass::pair_stream() else {
+        b.check("the attachment falsifiers could run", false, "no socketpair");
+        return;
+    };
+    let served = dir.clone();
+    std::thread::spawn(move || crate::serve_carrier(theirs, served));
+
+    let ptmx_before = host_ptmx_count();
+
+    // Two Carriers, because half of what an attachment must not do is reach
+    // the other one. A single-Carrier battery cannot see a stream that is
+    // wired to the wrong terminal, and that is the failure this design is
+    // most able to have.
+    let mut started: Vec<(String, String)> = Vec::new();
+    for i in 0..2 {
+        let cref = format!("cr_att{i}");
+        let cep = format!("att-epoch-{i}");
+        let req = json!({
+            "schema": "carrier-start-request@1", "op": "start",
+            "carrier_ref": cref, "carrier_epoch": cep, "runtime_epoch": "runtime-ATT",
+        });
+        if write_frame(mine, &req).is_err() { break }
+        let Ok(obs) = read_frame(mine) else { break };
+        if obs["refused"].is_null() {
+            started.push((cref, cep));
+        }
+    }
+    b.check(
+        "two real Carriers are running, each on its own terminal",
+        started.len() == 2 && host_ptmx_count() == ptmx_before + 2,
+        format!("{started:?} · masters {ptmx_before} → {}", host_ptmx_count()),
+    );
+    if started.len() != 2 {
+        return;
+    }
+
+    let (ref_a, ep_a) = started[0].clone();
+    let (ref_b, ep_b) = started[1].clone();
+
+    // ------------------------------------------------------- attach, and what
+    //                                                         it hands over
+    let attach = |cref: &str, cep: &str| -> (Value, Vec<std::os::fd::RawFd>) {
+        let _ = write_frame(mine, &json!({
+            "schema": "carrier-pty-attach-request@1", "op": "pty-attach",
+            "carrier_ref": cref, "carrier_epoch": cep,
+        }));
+        read_frame_with_fds(mine).unwrap_or((Value::Null, vec![]))
+    };
+
+    let (obs_a, fds_a) = attach(&ref_a, &ep_a);
+    let pty_epoch_a = obs_a["pty_epoch"].as_str().unwrap_or("").to_string();
+    let stream_a = fds_a.first().copied().unwrap_or(-1);
+
+    b.check(
+        "attaching answers with a descriptor, not with a name",
+        obs_a["attached"] == true && fds_a.len() == 1 && stream_a >= 0,
+        format!("fds={fds_a:?} obs={obs_a}"),
+    );
+    b.check(
+        "the attachment names an ephemeral pty epoch minted by the host",
+        pty_epoch_a.len() == 32 && pty_epoch_a.chars().all(|c| c.is_ascii_hexdigit()),
+        format!("pty_epoch={pty_epoch_a:?}"),
+    );
+
+    // ------------------------------------------------- the identity's width
+    //
+    // **A label that is about to become a name.** `attachment_ref` was three
+    // characters and a 12-hex slice of the mint — 48 bits — and that was
+    // invisible while the host decided everything by `attachment_epoch` and
+    // nothing at all by the ref. c·2b makes it the runtime's name for a
+    // `terminal-attachment@1`, indexed and quoted, and 48 bits is a
+    // birthday collision at populations this stack keeps designing against.
+    //
+    // Asked of the value that crossed the wire, not of the source line that
+    // produced it, because the failure being guarded against is a future
+    // truncation "for display" and a source grep would be satisfied by a
+    // mint that is wide right up until something narrows it downstream. The
+    // matching sabotage probe re-introduces the slice and must turn this red.
+    let hex32 = |s: &str| {
+        s.len() == 32 && s.chars().all(|c| c.is_ascii_digit() || matches!(c, 'a'..='f'))
+    };
+    let att_ref_a = obs_a["attachment_ref"].as_str().unwrap_or("").to_string();
+    let att_ep_a = obs_a["attachment_epoch"].as_str().unwrap_or("").to_string();
+    b.check(
+        "the attachment ref is a FULL 128-bit mint — ta_ then 32 lowercase hex, never a slice",
+        att_ref_a.strip_prefix("ta_").map_or(false, |p| hex32(p)),
+        format!(
+            "attachment_ref={att_ref_a:?} — {} hex after the prefix, wanted 32",
+            att_ref_a.strip_prefix("ta_").map_or(0, str::len)
+        ),
+    );
+    b.check(
+        "the attachment epoch is a full 128-bit mint of its own",
+        hex32(&att_ep_a),
+        format!("attachment_epoch={att_ep_a:?}"),
+    );
+    // They are minted at the same event and are still two identifiers: the
+    // ref names the object, the epoch names this incarnation of it. Equal
+    // values would be a single identifier wearing two field names, and the
+    // day one of them has to move without the other there would be nothing
+    // to move.
+    b.check(
+        "the attachment's ref and its epoch are DISTINCT mints, not one value twice",
+        att_ref_a
+            .strip_prefix("ta_")
+            .map_or(false, |p| !p.is_empty() && p != att_ep_a),
+        format!("ref={att_ref_a:?} epoch={att_ep_a:?}"),
+    );
+
+    // The negative half of "no pathname crosses the wire", asked of the whole
+    // serialized answer rather than of the fields somebody remembered to look
+    // at.
+    let flat = obs_a.to_string();
+    b.check(
+        "no pathname, pts index or pid appears anywhere in the attach answer",
+        !flat.contains("/dev/pts") && !flat.contains("ptmx") && !flat.contains("/proc/"),
+        format!("{flat}"),
+    );
+
+    // **The endpoint is a socket and not a terminal.** This is the whole of
+    // "the attachment transfers no ioctl authority": there is nothing terminal
+    // -shaped to ask it, so `TIOCSWINSZ`, `TIOCSTI` and `TCSETS` are not
+    // refused by policy here — they are unanswerable by kind.
+    b.check(
+        "the attachment endpoint is NOT a terminal — TCGETS on it answers ENOTTY",
+        stream_a >= 0 && !is_a_terminal(stream_a),
+        format!("fd {stream_a} answered TCGETS"),
+    );
+    // **What arrived is a socket, asked of the kernel.** The count next door
+    // cannot answer this: a duplicate of the master readlinks to `/dev/ptmx`
+    // exactly like the original, so "the number went up by one" is equally
+    // true of the pump doing its job and of the master being handed over.
+    // This is the question that distinguishes them.
+    b.check(
+        "what the holder received is a socket endpoint and not the master",
+        std::fs::read_link(format!("/proc/self/fd/{stream_a}"))
+            .map(|p| p.to_string_lossy().starts_with("socket:"))
+            .unwrap_or(false),
+        format!(
+            "fd {stream_a} → {:?}",
+            std::fs::read_link(format!("/proc/self/fd/{stream_a}"))
+        ),
+    );
+    // **The pump's duplicate is deliberately visible in the census**, and
+    // this check exists to say so rather than to be satisfied. A duplicate
+    // that did not appear here would be a master this host holds and cannot
+    // count — and the census is the only thing standing between a forgotten
+    // pump and a terminal that never hangs up.
+    b.check(
+        "the pump's duplicate of the master IS visible in the host's own census",
+        host_ptmx_count() == ptmx_before + 3,
+        format!("masters {} (expected {} — two Carriers and one pump)",
+                host_ptmx_count(), ptmx_before + 3),
+    );
+
+    // -------------------------------------------------- bytes, through the pump
+    //
+    // The line discipline is the witness. A byte written into the attachment
+    // reaches the slave, the terminal echoes it, the echo comes back out of
+    // the master and through the pump — so a round trip proves **both**
+    // directions and proves the thing on the far end is a real terminal. A
+    // pipe returns nothing at all.
+    {
+        extern "C" {
+            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        }
+        let msg = b"hello-attachment\n";
+        let put = unsafe { write(stream_a, msg.as_ptr(), msg.len()) };
+        let echoed = slurp(stream_a, "hello-attachment", 60);
+        b.check(
+            "bytes written to the attachment reach the terminal, and its echo comes back",
+            put == msg.len() as isize && echoed.contains("hello-attachment\r\n"),
+            format!("wrote {put} · read {echoed:?} — expected the discipline's CRLF echo"),
+        );
+    }
+
+    // ------------------------------------------------ one stream, one terminal
+    let (obs_b, fds_b) = attach(&ref_b, &ep_b);
+    let stream_b = fds_b.first().copied().unwrap_or(-1);
+    b.check(
+        "a second Carrier attaches to its own terminal, with its own epochs",
+        obs_b["attached"] == true
+            && stream_b >= 0
+            && obs_b["pty_epoch"].as_str().unwrap_or("") != pty_epoch_a
+            && obs_b["attachment_epoch"] != obs_a["attachment_epoch"],
+        format!("{obs_b}"),
+    );
+    {
+        // Anything B's terminal echoes must not appear on A's stream. Written
+        // to B and read from A, which is the direction a mis-wired pump would
+        // actually fail in.
+        extern "C" {
+            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+        }
+        let m = b"belongs-to-b\n";
+        let _ = unsafe { write(stream_b, m.as_ptr(), m.len()) };
+        let on_b = slurp(stream_b, "belongs-to-b", 40);
+        let on_a = slurp(stream_a, "", 8);
+        b.check(
+            "an attachment never sees another Carrier's terminal",
+            on_b.contains("belongs-to-b") && !on_a.contains("belongs-to-b"),
+            format!("B saw {on_b:?} · A saw {on_a:?}"),
+        );
+    }
+
+    // ------------------------------------------------------ a second attachment
+    let (again, fds_again) = attach(&ref_a, &ep_a);
+    for f in &fds_again { fdpass::close_fd(*f); }
+    b.check(
+        "a Carrier's terminal cannot be attached twice in this slice",
+        again["attached"].is_null()
+            && again["refused"].as_str().unwrap_or("").contains("already attached")
+            && fds_again.is_empty(),
+        format!("{again}"),
+    );
+
+    // ------------------------------------------------------------- the address
+    //
+    // Each of these is a real request over the real channel, differing from a
+    // working one in exactly one identity.
+    let ask = |op: &str, schema: &str, cref: &str, cep: &str, pep: &str, aep: &str| -> Value {
+        let _ = write_frame(mine, &json!({
+            "schema": schema, "op": op,
+            "carrier_ref": cref, "carrier_epoch": cep,
+            "pty_epoch": pep, "attachment_epoch": aep,
+            "rows": 30, "cols": 90,
+        }));
+        read_frame(mine).unwrap_or(Value::Null)
+    };
+    let att_epoch_a = obs_a["attachment_epoch"].as_str().unwrap_or("").to_string();
+
+    let wrong_ce = ask("pty-resize", "carrier-pty-resize-request@1", &ref_a, "not-the-epoch", &pty_epoch_a, &att_epoch_a);
+    b.check(
+        "a resize naming the wrong carrier epoch is refused",
+        wrong_ce["resized"].is_null() && wrong_ce["refused"].as_str().unwrap_or("").contains("carrier epoch"),
+        format!("{wrong_ce}"),
+    );
+    let wrong_pe = ask("pty-resize", "carrier-pty-resize-request@1", &ref_a, &ep_a, "0123456789abcdef0123456789abcdef", &att_epoch_a);
+    b.check(
+        "a resize naming another terminal's pty epoch is refused",
+        wrong_pe["resized"].is_null() && wrong_pe["refused"].as_str().unwrap_or("").contains("pty epoch"),
+        format!("{wrong_pe}"),
+    );
+    // B's epoch against A's ref: both halves individually well-formed, and the
+    // pair naming no terminal that exists. This is the replacement case in
+    // miniature, and it is the one a single-Carrier battery cannot construct.
+    let pty_epoch_b = obs_b["pty_epoch"].as_str().unwrap_or("").to_string();
+    let crossed = ask("pty-resize", "carrier-pty-resize-request@1", &ref_a, &ep_a, &pty_epoch_b, &att_epoch_a);
+    b.check(
+        "a resize carrying another live Carrier's pty epoch is refused",
+        crossed["resized"].is_null(),
+        format!("{crossed}"),
+    );
+
+    let sized = ask("pty-resize", "carrier-pty-resize-request@1", &ref_a, &ep_a, &pty_epoch_a, &att_epoch_a);
+    b.check(
+        "a resize naming all three current identities is performed",
+        sized["resized"] == true && sized["rows"] == 30 && sized["cols"] == 90,
+        format!("{sized}"),
+    );
+    let zero = {
+        let _ = write_frame(mine, &json!({
+            "schema": "carrier-pty-resize-request@1", "op": "pty-resize",
+            "carrier_ref": ref_a, "carrier_epoch": ep_a, "pty_epoch": pty_epoch_a,
+            "attachment_epoch": att_epoch_a,
+            "rows": 0, "cols": 0,
+        }));
+        read_frame(mine).unwrap_or(Value::Null)
+    };
+    b.check(
+        "a resize to zero rows or columns is refused rather than performed",
+        zero["resized"].is_null(),
+        format!("{zero}"),
+    );
+
+    // ------------------------------------------------- detaching is not killing
+    let det = ask("pty-detach", "carrier-pty-detach-request@1", &ref_a, &ep_a, &pty_epoch_a, &att_epoch_a);
+    b.check(
+        "detaching closes the attachment and leaves the Carrier running",
+        det["detached"] == true && det["carrier_still_running"] == true,
+        format!("{det}"),
+    );
+    b.check(
+        "the detached holder sees EOF on its endpoint",
+        {
+            extern "C" {
+                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            }
+            let mut eof = false;
+            for _ in 0..40 {
+                let mut buf = [0u8; 256];
+                if unsafe { read(stream_a, buf.as_mut_ptr(), buf.len()) } == 0 {
+                    eof = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            eof
+        },
+        "the endpoint never reported end of stream after a detach",
+    );
+    // Two Carriers and B's pump. A's pump duplicate is gone, so a detach
+    // that merely stopped forwarding — leaving the thread parked on a master
+    // it still held — would be caught here and nowhere else.
+    b.check(
+        "and detaching returned the pump's duplicate of the master",
+        host_ptmx_count() == ptmx_before + 3,
+        format!("masters {} (expected {} — two Carriers and B's pump)",
+                host_ptmx_count(), ptmx_before + 3),
+    );
+
+    // A detached attachment cannot be re-used, and re-attaching is a NEW
+    // attachment rather than the old one coming back.
+    let (re, fds_re) = attach(&ref_a, &ep_a);
+    let stream_re = fds_re.first().copied().unwrap_or(-1);
+    b.check(
+        "re-attaching mints a new attachment epoch — the old one does not return",
+        re["attached"] == true
+            && re["attachment_epoch"] != obs_a["attachment_epoch"]
+            && re["pty_epoch"] == pty_epoch_a.as_str(),
+        format!("{re}"),
+    );
+    let att_epoch_re = re["attachment_epoch"].as_str().unwrap_or("").to_string();
+    // And the *ref* is new too. Checked separately from the epoch because
+    // these are the two halves c·2b will hold apart — a mint that refreshed
+    // the epoch while handing back the old ref would give the runtime a name
+    // that outlives the object it names, which is the exact shape of the
+    // stale-address bug this slice spent itself closing.
+    let att_ref_re = re["attachment_ref"].as_str().unwrap_or("").to_string();
+    b.check(
+        "re-attaching mints a new attachment REF as well — a name is not reused across incarnations",
+        att_ref_re.strip_prefix("ta_").map_or(false, |p| hex32(p)) && att_ref_re != att_ref_a,
+        format!("was {att_ref_a:?} · now {att_ref_re:?}"),
+    );
+
+    // --------------------------------------- the stale ATTACHMENT, replayed
+    //
+    // **The case three identities cannot see.** A1 has been detached and A2
+    // exists on the same Carrier, the same incarnation and the same terminal,
+    // so `carrier_ref`, `carrier_epoch` and `pty_epoch` are all current in a
+    // request minted against A1. Only the fourth identity can refuse it, and
+    // until an operation is required to carry that identity, minting a fresh
+    // one on re-attach is bookkeeping rather than an address.
+    let stale_det = ask("pty-detach", "carrier-pty-detach-request@1",
+                        &ref_a, &ep_a, &pty_epoch_a, &att_epoch_a);
+    b.check(
+        "a detach replayed from a REPLACED attachment is refused, not applied to its successor",
+        stale_det["detached"].is_null()
+            && stale_det["refused"].as_str().unwrap_or("").contains("attachment epoch"),
+        format!("{stale_det}"),
+    );
+    // And the successor is untouched — asked of the stream, because a refusal
+    // that had already torn the pump down would answer the check above just
+    // as well.
+    b.check(
+        "and the replacement attachment still carries bytes after the stale detach",
+        {
+            extern "C" {
+                fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+            }
+            let m = b"survived-the-stale-detach\n";
+            let _ = unsafe { write(stream_re, m.as_ptr(), m.len()) };
+            slurp(stream_re, "survived-the-stale-detach", 40)
+                .contains("survived-the-stale-detach")
+        },
+        "the surviving attachment stopped carrying bytes, so the stale detach reached it",
+    );
+
+    let stale_size = ask("pty-resize", "carrier-pty-resize-request@1",
+                         &ref_a, &ep_a, &pty_epoch_a, &att_epoch_a);
+    b.check(
+        "a resize replayed from a REPLACED attachment is refused",
+        stale_size["resized"].is_null(),
+        format!("{stale_size}"),
+    );
+    let cur_size = ask("pty-resize", "carrier-pty-resize-request@1",
+                       &ref_a, &ep_a, &pty_epoch_a, &att_epoch_re);
+    b.check(
+        "while the CURRENT attachment's resize is performed — the refusal is the epoch, not the op",
+        cur_size["resized"] == true,
+        format!("{cur_size}"),
+    );
+
+    // ------------------------------- the holder that vanishes without detaching
+    //
+    // **The normal runtime failure, not a malformed one.** A holder's process
+    // crashes, its Peer dies, the runtime closes the socket it adopted — and
+    // no detach is ever sent. The pump sees EOF and stops, which is correct;
+    // the question is what happens to the *slot*.
+    //
+    // A slot that stayed occupied because the field was still `Some` would
+    // refuse every future attach on a Carrier that is otherwise perfectly
+    // alive, until the Carrier itself died. That is
+    // `Ampd.Carrier.Reaper`'s distinction one layer down — semantic
+    // membership ending is not the same event as the process ending — and it
+    // is answered by re-deriving liveness rather than by remembering.
+    crate::fdpass::close_fd(stream_re);
+    // **The successful attach IS the proof, so it is kept rather than
+    // probed.** A first draft polled with throwaway attaches and closed each
+    // one — which orphaned a fresh attachment on every iteration and then
+    // raced its own pump, so the real attach that followed was refused
+    // "already attached". The loop retries only while the answer is a
+    // refusal; the moment it succeeds, that attachment is the one under test.
+    let (post, fds_post) = {
+        let mut got = (Value::Null, vec![]);
+        for _ in 0..40 {
+            let r = attach(&ref_a, &ep_a);
+            if r.0["attached"] == true {
+                got = r;
+                break;
+            }
+            for f in &r.1 { crate::fdpass::close_fd(*f); }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        got
+    };
+    let stream_post = fds_post.first().copied().unwrap_or(-1);
+    b.check(
+        "a holder that closes its endpoint without detaching leaves a RECLAIMABLE slot",
+        post["attached"] == true,
+        format!("the slot stayed occupied after its holder vanished — this Carrier \
+                 would be permanently unattachable: {post}"),
+    );
+    // The Carrier is untouched by any of it. Losing an observer is not a
+    // death, and the reclaim must not have become one.
+    b.check(
+        "the Carrier survived its holder vanishing, and the new attachment is a NEW incarnation",
+        post["attached"] == true
+            && post["attachment_epoch"] != att_epoch_re.as_str()
+            && post["attachment_epoch"] != att_epoch_a.as_str()
+            && post["pty_epoch"] == pty_epoch_a.as_str(),
+        format!("{post}"),
+    );
+    b.check(
+        "and bytes flow both ways on the attachment that replaced the orphan",
+        {
+            extern "C" {
+                fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+            }
+            let m = b"after-the-orphan\n";
+            let put = unsafe { write(stream_post, m.as_ptr(), m.len()) };
+            put == m.len() as isize
+                && slurp(stream_post, "after-the-orphan", 60).contains("after-the-orphan\r\n")
+        },
+        "the replacement attachment did not carry the terminal's echo",
+    );
+    b.check(
+        "and the orphaned pump's duplicate of the master was returned, not leaked",
+        host_ptmx_count() == ptmx_before + 4,
+        format!("masters {} (expected {} — two Carriers, B's pump, one live pump on A)",
+                host_ptmx_count(), ptmx_before + 4),
+    );
+
+    // -------------------------------------------------------- the death matrix
+    let stopped = {
+        let _ = write_frame(mine, &json!({
+            "schema": "carrier-stop-request@1", "op": "stop",
+            "carrier_ref": ref_a, "carrier_epoch": ep_a,
+        }));
+        read_frame(mine).unwrap_or(Value::Null)
+    };
+    b.check(
+        "the attached Carrier stops",
+        stopped["stopped"] == true,
+        format!("{stopped}"),
+    );
+    b.check(
+        "a Carrier's death closes its attachment — the holder sees EOF",
+        {
+            extern "C" {
+                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            }
+            let mut eof = false;
+            for _ in 0..40 {
+                let mut buf = [0u8; 256];
+                if unsafe { read(stream_post, buf.as_mut_ptr(), buf.len()) } == 0 {
+                    eof = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            eof
+        },
+        "the endpoint of a dead Carrier never reported end of stream",
+    );
+    // **Two descriptors at once, and that is the point.** Stopping A returns
+    // A's master AND the duplicate held by the attachment that was re-made on
+    // it. A disposal that closed the master and left the pump would leave the
+    // count one high, and the terminal alive in a process nobody is watching.
+    b.check(
+        "and the terminal went with it — master and pump duplicate both gone",
+        host_ptmx_count() == ptmx_before + 2,
+        format!("masters {} (expected {} — B and B's pump only)",
+                host_ptmx_count(), ptmx_before + 2),
+    );
+
+    // An operation against the terminal that has just died. Not "refused
+    // because the pty epoch moved" — there is no Carrier left to hold one —
+    // but refused, and never applied to the survivor.
+    let after = ask("pty-resize", "carrier-pty-resize-request@1",
+                    &ref_a, &ep_a, &pty_epoch_a, &att_epoch_a);
+    b.check(
+        "an operation addressed to a dead Carrier's terminal is refused, not rerouted",
+        after["resized"].is_null(),
+        format!("{after}"),
+    );
+
+    // ------------------------------------------------------------- the drain
+    let drained = {
+        let _ = write_frame(mine, &json!({
+            "schema": "carrier-runtime-drain-request@1", "op": "drain",
+            "runtime_epoch": "runtime-ATT",
+        }));
+        read_frame(mine).unwrap_or(Value::Null)
+    };
+    b.check(
+        "a drain closes every remaining terminal stream with its Carrier",
+        drained["remaining"] == 0 && host_ptmx_count() == ptmx_before,
+        format!("{drained} · masters {} (expected {ptmx_before})", host_ptmx_count()),
+    );
+    b.check(
+        "the surviving attachment saw EOF when its Carrier was drained",
+        {
+            extern "C" {
+                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            }
+            let mut eof = false;
+            for _ in 0..40 {
+                let mut buf = [0u8; 256];
+                if unsafe { read(stream_b, buf.as_mut_ptr(), buf.len()) } == 0 {
+                    eof = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            eof
+        },
+        "a drained Carrier's attachment never reported end of stream",
+    );
+
+    for f in [stream_a, stream_b, stream_post] {
+        if f >= 0 { fdpass::close_fd(f); }
+    }
+    fdpass::close_fd(mine);
+}
+
+/// The half the channel battery cannot reach: **the payload really receives
+/// the bytes, and its own output really leaves.**
+///
+/// The Carriers in `pty_attachment` live inside `serve_carrier`'s map, so
+/// nothing there can speak to one on fd 3 — and the line-discipline echo,
+/// which is the right witness for *the pump*, says nothing about whether the
+/// process behind the terminal ever saw a byte. This holds its own Carrier so
+/// it can ask, and calls the same `Carrier::attach` the op calls.
+///
+/// It also carries the backpressure measurement, which needs a consumer that
+/// deliberately stops reading — something no correlated request/response
+/// exchange can express.
+fn pty_attachment_payload(b: &mut Battery, scratch: &Path) {
+    use crate::carrier;
+    use crate::pty::Pty;
+
+    println!("\n  D.1.3c·2 · the payload behind the attachment");
+
+    let Some(fixture) = carrier::fixture_path() else {
+        b.check("the attachment payload falsifiers could run", false, "no fixture");
+        return;
+    };
+    let dir = scratch.join("attachpay");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let Ok(p) = Pty::open() else {
+        b.check("the attachment payload falsifiers could run", false, "no pty");
+        return;
+    };
+    let before = host_ptmx_count();
+    let mut c = match carrier::spawn_on_pty(&fixture, &dir, &dir.join("ap.log"),
+                                            &crate::new_epoch(), None, p) {
+        Ok(c) => c,
+        Err(e) => {
+            b.check("a Carrier starts for the attachment payload battery", false, e);
+            return;
+        }
+    };
+    if c.handshake(5_000).is_err() {
+        b.check("the attachment payload Carrier proved its incarnation", false, "no handshake");
+        return;
+    }
+
+    let stream = match c.attach() {
+        Ok(f) => f,
+        Err(e) => {
+            b.check("an attachment is created on a live Carrier", false, e);
+            return;
+        }
+    };
+    b.check(
+        "attaching duplicates the master and does not allocate a second terminal",
+        host_ptmx_count() == before + 1,
+        format!("masters {} (expected {}) — one more descriptor onto the SAME terminal, \
+                 not a second /dev/ptmx open", host_ptmx_count(), before + 1),
+    );
+
+    extern "C" {
+        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
+    }
+
+    // ---------------------------------------------- input reaches the payload
+    let msg = b"through-the-pump\n";
+    let put = unsafe { write(stream, msg.as_ptr(), msg.len()) };
+    let heard = c.speak("HEAR", 3_000).unwrap_or_default();
+    b.check(
+        "input written to the attachment is read by the Carrier from its own stdin",
+        put == msg.len() as isize && heard == "HEARD through-the-pump",
+        format!("wrote {put} · carrier said {heard:?}"),
+    );
+
+    // --------------------------------------------- output leaves the payload
+    let said = c.speak("SAY attached-output", 3_000).unwrap_or_default();
+    let seen = slurp(stream, "attached-output", 60);
+    b.check(
+        "output written by the Carrier arrives on the attachment",
+        said.starts_with("SAID") && seen.contains("attached-output"),
+        format!("speak={said:?} · attachment saw {seen:?}"),
+    );
+
+    // ------------------------------------------------------- bounded memory
+    //
+    // **The consumer stops reading and the host does not grow.** The pump
+    // declines to read the master once its outbound buffer is full, so the
+    // pts buffer fills and the Carrier's own `write` blocks — which is what a
+    // terminal with an inattentive reader is supposed to do. The measurement
+    // is the pump *saying it stalled*: an unbounded relay would report zero
+    // stalls and a rising heap instead.
+    //
+    // 512 KiB asked for against a 64 KiB buffer plus the socket's own space,
+    // so the stall is structural rather than a matter of timing.
+    let mut asked = 0usize;
+    for _ in 0..64 {
+        // 8 KiB per line, never read back.
+        let line = format!("SAY {}", "x".repeat(8 * 1024));
+        match c.speak(&line, 300) {
+            Ok(_) => asked += 8 * 1024,
+            Err(_) => break,
+        }
+    }
+    let stalled = c
+        .attachment()
+        .map(|a| a.stats().stalled_out.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    let moved = c
+        .attachment()
+        .map(|a| a.stats().to_stream.load(std::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(0);
+    b.check(
+        "a consumer that stops reading stalls the pump instead of growing the host",
+        stalled > 0 && moved > 0,
+        format!("asked {asked} bytes · pump moved {moved} · stalls {stalled} \
+                 — zero stalls with a stopped consumer means an unbounded buffer"),
+    );
+
+    // Draining the endpoint lets it move again, so the stall was backpressure
+    // and not a wedge. A pump that stopped forever would satisfy the check
+    // above just as well.
+    let after_drain = {
+        let _ = slurp(stream, "", 40);
+        c.attachment()
+            .map(|a| a.stats().to_stream.load(std::sync::atomic::Ordering::Relaxed))
+            .unwrap_or(0)
+    };
+    b.check(
+        "and it resumes once the consumer reads — the stall was backpressure, not a wedge",
+        after_drain > moved,
+        format!("moved {moved} before the drain, {after_drain} after"),
+    );
+
+    // ---------------------------------------------------- the ending is named
+    let live_before = c.attachment().map(|a| a.live()).unwrap_or(false);
+    c.terminate(3_000);
+    let ending = c.attachment().map(|a| a.ending().name().to_string()).unwrap_or_default();
+    b.check(
+        "the pump ends because the TERMINAL hung up, not because the host tidied up",
+        live_before && ending == "terminal-hangup",
+        format!("ending={ending:?} — 'host-closed' here would mean the binding is policy, not lifetime"),
+    );
+
+    // **EOF arrives from the hangup, before anything is disposed of.** The
+    // `Carrier` is still a live value here and its end of the stream is still
+    // open, so a holder that only learns of the death when the descriptor is
+    // finally closed would still be waiting. This is the check that makes the
+    // pump's `shutdown(SHUT_WR)` load-bearing rather than belt-and-braces:
+    // "the terminal disappeared" has to be something the holder is told, not
+    // something it infers from the socket eventually going away.
+    b.check(
+        "the holder is told the terminal is gone before the Carrier is disposed of",
+        {
+            extern "C" {
+                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
+            }
+            let mut eof = false;
+            for _ in 0..40 {
+                let mut buf = [0u8; 4096];
+                if unsafe { read(stream, buf.as_mut_ptr(), buf.len()) } == 0 {
+                    eof = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            eof
+        },
+        "the endpoint reported no end of stream while the Carrier value was still alive",
+    );
+
+    drop(c);
+    b.check(
+        "and the Carrier's disposal left the host holding no master at all",
+        host_ptmx_count() == before.saturating_sub(1),
+        format!("masters {} (expected {})", host_ptmx_count(), before.saturating_sub(1)),
+    );
+    crate::fdpass::close_fd(stream);
 }
 
 /// The four terminal properties, staged apart.

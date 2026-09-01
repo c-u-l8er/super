@@ -102,9 +102,32 @@ pub struct Pty {
     /// into a ticket, a receipt or a projection.
     ptn: u32,
     /// `st_rdev` of the slave as the host created it. The anchor the
-    /// provenance falsifier compares `/proc/<pid>/fd/0` against, because a
-    /// device number is the resource and the symlink text is a name.
+    /// provenance falsifier compares `/proc/<pid>/fd/0` against, because the
+    /// device number identifies the slave **within the current devpts
+    /// instance** and the symlink text is only a name.
+    ///
+    /// **The condition on that exactness, recorded.** Linux allows multiple
+    /// independent devpts instances and the kernel documents that indices do
+    /// not span them, so two slaves in two instances can carry the same
+    /// `st_rdev` — major 136 with the index as the minor. It is `st_dev`
+    /// that separates the instances. Super is sound today because host and
+    /// Carrier share one devpts instance and the Carrier cannot `unshare` or
+    /// `setns` into another — which is a measured confinement row, not an
+    /// assumption. **If Carrier confinement ever gains its own mount or
+    /// devpts namespace, this must become `{st_dev, st_ino, st_rdev}` or
+    /// another measured kernel identity before exactness is claimed across
+    /// instances.**
     slave_rdev: u64,
+    /// Ephemeral, host-originated, 16 CSPRNG bytes — minted here because the
+    /// terminal is allocated here, and a replacement terminal must be
+    /// unable to inherit its predecessor's name.
+    ///
+    /// **Not authority and not durable.** It grants nothing; it is the third
+    /// identity a terminal operation must name — beside `carrier_ref` and
+    /// `carrier_epoch` — so that input or a resize addressed to a dead PTY
+    /// cannot land on the live one that replaced it. It is never a pathname
+    /// and it never outlives the `Pty`.
+    epoch: String,
 }
 
 impl Pty {
@@ -177,6 +200,10 @@ impl Pty {
             slave: Some(s as RawFd),
             ptn: n,
             slave_rdev,
+            // `crate::new_epoch` and not a second mint here. Two epoch mints
+            // in one process are two disciplines that can drift, and the
+            // width of this one is the whole of its value.
+            epoch: crate::new_epoch(),
         })
     }
 
@@ -191,6 +218,37 @@ impl Pty {
     }
     pub fn slave_rdev(&self) -> u64 {
         self.slave_rdev
+    }
+    /// The terminal's ephemeral identity. See the field.
+    pub fn epoch(&self) -> &str {
+        &self.epoch
+    }
+
+    /// A private copy of the master for a pump thread.
+    ///
+    /// **The master itself is never handed over.** `Pty` owns exactly one
+    /// number and closes it in `Drop`; a thread that outlives this borrow
+    /// needs a number of its own, and `dup(2)` is the only way to get one
+    /// without giving away the original.
+    ///
+    /// **This is a hangup-suppressing operation and the caller owes a
+    /// close.** A pseudoterminal delivers `SIGHUP` to its session on the
+    /// *last* close of the master, so a leaked duplicate is a death signal
+    /// that never fires — the exact defect host probe 32 constructs on the
+    /// slave side. Every duplicate this returns must be closed before the
+    /// `Carrier` that owns the terminal is disposed of, and the death matrix
+    /// counts the host's masters across that boundary to prove it.
+    pub fn dup_master(&self) -> Result<RawFd, String> {
+        // F_DUPFD_CLOEXEC, not dup(2): a duplicate that survived an exec
+        // would be a master descriptor in a process that was never given
+        // one. Declared beside its use, as `set_nonblocking` declares
+        // `F_GETFL`.
+        const F_DUPFD_CLOEXEC: i32 = 1030;
+        let d = unsafe { fcntl(self.master, F_DUPFD_CLOEXEC, 0) };
+        if d < 0 {
+            return Err(format!("pty: duplicating the master: errno {}", errno()));
+        }
+        Ok(d as RawFd)
     }
 
     /// Drop the host's copy of the slave, leaving the Carrier the only holder.
