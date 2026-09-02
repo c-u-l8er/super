@@ -805,6 +805,81 @@ probe "an in-place incarnation change is not inferred from the token" test/carri
 # disabled, which is the definition of not a falsifier. What the monitor is
 # *for* is falsified by the rollback probe above.
 
+# --- D.1.3c·2b·1 · semantic terminal possession ----------------------------
+#
+# Nine probes, and each names a distinct thing that would otherwise be a
+# sentence. The rule this lane keeps re-learning: **a gate is not evidence
+# unless we know what would make it fail.** Every one of these was written by
+# asking what single line, removed, leaves the whole suite green.
+
+# L1 · The identity the host establishes is BELIEVED, not assumed. Before this
+#      slice `interpret/2` checked descriptor cardinality and nothing about
+#      what the answer said, so `attached: true` with three nil identities and
+#      one socket was a clean success.
+probe "an attach answer with no physical identity is not a success" test/terminal_possession_test.exs \
+  '/def malformed_identity(obs) do/,/^  end/{s@    |> Enum.reverse()@    |> Enum.reverse() |> Enum.drop(99)@}' \
+  lib/ampd/carrier/terminal.ex
+
+# L2 · A malformed field is not a default. The two-valued reading
+#      `is_binary(r) and r != ""` makes every non-string `refused` silently
+#      equal to absent, which is how `refused: 0` alongside `attached: true`
+#      passed as a clean success.
+probe "a malformed refusal field is malformed rather than absent" test/terminal_possession_test.exs \
+  's@  defp shape(_, _), do: :malformed@  defp shape(_, _), do: :absent@' \
+  lib/ampd/carrier/terminal.ex
+
+# L3 · B2 re-derives, and it is not B1 doing it twice. Without this the world
+#      may move between installing COMMITTING and finalising ACTIVE, and an
+#      authorisation granted under one world state is laundered into another.
+probe "the second ordered transaction re-derives the world again" test/terminal_possession_test.exs \
+  's@  defp moved_again(ticket), do: moved(ticket)@  defp moved_again(_ticket), do: nil@' \
+  lib/ampd/carrier/terminal.ex
+
+# L4 · The lifetime witness is PROVED. A prepared attachment monitoring the
+#      wrong process is indistinguishable from a correct one right up until
+#      the process it should have been watching dies.
+probe "an active attachment's lifetime witness must be the peer's own owner" test/terminal_possession_test.exs \
+  's@        Ampd.TerminalAttachment.owner(pid) != owner ->@        Ampd.TerminalAttachment.owner(pid) == nil ->@' \
+  lib/ampd/carrier/terminal.ex
+
+# L5 · And the owner is the process that established the binding, never the
+#      singleton registry. `Ampd.Peer` outlives every binding it holds, so an
+#      attachment bound to it survives the death of the connection whose peer
+#      it belongs to — a stream owned on behalf of a peer that is gone.
+probe "the peer owner is the establishing process, not the registry" test/terminal_possession_test.exs \
+  '/def handle_call({:owner_pid, peer_id}, _f, st) do/,/^  end/{s@    {:reply, pid, st}@    _ = pid; {:reply, Process.whereis(__MODULE__), st}@}' \
+  lib/ampd/peer.ex
+
+# L6 · The reverse direction of the terminal dependency, and it has to be a
+#      monitor: `:kill` skips `terminate/2`, so a record that relied on the
+#      dying process announcing itself would survive exactly the case it must
+#      not.
+probe "the semantic record does not outlive the process owning its stream" test/terminal_possession_test.exs \
+  's@        ref = Process.monitor(pid)@        ref = make_ref()@' \
+  lib/ampd/peer.ex
+
+# L7 · The terminal relation is subordinate to the Carrier relation, and the
+#      funnel that makes that true had to be built — four sites wrote
+#      `st.carriers` on removal and only two shared any code.
+probe "ending the carrier relation ends the terminal relation" test/terminal_possession_test.exs \
+  '/defp release_carrier(st, peer_id) do/,/^  end/{s@    |> release_terminal(peer_id)@@}' \
+  lib/ampd/peer.ex
+
+# L8 · PREPARED is not ACTIVE. Collapsing them is the window this state was
+#      added to close: the stream becomes usable while the World still says
+#      COMMITTING.
+probe "a prepared attachment is not yet a possession" test/terminal_possession_test.exs \
+  's@         %{s | phase: :prepared, record: record, owner: owner, owner_ref: owner_ref, setup_ref: nil}}@         %{s | phase: :active, record: record, owner: owner, owner_ref: owner_ref, setup_ref: nil}}@' \
+  lib/ampd/terminal_attachment.ex
+
+# L9 · A refused B2 leaves nothing behind, and the convergence lives WITH the
+#      refusal rather than in the caller. `K.11` found the first version of
+#      this: the refusal was correct, by the right name, and the COMMITTING
+#      record it refused was still there afterwards.
+probe "a refused commit removes the record it installed" test/terminal_possession_test.exs \
+  's@      converge(peer_ref, current, record, pid)@      _ = {peer_ref, current, record, pid}@' \
+  lib/ampd/carrier/terminal.ex
+
 # NOT probed here: descriptor ownership on the receiving side.
 #
 # The integer path is reached only by an SCM_RIGHTS receive from the host.

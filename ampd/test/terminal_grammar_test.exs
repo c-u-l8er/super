@@ -108,7 +108,7 @@ defmodule Ampd.TerminalGrammarTest do
     } do
       other = Map.put(@identity, "attachment_ref", "ta_" <> String.duplicate("f", 32))
 
-      assert {:error, {:identity_mismatch, ["attachment_ref"]}} = TA.activate(pid, other, self())
+      assert {:error, {:identity_mismatch, ["attachment_ref"]}} = TA.prepare(pid, other, self())
       assert TA.state(pid) == :provisional
       assert TA.record(pid) == nil
 
@@ -121,13 +121,15 @@ defmodule Ampd.TerminalGrammarTest do
 
     test "every bound field is checked, not just the ref", %{pid: pid} do
       wrong = Map.put(@identity, "pty_epoch", String.duplicate("9", 32))
-      assert {:error, {:identity_mismatch, ["pty_epoch"]}} = TA.activate(pid, wrong, self())
+      assert {:error, {:identity_mismatch, ["pty_epoch"]}} = TA.prepare(pid, wrong, self())
       assert TA.state(pid) == :provisional
       TA.close(pid)
     end
 
     test "the matching record activates", %{pid: pid} do
-      assert :ok = TA.activate(pid, @identity, self())
+      assert :ok = TA.prepare(pid, @identity, self())
+      assert TA.state(pid) == :prepared
+      assert :ok = TA.activate(pid, @identity["attachment_ref"], @identity["attachment_epoch"])
       assert TA.state(pid) == :active
       TA.close(pid)
     end
@@ -149,7 +151,8 @@ defmodule Ampd.TerminalGrammarTest do
         receive do :go -> :ok end
         {:ok, pid} = TA.Supervisor.start_owner(%{sock: mine, setup: self(), identity: @identity})
         :ok = :socket.setopt(mine, {:otp, :controlling_process}, pid)
-        :ok = TA.activate(pid, @identity, owner)
+        :ok = TA.prepare(pid, @identity, owner)
+        :ok = TA.activate(pid, @identity["attachment_ref"], @identity["attachment_epoch"])
         send(parent, {:owner, pid})
         receive do :die -> :ok end
       end)

@@ -183,11 +183,22 @@ defmodule Ampd.TerminalOwnerTest do
     :ok = transfer(mine, pid)
 
     record = Map.put(@identity, "schema", "terminal-attachment@1")
-    assert :ok = TA.activate(pid, record, self())
-    assert TA.state(pid) == :active
-    assert TA.record(pid) == record
 
-    assert {:error, {:not_provisional, :active}} = TA.activate(pid, record, self())
+    # B1's owner transition. The identity is bound and the lifetime is
+    # transferred — and this is deliberately NOT possession, so the bytes
+    # below are still refused.
+    assert :ok = TA.prepare(pid, record, self())
+    assert TA.state(pid) == :prepared
+    assert TA.record(pid) == record
+    assert {:error, :prepared} = TA.read(pid)
+    assert {:error, :prepared} = TA.write(pid, "ls\n")
+
+    # B2 finalises, addressed by the attachment identity.
+    assert :ok = TA.activate(pid, @identity["attachment_ref"], @identity["attachment_epoch"])
+    assert TA.state(pid) == :active
+
+    assert {:error, {:not_provisional, :active}} = TA.prepare(pid, record, self())
+    assert {:error, {:not_prepared, :active}} = TA.activate(pid, @identity["attachment_ref"], @identity["attachment_epoch"])
 
     # And only now do bytes mean anything.
     :ok = :socket.send(theirs, "hello\n")
@@ -204,7 +215,8 @@ defmodule Ampd.TerminalOwnerTest do
     {mine, theirs} = pair()
     pid = start_owner(mine)
     :ok = transfer(mine, pid)
-    :ok = TA.activate(pid, Map.put(@identity, "schema", "terminal-attachment@1"), self())
+    :ok = TA.prepare(pid, Map.put(@identity, "schema", "terminal-attachment@1"), self())
+    :ok = TA.activate(pid, @identity["attachment_ref"], @identity["attachment_epoch"])
 
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)

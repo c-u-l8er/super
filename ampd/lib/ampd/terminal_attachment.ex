@@ -19,8 +19,30 @@ defmodule Ampd.TerminalAttachment do
 
       PROVISIONAL   the socket is owned. Nothing else is true.
                     no bytes out, no projection, no record
-      ACTIVE        ORDERED B re-derived every basis and committed
+      PREPARED      identity bound, lifetime transferred to the owning Peer,
+                    and still not a possession. no bytes out.
+      ACTIVE        ORDERED B2 re-derived every basis and finalised
       CLOSED        the socket is gone and this process is ending
+
+  ## Why PREPARED exists, and why the two-state count was not worth keeping
+
+  The semantic record lives in `Ampd.Peer` and the stream lives here. Those
+  are two GenServers and they cannot change atomically, so a commit that
+  claimed to move both at once would be hiding a transition rather than
+  performing one. With two states the hidden transition is visible as a
+  window:
+
+      B1 installs COMMITTING in Ampd.Peer
+      activate() makes THIS process ACTIVE   ← bytes flow here
+      B2 finalises ACTIVE in Ampd.Peer
+
+  Between the second and third lines the stream is usable and the World says
+  the attachment is still committing. That is possession without an
+  authorisation, which is the whole thing ORDERED B exists to prevent, so the
+  state got added rather than the count defended. `prepare/3` does everything
+  the old `activate/3` did — bind identity, swap the lifetime — and grants
+  nothing; `activate/3` grants, and only after B2 has re-derived every basis
+  a second time.
 
   It is the same shape as `process spawned ≠ Carrier admitted`, one layer
   down, and it is enforced rather than documented: `read/1` and `write/2`
@@ -118,10 +140,10 @@ defmodule Ampd.TerminalAttachment do
     do: GenServer.start_link(__MODULE__, args)
 
   @doc """
-  PROVISIONAL → ACTIVE. Exactly once; a second call is refused.
+  PROVISIONAL → PREPARED. Exactly once; a second call is refused.
 
-  `owner` is the process whose life the **active** attachment is bound to —
-  the owning Peer/session incarnation, not the transaction that set it up.
+  `owner` is the process whose life the attachment is bound to from here on
+  — the owning Peer/session incarnation, not the transaction that set it up.
   See the lifetime note in the moduledoc: those are not the same thing, and
   binding an active attachment to the setup caller was a real defect.
 
@@ -130,29 +152,58 @@ defmodule Ampd.TerminalAttachment do
   is a process that physically owns stream A while claiming to be
   attachment B — a mistake a trusted caller should not make and which
   nothing would otherwise catch.
+
+  **Grants nothing.** A prepared attachment refuses bytes exactly as a
+  provisional one does.
   """
-  def activate(pid, record, owner) when is_map(record) and is_pid(owner),
-    do: GenServer.call(pid, {:activate, record, owner})
+  def prepare(pid, record, owner) when is_map(record) and is_pid(owner),
+    do: GenServer.call(pid, {:prepare, record, owner})
+
+  @doc """
+  PREPARED → ACTIVE, addressed by the attachment identity. Exactly once.
+
+  Called by ORDERED B2 and by nothing else. The two identity arguments are
+  not decoration: this process must not be finalisable by a caller that has
+  a pid and no idea which attachment it belongs to, which is the same rule
+  `prepare/3` applies to the record and `Ampd.Peer.activate_terminal/3`
+  applies one layer up.
+  """
+  def activate(pid, attachment_ref, attachment_epoch)
+      when is_binary(attachment_ref) and is_binary(attachment_epoch),
+      do: GenServer.call(pid, {:activate, attachment_ref, attachment_epoch})
+
+  @doc """
+  The process this attachment's lifetime is bound to, or `nil` while
+  provisional.
+
+  Exists so ORDERED B2 can **prove** the lifetime witness is the Peer
+  binding's current owner rather than infer it from the call path. A wrong
+  pid reaching `prepare/3` is otherwise undetectable — it monitors
+  successfully, it just watches the wrong thing.
+  """
+  def owner(pid), do: GenServer.call(pid, :owner)
 
   @doc "Close the stream and end. Safe from any state, including twice."
   def close(pid), do: GenServer.stop(pid, :normal, 5_000)
 
-  @doc "The attachment's current state — `:provisional`, `:active` or `:closed`."
+  @doc "The attachment's current state — `:provisional`, `:prepared` or `:active`."
   def state(pid), do: GenServer.call(pid, :state)
 
-  @doc "The `terminal-attachment@1` record, or `nil` while provisional."
+  @doc "The `terminal-attachment@1` record, or `nil` while provisional. Bound at `prepare/3`."
   def record(pid), do: GenServer.call(pid, :record)
 
   @doc """
-  Bytes toward the terminal. **Refused while provisional.**
+  Bytes toward the terminal. **Refused before ACTIVE.**
 
   Not "returns an error because the socket is not ready" — the socket is
   perfectly ready. Refused because writing to a terminal is an act of
-  possession and this process does not yet represent one.
+  possession and this process does not yet represent one. That is true in
+  PREPARED as well as PROVISIONAL: a prepared attachment has an identity and
+  a lifetime and no authorisation.
   """
   def write(pid, data) when is_binary(data), do: GenServer.call(pid, {:write, data})
 
-  @doc "Bytes from the terminal, up to `n`. **Refused while provisional.**"
+  @doc "Bytes from the terminal, up to `n`. **Refused before ACTIVE.**"
   def read(pid, n \\ 4096, timeout \\ 0), do: GenServer.call(pid, {:read, n, timeout})
 
   # ----------------------------------------------------------------- impl
@@ -180,46 +231,57 @@ defmodule Ampd.TerminalAttachment do
   end
 
   @impl true
-  def handle_call({:activate, record, owner}, _from, %{phase: :provisional} = s) do
+  def handle_call({:prepare, record, owner}, _from, %{phase: :provisional} = s) do
     case disagrees(record, s.identity) do
       [] ->
-        # **The ACTIVE monitor is established BEFORE the setup one is
-        # dropped.** Reversed, there would be an interval — however short —
-        # in which nothing was watching, and a death inside it would leave
-        # an attachment owned by a process nobody is waiting on.
+        # **The new monitor is established BEFORE the setup one is dropped.**
+        # Reversed, there would be an interval — however short — in which
+        # nothing was watching, and a death inside it would leave an
+        # attachment owned by a process nobody is waiting on.
+        #
+        # The setup deadline is deliberately **not** cancelled here. A
+        # prepared attachment is still unfinished, and the caller that was
+        # going to run B2 can die between the two; without the timer the
+        # owning Peer's own liveness would be the only thing left holding the
+        # Carrier's single attachment slot, which could be hours.
         owner_ref = Process.monitor(owner)
         Process.demonitor(s.setup_ref, [:flush])
-        Process.cancel_timer(s.timer)
 
         {:reply, :ok,
-         %{
-           s
-           | phase: :active,
-             record: record,
-             owner: owner,
-             owner_ref: owner_ref,
-             setup_ref: nil,
-             timer: nil
-         }}
+         %{s | phase: :prepared, record: record, owner: owner, owner_ref: owner_ref, setup_ref: nil}}
 
       bad ->
         {:reply, {:error, {:identity_mismatch, bad}}, s}
     end
   end
 
-  def handle_call({:activate, _, _}, _from, s),
+  def handle_call({:prepare, _, _}, _from, s),
     do: {:reply, {:error, {:not_provisional, s.phase}}, s}
+
+  def handle_call({:activate, aref, aepoch}, _from, %{phase: :prepared} = s) do
+    if s.record["attachment_ref"] == aref and s.record["attachment_epoch"] == aepoch do
+      Process.cancel_timer(s.timer)
+      {:reply, :ok, %{s | phase: :active, timer: nil}}
+    else
+      {:reply, {:error, {:identity_mismatch, s.record["attachment_ref"]}}, s}
+    end
+  end
+
+  def handle_call({:activate, _, _}, _from, s),
+    do: {:reply, {:error, {:not_prepared, s.phase}}, s}
 
   def handle_call(:state, _from, s), do: {:reply, s.phase, s}
   def handle_call(:record, _from, s), do: {:reply, s.record, s}
+  def handle_call(:owner, _from, s), do: {:reply, s.owner, s}
 
   # **The refusal is the feature.** A provisional attachment owns a socket
-  # with real bytes in it and must not be a way to read them.
-  def handle_call({:write, _}, _from, %{phase: :provisional} = s),
-    do: {:reply, {:error, :provisional}, s}
+  # with real bytes in it and must not be a way to read them — and a prepared
+  # one, which has an identity and a lifetime, still has no authorisation.
+  def handle_call({:write, _}, _from, %{phase: p} = s) when p in [:provisional, :prepared],
+    do: {:reply, {:error, p}, s}
 
-  def handle_call({:read, _, _}, _from, %{phase: :provisional} = s),
-    do: {:reply, {:error, :provisional}, s}
+  def handle_call({:read, _, _}, _from, %{phase: p} = s) when p in [:provisional, :prepared],
+    do: {:reply, {:error, p}, s}
 
   def handle_call({:write, data}, _from, %{phase: :active} = s),
     do: {:reply, :socket.send(s.sock, data), s}
@@ -262,9 +324,9 @@ defmodule Ampd.TerminalAttachment do
     {:stop, :normal, s}
   end
 
-  def handle_info(:setup_deadline, %{phase: :provisional} = s) do
+  def handle_info(:setup_deadline, %{phase: p} = s) when p in [:provisional, :prepared] do
     Logger.warning(
-      "ampd: a terminal attachment was not activated within " <>
+      "ampd: a terminal attachment was still #{p} after " <>
         "#{setup_deadline_ms()}ms; closing it rather than holding the carrier's slot"
     )
 

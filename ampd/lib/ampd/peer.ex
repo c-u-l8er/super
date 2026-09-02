@@ -116,6 +116,17 @@ defmodule Ampd.Peer do
        control_claimed: false,
        seq: 0,
        epoch: new_epoch(),
+       # monitor_ref => {peer_id, owner_pid}.
+       #
+       # **The pid used to be discarded here and that made one question
+       # unanswerable.** `own/3` passed it to `Process.monitor/1` and kept
+       # only the reference, so the runtime monitored the process that
+       # established each binding without ever being able to *name* it. That
+       # is enough to drop a binding when its owner dies and not enough to
+       # answer "which process currently owns this peer_ref?" — which is
+       # exactly what an ACTIVE terminal attachment has to bind its lifetime
+       # to. Storing the pid alongside the id makes `owner_pid/1` a lookup
+       # instead of an inference from the call path.
        owners: %{},
        # peer_id => carrier-attachment@1. Carrier-local by construction:
        # it is in this process's state and nothing writes it to disk.
@@ -172,7 +183,26 @@ defmodule Ampd.Peer do
        # ambiguity, built on the strength of a race nothing has yet observed
        # in the wild. `E27` is the falsifier; if it ever proves insufficient,
        # build the queue then.
-       pending_reaps: %{}
+       pending_reaps: %{},
+       # peer_id => %{record: terminal-attachment@1, pid: owner, ref: monitor}
+       #
+       # **The semantic relation, and the ephemeral machinery that carries
+       # it, in one entry rather than two maps.** The published object is
+       # `record` alone — `terminal_attachment/1` projects it out and nothing
+       # else escapes. The pid and the monitor reference are how this process
+       # knows the stream still has an owner; they are not part of what a
+       # Peer possesses, and a semantic record carrying a pid would be a
+       # World fact that changes when the BEAM reschedules.
+       #
+       # Two maps would have been the obvious shape and it is the shape that
+       # desynchronises: the record and its monitor must appear and disappear
+       # together, and the only structural way to guarantee that is for them
+       # to be the same entry.
+       #
+       # Ephemeral, like everything else here, and deliberately so — see
+       # `Ampd.Carrier.Terminal` for why a terminal attachment needs no
+       # durable attempt ledger while a Carrier start does.
+       terminals: %{}
      }}
   end
 
@@ -433,6 +463,92 @@ defmodule Ampd.Peer do
   """
   def reap_settled(carrier_ref), do: GenServer.call(__MODULE__, {:reap_settled, carrier_ref})
 
+  # ------------------------------------------------------- terminal possession
+  @terminal_schema "terminal-attachment@1"
+
+  @doc "The schema of the semantic terminal relation this module holds."
+  def terminal_schema, do: @terminal_schema
+
+  @doc """
+  Which process currently owns `peer_id`'s binding, or `nil`.
+
+  **The one thing an ACTIVE terminal attachment may bind its lifetime to.**
+
+  It is emphatically *not* `Process.whereis(Ampd.Peer)`. This module is a
+  singleton registry: it holds every binding and outlives all of them, so an
+  attachment monitoring it would survive the death of the very connection
+  that established the Peer it belongs to —
+
+      transport connection for peer P dies
+          → Ampd.Peer drops P
+          → Ampd.Peer itself is still alive
+          → an attachment monitoring Ampd.Peer does NOT close
+
+  — which is a stream owned on behalf of a peer that no longer exists. The
+  binding's owner is the process that called `attach_agent/3` or
+  `claim_control_channel/2`, which today is an `Ampd.Transport.Connection`.
+  Nothing here depends on it being that: this returns whichever process the
+  binding was actually established by, and the commit re-reads it rather than
+  assuming the caller happens to be it.
+  """
+  def owner_pid(nil), do: nil
+  def owner_pid(peer_id) when is_binary(peer_id), do: GenServer.call(__MODULE__, {:owner_pid, peer_id})
+
+  @doc """
+  The `terminal-attachment@1` a peer possesses, or `nil`.
+
+  The record only. No pid, no descriptor, no `/dev/pts` path — those are how
+  the runtime carries the relation, not what the relation is.
+  """
+  def terminal_attachment(nil), do: nil
+
+  def terminal_attachment(peer_id) when is_binary(peer_id),
+    do: GenServer.call(__MODULE__, {:terminal_attachment, peer_id})
+
+  @doc "Every semantic terminal relation in this incarnation, as `peer_id => record`."
+  def terminal_attachments, do: GenServer.call(__MODULE__, :terminal_attachments)
+
+  @doc """
+  Install a `COMMITTING` terminal relation and start watching its stream owner.
+
+  Refuses rather than replaces, the same way `attach_carrier/2` does and for
+  the same reason: a second attachment arriving for a peer that already has
+  one means two commits raced, and the survivable direction is for the second
+  to be told so.
+
+  **`COMMITTING` is not possession.** Nothing may read, write or resize
+  through it. It exists so that the interval between installing the record and
+  finalising it is a state the World can name, rather than a gap in which a
+  half-built attachment is indistinguishable from a real one.
+  """
+  def install_terminal(peer_id, record, pid)
+      when is_binary(peer_id) and is_map(record) and is_pid(pid),
+      do: GenServer.call(__MODULE__, {:install_terminal, peer_id, record, pid})
+
+  @doc """
+  `COMMITTING` → `ACTIVE`, addressed by the exact attachment identity.
+
+  Refused if the current record is a different attachment, is already ACTIVE,
+  or is absent. The identity is required rather than implied so that a commit
+  cannot finalise whatever happens to be in the slot — which is the same rule
+  `Ampd.TerminalAttachment` applies to its own five physical fields, one layer
+  up.
+  """
+  def activate_terminal(peer_id, attachment_ref, attachment_epoch)
+      when is_binary(peer_id) and is_binary(attachment_ref) and is_binary(attachment_epoch),
+      do: GenServer.call(__MODULE__, {:activate_terminal, peer_id, attachment_ref, attachment_epoch})
+
+  @doc """
+  End a peer's terminal relation and converge its stream. `:ok` either way.
+
+  For a refused commit and for a voluntary release. Carrier loss does not go
+  through here — it goes through the Carrier-removal funnel, because the
+  terminal relation is subordinate to the Carrier relation rather than being
+  a peer of it.
+  """
+  def remove_terminal(peer_id) when is_binary(peer_id),
+    do: GenServer.call(__MODULE__, {:remove_terminal, peer_id})
+
   @doc """
   Tear down every binding and free the control claim.
 
@@ -645,7 +761,7 @@ defmodule Ampd.Peer do
 
   def handle_call({:detach_carrier, peer_id}, _f, st) do
     if Map.has_key?(st.carriers, peer_id), do: touched()
-    {:reply, :ok, %{st | carriers: Map.delete(st.carriers, peer_id)}}
+    {:reply, :ok, release_carrier(st, peer_id)}
   end
 
   def handle_call({:detach_carrier_pending, peer_id}, _f, st) do
@@ -655,7 +771,7 @@ defmodule Ampd.Peer do
 
       inc ->
         touched()
-        {:reply, {:ok, inc}, pend(%{st | carriers: Map.delete(st.carriers, peer_id)}, inc)}
+        {:reply, {:ok, inc}, pend(release_carrier(st, peer_id), inc)}
     end
   end
 
@@ -664,11 +780,82 @@ defmodule Ampd.Peer do
   def handle_call({:reap_settled, ref}, _f, st),
     do: {:reply, :ok, %{st | pending_reaps: Map.delete(st.pending_reaps, ref)}}
 
+  # ------------------------------------------------------- terminal possession
+  def handle_call({:owner_pid, peer_id}, _f, st) do
+    pid =
+      case Enum.find(st.owners, fn {_ref, {held, _pid}} -> held == peer_id end) do
+        {_ref, {_id, pid}} -> pid
+        nil -> nil
+      end
+
+    {:reply, pid, st}
+  end
+
+  def handle_call({:terminal_attachment, peer_id}, _f, st),
+    do: {:reply, st.terminals[peer_id] && st.terminals[peer_id].record, st}
+
+  def handle_call(:terminal_attachments, _f, st),
+    do: {:reply, Map.new(st.terminals, fn {id, t} -> {id, t.record} end), st}
+
+  def handle_call({:install_terminal, peer_id, record, pid}, _f, st) do
+    cond do
+      not Map.has_key?(st.peers, peer_id) ->
+        {:reply, {:refused, :peer_gone}, st}
+
+      Map.has_key?(st.terminals, peer_id) ->
+        {:reply, {:refused, :terminal_live}, st}
+
+      not Process.alive?(pid) ->
+        {:reply, {:refused, :owner_gone}, st}
+
+      true ->
+        touched()
+        rec = Map.put(record, "status", "COMMITTING")
+        ref = Process.monitor(pid)
+        {:reply, {:ok, rec}, %{st | terminals: Map.put(st.terminals, peer_id, %{record: rec, pid: pid, ref: ref})}}
+    end
+  end
+
+  def handle_call({:activate_terminal, peer_id, aref, aepoch}, _f, st) do
+    t = Map.get(st.terminals, peer_id)
+    r = t && t.record
+
+    cond do
+      t == nil ->
+        {:reply, {:refused, :no_terminal}, st}
+
+      # Exactly once. A second finalisation of the same record would be a
+      # commit deciding again about something already decided, and the only
+      # way to reach it is a caller that has lost track of which transaction
+      # it is in.
+      r["status"] == "ACTIVE" ->
+        {:reply, {:refused, :already_active}, st}
+
+      r["attachment_ref"] != aref or r["attachment_epoch"] != aepoch ->
+        {:reply, {:refused, {:identity_mismatch, r["attachment_ref"]}}, st}
+
+      true ->
+        touched()
+        rec = Map.put(r, "status", "ACTIVE")
+        {:reply, {:ok, rec}, %{st | terminals: Map.put(st.terminals, peer_id, %{t | record: rec})}}
+    end
+  end
+
+  def handle_call({:remove_terminal, peer_id}, _f, st) do
+    if Map.has_key?(st.terminals, peer_id), do: touched()
+    {:reply, :ok, release_terminal(st, peer_id)}
+  end
+
   # A new epoch too: a world reset invalidates every channel, and a handle
   # from before it must not resolve into the world that replaced it.
   def handle_call(:reset, _f, st) do
     touched()
     Enum.each(Map.keys(st.owners), &Process.demonitor(&1, [:flush]))
+
+    # Every Carrier relation ends here, so every terminal relation does too.
+    # The owners are killed rather than asked: this runs inside the `Ampd.Peer`
+    # GenServer and a reset must not wait on anything.
+    Enum.each(Map.keys(st.terminals), fn id -> kill_terminal(st, id) end)
 
     # **Announced before they are dropped, not silently cleared.** `reset/0`
     # emptied this map and told nobody, so the invariant it claims — losing
@@ -714,7 +901,8 @@ defmodule Ampd.Peer do
          # are untouched — they are in dets and this process has never
          # been able to reach them.
          attachments: %{},
-         carriers: %{}
+         carriers: %{},
+         terminals: %{}
      }}
   end
 
@@ -738,8 +926,28 @@ defmodule Ampd.Peer do
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, _reason}, st) do
     case Map.pop(st.owners, ref) do
-      {nil, _} -> {:noreply, st}
-      {id, rest} -> touched(); {:noreply, drop(id, %{st | owners: rest})}
+      {{id, _pid}, rest} ->
+        touched()
+        {:noreply, drop(id, %{st | owners: rest})}
+
+      # **The reverse direction of the terminal dependency, and it has to be
+      # a monitor.** `Ampd.TerminalAttachment` monitors the process whose
+      # life an ACTIVE attachment is bound to; this is the other way round —
+      # the stream owner dying must remove the semantic record, or a World
+      # that says a Peer possesses a terminal outlives the process that
+      # owned the terminal's only descriptor.
+      #
+      # `terminate/2` cannot carry this. A `:kill` skips it, and `:kill` is
+      # precisely the case a record must not survive.
+      {nil, _} ->
+        case Enum.find(st.terminals, fn {_id, t} -> t.ref == ref end) do
+          nil ->
+            {:noreply, st}
+
+          {id, _} ->
+            touched()
+            {:noreply, %{st | terminals: Map.delete(st.terminals, id)}}
+        end
     end
   end
 
@@ -774,9 +982,59 @@ defmodule Ampd.Peer do
   # `Ampd.AuthorityCoordinator`'s second clock exists for.
   defp touched, do: Ampd.AuthorityCoordinator.touched()
 
-  defp own(owners, pid, id), do: Map.put(owners, Process.monitor(pid), id)
+  defp own(owners, pid, id), do: Map.put(owners, Process.monitor(pid), {id, pid})
 
   defp dead?(pid), do: is_pid(pid) and not Process.alive?(pid)
+
+  # ------------------------------------------------- the carrier-removal funnel
+  #
+  # **This funnel did not exist and had to be built.** Four independent sites
+  # wrote `st.carriers` on removal — `detach_carrier`, `detach_carrier_pending`,
+  # `drop/2` and `reset/0` — and only the last two shared any code. `drop/2`'s
+  # comment says it is "the one place every way of losing a channel already
+  # converges", which is true and is a narrower claim than it reads as: losing
+  # a *channel* converges there, losing a *Carrier* does not.
+  #
+  # That was survivable while the only thing subordinate to Carrier membership
+  # was the membership itself. It stops being survivable the moment a terminal
+  # attachment hangs off it, because then "the Carrier relation ended" has a
+  # consequence, and a consequence scattered across four callers is a
+  # consequence three of them can forget.
+  #
+  # So: one place a Peer stops having a current execution Carrier, and the
+  # terminal relation ends there because it is subordinate to it — not because
+  # each caller remembered.
+  defp release_carrier(st, peer_id) do
+    %{st | carriers: Map.delete(st.carriers, peer_id)}
+    |> release_terminal(peer_id)
+  end
+
+  # Remove the semantic record, stop watching the stream owner, and end it.
+  #
+  # The kill is what converges the physical side. `Ampd.TerminalAttachment`
+  # owns its socket, and a `:socket` dies with its owner immediately — measured
+  # on OTP 28.2 — so the descriptor is gone when this returns even though
+  # `terminate/2` never runs. Asking politely would mean a `GenServer.stop`
+  # from inside this process, which is a synchronous wait on another process
+  # in the middle of a disconnect.
+  defp release_terminal(st, peer_id) do
+    case Map.get(st.terminals, peer_id) do
+      nil ->
+        st
+
+      t ->
+        Process.demonitor(t.ref, [:flush])
+        Process.exit(t.pid, :kill)
+        %{st | terminals: Map.delete(st.terminals, peer_id)}
+    end
+  end
+
+  defp kill_terminal(st, peer_id) do
+    case Map.get(st.terminals, peer_id) do
+      nil -> :ok
+      t -> Process.demonitor(t.ref, [:flush]); Process.exit(t.pid, :kill); :ok
+    end
+  end
 
   # Closing the control channel frees the claim — the host may restart and
   # take it again. Nothing else can, while it is held.
@@ -784,10 +1042,12 @@ defmodule Ampd.Peer do
     freed = match?(%{"channel" => :human_control}, Map.get(st.peers, id))
 
     owners =
-      case Enum.find(st.owners, fn {_ref, held} -> held == id end) do
+      case Enum.find(st.owners, fn {_ref, {held, _pid}} -> held == id end) do
         {ref, _} -> Process.demonitor(ref, [:flush]) && Map.delete(st.owners, ref)
         nil -> st.owners
       end
+
+    inc = Map.get(st.carriers, id)
 
     # The attachment goes with the binding, in the one place every way of
     # losing a channel already converges — `detach/1` and the `:DOWN`
@@ -813,7 +1073,13 @@ defmodule Ampd.Peer do
            # machine request from here would put an 8-second timeout in front
            # of every disconnect.
            carriers: Map.delete(st.carriers, id)}
-    |> announce_orphan(Map.get(st.carriers, id))
+    # The terminal relation is subordinate to the Carrier relation, and this
+    # is one of the four places the Carrier relation ends. It is released
+    # unconditionally rather than through `release_carrier/2`, because here
+    # the *binding* is going too: a terminal attachment held by a peer that
+    # no longer exists is not merely stale, it is unaddressable.
+    |> release_terminal(id)
+    |> announce_orphan(inc)
   end
 
   # Cast, not call: nothing about a channel closing should wait for a
