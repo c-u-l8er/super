@@ -1,6 +1,22 @@
 #!/usr/bin/env bash
 # check-sabotage-anchors — the cheap gate that says a probe still bites.
 #
+# **BOTH batteries, since D.1.3c·2b·1.** This read `tools/sabotage-host.sh`
+# and nothing else for its whole existence, so the 97 probes in
+# `ampd/tools/sabotage.sh` had no anchor gate at all — and one of them broke
+# the moment `Ampd.Peer.own/3` changed shape. The break cost a full battery
+# run to discover, which is precisely the cost this file exists to avoid. A
+# gate that covers one of two coupled things is a gate whose name overstates
+# it.
+#
+# The two batteries couple differently and are judged differently:
+#
+#   host   probe "<name>" "<expected check>" <file> <sed>…
+#          the sed must bite AND the named check must exist in verify's output
+#   beam   probe "<name>" <test file> <sed> <file> …
+#          the sed must bite AND the named test file must exist. There is no
+#          check name: a BEAM probe reddens a whole ExUnit file.
+#
 # `tools/sabotage-host.sh` couples to the source in two places, and **both
 # fail silently**:
 #
@@ -35,7 +51,9 @@ fail=0
 ok () { printf '  \033[32mheld\033[0m  %s\n' "$1"; }
 no () { printf '  \033[31mFAIL\033[0m  %s — %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
-printf '\n  sabotage anchors · %s\n\n' "$(grep -c '^probe "' tools/sabotage-host.sh) host probes"
+printf '\n  sabotage anchors · %s host + %s beam probes\n\n' \
+  "$(grep -c '^probe "' tools/sabotage-host.sh)" \
+  "$(grep -c '^probe "' ampd/tools/sabotage.sh)"
 
 # **The battery's own output, not a grep of the source.** Several check names
 # are built in a loop from a census table — `format!("a Carrier may NOT {what}
@@ -107,6 +125,81 @@ while IFS=$'\t' read -r kind name expect file rest; do
 
   ok "probe $i · $name"
 done < "$work/probes.tsv"
+
+# ------------------------------------------------------------------ beam
+#
+# Same two questions, different couplings. A BEAM probe names an ExUnit file
+# rather than a check, and carries (sed, file) PAIRS rather than one file and
+# a list of expressions — so it gets its own parse rather than a flag on the
+# host one.
+printf '\n'
+python3 - <<'PY' > "$work/beam.tsv"
+import re, subprocess
+src = open('ampd/tools/sabotage.sh').read()
+for c in re.findall(r'^probe "(.*?)(?=\n(?:#|echo|probe|\n))', src, re.M | re.S):
+    parts = subprocess.run(
+        ['bash', '-c', 'printf "%s\\n" "' + c.replace('\\\n', ' ')],
+        capture_output=True, text=True).stdout.split('\n')
+    parts = [p for p in parts if p != '']
+    if len(parts) < 4 or (len(parts) - 2) % 2 != 0:
+        print('PARSE\t' + c[:60].replace('\n', ' '))
+        continue
+    print('\t'.join(['B', parts[0], parts[1]] + parts[2:]))
+PY
+
+j=0
+while IFS=$'\t' read -r kind name tf rest; do
+  j=$((j + 1))
+  if [ "$kind" != "B" ]; then
+    no "beam probe $j parses" "the invocation could not be read: $name"
+    continue
+  fi
+
+  if [ ! -f "ampd/$tf" ]; then
+    no "beam probe $j · $name" "test file ampd/$tf does not exist"
+    continue
+  fi
+
+  # **Each expression against a PRISTINE copy, not cumulatively.**
+  #
+  # Per-expression is the strict question and the one worth asking: a probe
+  # with two patches, one of which has gone stale, is carried by the other
+  # under a whole-file comparison and reports held while proving half of what
+  # it claims. Probe 47 is exactly that — its first expression stopped
+  # matching `bridge.ex` at some earlier revision and its second still does.
+  #
+  # But cumulative application makes that check wrong in the other direction.
+  # Probe 55 patches the same field at two indentations, and `sed s@…@…@`
+  # without `g` still matches the deeper line as a substring — so the first
+  # expression legitimately does both, and comparing after it reports the
+  # second as stale when it is merely subsumed. Against a pristine copy both
+  # bite, which is the true answer.
+  #
+  # The case this cannot see is an expression that only matches *after* an
+  # earlier one has run. No probe in either battery is written that way, and
+  # one that were would be reported here rather than passing silently.
+  IFS=$'\t' read -r -a toks <<< "$rest"
+  n=${#toks[@]}
+  k=0
+  missed=""
+  while [ "$k" -lt "$n" ]; do
+    e="${toks[$k]}"; f="ampd/${toks[$((k + 1))]}"
+    k=$((k + 2))
+    if [ ! -f "$f" ]; then missed="target file $f does not exist"; break; fi
+    cp "$f" "$work/b.probe"
+    sed -i "$e" "$work/b.probe"
+    if cmp -s "$f" "$work/b.probe"; then
+      missed="SED MISSED — '${e:0:60}' no longer matches $f, so the probe patches nothing"
+      break
+    fi
+  done
+
+  if [ -n "$missed" ]; then
+    no "beam probe $j · $name" "$missed"
+  else
+    ok "beam probe $j · $name"
+  fi
+done < "$work/beam.tsv"
 
 printf '\n'
 if [ "$fail" -eq 0 ]; then

@@ -457,6 +457,14 @@ defmodule Ampd.Carrier.Terminal do
         end
 
       reason ->
+        # **The stream goes with the refusal, and it goes from here.** Nothing
+        # was installed, so there is no record to remove — but the provisional
+        # owner exists and holds the Carrier's single attachment slot, and a
+        # refusal that left it running would be a refusal the host has to wait
+        # out. Putting this in the caller, which is what the first version
+        # did, makes "B1 refuses and the stream closes" a property of one call
+        # path rather than of B1.
+        kill_owner(pid)
         {:refused, refuse(reason, ticket)}
     end
   end
@@ -493,6 +501,12 @@ defmodule Ampd.Carrier.Terminal do
     current = Peer.terminal_attachment(peer_ref)
     owner = Peer.owner_pid(peer_ref)
 
+    # **Read once, through the wrapper, before the `cond`.** See `safely/1`:
+    # a `GenServer.call` to a process that dies mid-call exits the caller,
+    # and inside a transaction the caller is the total order.
+    held = safely(fn -> Ampd.TerminalAttachment.record(pid) end)
+    bound_owner = safely(fn -> Ampd.TerminalAttachment.owner(pid) end)
+
     reason =
       cond do
         # The same World bases as B1, in the same disclosure-graded order.
@@ -516,19 +530,25 @@ defmodule Ampd.Carrier.Terminal do
         # here means a record describing another attachment, which is the
         # defect `Ampd.TerminalAttachment.prepare/3` refuses one layer down
         # and which is worth refusing from both sides.
-        not Process.alive?(pid) ->
+        held == :gone or not Process.alive?(pid) ->
           "terminal-owner-gone"
 
-        disagrees_physically(current, Ampd.TerminalAttachment.record(pid)) != [] ->
+        disagrees_physically(current, held) != [] ->
           "terminal-owner-identity-mismatch"
 
         # **The lifetime witness is proved, not assumed.** A prepared
         # attachment monitoring the wrong process is indistinguishable from a
         # correct one until the process it should have been watching dies.
+        #
+        # `owner == nil` is ordered after `moved_again/1`, which refuses
+        # `terminal-peer-gone` first for every peer this can be true of. It
+        # is kept as the statement that this transaction will not activate
+        # without a witness, and it is reachable through `commit/4` before
+        # `prepare/3` — not here.
         owner == nil ->
           "terminal-peer-owner-gone"
 
-        Ampd.TerminalAttachment.owner(pid) != owner ->
+        bound_owner != owner ->
           "terminal-owner-not-peer-owner"
 
         true ->
@@ -552,19 +572,51 @@ defmodule Ampd.Carrier.Terminal do
       # monitor the moment the owner goes.
       case Peer.activate_terminal(peer_ref, record["attachment_ref"], record["attachment_epoch"]) do
         {:ok, active} ->
-          case Ampd.TerminalAttachment.activate(pid, record["attachment_ref"], record["attachment_epoch"]) do
+          case safely(fn ->
+                 Ampd.TerminalAttachment.activate(pid, record["attachment_ref"], record["attachment_epoch"])
+               end) do
             :ok ->
               {:ok, active}
 
-            {:error, why} ->
-              _ = Peer.remove_terminal(peer_ref)
-              {:refused, refuse("terminal-owner-refused-activation", %{"reason" => inspect(why)})}
+            other ->
+              # Includes `:gone` — the owner died between the check above and
+              # this call. The World has already said ACTIVE, so this removes
+              # it again by identity rather than leaving a possession whose
+              # stream never finished becoming one.
+              _ = Peer.remove_terminal(peer_ref, record["attachment_ref"], record["attachment_epoch"])
+              {:refused, refuse("terminal-owner-refused-activation", %{"reason" => inspect(other)})}
           end
 
         {:refused, why} ->
           {:refused, refuse("terminal-commit-refused", %{"reason" => inspect(why)})}
       end
     end
+  end
+
+  # **Every cross-process read this transaction makes goes through here.**
+  #
+  # A `GenServer.call` to a process that dies mid-call exits the caller, and
+  # inside `AuthorityCoordinator.transact/1` the caller **is** the total
+  # order — so an ordinary disconnect, landing in the microseconds between
+  # `Process.alive?/1` and the message that follows it, would take the
+  # coordinator down: `seq` back to zero, the projection epoch re-minted,
+  # every subscriber resnapshotting. One lost attachment becomes a
+  # control-plane outage.
+  #
+  # `Ampd.Peer` is deliberately outside the total order, and its `:DOWN`
+  # handling kills stream owners. So this race is not exotic; it is the
+  # ordinary path, and `Process.alive?/1` cannot close it because the answer
+  # is stale the instant it is returned.
+  #
+  # A dead owner becomes `:gone`, which is a value the `cond` refuses on.
+  # Only `Ampd.TerminalAttachment` calls are wrapped: it is `:temporary` and
+  # expected to die. `Ampd.Peer` dying is a supervisor event that invalidates
+  # this whole incarnation, and the surrounding code has always let that
+  # propagate.
+  defp safely(fun) do
+    fun.()
+  catch
+    :exit, _ -> :gone
   end
 
   # Remove exactly what this commit installed and nothing else.
@@ -587,12 +639,20 @@ defmodule Ampd.Carrier.Terminal do
       ours? and current["status"] == "COMMITTING" ->
         # Drops the record, demonitors, and kills the owner — the socket dies
         # with it. One call, so the two halves cannot be left out of step.
-        _ = Peer.remove_terminal(peer_ref)
+        # Addressed by identity even though `ours?` has just established it,
+        # because the removal crosses a process boundary and the slot can be
+        # replaced in between.
+        _ = Peer.remove_terminal(peer_ref, record["attachment_ref"], record["attachment_epoch"])
         :ok
 
       # A duplicate B2. The possession it is refusing to re-establish was
       # legitimately established by the first one — `K.18` failed the version
-      # of this function that tore it down.
+      # of this function that tore it down. Keyed on the status explicitly
+      # rather than on "ours and not COMMITTING", so a third status added
+      # later is a compile-time-visible gap rather than a silent preserve.
+      ours? and current["status"] == "ACTIVE" ->
+        :ok
+
       ours? ->
         :ok
 
@@ -682,44 +742,58 @@ defmodule Ampd.Carrier.Terminal do
   defp commit(ticket, obs, pid, identity) do
     case commit_b1(ticket, obs, pid) do
       {:ok, record} ->
-        owner = Peer.owner_pid(ticket["peer_ref"])
-
-        cond do
-          owner == nil ->
-            abandon(ticket["peer_ref"], pid)
+        case Peer.owner_pid(ticket["peer_ref"]) do
+          nil ->
+            abandon(ticket, record, pid)
             {:refused, refuse("terminal-peer-owner-gone", ticket)}
 
-          true ->
-            case Ampd.TerminalAttachment.prepare(pid, Map.merge(record, identity), owner) do
+          owner ->
+            case safely(fn -> Ampd.TerminalAttachment.prepare(pid, Map.merge(record, identity), owner) end) do
               :ok ->
-                case commit_b2(ticket, record, pid) do
-                  {:ok, active} ->
-                    {:ok, active}
+                # **B2 converges its own refusal**, so there is nothing to do
+                # here on that path. A second removal from out here — outside
+                # the order, and unaddressed — could drop a record a *later*
+                # commit had already installed in the slot this one vacated.
+                commit_b2(ticket, record, pid)
 
-                  {:refused, r} ->
-                    abandon(ticket["peer_ref"], pid)
-                    {:refused, r}
-                end
-
-              {:error, why} ->
-                abandon(ticket["peer_ref"], pid)
-                {:refused, refuse("terminal-owner-identity-mismatch", %{"reason" => inspect(why)})}
+              other ->
+                abandon(ticket, record, pid)
+                {:refused, refuse("terminal-owner-identity-mismatch", %{"reason" => inspect(other)})}
             end
         end
 
+      # `b1/3` has already killed the owner. Nothing was published.
       {:refused, r} ->
-        _ = Ampd.TerminalAttachment.close(pid)
         {:refused, r}
     end
   end
 
-  # Every failure after B1 converges the same way: the record goes and the
-  # stream closes. `remove_terminal/1` does both — it is the funnel that
-  # demonitors, drops the record and kills the owner — so this cannot leave
-  # one half behind by getting the order wrong.
-  defp abandon(peer_ref, pid) do
-    _ = Peer.remove_terminal(peer_ref)
-    if Process.alive?(pid), do: Ampd.TerminalAttachment.close(pid)
+  # The one convergence `commit/4` still owns: B1 installed a record and the
+  # owner transition never happened.
+  #
+  # **Addressed by identity, and inside the order.** The unaddressed version
+  # of this ran outside `transact` and removed whatever was in the slot, so a
+  # commit that had already converged its own failure could then drop a
+  # record a subsequent commit had legitimately installed in the same slot.
+  # Removal now takes the same two identity arguments finalisation does, for
+  # the same reason.
+  defp abandon(ticket, record, pid) do
+    _ =
+      AuthorityCoordinator.transact(fn ->
+        Peer.remove_terminal(ticket["peer_ref"], record["attachment_ref"], record["attachment_epoch"])
+      end)
+
+    kill_owner(pid)
+  end
+
+  # Total, and it never raises. `Process.exit/2` on a dead pid is a no-op,
+  # where `GenServer.stop/3` exits `:noproc` — and the one path that reaches
+  # this with a **guaranteed** dead pid is `install_terminal` answering
+  # `{:refused, :owner_gone}`, which it answers precisely because the process
+  # is gone. The socket dies with its owner, measured on OTP 28.2, so this is
+  # disposal and not merely termination.
+  defp kill_owner(pid) do
+    Process.exit(pid, :kill)
     :ok
   end
 
@@ -776,11 +850,38 @@ defmodule Ampd.Carrier.Terminal do
       current["status"] != "ACTIVE" ->
         {:refused, refuse("terminal-not-possessed", %{"status" => current["status"]})}
 
+      # **Possession is the conjunction, and resize is the one operation that
+      # could have been granted on half of it.** Bytes go through
+      # `Ampd.TerminalAttachment`, so its phase gates them on its own; a
+      # resize goes to the host addressed by epochs and never touches the
+      # stream owner, so nothing would have consulted it.
+      #
+      # The window is real and small: B2 finalises the World record and then
+      # the stream, and between those two calls the record says ACTIVE while
+      # the owner is still PREPARED. A resize arriving there would be
+      # performed under a possession that had not finished becoming one — and
+      # if the second call then fails, performed under one that never does.
+      stream_phase(current["peer_ref"]) != :active ->
+        {:refused,
+         refuse("terminal-stream-not-active", %{
+           "status" => current["status"],
+           "reason" => "the World record is ACTIVE and the stream owner has not finished becoming so"
+         })}
+
       rows < 1 or cols < 1 ->
         {:refused, refuse("terminal-resize-degenerate", %{"rows" => rows, "cols" => cols})}
 
       true ->
         ask_resize(current, rows, cols)
+    end
+  end
+
+  # The stream owner's phase, or `:gone`. The pid is runtime machinery and
+  # does not leave this module — what crosses the boundary is a phase.
+  defp stream_phase(peer_ref) do
+    case Peer.terminal_owner(peer_ref) do
+      nil -> :gone
+      pid -> safely(fn -> Ampd.TerminalAttachment.state(pid) end)
     end
   end
 

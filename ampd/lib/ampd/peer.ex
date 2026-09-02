@@ -550,6 +550,30 @@ defmodule Ampd.Peer do
     do: GenServer.call(__MODULE__, {:remove_terminal, peer_id})
 
   @doc """
+  The same, **addressed by the attachment identity**. `:ok` if it was
+  removed, `{:refused, :identity_mismatch}` if the slot holds a different
+  attachment, `:ok` if it holds none.
+
+  Removal used to take only the peer. That is right for a voluntary release,
+  where the caller means *whatever I have*, and wrong for a failed commit
+  converging itself: a commit that has already vacated the slot, and whose
+  caller then removes it a second time from outside the total order, can drop
+  a record a **later** commit legitimately installed there. Finalisation has
+  taken these two arguments from the start, for exactly this reason;
+  cancellation needs them for the same one.
+  """
+  def remove_terminal(peer_id, attachment_ref, attachment_epoch)
+      when is_binary(peer_id) and is_binary(attachment_ref) and is_binary(attachment_epoch),
+      do: GenServer.call(__MODULE__, {:remove_terminal, peer_id, attachment_ref, attachment_epoch})
+
+  @doc false
+  # The process owning a peer's terminal stream. **Runtime machinery**, not
+  # part of the relation: it exists so `Ampd.Carrier.Terminal` can ask the
+  # stream owner what phase it is in, and no caller may put it in a record.
+  def terminal_owner(peer_id) when is_binary(peer_id),
+    do: GenServer.call(__MODULE__, {:terminal_owner, peer_id})
+
+  @doc """
   Tear down every binding and free the control claim.
 
   This is a world-lifecycle operation, not a test hook: resetting or
@@ -845,6 +869,25 @@ defmodule Ampd.Peer do
     if Map.has_key?(st.terminals, peer_id), do: touched()
     {:reply, :ok, release_terminal(st, peer_id)}
   end
+
+  def handle_call({:remove_terminal, peer_id, aref, aepoch}, _f, st) do
+    r = st.terminals[peer_id] && st.terminals[peer_id].record
+
+    cond do
+      r == nil ->
+        {:reply, :ok, st}
+
+      r["attachment_ref"] != aref or r["attachment_epoch"] != aepoch ->
+        {:reply, {:refused, :identity_mismatch}, st}
+
+      true ->
+        touched()
+        {:reply, :ok, release_terminal(st, peer_id)}
+    end
+  end
+
+  def handle_call({:terminal_owner, peer_id}, _f, st),
+    do: {:reply, st.terminals[peer_id] && st.terminals[peer_id].pid, st}
 
   # A new epoch too: a world reset invalidates every channel, and a handle
   # from before it must not resolve into the world that replaced it.

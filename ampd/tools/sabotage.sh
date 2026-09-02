@@ -380,7 +380,7 @@ probe "a world reset invalidates the channels bound to the old world" test/lifec
 # Fire-and-forget, exactly as it was: tell each connection to stop and
 # return without proving any of them did.
 probe "a world reset does not complete until its channels are gone" test/lifecycle_test.exs \
-  's@    Enum.each(st.channels, fn {pid, _ch} -> Process.exit(pid, :kill) end)@    Enum.each(st.channels, fn {pid, _ch} -> send(pid, :stop) end)@' \
+  '/def handle_call(:reset, _f, st) do/,/^  end/{s@        Process.exit(pid, :kill)@        send(pid, :stop)@}' \
   lib/ampd/bridge.ex \
   's@      Ampd.Transport.Connection.rollback(ch.sock, ch.peer)@      _ = ch@' \
   lib/ampd/bridge.ex
@@ -464,8 +464,13 @@ probe "a continuity frame names which world it is, not merely how far along" tes
   's@                "world_incarnation" => Ampd.World.incarnation_of(lin),@                "world_incarnation" => "constant",@' \
   lib/ampd/projection.ex
 
+# **RE-AIMED at D.1.3c·2b·1.** `own/3` now stores the owning pid alongside
+# the id — `{id, pid}` — so the old anchor, which named the previous map
+# shape byte for byte, matched nothing and the probe silently proved nothing
+# for one whole battery run. Nothing gated it: `check-sabotage-anchors.sh`
+# read `tools/sabotage-host.sh` and not this file. It reads both now.
 probe "an identity does not outlive the process that asked for it" test/lifecycle_test.exs \
-  's|  defp own(owners, pid, id), do: Map.put(owners, Process.monitor(pid), id)|  defp own(owners, _pid, _id), do: owners|' \
+  's|  defp own(owners, pid, id), do: Map.put(owners, Process.monitor(pid), {id, pid})|  defp own(owners, _pid, _id), do: owners|' \
   lib/ampd/peer.ex
 
 # --- W.1: the cockpit observes one world incarnation ------------------
@@ -839,7 +844,7 @@ probe "the second ordered transaction re-derives the world again" test/terminal_
 #      wrong process is indistinguishable from a correct one right up until
 #      the process it should have been watching dies.
 probe "an active attachment's lifetime witness must be the peer's own owner" test/terminal_possession_test.exs \
-  's@        Ampd.TerminalAttachment.owner(pid) != owner ->@        Ampd.TerminalAttachment.owner(pid) == nil ->@' \
+  's@        bound_owner != owner ->@        bound_owner == nil ->@' \
   lib/ampd/carrier/terminal.ex
 
 # L5 · And the owner is the process that established the binding, never the
@@ -879,6 +884,45 @@ probe "a prepared attachment is not yet a possession" test/terminal_possession_t
 probe "a refused commit removes the record it installed" test/terminal_possession_test.exs \
   's@      converge(peer_ref, current, record, pid)@      _ = {peer_ref, current, record, pid}@' \
   lib/ampd/carrier/terminal.ex
+
+# L10 · A refused B1 converges its own stream. Leaving it to the caller makes
+#       "B1 refuses and the stream closes" a property of one call path rather
+#       than of B1, and the falsifiers drive B1 directly.
+probe "a refused admission does not leave the stream running" test/terminal_possession_test.exs \
+  '/defp b1(ticket, obs, pid) do/,/^  end/{s@        kill_owner(pid)@        :ok@}' \
+  lib/ampd/carrier/terminal.ex
+
+# L11 · A stream owner dying under an ordered transaction refuses the
+#       transaction. Without the catch, the `GenServer.call` exits the caller
+#       — and inside `transact/1` the caller IS the total order, so one lost
+#       attachment becomes a control-plane outage. `Process.alive?/1` cannot
+#       close this: the answer is stale the instant it returns.
+probe "a dead stream owner refuses the commit rather than the total order" test/terminal_possession_test.exs \
+  's@    :exit, _ -> :gone@    :exit, e -> exit(e)@' \
+  lib/ampd/carrier/terminal.ex
+
+# L12 · The registry holding the record is a third lifetime. `Ampd.Peer` dying
+#       takes every `terminal-attachment@1` with it, and a stream owner that
+#       survived would hold the host's single attachment slot with nothing in
+#       the runtime referring to it. There is no reaper for attachments.
+probe "a stream does not outlive the registry that holds its record" test/terminal_possession_test.exs \
+  '/def init(%{sock: sock, setup: setup, identity: identity}) do/,/^  end/{s@      p -> Process.monitor(p)@      _p -> nil@}' \
+  lib/ampd/terminal_attachment.ex
+
+# L13 · Possession is the conjunction. Bytes are gated by the owner'"'"'s own
+#       phase; a resize never touches the owner, so it is the one operation
+#       that could be performed on half a possession — in the window B2 opens
+#       between finalising the World record and finalising the stream.
+probe "a resize is refused until the stream has finished becoming active" test/terminal_possession_test.exs \
+  '/def resize_record(record, rows, cols) when is_map(record) do/,/^  end/{s@      stream_phase(current\["peer_ref"\]) != :active ->@      false ->@}' \
+  lib/ampd/carrier/terminal.ex
+
+# L14 · Cancellation is addressed the way finalisation is. An unaddressed
+#       removal lets a failed commit drop a record a LATER commit installed in
+#       the slot it vacated.
+probe "removing a terminal record is addressed by identity" test/terminal_possession_test.exs \
+  '/def handle_call({:remove_terminal, peer_id, aref, aepoch}, _f, st) do/,/^  end/{s@      r\["attachment_ref"\] != aref or r\["attachment_epoch"\] != aepoch ->@      false ->@}' \
+  lib/ampd/peer.ex
 
 # NOT probed here: descriptor ownership on the receiving side.
 #

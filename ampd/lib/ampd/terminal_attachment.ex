@@ -118,13 +118,26 @@ defmodule Ampd.TerminalAttachment do
   require Logger
 
   @doc """
-  How long a provisional attachment may remain unactivated.
+  How long an attachment may remain unfinalised.
 
-  Bounded because the alternative is a caller that wandered off holding the
-  host's only attachment slot for that Carrier. Generous relative to
-  ORDERED B, which is BEAM-local re-derivation and does no I/O.
+  **Derived from the coordinator's budget, not chosen.** The commit this
+  deadline has to survive is *two* ordered transactions —
+
+      own_stream → transact(B1) → prepare → transact(B2)
+
+  — and each of those may take the full `AuthorityCoordinator.budget_ms/0`.
+  A flat 15_000 was the same number as one of them, so a busy coordinator
+  could reap the stream owner while B1 was still enqueued or while B2 was
+  executing: the timer would fire, the process would stop, and the
+  `GenServer.call` in flight from inside the total order would exit.
+
+  So this is the budget times the number of transactions it spans, plus
+  margin — the same ordering discipline `Ampd.Worktree`'s deadline chain
+  keeps, pointing the other way. It bounds a caller that wandered off
+  holding the host's only attachment slot; it must not bound a commit that
+  is merely waiting its turn.
   """
-  def setup_deadline_ms, do: 15_000
+  def setup_deadline_ms, do: 2 * Ampd.AuthorityCoordinator.budget_ms() + 5_000
 
   # ------------------------------------------------------------------ api
 
@@ -183,8 +196,19 @@ defmodule Ampd.TerminalAttachment do
   """
   def owner(pid), do: GenServer.call(pid, :owner)
 
-  @doc "Close the stream and end. Safe from any state, including twice."
-  def close(pid), do: GenServer.stop(pid, :normal, 5_000)
+  @doc """
+  Close the stream and end. Safe from any state, including twice.
+
+  The catch is what makes that sentence true. `GenServer.stop/3` on a process
+  that has already gone exits the **caller** with `:noproc`, and the callers
+  here include code running inside the total order, where an exit is not a
+  failed disposal but a control-plane outage.
+  """
+  def close(pid) do
+    GenServer.stop(pid, :normal, 5_000)
+  catch
+    :exit, _ -> :ok
+  end
 
   @doc "The attachment's current state — `:provisional`, `:prepared` or `:active`."
   def state(pid), do: GenServer.call(pid, :state)
@@ -216,12 +240,35 @@ defmodule Ampd.TerminalAttachment do
     ref = Process.monitor(setup)
     timer = Process.send_after(self(), :setup_deadline, setup_deadline_ms())
 
+    # **A third lifetime, and it is not an ownership.**
+    #
+    # `Ampd.Peer` holds the semantic record. Its state is ephemeral by
+    # design, so a crash takes every `terminal-attachment@1` with it — and a
+    # stream owner that survived that would hold the host's single attachment
+    # slot for its Carrier with nothing in the runtime referring to it. That
+    # is the orphaned-process shape `pending_reaps` exists to close one
+    # object up, and there is no reaper for attachments.
+    #
+    # `Ampd.Transport.Connection` monitors the same process for the same
+    # reason: an identity that can no longer be proved is not an identity.
+    #
+    # This is emphatically **not** the ownership monitor. Binding an ACTIVE
+    # attachment's lifetime to the singleton registry is the defect
+    # `owner_ref` exists to avoid — the registry outlives every binding in
+    # it. This one says *my record is gone*, which is a different fact
+    # arriving from a different process death.
+    registry_ref = case Process.whereis(Ampd.Peer) do
+      nil -> nil
+      p -> Process.monitor(p)
+    end
+
     {:ok,
      %{
        phase: :provisional,
        sock: sock,
        setup: setup,
        setup_ref: ref,
+       registry_ref: registry_ref,
        timer: timer,
        identity: identity,
        owner: nil,
@@ -319,6 +366,16 @@ defmodule Ampd.TerminalAttachment do
     Logger.debug(fn ->
       "ampd: the peer possessing a terminal attachment went away " <>
         "(#{inspect(reason)}); closing the stream"
+    end)
+
+    {:stop, :normal, s}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{registry_ref: ref} = s)
+      when not is_nil(ref) do
+    Logger.debug(fn ->
+      "ampd: the peer registry holding this terminal attachment's record went away " <>
+        "(#{inspect(reason)}); the record is gone, so the stream is too"
     end)
 
     {:stop, :normal, s}
