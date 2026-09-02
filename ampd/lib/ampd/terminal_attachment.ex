@@ -131,13 +131,25 @@ defmodule Ampd.TerminalAttachment do
   executing: the timer would fire, the process would stop, and the
   `GenServer.call` in flight from inside the total order would exit.
 
-  So this is the budget times the number of transactions it spans, plus
-  margin — the same ordering discipline `Ampd.Worktree`'s deadline chain
-  keeps, pointing the other way. It bounds a caller that wandered off
-  holding the host's only attachment slot; it must not bound a commit that
-  is merely waiting its turn.
+  So this is the sum of every wait the commit can contain, plus margin —
+  the same ordering discipline `Ampd.Worktree`'s deadline chain keeps,
+  pointing the other way. It bounds a caller that wandered off holding the
+  host's only attachment slot; it must not bound a commit that is merely
+  waiting its turn.
+
+      transact(B1) client timeout      budget_ms
+      Peer.owner_pid/1                 5_000, the GenServer default
+      prepare/3                        5_000
+      transact(B2) client timeout      budget_ms
+                                       ─────────
+                                       2 × budget + 10_000
+
+  The first arithmetic here was `2 × budget + 5_000`, which is **less than
+  that sum**: it forgot the two ordinary calls between the transactions, so
+  a commit could be reaped five seconds before its own worst case. The
+  margin is a third interval on top, not a rounding.
   """
-  def setup_deadline_ms, do: 2 * Ampd.AuthorityCoordinator.budget_ms() + 5_000
+  def setup_deadline_ms, do: 2 * Ampd.AuthorityCoordinator.budget_ms() + 3 * 5_000
 
   # ------------------------------------------------------------------ api
 
@@ -203,6 +215,11 @@ defmodule Ampd.TerminalAttachment do
   that has already gone exits the **caller** with `:noproc`, and the callers
   here include code running inside the total order, where an exit is not a
   failed disposal but a control-plane outage.
+
+  **It therefore cannot report a failed disposal.** A target that is still
+  running after five seconds answers `:ok` like one that stopped. That is
+  the right trade here — every caller either owns the descriptor itself or
+  is relying on the deadline — but it is a real loss and not a free catch.
   """
   def close(pid) do
     GenServer.stop(pid, :normal, 5_000)
@@ -210,8 +227,25 @@ defmodule Ampd.TerminalAttachment do
     :exit, _ -> :ok
   end
 
-  @doc "The attachment's current state — `:provisional`, `:prepared` or `:active`."
-  def state(pid), do: GenServer.call(pid, :state)
+  @doc """
+  The attachment's current state — `:provisional`, `:prepared` or `:active`.
+
+  The timeout is a parameter because the callers that matter are inside an
+  ordered transaction, where the `GenServer` default of five seconds is a
+  third of the whole budget.
+  """
+  def state(pid, timeout \\ 5_000), do: GenServer.call(pid, :state, timeout)
+
+  @doc """
+  Phase, record and owner in **one** bounded call.
+
+  Two separate calls is what ORDERED B2 did first, and it cost twice: two
+  round trips on every path including the ones that were going to refuse
+  anyway, each with the five-second default in front of a fifteen-second
+  budget. One call, bounded, is the same evidence for a tenth of the worst
+  case.
+  """
+  def snapshot(pid, timeout \\ 1_000), do: GenServer.call(pid, :snapshot, timeout)
 
   @doc "The `terminal-attachment@1` record, or `nil` while provisional. Bound at `prepare/3`."
   def record(pid), do: GenServer.call(pid, :record)
@@ -257,6 +291,12 @@ defmodule Ampd.TerminalAttachment do
     # `owner_ref` exists to avoid — the registry outlives every binding in
     # it. This one says *my record is gone*, which is a different fact
     # arriving from a different process death.
+    # `nil` if the registry is between restarts at this instant, and it is
+    # not established later. That case is benign rather than handled: with no
+    # `Ampd.Peer` there is nothing to install a record into, so this
+    # attachment reaches its deadline and closes without ever having meant
+    # anything. Reconnecting the monitor would be machinery for a window in
+    # which the thing it protects cannot exist.
     registry_ref = case Process.whereis(Ampd.Peer) do
       nil -> nil
       p -> Process.monitor(p)
@@ -320,6 +360,9 @@ defmodule Ampd.TerminalAttachment do
   def handle_call(:state, _from, s), do: {:reply, s.phase, s}
   def handle_call(:record, _from, s), do: {:reply, s.record, s}
   def handle_call(:owner, _from, s), do: {:reply, s.owner, s}
+
+  def handle_call(:snapshot, _from, s),
+    do: {:reply, %{phase: s.phase, record: s.record, owner: s.owner}, s}
 
   # **The refusal is the feature.** A provisional attachment owns a socket
   # with real bytes in it and must not be a way to read them — and a prepared

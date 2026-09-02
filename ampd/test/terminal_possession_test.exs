@@ -523,6 +523,7 @@ defmodule Ampd.TerminalPossessionTest do
     # here is not the name but the line below it.
     assert {:refused, r} = T.commit_b2(p.ticket, record, p.pid)
     assert r["code"] in ~w(terminal-owner-gone terminal-record-gone)
+    refute r["code"] == "terminal-owner-unreachable", "a dead owner was reported as a slow one"
 
     assert Process.whereis(Ampd.AuthorityCoordinator) == coordinator,
            "a dead stream owner took the AuthorityCoordinator down with it"
@@ -831,6 +832,26 @@ defmodule Ampd.TerminalPossessionTest do
 
     assert {:refused, r} = T.resize(ctx.agent, 30, 90)
     assert r["code"] == "terminal-stream-not-active"
+  end
+
+  test "K.21c · a busy terminal is still a possessed one", ctx do
+    p = possess!(ctx)
+
+    # `read/1` runs `:socket.recv/3` synchronously inside the attachment
+    # process, so this occupies it for two seconds with nothing to read.
+    # PROVISIONAL and PREPARED cannot do that — they refuse bytes without
+    # blocking — so an owner that fails to answer is necessarily ACTIVE, and
+    # reading the timeout as "not yet active" would refuse a legitimate
+    # resize of a terminal that is merely printing.
+    reader = spawn(fn -> TA.read(p.pid, 4096, 2000) end)
+    Process.sleep(100)
+    assert Process.alive?(reader)
+
+    # No host channel in this suite, so a *permitted* resize reaches the
+    # machine and reports the absent endpoint. A refusal here would mean the
+    # World turned it away, which is the thing under test.
+    assert {:error, why} = T.resize(ctx.agent, 30, 90)
+    assert why =~ "no host carrier channel"
   end
 
   test "K.22 · no raw descriptor, socket or pid enters the semantic state", ctx do

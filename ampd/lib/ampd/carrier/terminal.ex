@@ -422,6 +422,15 @@ defmodule Ampd.Carrier.Terminal do
 
   Returns `{:ok, record}` or `{:refused, refusal}`.
 
+  **On refusal this disposes of `pid`.** A public function that kills its
+  argument is worth saying out loud: nothing was installed, so there is no
+  record to remove, but the provisional owner exists and holds the Carrier's
+  single attachment slot. Leaving that to the caller made "B1 refuses and
+  the stream closes" a property of one call path rather than of B1. The kill
+  skips `terminate/2` and therefore its explicit `:socket.close/1`; the
+  socket dies with its owner, measured on OTP 28.2, which is what makes that
+  acceptable rather than merely convenient.
+
   `COMMITTING` is not possession and is not a weaker possession. Nothing may
   be read, written or resized through it and it is not projected as an
   attachment. It exists so the interval between "the World has a record" and
@@ -501,11 +510,17 @@ defmodule Ampd.Carrier.Terminal do
     current = Peer.terminal_attachment(peer_ref)
     owner = Peer.owner_pid(peer_ref)
 
-    # **Read once, through the wrapper, before the `cond`.** See `safely/1`:
-    # a `GenServer.call` to a process that dies mid-call exits the caller,
-    # and inside a transaction the caller is the total order.
-    held = safely(fn -> Ampd.TerminalAttachment.record(pid) end)
-    bound_owner = safely(fn -> Ampd.TerminalAttachment.owner(pid) end)
+    # **One bounded call, before the `cond`.** See `safely/1`: a
+    # `GenServer.call` to a process that dies mid-call exits the caller, and
+    # inside a transaction the caller is the total order.
+    #
+    # Two calls with the five-second default was the first version, and it
+    # put ten seconds of a fifteen-second budget in front of *every* refusal
+    # — including the ones that never look at the answers. One snapshot,
+    # bounded at a second, is the same evidence.
+    snap = safely(fn -> Ampd.TerminalAttachment.snapshot(pid) end)
+    held = if is_map(snap), do: snap.record, else: snap
+    bound_owner = if is_map(snap), do: snap.owner, else: snap
 
     reason =
       cond do
@@ -530,6 +545,9 @@ defmodule Ampd.Carrier.Terminal do
         # here means a record describing another attachment, which is the
         # defect `Ampd.TerminalAttachment.prepare/3` refuses one layer down
         # and which is worth refusing from both sides.
+        held == :unreachable ->
+          "terminal-owner-unreachable"
+
         held == :gone or not Process.alive?(pid) ->
           "terminal-owner-gone"
 
@@ -593,7 +611,7 @@ defmodule Ampd.Carrier.Terminal do
     end
   end
 
-  # **Every cross-process read this transaction makes goes through here.**
+  # **Every call this transaction makes to a stream owner goes through here.**
   #
   # A `GenServer.call` to a process that dies mid-call exits the caller, and
   # inside `AuthorityCoordinator.transact/1` the caller **is** the total
@@ -608,14 +626,37 @@ defmodule Ampd.Carrier.Terminal do
   # ordinary path, and `Process.alive?/1` cannot close it because the answer
   # is stale the instant it is returned.
   #
-  # A dead owner becomes `:gone`, which is a value the `cond` refuses on.
-  # Only `Ampd.TerminalAttachment` calls are wrapped: it is `:temporary` and
-  # expected to die. `Ampd.Peer` dying is a supervisor event that invalidates
-  # this whole incarnation, and the surrounding code has always let that
-  # propagate.
+  # ## Why only the stream owner, and what that leaves open
+  #
+  # An earlier version of this comment said `Ampd.Peer` dying "invalidates
+  # this whole incarnation" and so needed no wrapping. **That is false, and
+  # worth correcting rather than deleting:** the application supervisor is
+  # `:one_for_one` and starts `Ampd.Peer` *before* the coordinator, so a
+  # `Ampd.Peer` crash restarts `Ampd.Peer` alone and leaves the coordinator
+  # running — with, if it was mid-call, an exit signal on the way.
+  #
+  # The real distinction is the one that justifies the line being drawn
+  # here: **a `TerminalAttachment` dying is the normal path** — it is
+  # `:temporary`, it is killed by the Carrier-removal funnel, it dies with
+  # its owner — whereas `Ampd.Peer` and `Ampd.Loci` dying is a fault. Every
+  # ordered transaction in this tree calls both bare, and has since C1.0b.1;
+  # wrapping them here alone would protect one transaction and misrepresent
+  # the rest as protected too.
+  #
+  # **So this is an accepted residual with a stated scope**, not a closed
+  # question: a registry crash can still exit a transaction, in this module
+  # exactly as in `Ampd.Carrier`. Closing it is a tree-wide change to how
+  # ordered transactions call registries, and it does not belong in a slice
+  # about terminals.
+  #
+  # A timeout is not a death and is not reported as one. The two are told
+  # apart because "the owner is gone" and "the owner did not answer in time"
+  # want different refusals and, one layer up in `stream_phase/1`, opposite
+  # conclusions.
   defp safely(fun) do
     fun.()
   catch
+    :exit, {:timeout, _} -> :unreachable
     :exit, _ -> :gone
   end
 
@@ -647,13 +688,15 @@ defmodule Ampd.Carrier.Terminal do
 
       # A duplicate B2. The possession it is refusing to re-establish was
       # legitimately established by the first one — `K.18` failed the version
-      # of this function that tore it down. Keyed on the status explicitly
-      # rather than on "ours and not COMMITTING", so a third status added
-      # later is a compile-time-visible gap rather than a silent preserve.
+      # of this function that tore it down.
+      #
+      # **Keyed on the status, with no `ours?` catch-all under it.** The
+      # version that had one claimed in a comment to make a third status
+      # visible and did not: the catch-all silently preserved it. A status
+      # this function has not been taught about now falls to the last clause
+      # and converges only this transaction's own stream, which is the
+      # conservative act.
       ours? and current["status"] == "ACTIVE" ->
-        :ok
-
-      ours? ->
         :ok
 
       true ->
@@ -803,8 +846,26 @@ defmodule Ampd.Carrier.Terminal do
   Voluntary. Losing the Carrier does this without being asked, because the
   terminal relation is subordinate to the Carrier relation.
   """
-  def release(peer_ref) when is_binary(peer_ref),
-    do: AuthorityCoordinator.transact(fn -> Peer.remove_terminal(peer_ref) end)
+  def release(peer_ref) when is_binary(peer_ref) do
+    # **Addressed, like every other removal.** "Whatever this peer has" is
+    # the right meaning for a caller that holds the peer and nothing else —
+    # and it is the wrong meaning by the time this transaction runs, because
+    # the `{:tx, _}` message queues. Between the call and the turn, the
+    # attachment this caller meant can die, its record can be cleared by
+    # `Ampd.Peer`'s monitor, and a fresh acquisition can install a
+    # replacement in the same slot. An unaddressed removal then kills a live
+    # possession nobody asked to release.
+    #
+    # Reading the record and removing by its identity happen in the same
+    # transaction, and every install is ordered, so nothing can be
+    # substituted between them.
+    AuthorityCoordinator.transact(fn ->
+      case Peer.terminal_attachment(peer_ref) do
+        nil -> :ok
+        r -> Peer.remove_terminal(peer_ref, r["attachment_ref"], r["attachment_epoch"])
+      end
+    end)
+  end
 
   # ------------------------------------------------------------------ resize
   @doc """
@@ -878,10 +939,29 @@ defmodule Ampd.Carrier.Terminal do
 
   # The stream owner's phase, or `:gone`. The pid is runtime machinery and
   # does not leave this module — what crosses the boundary is a phase.
+  #
+  # **A busy owner is an ACTIVE owner, and reading a timeout as "not yet
+  # active" was a real regression.** `read/1` and `write/2` run
+  # `:socket.recv/3` and `:socket.send/2` synchronously inside the
+  # attachment process, so an owner with output flowing through it can take
+  # arbitrarily long to answer — and PROVISIONAL and PREPARED cannot,
+  # because they refuse bytes without blocking. There is exactly one phase
+  # that can fail to answer in time, so a timeout *is* the answer.
+  #
+  # The first version treated it as `:gone` and refused a legitimate resize
+  # of a terminal that was merely busy, with a message saying the stream had
+  # not finished becoming active. That is the ordinary case — someone
+  # resizing a window while the terminal is printing.
   defp stream_phase(peer_ref) do
     case Peer.terminal_owner(peer_ref) do
-      nil -> :gone
-      pid -> safely(fn -> Ampd.TerminalAttachment.state(pid) end)
+      nil ->
+        :gone
+
+      pid ->
+        case safely(fn -> Ampd.TerminalAttachment.state(pid, 1_000) end) do
+          :unreachable -> :active
+          phase -> phase
+        end
     end
   end
 

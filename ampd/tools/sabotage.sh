@@ -898,7 +898,7 @@ probe "a refused admission does not leave the stream running" test/terminal_poss
 #       attachment becomes a control-plane outage. `Process.alive?/1` cannot
 #       close this: the answer is stale the instant it returns.
 probe "a dead stream owner refuses the commit rather than the total order" test/terminal_possession_test.exs \
-  's@    :exit, _ -> :gone@    :exit, e -> exit(e)@' \
+  's@    :exit, _ -> :gone@    :exit, e -> exit({:rethrown, e})@' \
   lib/ampd/carrier/terminal.ex
 
 # L12 · The registry holding the record is a third lifetime. `Ampd.Peer` dying
@@ -923,6 +923,36 @@ probe "a resize is refused until the stream has finished becoming active" test/t
 probe "removing a terminal record is addressed by identity" test/terminal_possession_test.exs \
   '/def handle_call({:remove_terminal, peer_id, aref, aepoch}, _f, st) do/,/^  end/{s@      r\["attachment_ref"\] != aref or r\["attachment_epoch"\] != aepoch ->@      false ->@}' \
   lib/ampd/peer.ex
+
+# L15 · A busy owner is an ACTIVE owner. `read/1` and `write/2` run their
+#       socket call synchronously inside the attachment process, and
+#       PROVISIONAL and PREPARED refuse bytes without blocking — so exactly
+#       one phase can fail to answer in time, which makes a timeout the
+#       answer rather than an absence of one. Reading it as `:gone` refuses a
+#       legitimate resize of a terminal that is merely printing.
+probe "a terminal that is busy is not mistaken for one that is not yet possessed" test/terminal_possession_test.exs \
+  '/defp stream_phase(peer_ref) do/,/^  end/{s@          :unreachable -> :active@          :unreachable -> :gone@}' \
+  lib/ampd/carrier/terminal.ex
+
+# NOT probed, and not counted: `Ampd.Carrier.Terminal.release/1`'"'"'s identity
+# addressing.
+#
+# Review found the shape — a queued release removing whatever is in the slot
+# by the time it runs, rather than the attachment its caller meant — and the
+# repair is in the source. It is **defence in depth, not a closed defect**,
+# and the difference is worth writing down rather than hiding behind a probe
+# that would score NOT A FALSIFIER.
+#
+# For the substitution to occur, a replacement must be installed between the
+# release being queued and it running. Installing one means ORDERED B1, which
+# is a transaction, which queues *behind* the release — the coordinator is
+# FIFO, so the replacement cannot exist yet. The defect is unconstructible
+# through the only caller `Ampd.Peer.install_terminal/3` has.
+#
+# That guarantee rests on a convention rather than a mechanism:
+# `install_terminal/3` is public and is not behind the `Ampd.Ordered` guard,
+# so a future unordered caller would make this reachable. The addressing is
+# there for that day.
 
 # NOT probed here: descriptor ownership on the receiving side.
 #
