@@ -54,7 +54,27 @@ defmodule Ampd.TerminalAttachment do
       child dies before transfer    caller owns it    → caller closes
       caller dies after transfer    WE own it         → monitor → we close
       ORDERED B refuses             we close, nothing is published
-      ORDERED B commits             activate/2, exactly once
+      ORDERED B commits             activate/3, exactly once
+
+  ## Two lifetimes, and they are not the same one
+
+  The first version of this module monitored the setup caller and kept that
+  monitor after activation, which quietly made an *active* attachment die
+  with the transaction that created it. Those are different things:
+
+      PROVISIONAL   lives as long as the setup transaction
+      ACTIVE        lives as long as the owning Peer/session incarnation
+
+  A setup transaction that did its job and returned would otherwise have
+  closed a perfectly good attachment out from under its owner. So the
+  monitor is **swapped** at activation — the new one established before the
+  old one is dropped, because the reverse order leaves an interval in which
+  nothing is watching, and a death inside it strands a socket on a process
+  nobody is waiting on.
+
+  If it ever turns out that the setup caller and the owning Peer are
+  necessarily the same process, that equality should be encoded and
+  falsified rather than relied on by call-path inspection.
 
   ## The abort floor is mechanical, not cooperative
 
@@ -97,9 +117,22 @@ defmodule Ampd.TerminalAttachment do
   def start_link(%{sock: _, setup: _, identity: _} = args),
     do: GenServer.start_link(__MODULE__, args)
 
-  @doc "PROVISIONAL → ACTIVE. Exactly once; a second call is refused."
-  def activate(pid, record) when is_map(record),
-    do: GenServer.call(pid, {:activate, record})
+  @doc """
+  PROVISIONAL → ACTIVE. Exactly once; a second call is refused.
+
+  `owner` is the process whose life the **active** attachment is bound to —
+  the owning Peer/session incarnation, not the transaction that set it up.
+  See the lifetime note in the moduledoc: those are not the same thing, and
+  binding an active attachment to the setup caller was a real defect.
+
+  `record` must describe **this** attachment. It is checked field by field
+  against the identity this process was created for, because the alternative
+  is a process that physically owns stream A while claiming to be
+  attachment B — a mistake a trusted caller should not make and which
+  nothing would otherwise catch.
+  """
+  def activate(pid, record, owner) when is_map(record) and is_pid(owner),
+    do: GenServer.call(pid, {:activate, record, owner})
 
   @doc "Close the stream and end. Safe from any state, including twice."
   def close(pid), do: GenServer.stop(pid, :normal, 5_000)
@@ -140,17 +173,41 @@ defmodule Ampd.TerminalAttachment do
        setup_ref: ref,
        timer: timer,
        identity: identity,
+       owner: nil,
+       owner_ref: nil,
        record: nil
      }}
   end
 
   @impl true
-  def handle_call({:activate, record}, _from, %{phase: :provisional} = s) do
-    Process.cancel_timer(s.timer)
-    {:reply, :ok, %{s | phase: :active, record: record, timer: nil}}
+  def handle_call({:activate, record, owner}, _from, %{phase: :provisional} = s) do
+    case disagrees(record, s.identity) do
+      [] ->
+        # **The ACTIVE monitor is established BEFORE the setup one is
+        # dropped.** Reversed, there would be an interval — however short —
+        # in which nothing was watching, and a death inside it would leave
+        # an attachment owned by a process nobody is waiting on.
+        owner_ref = Process.monitor(owner)
+        Process.demonitor(s.setup_ref, [:flush])
+        Process.cancel_timer(s.timer)
+
+        {:reply, :ok,
+         %{
+           s
+           | phase: :active,
+             record: record,
+             owner: owner,
+             owner_ref: owner_ref,
+             setup_ref: nil,
+             timer: nil
+         }}
+
+      bad ->
+        {:reply, {:error, {:identity_mismatch, bad}}, s}
+    end
   end
 
-  def handle_call({:activate, _}, _from, s),
+  def handle_call({:activate, _, _}, _from, s),
     do: {:reply, {:error, {:not_provisional, s.phase}}, s}
 
   def handle_call(:state, _from, s), do: {:reply, s.phase, s}
@@ -174,16 +231,33 @@ defmodule Ampd.TerminalAttachment do
   def handle_call({:read, _, _}, _from, s), do: {:reply, {:error, s.phase}, s}
 
   @impl true
-  # The cut that needs this process to exist. Before the ownership transfer
-  # the socket has already closed with its owner and this is bookkeeping;
-  # after it, this is the only thing that will ever close it.
-  def handle_info({:DOWN, ref, :process, _pid, reason}, %{setup_ref: ref} = s) do
-    if s.phase == :provisional do
-      Logger.debug(fn ->
-        "ampd: a provisional terminal attachment's setup owner went away " <>
-          "(#{inspect(reason)}); closing the stream and publishing nothing"
-      end)
-    end
+  # **Two lifetimes, and they are not the same one.**
+  #
+  # A provisional attachment lives as long as the transaction setting it up;
+  # an active one lives as long as the Peer that possesses it. Binding the
+  # active phase to the setup caller was the first version of this module and
+  # it was wrong: a setup transaction that returned and exited would have
+  # closed a perfectly good attachment out from under its owner.
+  #
+  # The monitor is swapped at activation rather than kept, so only one of
+  # these clauses can match at a time and the phase is not consulted to
+  # decide which lifetime just ended.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{setup_ref: ref} = s)
+      when not is_nil(ref) do
+    Logger.debug(fn ->
+      "ampd: a provisional terminal attachment's setup owner went away " <>
+        "(#{inspect(reason)}); closing the stream and publishing nothing"
+    end)
+
+    {:stop, :normal, s}
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{owner_ref: ref} = s)
+      when not is_nil(ref) do
+    Logger.debug(fn ->
+      "ampd: the peer possessing a terminal attachment went away " <>
+        "(#{inspect(reason)}); closing the stream"
+    end)
 
     {:stop, :normal, s}
   end
@@ -199,6 +273,15 @@ defmodule Ampd.TerminalAttachment do
 
   def handle_info(:setup_deadline, s), do: {:noreply, s}
   def handle_info(_, s), do: {:noreply, s}
+
+  # The five fields that say *which* attachment this is. Physical identity,
+  # not authority: agreeing on them does not make a record permitted, it
+  # makes it about this stream.
+  @bound ~w(attachment_ref attachment_epoch carrier_ref carrier_epoch pty_epoch)
+
+  defp disagrees(record, identity) do
+    Enum.filter(@bound, fn k -> Map.get(record, k) != Map.get(identity, k) end)
+  end
 
   @impl true
   # One disposal, on every exit. `:socket.close/1` is attempted whether or

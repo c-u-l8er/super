@@ -34,51 +34,59 @@ cd "$(dirname "$0")/.."
 root=$(pwd)
 out=carrier-fixture/target/release/super-carrier-fixture
 
-# The `cd` IS the build rule. Not `--manifest-path`, ever.
-build () { (cd carrier-fixture && cargo build --release "$@"); }
-
-# Static, as judged at the artifact rather than at the configuration that
-# was supposed to produce it.
-is_static () { [ -x "$root/$out" ] && ! file "$root/$out" | grep -q 'dynamically linked'; }
-
-build "$@"
-
-# **A wrong artifact can survive a successful build, twice over.** Cargo
-# hard-links `target/release/<name>` from `deps/<name>-<hash>` and then
-# calls itself up to date by fingerprint, so:
+# **Built into a fresh target directory, then installed.**
 #
-#   - a binary planted at the output path is not replaced; and
-#   - because that path is a HARD LINK, anything that wrote *through* it
-#     corrupted the deps artifact as well — under a hash whose fingerprint
-#     is still considered current.
+# The first version built in place and only forced a recompile when the
+# existing artifact looked *dynamic*. That closed the case it had just been
+# bitten by and left the general one open: cargo calls itself up to date by
+# fingerprint, so a planted or stale **statically linked** binary at the
+# output path passes "not dynamic" and is never rebuilt. The predicate was
+# checking embodiment when the question is provenance.
 #
-# Both were reproduced here. Neither is exotic: the first is "someone
-# copied a binary around", the second is the same act one inode deeper. So
-# a failed check forces a real recompile rather than another link, and only
-# then gives up.
-if ! is_static; then
-  printf '  the fixture is not static — forcing a rebuild
-' >&2
-  # `cargo clean -p` is not the tool: it reports "Removed 0 files" and
-  # leaves both the binary and its deps artifact in place. The fingerprint
-  # is what has to be invalidated, so the source mtime is what moves.
-  find carrier-fixture/src -name '*.rs' -exec touch {} +
-  rm -f "$root/$out"
-  build "$@"
-fi
+# So the build cannot see the canonical target directory at all. A private
+# CARGO_TARGET_DIR has no fingerprints to trust and no output to leave
+# alone, which makes "this binary came from this invocation of this source"
+# structural rather than inferred. The fixture is tiny — a full build is
+# about two seconds — so there is nothing to trade away.
+#
+# The `cd` is still the build rule: cargo reads `.cargo/config.toml` from
+# the working directory, not from the package `--manifest-path` names, and
+# that file is where `+crt-static` is pinned. Landlock's execute grant names
+# one inode, so a dynamic payload would need FS_EXECUTE across /usr/lib.
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
 
-if [ ! -x "$root/$out" ]; then
-  printf '\033[31mFAIL\033[0m  the fixture did not build: %s\n' "$out" >&2
+(cd carrier-fixture && CARGO_TARGET_DIR="$tmp" cargo build --release "$@")
+
+fresh="$tmp/release/super-carrier-fixture"
+
+if [ ! -x "$fresh" ]; then
+  printf '\033[31mFAIL\033[0m  the fixture did not build\n' >&2
   exit 1
 fi
 
-if ! is_static; then
-  printf '\033[31mFAIL\033[0m  the fixture is DYNAMICALLY linked, and a forced\n' >&2
-  printf '      rebuild did not fix it. Its .cargo/config.toml is not being\n' >&2
-  printf '      read — check for a --manifest-path build or a stray\n' >&2
-  printf '      CARGO_BUILD_RUSTFLAGS/RUSTFLAGS in the environment.\n' >&2
+# Asserted on the artifact this invocation produced, before it is allowed
+# anywhere near the canonical path.
+if file "$fresh" | grep -q 'dynamically linked'; then
+  printf '\033[31mFAIL\033[0m  the freshly built fixture is DYNAMICALLY linked.\n' >&2
+  printf '      carrier-fixture/.cargo/config.toml did not apply — check for a\n' >&2
+  printf '      stray RUSTFLAGS/CARGO_BUILD_RUSTFLAGS in the environment.\n' >&2
   exit 1
 fi
 
-printf '  \033[32mheld\033[0m  the Carrier payload is statically linked · %s\n' \
+# `cp` and not `mv`: the canonical path may be a hard link into a `deps/`
+# tree, and writing *through* such a link is how a previous session
+# corrupted the deps artifact under a still-current fingerprint. Removing it
+# first breaks the link rather than following it.
+mkdir -p "$(dirname "$root/$out")"
+rm -f "$root/$out"
+cp "$fresh" "$root/$out"
+chmod +x "$root/$out"
+
+if file "$root/$out" | grep -q 'dynamically linked'; then
+  printf '\033[31mFAIL\033[0m  the installed fixture is not the one just built\n' >&2
+  exit 1
+fi
+
+printf '  \033[32mheld\033[0m  the Carrier payload is freshly built and statically linked · %s\n' \
   "$(file -b "$root/$out" | cut -d, -f1-2)"

@@ -538,15 +538,25 @@ defmodule Ampd.Worktree.EffectChannel do
     # both.
     case :socket.recvmsg(sock, 4, @ctrl_bytes, [:cmsg_cloexec], timeout) do
       {:ok, %{iov: iov, ctrl: ctrl, flags: flags}} ->
-        fds = rights(ctrl)
+        # Truncation is decided on the raw list, before shape, because a
+        # truncated control buffer is exactly the case in which the shape
+        # cannot be trusted — and it may still have installed descriptors.
+        {shape, fds} =
+          case ancillary(ctrl) do
+            {:ok, f} -> {:ok, f}
+            {:error, why, f} -> {{:error, why}, f}
+          end
 
-        # First, and before anything reads the body. A truncated control
-        # message may still have installed descriptors, so this sinks
-        # whatever arrived rather than assuming truncation means none.
-        if :ctrunc in flags do
-          Enum.each(fds, &Ampd.NativeFd.discard/1)
-          {:error, {:ctrunc, length(fds)}}
-        else
+        cond do
+          :ctrunc in flags ->
+            Enum.each(fds, &Ampd.NativeFd.discard/1)
+            {:error, {:ctrunc, length(fds)}}
+
+          shape != :ok ->
+            Enum.each(fds, &Ampd.NativeFd.discard/1)
+            {:error, elem(shape, 1)}
+
+          true ->
           # **Ownership is established here, and nothing happens first.**
           #
           # A descriptor that `recvmsg` installed is owned by nobody until
@@ -562,10 +572,10 @@ defmodule Ampd.Worktree.EffectChannel do
           # with a syscall that can block inside it. Now nothing at all
           # happens between the ctrunc check and the adoption, and every
           # path after this line disposes of a *managed* socket.
-          case adopt_all(fds) do
-            {:ok, socks} -> complete_frame(sock, IO.iodata_to_binary(iov), timeout, socks)
-            :error -> {:error, :adoption_failed}
-          end
+            case adopt_all(fds) do
+              {:ok, socks} -> complete_frame(sock, IO.iodata_to_binary(iov), timeout, socks)
+              :error -> {:error, :adoption_failed}
+            end
         end
 
       {:error, e} ->
@@ -576,13 +586,74 @@ defmodule Ampd.Worktree.EffectChannel do
   # OTP hands `SCM_RIGHTS` over undecoded — one control message whose `data`
   # is N packed native-endian 32-bit descriptors — so this unpacks rather
   # than pattern-matching a list OTP does not build.
-  defp rights(ctrl) when is_list(ctrl) do
-    for %{level: :socket, type: :rights, data: d} <- ctrl,
-        <<fd::native-integer-size(32) <- d>>,
-        do: fd
+  #
+  # **The whole control list is validated, not the part that parsed.** The
+  # first version was a comprehension, and a comprehension is a filter: a
+  # response carrying valid `SCM_RIGHTS` *and* some other ancillary message
+  # produced exactly the same descriptors as one carrying only the rights,
+  # with the rest silently absent from consideration. That is the same
+  # mistake as accepting a frame because the fields you looked at were
+  # well-formed.
+  #
+  # So this returns the descriptors it identified **on both branches** —
+  # `{:error, reason, fds}` carries them out so a single audited sink can
+  # close them. A refusal that dropped them on the floor would be a protocol
+  # error that leaks.
+  @doc false
+  # Public only so the falsifiers can reach the **production** parser.
+  #
+  # The alternative was a real-socket test, and it is not producible: on
+  # Linux, `sendmsg` refuses every control message other than `SCM_RIGHTS`
+  # on an AF_UNIX stream socket. Measured on this box —
+  #
+  #     :timestamp     {:error, :einval}
+  #     :credentials   {:error, :einval}
+  #     :origdstaddr   {:error, {:invalid, {:msg, :ctrl, ...}}}
+  #     raw type 99    {:error, :einval}
+  #
+  # — so the kernel will not manufacture the case this branch exists for.
+  # That makes the branch defensive rather than currently reachable, which
+  # is worth saying plainly: it is guarding a shape this platform does not
+  # produce today, and the guard is cheap and the alternative is accepting a
+  # message because the part of it that parsed was fine.
+  #
+  # Testing a *copy* of the parser would prove nothing about this one, so
+  # the seam is here and the tests fabricate the control list OTP would have
+  # decoded.
+  def ancillary(ctrl) when is_list(ctrl) do
+    {rights, others} =
+      Enum.split_with(ctrl, fn c ->
+        is_map(c) and Map.get(c, :level) == :socket and Map.get(c, :type) == :rights
+      end)
+
+    datas = Enum.map(rights, &Map.get(&1, :data))
+
+    # Unpack before deciding, so that whatever arrived can be sunk whatever
+    # the verdict is.
+    fds =
+      datas
+      |> Enum.filter(&is_binary/1)
+      |> Enum.flat_map(fn d -> for <<fd::native-integer-size(32) <- d>>, do: fd end)
+
+    cond do
+      others != [] ->
+        {:error, {:unexpected_ancillary, Enum.map(others, &{Map.get(&1, :level), Map.get(&1, :type)})}, fds}
+
+      not Enum.all?(datas, &is_binary/1) ->
+        {:error, :malformed_rights, fds}
+
+      # A rights payload is a whole number of descriptors. A ragged one means
+      # the sender and this reader disagree about the encoding, and the
+      # comprehension would have silently dropped the tail.
+      Enum.any?(datas, &(rem(byte_size(&1), 4) != 0)) ->
+        {:error, :ragged_rights, fds}
+
+      true ->
+        {:ok, fds}
+    end
   end
 
-  defp rights(_), do: []
+  def ancillary(_), do: {:error, :unreadable_ancillary, []}
 
   # The first receive asked for four bytes and may have returned fewer:
   # `recvmsg` on a stream socket returns short without saying so. Everything

@@ -183,11 +183,11 @@ defmodule Ampd.TerminalOwnerTest do
     :ok = transfer(mine, pid)
 
     record = Map.put(@identity, "schema", "terminal-attachment@1")
-    assert :ok = TA.activate(pid, record)
+    assert :ok = TA.activate(pid, record, self())
     assert TA.state(pid) == :active
     assert TA.record(pid) == record
 
-    assert {:error, {:not_provisional, :active}} = TA.activate(pid, record)
+    assert {:error, {:not_provisional, :active}} = TA.activate(pid, record, self())
 
     # And only now do bytes mean anything.
     :ok = :socket.send(theirs, "hello\n")
@@ -204,7 +204,7 @@ defmodule Ampd.TerminalOwnerTest do
     {mine, theirs} = pair()
     pid = start_owner(mine)
     :ok = transfer(mine, pid)
-    :ok = TA.activate(pid, Map.put(@identity, "schema", "terminal-attachment@1"))
+    :ok = TA.activate(pid, Map.put(@identity, "schema", "terminal-attachment@1"), self())
 
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
