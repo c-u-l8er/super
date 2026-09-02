@@ -56,6 +56,18 @@ defmodule Ampd.Application do
       # its own `:DOWN` path — a reaper that were also the gate would be
       # waiting on itself.
       Ampd.Carrier.Reaper,
+      # The owners of terminal attachment streams. After `Ampd.Peer`,
+      # because an attachment's lifetime is bound to a peer incarnation and
+      # `:one_for_one` means an earlier child survives a later one's
+      # restart — the same argument `Ampd.Peer` makes for holding
+      # `pending_reaps` itself. After the gate, because `pty-attach` rides
+      # the lifecycle channel and must not race a start. Before the bridge,
+      # for the reason stated below.
+      #
+      # It supervises no authority and holds no record: each child owns one
+      # adopted socket and the fact that a socket dies with its owner. The
+      # semantic relation lives on `Ampd.Peer`.
+      Ampd.TerminalAttachment.Supervisor,
       # Last: the bridge creates the sockets the outside world arrives on,
       # and nothing should be reachable before the registries that answer
       # it are up. A channel that accepted a connection during boot would
