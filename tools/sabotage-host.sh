@@ -20,6 +20,43 @@ HOST=./host/target/release/super-host
 
 pass=0; fail=0
 
+# **Restore the tree on any exit, and this file did not.**
+#
+# `ampd/tools/sabotage.sh` has carried an EXIT trap since W.1.4 for exactly
+# this reason; this one carried a *comment* referring to "the `INT` trap this
+# file already carries" and no trap at all. The comment is the worse half: it
+# tells a reader the protection exists.
+#
+# It is not hypothetical. Interrupting this battery mid-probe left
+# `ampd/lib/ampd/native_fd.ex` sabotaged in the working tree with its `.orig`
+# beside it — the module whose entire job is that every received descriptor
+# has an exit, silently altered, one `git add -A` away from being committed.
+#
+# The signals *exit* rather than restore-and-continue, and the single EXIT
+# trap owns restoration: a handler that only restores would return into a
+# probe still running, with every `.orig` pulled out from under it. 130 and
+# 143 are the conventional 128+SIGINT and 128+SIGTERM, so a caller can still
+# tell which arrived. Same reasoning, same shape, as the ampd battery.
+#
+# One nuance, because verifying this trap is what taught it: bash defers a
+# trap until the current foreground command returns, and this script spends
+# most of its life inside `cargo build` or a 240 s `timeout`. A real Ctrl-C
+# is prompt anyway — the terminal signals the whole process GROUP, so the
+# child dies at once and the trap runs immediately after. A bare
+# `kill -INT <script-pid>` does not, and appears to do nothing for as long
+# as the child takes. It is not stuck; it is waiting.
+restore_all () {
+  for f in host/src/*.rs.orig ampd/lib/ampd/*.ex.orig ampd/lib/ampd/*/*.ex.orig; do
+    [ -e "$f" ] || continue
+    mv -- "$f" "${f%.orig}"
+    touch -- "${f%.orig}"
+    echo "  restored ${f%.orig}" >&2
+  done
+}
+trap restore_all EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 # probe <name> <expected-RED check substring> <file> <sed-expr>...
 probe () {
   local name="$1" expect="$2" f="$3"; shift 3
@@ -58,10 +95,10 @@ probe () {
     # measured at **1h46m** on probe 11, with a `.orig` left in the tree
     # the whole time and an orphaned BEAM holding the pipe open.
     #
-    # That is the same class as the `INT` trap this file already carries a
-    # note about — a harness that can wedge or corrupt the source it is
-    # testing is a worse defect than anything it can find. A file has no
-    # writer to wait on, and `timeout` bounds a host that genuinely hangs.
+    # That is the same class of defect as the missing EXIT trap above — a
+    # harness that can wedge or corrupt the source it is testing is worse
+    # than anything it can find. A file has no writer to wait on, and
+    # `timeout` bounds a host that genuinely hangs.
     out_file=$(mktemp)
     timeout 240 "$HOST" verify >"$out_file" 2>&1
     rc=$?
