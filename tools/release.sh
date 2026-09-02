@@ -152,6 +152,17 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 1
 fi
 cargo build --release --manifest-path host/Cargo.toml
+
+# **The Carrier payload is built here, and by exactly one thing.**
+#
+# It was not built at all: this script assumed a binary was already sitting
+# in `carrier-fixture/target/release/`, which is how a stale or wrongly
+# linked one survives a release. `--manifest-path` is deliberately NOT used
+# — cargo reads `.cargo/config.toml` from the working directory, and the
+# fixture's pins `+crt-static`, without which Landlock refuses the `execve`
+# and nineteen acceptance checks go red saying nothing about why.
+bash tools/build-carrier-fixture.sh
+
 ./host/target/release/super-host verify
 guarded sabotage-host ampd/lib host/src -- bash tools/sabotage-host.sh
 

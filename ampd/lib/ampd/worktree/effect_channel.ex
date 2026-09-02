@@ -308,11 +308,27 @@ defmodule Ampd.Worktree.EffectChannel do
 
   ## What the caller gets
 
-  `{:ok, observation, fds}` — and **the caller owes every descriptor in
-  `fds` to `Ampd.NativeFd`**, on every path out. This function sinks the
-  ones it decides about; it cannot sink the ones it hands over.
+  `{:ok, observation, sockets}` — **already adopted**, and owned by the
+  calling process. Not raw descriptors: a bare number is owned by nobody,
+  and handing one across a function boundary makes the seam between receipt
+  and ownership as wide as whatever the caller does next.
 
-  Returns `{:error, reason}` with **no descriptors outstanding**.
+  Adoption happens immediately after the truncation check and before any
+  further I/O, so the interval in which a descriptor exists unowned is a
+  few instructions of binary parsing with no syscall in it. It is **not
+  zero** — see `Ampd.NativeFd` — and closing it entirely would mean
+  performing the `recvmsg` inside a NIF, on a descriptor OTP is
+  simultaneously polling, which is a second implementation of OTP's socket
+  readiness handling and is refused for that reason.
+
+  A `:socket` closes when its owning process dies, so from this return
+  onward the descriptor has an owner under every exit. The caller's
+  remaining duty is ordinary: close them, or transfer them with
+  `:socket.setopt(s, {:otp, :controlling_process}, pid)` — which only the
+  current owner may do.
+
+  Returns `{:error, reason}` with **nothing outstanding**: raw descriptors
+  sunk, adopted sockets closed.
   """
   def request_with_fd(sock, %{"channel_epoch" => epoch}, body, timeout, expect)
       when is_map(body) do
@@ -347,18 +363,18 @@ defmodule Ampd.Worktree.EffectChannel do
       {:error, "the carrier channel did not answer the attach in time"}
     else
       case recv_frame_with_fd(sock, left) do
-        {:ok, obs, fds} ->
+        {:ok, obs, socks} ->
           cond do
             obs["channel_epoch"] != epoch or obs["request_id"] != request_id ->
-              Enum.each(fds, &Ampd.NativeFd.discard/1)
+              close_all(socks)
               await_with_fd(sock, request_id, epoch, deadline, expect)
 
             obs["schema"] != expect ->
-              Enum.each(fds, &Ampd.NativeFd.discard/1)
+              close_all(socks)
               {:error, "the host returned an unknown observation schema: #{inspect(obs["schema"])}"}
 
             true ->
-              {:ok, obs, fds}
+              {:ok, obs, socks}
           end
 
         {:error, :closed} ->
@@ -531,7 +547,25 @@ defmodule Ampd.Worktree.EffectChannel do
           Enum.each(fds, &Ampd.NativeFd.discard/1)
           {:error, {:ctrunc, length(fds)}}
         else
-          complete_frame(sock, IO.iodata_to_binary(iov), timeout, fds)
+          # **Ownership is established here, and nothing happens first.**
+          #
+          # A descriptor that `recvmsg` installed is owned by nobody until
+          # `adopt_socket/1` runs: OTP will not close it, and if the
+          # receiving process dies it stays in the OS process's table for
+          # the life of the VM. So the interval between the receive and the
+          # adoption is a seam, and its WIDTH is a choice.
+          #
+          # The first draft made that choice badly. It carried bare
+          # integers through `complete_frame/4`, which performs blocking
+          # `:socket.recv` calls and a JSON decode — so the seam was not a
+          # few instructions, it was up to the whole remaining deadline,
+          # with a syscall that can block inside it. Now nothing at all
+          # happens between the ctrunc check and the adoption, and every
+          # path after this line disposes of a *managed* socket.
+          case adopt_all(fds) do
+            {:ok, socks} -> complete_frame(sock, IO.iodata_to_binary(iov), timeout, socks)
+            :error -> {:error, :adoption_failed}
+          end
         end
 
       {:error, e} ->
@@ -558,22 +592,46 @@ defmodule Ampd.Worktree.EffectChannel do
   # Every failure below sinks the descriptors first. They are this function's
   # to lose once the receive succeeded, and an error return that left one
   # outstanding would be a leak with a reason attached.
-  defp complete_frame(sock, prefix, timeout, fds) do
+  defp complete_frame(sock, prefix, timeout, socks) do
     with {:ok, <<n::big-32>>} <- fill(sock, prefix, 4, timeout),
          :ok <- bounded(n),
          {:ok, body} <- :socket.recv(sock, n, timeout),
          {:ok, obs} <- decode(body) do
-      {:ok, obs, fds}
+      {:ok, obs, socks}
     else
       {:error, e} ->
-        Enum.each(fds, &Ampd.NativeFd.discard/1)
+        close_all(socks)
         {:error, e}
 
       other ->
-        Enum.each(fds, &Ampd.NativeFd.discard/1)
+        close_all(socks)
         {:error, {:unreadable_frame, other}}
     end
   end
+
+  # Adopt every received descriptor, or none. A partial adoption would
+  # leave the caller holding some managed sockets and some raw numbers
+  # under one name, which is the ambiguity this whole path exists to
+  # remove — so a failure sinks what has not been adopted, closes what
+  # has, and reports one thing.
+  defp adopt_all(fds), do: adopt_all(fds, [])
+
+  defp adopt_all([], acc), do: {:ok, Enum.reverse(acc)}
+
+  defp adopt_all([fd | rest], acc) do
+    case Ampd.NativeFd.adopt_socket(fd) do
+      {:ok, s} ->
+        adopt_all(rest, [s | acc])
+
+      :error ->
+        # `adopt_socket/1` has already sunk this one, both halves of it.
+        Enum.each(rest, &Ampd.NativeFd.discard/1)
+        close_all(acc)
+        :error
+    end
+  end
+
+  defp close_all(socks), do: Enum.each(socks, &:socket.close/1)
 
   defp bounded(n) when n == 0, do: {:error, :empty_frame}
   defp bounded(n), do: if(n > Ampd.Frame.max_bytes(), do: {:error, {:oversize, n}}, else: :ok)

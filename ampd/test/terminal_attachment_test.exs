@@ -105,12 +105,14 @@ defmodule Ampd.TerminalAttachmentTest do
 
     assert o["attached"] == true
     assert o["attachment_ref"] == "ta_" <> String.duplicate("a", 32)
-    assert is_integer(got) and got >= 0
 
-    # It is a real, usable descriptor and not a number that happened to
-    # survive the trip: adopting it is what the runtime will actually do.
-    assert {:ok, adopted} = Ampd.NativeFd.adopt_socket(got)
-    :ok = :socket.close(adopted)
+    # **Already adopted.** Not a raw number the caller must remember to
+    # own — a managed socket, which closes when its owner dies. That is the
+    # whole difference between a descriptor with an exit under every branch
+    # and one that has an exit only if the next line runs.
+    assert is_tuple(got) and :socket.getopt(got, :otp, :fd) != :error
+
+    :ok = :socket.close(got)
     :ok = :socket.close(holder)
   end
 
@@ -189,7 +191,7 @@ defmodule Ampd.TerminalAttachmentTest do
     # accumulate either. Net: exactly one more than before.
     assert fds() == before + 1
 
-    Ampd.NativeFd.discard(got)
+    :socket.close(got)
     :socket.close(h1)
     :socket.close(h2)
   end
@@ -218,7 +220,7 @@ defmodule Ampd.TerminalAttachmentTest do
     assert {:ok, body} = :socket.recv(mine, n, 3000)
     assert :json.decode(body)["schema"] == "the-next-frame@1"
 
-    Ampd.NativeFd.discard(got)
+    :socket.close(got)
     :socket.close(holder)
   end
 
@@ -242,8 +244,100 @@ defmodule Ampd.TerminalAttachmentTest do
     Task.await(t)
 
     assert o["schema"] == @schema
-    Ampd.NativeFd.discard(got)
+    :socket.close(got)
     :socket.close(holder)
+  end
+
+  # ------------------------------------------------- ownership before I/O
+  #
+  # **The falsifier for the seam's width.** The first draft carried bare
+  # descriptor numbers through `complete_frame/4` — which performs blocking
+  # `:socket.recv` calls with the remaining deadline — so a host that sent
+  # the ancillary data and the length prefix and then stopped left a
+  # descriptor owned by nobody for the whole timeout.
+  #
+  # Adoption now happens before any of that, so the same hostile silence
+  # ends with the socket closed rather than leaked. This test fails against
+  # the first draft and passes against the second, which is the only reason
+  # to have it.
+  test "a body that never arrives still leaves no descriptor outstanding", %{
+    mine: mine,
+    host: host
+  } do
+    {holder, fd} = spare()
+    before = fds()
+
+    t =
+      answering(host, fn req ->
+        full = frame(obs(req))
+        <<head::binary-size(4), _rest::binary>> = full
+        # The prefix and the rights, and then nothing at all.
+        :socket.sendmsg(host, %{iov: [head], ctrl: ctrl([fd])})
+      end)
+
+    result =
+      EffectChannel.request_with_fd(
+        mine,
+        %{"channel_epoch" => @epoch},
+        %{"schema" => "carrier-pty-attach-request@1", "op" => "pty-attach"},
+        300,
+        @schema
+      )
+
+    assert {:error, _} = result
+    Task.await(t)
+    assert fds() == before
+
+    :socket.close(holder)
+  end
+
+  # --------------------------------------------------- the seam, declared
+  #
+  # **This is not a defect being tested; it is a boundary being stated.**
+  #
+  # `recvmsg` installs the descriptor into the OS process's table before any
+  # Erlang code runs. Between that instant and `adopt_socket/1` the
+  # descriptor is owned by nobody: OTP will not close it, and a `:socket`
+  # handle does not exist yet to die with anyone. Killing the receiving
+  # process in that interval leaks one descriptor for the life of the VM.
+  #
+  # Closing it entirely would mean performing the `recvmsg` inside a NIF,
+  # on a descriptor OTP is simultaneously polling — a second implementation
+  # of OTP's readiness handling, on a dirty scheduler, duplicating framing
+  # this module already has. That is refused, and this test is what refusing
+  # it costs, written down.
+  #
+  # The consequence is bounded and it is DENIAL, not escalation: a leaked
+  # endpoint keeps the host's pump from seeing EOF, so one Carrier's single
+  # attachment slot stays occupied. No semantic record was committed, no
+  # Peer possesses anything, and no Erlang code holds the number.
+  test "an unadopted descriptor stays open and its peer sees no EOF — the seam, measured", %{
+    mine: _mine,
+    host: _host
+  } do
+    {a, b} = Ampd.Transport.socketpair(:stream)
+    {:ok, raw} = :socket.getopt(b, :otp, :fd)
+    before = fds()
+
+    # Stand in for "the receive happened and the adoption did not": OTP is
+    # asked to forget its handle without closing the number, which is
+    # exactly the state `recvmsg` leaves behind.
+    {:ok, dup} = :socket.open(raw, %{dup: true})
+    after_receive = fds()
+    assert after_receive == before + 1
+
+    # The peer is still connected — no EOF — which is the whole
+    # consequence: the host pump would not end.
+    assert {:error, :timeout} = :socket.recv(a, 1, 50)
+
+    # And the only thing that ends it is the sink this runtime owns.
+    {:ok, dup_fd} = :socket.getopt(dup, :otp, :fd)
+    :ok = :socket.close(dup)
+    assert fds() == before
+    assert Ampd.NativeFd.state(dup_fd) == :closed
+
+    :socket.close(a)
+    :socket.close(b)
   end
 
   # --------------------------------------------------------------- endings
