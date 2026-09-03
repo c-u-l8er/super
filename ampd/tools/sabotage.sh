@@ -1023,6 +1023,15 @@ probe "an indeterminate mutation is never marked retryable" test/ordered_partici
   's@      retryable: f.outcome in \[:unavailable, :not_applied\],@      retryable: true,@' \
   lib/ampd/participant.ex
 
+# M10 · **No layer acts on an unknown as though it were a decision.** Reaping
+#       is an action taken on the assumption that membership was not granted,
+#       and an indeterminate commit is exactly the case where that assumption
+#       is what is unknown. Reaping there leaves the runtime holding a live
+#       incarnation whose process is dead.
+probe "an indeterminate commit does not reap the carrier it may have committed" test/ordered_participant_test.exs \
+  '/def settle_commit(ticket, obs, refusal) do/,/^  end/{s@    if refusal\["code"\] == "participant-indeterminate" do@    if false do@}' \
+  lib/ampd/carrier.ex
+
 # NOT probed here: descriptor ownership on the receiving side.
 #
 # The integer path is reached only by an SCM_RIGHTS receive from the host.

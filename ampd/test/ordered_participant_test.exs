@@ -356,6 +356,53 @@ defmodule Ampd.OrderedParticipantTest do
     assert Loci.class(:lane) == :read
   end
 
+  # ==================================================================== P.11
+  describe "P.11 · no layer acts on an unknown as though it were a decision" do
+    setup do
+      Application.put_env(:ampd, :carrier_machine, Ampd.Carrier.Machine.Harness)
+      Ampd.Carrier.Machine.Harness.reset()
+      on_exit(fn -> Application.delete_env(:ampd, :carrier_machine) end)
+
+      ticket = %{
+        "ticket_id" => "ct_" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower),
+        "carrier_ref" => "cr_settle",
+        "carrier_epoch" => String.duplicate("a", 32)
+      }
+
+      {:ok, ticket: ticket}
+    end
+
+    test "an indeterminate commit does NOT reap the process it may have committed", ctx do
+      before = Ampd.Carrier.Machine.Harness.terminated()
+      r = Participant.refusal(%Failure{outcome: :indeterminate, server: Peer, op: :x, reason: :timeout})
+
+      assert {:refused, ^r} = Ampd.Carrier.settle_commit(ctx.ticket, %{}, r)
+
+      assert Ampd.Carrier.Machine.Harness.terminated() == before,
+             "an indeterminate commit reaped a Carrier that may be a member"
+    end
+
+    test "and an ordinary refusal still reaps", ctx do
+      before = length(Ampd.Carrier.Machine.Harness.terminated())
+      r = %{"code" => "carrier-worker-generation-stale"}
+
+      assert {:refused, ^r} = Ampd.Carrier.settle_commit(ctx.ticket, %{}, r)
+
+      assert length(Ampd.Carrier.Machine.Harness.terminated()) == before + 1,
+             "a decided refusal must still reap — otherwise this test proves nothing"
+    end
+
+    test "an unavailable commit reaps, because nothing was mutated", ctx do
+      before = length(Ampd.Carrier.Machine.Harness.terminated())
+      r = Participant.refusal(%Failure{outcome: :unavailable, server: Peer, op: :x, reason: :noproc})
+
+      assert {:refused, _} = Ampd.Carrier.settle_commit(ctx.ticket, %{}, r)
+
+      assert length(Ampd.Carrier.Machine.Harness.terminated()) == before + 1,
+             "a read that never established the basis mutated nothing — the process is not a member"
+    end
+  end
+
   # ==================================================================== P.10
   test "P.10 · the failure carries which participant and which class", %{tab: tab} do
     up(tab)

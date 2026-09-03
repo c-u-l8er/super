@@ -429,8 +429,7 @@ defmodule Ampd.Carrier do
               {:ok, inc}
 
             {:refused, r} ->
-              reap_refused(ticket, obs)
-              {:refused, r}
+              settle_commit(ticket, obs, r)
           end
 
         {:error, why} ->
@@ -463,6 +462,50 @@ defmodule Ampd.Carrier do
            refuse("carrier-start-indeterminate", Map.put(ticket, "machine_reason", why))}
       end
     end
+  end
+
+  @doc false
+  # **A refusal is a decision; an indeterminate commit is not one.**
+  #
+  # Reaping is an ACTION taken on the assumption that membership was not
+  # granted. C1.0b·2 introduced a refusal class where that assumption is
+  # exactly what is unknown: a participant may have applied `attach_carrier`
+  # and lost only its reply, in which case this Carrier **is** a member, and
+  # reaping it leaves the runtime holding a live incarnation whose process is
+  # dead — the inverse of the orphan `pending_reaps` exists to close.
+  #
+  # So an indeterminate commit leaves the process alone and marks the attempt,
+  # which is the same treatment the machine phase gives its own unknown one
+  # clause up, for the same reason: a second action against an unknown first
+  # one is how you get two. `Ampd.Carrier.Reaper` and `reconcile/1` own the
+  # convergence from here.
+  #
+  # Split out from `start/2` for the reason `Ampd.Worker.occupancy_of/3` is
+  # split from `occupancy/2`: the decision is worth having as a function of
+  # its inputs. Reaching this state through a real participant failure means
+  # racing a registry death against one call in the middle of a transaction;
+  # the decision itself is three lines and is what a falsifier is about.
+  def settle_commit(ticket, obs, refusal) do
+    if refusal["code"] == "participant-indeterminate" do
+      require Logger
+
+      Logger.warning(
+        "ampd: carrier start #{ticket["carrier_ref"]} could not establish whether it " <>
+          "committed — the process is NOT reaped, because reaping assumes it did not"
+      )
+
+      _ =
+        AuthorityCoordinator.transact(fn ->
+          Loci.patch_attempt(ticket["ticket_id"], %{
+            "state" => "INDETERMINATE",
+            "refused_as" => "the commit's participant did not answer"
+          })
+        end)
+    else
+      reap_refused(ticket, obs)
+    end
+
+    {:refused, refusal}
   end
 
   @doc """
