@@ -934,6 +934,33 @@ defmodule Ampd.TerminalPossessionTest do
     assert DynamicSupervisor.count_children(TA.Supervisor).active == 0
   end
 
+  test "K.27 · a participant failure inside B1 still disposes of the stream owner", ctx do
+    p = provision(ctx)
+
+    # **The gap C1.0b·2 opened in a slice that was already frozen.** `moved/1`
+    # makes five participant reads before the refusal branch that kills the
+    # owner is reachable at all; a failure in any of them unwound straight
+    # past it, leaving a provisional owner holding the Carrier's single
+    # attachment slot — while `commit/4` matched the refusal under the words
+    # "b1/3 has already killed the owner."
+    #
+    # `Ampd.Loci` is the participant to remove: `moved/1` resolves the Peer
+    # and its attachment first, so the failure lands mid-way through the
+    # re-derivation rather than on its first line.
+    :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Loci)
+
+    try do
+      assert {:refused, r} = T.commit_b1(p.ticket, p.obs, p.pid)
+      assert r["code"] == "participant-unavailable"
+      assert Peer.terminal_attachment(ctx.agent) == nil
+      dead!(p.pid)
+      assert closed?(p.mine), "a participant failure in B1 left the stream running"
+    after
+      _ = Supervisor.restart_child(Ampd.Supervisor, Ampd.Loci)
+      Process.sleep(200)
+    end
+  end
+
   test "K.26 · a stream that cannot be handed over is closed, and nothing is published", ctx do
     {:ok, ticket} = T.admit_attach(ctx.agent)
     {mine, _} = pair(ctx)
