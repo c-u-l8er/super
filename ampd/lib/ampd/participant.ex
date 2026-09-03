@@ -189,6 +189,11 @@ defmodule Ampd.Participant do
       {:error, {:noproc, _}} ->
         raise Failure.new(none_class(class), server, op, :noproc)
 
+      # The request could not even be constructed. Same conclusion, arrived
+      # at one step earlier.
+      {:never_sent, why} ->
+        raise Failure.new(none_class(class), server, op, {:request_not_sent, why})
+
       # Dead. Whatever it did is final, because it will not run again — which
       # is exactly the condition that makes a witness sound.
       {:error, {reason, _}} ->
@@ -202,11 +207,23 @@ defmodule Ampd.Participant do
   end
 
   defp ask(server, op, timeout) do
-    :gen_server.receive_response(:gen_server.send_request(server, op), timeout)
+    # **Split, because the two halves fail differently.** `send_request`
+    # throwing means the request provably never left — a malformed server
+    # reference, not a participant that may have acted. Folding it into the
+    # `{:error, {reason, _}}` arm below classified it under "dead, whatever
+    # it did is final", which for a mutation is `:indeterminate`: not
+    # retryable, requires a human, about an operation that certainly did not
+    # happen.
+    case send_or_not(server, op) do
+      {:sent, id} -> :gen_server.receive_response(id, timeout)
+      {:never_sent, why} -> {:never_sent, why}
+    end
+  end
+
+  defp send_or_not(server, op) do
+    {:sent, :gen_server.send_request(server, op)}
   catch
-    # `send_request` itself can fail on a malformed server reference. It is
-    # not a participant failure and must not be dressed as one.
-    kind, why -> {:error, {{:request_not_sent, kind, why}, server}}
+    kind, why -> {:never_sent, {kind, why}}
   end
 
   # A read mutates nothing, so a read that never arrived and a read that
@@ -228,6 +245,9 @@ defmodule Ampd.Participant do
     end
   end
 
+  @doc "How long a witness has to answer before it stops being evidence."
+  def witness_deadline_ms, do: 1_000
+
   # A witness that says APPLIED does not make the operation a success: the
   # caller still never received the participant's answer, and the value it
   # would have returned is gone. It makes the operation *not repeatable*,
@@ -237,12 +257,33 @@ defmodule Ampd.Participant do
   # A witness that itself fails leaves the class where it was. It is
   # evidence, and evidence that could not be obtained is not evidence to the
   # contrary.
+  #
+  # **It runs in another process, on a deadline, and the first version did
+  # not.** `rescue`/`catch` bound a witness that *fails*; nothing bounded one
+  # that simply does not return. Run inline on the coordinator, such a
+  # witness is worse than a crash: the process stays alive, so the supervisor
+  # never restarts it, `budget_ms/0` never applies because that is the
+  # *client's* deadline, and every later transaction and observation queues
+  # behind it permanently. Measured — a later `ops/0` timed out and the
+  # coordinator was still alive and still stuck.
+  #
+  # `:witness` is caller-supplied and this function is reachable from a public
+  # API, so the bound is not a courtesy.
   defp run_witness(witness) do
-    witness.()
-  rescue
-    _ -> :unknown
-  catch
-    _, _ -> :unknown
+    task = Task.async(fn ->
+      try do
+        witness.()
+      rescue
+        _ -> :unknown
+      catch
+        _, _ -> :unknown
+      end
+    end)
+
+    case Task.yield(task, witness_deadline_ms()) || Task.shutdown(task, :brutal_kill) do
+      {:ok, verdict} -> verdict
+      _ -> :unknown
+    end
   end
 
   @doc """

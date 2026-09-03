@@ -232,9 +232,16 @@ defmodule Ampd.AuthorityCoordinator do
     if self() == Process.whereis(__MODULE__) do
       {%{"projection_epoch" => nil, "revision" => nil}, fun.()}
     else
-      GenServer.call(__MODULE__, {:observe, fun}, timeout)
+      reraise_here(GenServer.call(__MODULE__, {:observe, fun}, timeout))
     end
   end
+
+  # The coordinator caught it so that it would survive. The caller is an
+  # ordinary process whose death is its own business, and it asked for
+  # content that does not exist — so it gets the exception it would have got
+  # before, in the process that can afford it.
+  defp reraise_here({:participant_failed, %Ampd.Participant.Failure{} = e}), do: raise(e)
+  defp reraise_here(result), do: result
 
   @doc """
   Observe **exactly once**, for a computation that may not be re-executed.
@@ -267,7 +274,7 @@ defmodule Ampd.AuthorityCoordinator do
     if self() == Process.whereis(__MODULE__) do
       {%{"projection_epoch" => nil, "revision" => nil}, fun.()}
     else
-      GenServer.call(__MODULE__, {:observe_once, fun}, timeout)
+      reraise_here(GenServer.call(__MODULE__, {:observe_once, fun}, timeout))
     end
   end
 
@@ -320,14 +327,41 @@ defmodule Ampd.AuthorityCoordinator do
   # **≥** the version of everything in it. The loop then converts the
   # common case from safe to exact, without a lock over three processes
   # that would have to be held for the length of a projection.
-  def handle_call({:observe, fun}, _from, st), do: {:reply, coherent(fun, st, 3), st}
+  def handle_call({:observe, fun}, _from, st),
+    do: {:reply, survivable(fn -> coherent(fun, st, 3) end), st}
 
   # **NOT `coherent(fun, st, 1)`.** That would be correct today and would
   # break silently the day anyone changes what the bound means — the
   # at-most-once guarantee would then depend on an integer read two
   # functions away. A computation that may run once gets a body with no
   # loop in it, so there is nothing to get wrong.
-  def handle_call({:observe_once, fun}, _from, st), do: {:reply, once(fun, st), st}
+  def handle_call({:observe_once, fun}, _from, st),
+    do: {:reply, survivable(fn -> once(fun, st) end), st}
+
+  # **The read path had no protection at all, and that was the whole claim.**
+  #
+  # C1.0b·2 said an ordered participant failure no longer takes the total
+  # order down. It said so having guarded only `{:tx, …}`. An observation
+  # walks a dozen registries — `Ampd.Projection` reads `Ampd.Peer.list/0` and
+  # five `Ampd.Loci` collections — and it is the path the cockpit uses on
+  # every frame. Measured: `Ampd.Loci` absent during a projection read killed
+  # the coordinator exactly as before, with the new machinery installed.
+  #
+  # An observation is a read, so there is no ambiguity to classify: nothing
+  # was mutated. What there is, is a caller that asked for content and cannot
+  # be given any.
+  #
+  # **The failure is moved to the caller rather than swallowed.** Returning a
+  # refusal in the content position would put a refusal map where a
+  # projection belongs, and `Ampd.Projection` would render it. Re-raising in
+  # the *caller's* process gives every existing caller the failure mode it
+  # already had — an exception — while the total order survives, which is the
+  # only place survival was ever the point.
+  defp survivable(fun) do
+    fun.()
+  rescue
+    e in Ampd.Participant.Failure -> {:participant_failed, e}
+  end
 
   defp once(fun, st) do
     content = fun.()
@@ -366,12 +400,31 @@ defmodule Ampd.AuthorityCoordinator do
 
   defp run(fun, st) do
     case classify(fun) do
-      # **The revision does not move for a transaction that did not happen.**
+      # **Whether the revision moves depends on the class, and the first
+      # version got this backwards.**
       #
-      # A participant failure is not an authority mutation, so advancing `seq`
-      # and ticking the view clock here would tell every subscriber the world
-      # changed because a registry was unreachable. The refusal is the result;
-      # the world is where it was.
+      # It advanced nothing, under a comment saying "the world is where it
+      # was". For `:unavailable` and `:not_applied` that is true and the
+      # comment stands. For `:indeterminate` it is exactly what is unknown —
+      # and the two errors are not symmetric:
+      #
+      #     advance and nothing happened   subscribers resnapshot for nothing
+      #     do not advance and it happened  subscribers render a world that
+      #                                     is no longer true, indefinitely
+      #
+      # The second is the LIVE-LOCAL defect this module's own `init/1`
+      # describes. So an indeterminate mutation moves the clocks, because it
+      # may have moved the world, and a resnapshot costs nothing to be wrong
+      # about.
+      #
+      # It matters more than it looks: `Ampd.Peer`'s mutating handlers call
+      # `touched/0` themselves, so a landed Peer mutation announces even from
+      # here — but `Ampd.Loci` never calls it at all and relies entirely on
+      # this function. A durable Loci write that lands and loses its reply
+      # would otherwise notify nobody until some unrelated later mutation.
+      {:participant_failed, %{outcome: :indeterminate} = failure} ->
+        applied({:refused, Ampd.Participant.refusal(failure)}, st)
+
       {:participant_failed, failure} ->
         {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}
 

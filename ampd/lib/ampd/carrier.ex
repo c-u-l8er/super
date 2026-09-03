@@ -401,7 +401,21 @@ defmodule Ampd.Carrier do
 
       case Peer.attach_carrier(ticket["peer_ref"], inc) do
         {:ok, stored} ->
-          _ = Loci.patch_attempt(ticket["ticket_id"], %{"state" => "COMMITTED"})
+          # **Membership is the authority fact; the attempt ledger is
+          # recovery bookkeeping, and losing the second does not un-make the
+          # first.**
+          #
+          # `attach_carrier` has replied. This Carrier IS a member of the
+          # World. If `Ampd.Loci` then fails, letting that failure become the
+          # transaction's result would refuse a start that committed — and
+          # `settle_commit/3` would reap the process while `Peer.carriers/0`
+          # still reports it RUNNING, which is the inverted orphan one class
+          # of refusal further along than the one that was already closed.
+          #
+          # The attempt stays START_ADMITTED, which `unresolved/0` reports and
+          # the boot sweep converges. That is the same outcome as a VM death
+          # between these two lines, which this ledger was built for.
+          _ = record_committed(ticket)
           {:ok, stored}
 
         {:taken, why} ->
@@ -462,6 +476,23 @@ defmodule Ampd.Carrier do
            refuse("carrier-start-indeterminate", Map.put(ticket, "machine_reason", why))}
       end
     end
+  end
+
+  # Deliberately narrow, deliberately local, and deliberately not a policy:
+  # this rescue exists for one call whose failure must not undo a commit that
+  # already happened.
+  defp record_committed(ticket) do
+    Loci.patch_attempt(ticket["ticket_id"], %{"state" => "COMMITTED"})
+  rescue
+    e in Ampd.Participant.Failure ->
+      require Logger
+
+      Logger.warning(
+        "ampd: carrier #{ticket["carrier_ref"]} committed and its attempt could not be " <>
+          "marked (#{Exception.message(e)}) — it stays START_ADMITTED for the boot sweep"
+      )
+
+      :ok
   end
 
   @doc false

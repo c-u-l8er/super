@@ -138,6 +138,54 @@ if (timeoutClauses.length === 0) {
   ok(`a witness cannot be consulted after a timeout (after_timeout/${timeoutClauses[0].split(',').length}, after_death/2)`)
 }
 
+// 5 · every message a converted module SENDS is classified
+//
+// **Client-side, and the first version got this wrong.** It derived the tag
+// set from `handle_call` clauses and reported five of `Ampd.Loci`'s ordered
+// ops as dead entries — because that module handles them through a single
+// guarded clause that dispatches to `handle_ordered/2`, so they appear in no
+// `handle_call` head at all. A census that reads the wrong side reports
+// correct source as broken.
+//
+// The classification governs what the CLIENT sends, so the client is what to
+// enumerate. A tag sent but named by no list is silently a read — which gives
+// an indeterminate write a retryable "basis unavailable" and invites the
+// second execution the class exists to forbid.
+const CONVERTED = {
+  'lib/ampd/peer.ex': { mod: 'Ampd.Peer', attr: /@mutations ~w\(([^)]*)\)a/ },
+  'lib/ampd/loci.ex': { mod: 'Ampd.Loci', attr: /@ordered_ops \[([^\]]*)\]/ },
+}
+
+const census = {}
+for (const [rel, { mod, attr }] of Object.entries(CONVERTED)) {
+  const code = codeOnly(readFileSync(join(LIB, rel.replace('lib/ampd/', 'ampd/')), 'utf8'))
+
+  const sent = [
+    ...code.matchAll(/ask\(\{:(\w+)/g),
+    ...code.matchAll(/ask\(:(\w+)/g),
+  ].map((m) => m[1]).filter((n, i, a) => a.indexOf(n) === i).sort()
+
+  const m = code.match(attr)
+  if (!m) { no(`${rel} declares its mutations`, 'the classification list could not be read'); continue }
+  const mutations = m[1].split(/[\s,]+/).map((t) => t.replace(/^:/, '')).filter(Boolean)
+
+  const dead = mutations.filter((t) => !sent.includes(t))
+  const reads = sent.filter((t) => !mutations.includes(t))
+  const bare = (code.match(/GenServer\.call\(__MODULE__/g) || []).length
+
+  census[mod] = {
+    sends: sent.length, mutations: sent.filter((t) => mutations.includes(t)).length,
+    reads: reads.length, declared_mutations: mutations.length, dead, bare,
+  }
+
+  if (bare) no(`${rel} sends everything through the boundary`, `${bare} bare call(s)`)
+  else if (dead.length) no(`${rel} has no dead classification entries`, `${dead.join(', ')} named but never sent`)
+  else ok(`${rel}: ${sent.length} messages sent — ${census[mod].mutations} mutations, ${reads.length} reads, 0 dead`)
+}
+
+writeFileSync(join(ROOT, 'tools/ordered-boundary-census.json'),
+  JSON.stringify({ bare: found, converted: census }, null, 2) + '\n')
+
 const total = Object.values(found).reduce((a, b) => a + b, 0)
 console.log(`\n  unconverted bare client calls: ${total}\n`)
 if (fail === 0) {

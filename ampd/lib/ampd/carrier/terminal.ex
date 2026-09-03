@@ -442,6 +442,27 @@ defmodule Ampd.Carrier.Terminal do
     do: AuthorityCoordinator.transact(fn -> b1(ticket, obs, pid) end)
 
   defp b1(ticket, obs, pid) do
+    do_b1(ticket, obs, pid)
+  rescue
+    # **A participant failure skipped the disposal, and a comment downstream
+    # said it had not.**
+    #
+    # `moved/1` makes five participant reads before the `reason ->` branch
+    # that kills the owner is reachable at all. A failure in any of them
+    # unwound straight past it, leaving a provisional owner holding the
+    # Carrier's single attachment slot with nothing referring to it — while
+    # `commit/4` matched the refusal under the words "b1/3 has already killed
+    # the owner. Nothing was published."
+    #
+    # The disposal belongs to every way out of this function, so it is here
+    # rather than in one branch of it. The failure is re-raised because its
+    # class is the caller's answer and must not become a plain refusal.
+    e in Ampd.Participant.Failure ->
+      kill_owner(pid)
+      reraise e, __STACKTRACE__
+  end
+
+  defp do_b1(ticket, obs, pid) do
     case moved(ticket) do
       nil ->
         record = %{
@@ -805,7 +826,8 @@ defmodule Ampd.Carrier.Terminal do
             end
         end
 
-      # `b1/3` has already killed the owner. Nothing was published.
+      # `b1/3` disposes of the owner on every way out — the refusal branch and
+      # a participant failure alike. Nothing was published.
       {:refused, r} ->
         {:refused, r}
     end

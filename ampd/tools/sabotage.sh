@@ -522,14 +522,14 @@ probe "a read that may run once is speculated on anyway" test/multiplicity_test.
 # it `coherent/3`'s bounded rebuild is the change someone makes while
 # "unifying" the two, and it silently reinstates the defect.
 probe "the exactly-once observation rebuilds like the retry-safe one" test/multiplicity_test.exs \
-  's|  def handle_call({:observe_once, fun}, _from, st), do: {:reply, once(fun, st), st}|  def handle_call({:observe_once, fun}, _from, st), do: {:reply, coherent(fun, st, 3), st}|' \
+  's|    do: {:reply, survivable(fn -> once(fun, st) end), st}|    do: {:reply, survivable(fn -> coherent(fun, st, 3) end), st}|' \
   lib/ampd/authority_coordinator.ex
 
 # A read that counted as an ordered operation would advance the revision it
 # is reporting — a cursor that changes because it was looked at, and a push
 # that is its own reason for another push.
 probe "an observation is ordered but is not an operation" test/cockpit_test.exs \
-  's|  def handle_call({:observe, fun}, _from, st), do: {:reply, coherent(fun, st, 3), st}|  def handle_call({:observe, fun}, _from, st), do: run(fn -> coherent(fun, st, 3) end, st)|' \
+  '/def handle_call({:observe, fun}, _from, st),/,+1{s|    do: {:reply, survivable(fn -> coherent(fun, st, 3) end), st}|    do: run(fn -> coherent(fun, st, 3) end, st)|}' \
   lib/ampd/authority_coordinator.ex
 
 probe "the world incarnation is 128 bits" test/cockpit_test.exs \
@@ -889,7 +889,7 @@ probe "a refused commit removes the record it installed" test/terminal_possessio
 #       "B1 refuses and the stream closes" a property of one call path rather
 #       than of B1, and the falsifiers drive B1 directly.
 probe "a refused admission does not leave the stream running" test/terminal_possession_test.exs \
-  '/defp b1(ticket, obs, pid) do/,/^  end/{s@        kill_owner(pid)@        :ok@}' \
+  '/defp do_b1(ticket, obs, pid) do/,/^  end/{s@        kill_owner(pid)@        :ok@}' \
   lib/ampd/carrier/terminal.ex
 
 # L11 · A stream owner dying under an ordered transaction refuses the
@@ -1002,11 +1002,19 @@ probe "the coordinator catches the failure the boundary raises" test/ordered_par
   's@    e in Ampd.Participant.Failure -> {:participant_failed, e}@    e in RuntimeError -> {:participant_failed, e}@' \
   lib/ampd/authority_coordinator.ex
 
-# M7 · A transaction that did not happen must not move the world. Advancing
-#      the revision here tells every subscriber the world changed because a
-#      registry was unreachable.
-probe "a failed participant does not advance the ordered revision" test/ordered_participant_test.exs \
-  's@        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}@        applied({:refused, Ampd.Participant.refusal(failure)}, st)@' \
+# M7 · A read that established nothing must not move the world. The
+#      indeterminate arm above it deliberately does — the two are different
+#      classes and this probe reddens if the distinction is erased downward.
+probe "an unavailable read does not advance the ordered revision" test/ordered_participant_test.exs \
+  '/{:participant_failed, failure} ->/,+1{s@        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}@        applied({:refused, Ampd.Participant.refusal(failure)}, st)@}' \
+  lib/ampd/authority_coordinator.ex
+
+# M7b · And the other direction. An indeterminate mutation that does NOT move
+#       the clocks leaves every subscriber rendering a world that may no
+#       longer be true, with nothing to correct it — the LIVE LOCAL defect,
+#       reached through the one class that cannot say whether it happened.
+probe "an indeterminate mutation does advance the ordered revision" test/ordered_participant_test.exs \
+  '/{:participant_failed, %{outcome: :indeterminate} = failure} ->/,+1{s@        applied({:refused, Ampd.Participant.refusal(failure)}, st)@        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}@}' \
   lib/ampd/authority_coordinator.ex
 
 # M8 · A witness that FINDS the mutation does not make the operation a
@@ -1031,6 +1039,37 @@ probe "an indeterminate mutation is never marked retryable" test/ordered_partici
 probe "an indeterminate commit does not reap the carrier it may have committed" test/ordered_participant_test.exs \
   '/def settle_commit(ticket, obs, refusal) do/,/^  end/{s@    if refusal\["code"\] == "participant-indeterminate" do@    if false do@}' \
   lib/ampd/carrier.ex
+
+# M11 · **The read path.** The slice claimed an ordered participant failure no
+#       longer takes the total order down, having guarded the transaction path
+#       only. An observation walks a dozen registries and is what the cockpit
+#       uses on every frame.
+probe "an observation survives the registry it was reading" test/ordered_participant_test.exs \
+  '/defp survivable(fun) do/,/^  end/{s@    e in Ampd.Participant.Failure -> {:participant_failed, e}@    e in ArgumentError -> {:participant_failed, e}@}' \
+  lib/ampd/authority_coordinator.ex
+
+# M12 · A witness runs on the coordinator process while the total order is
+#       held. Unbounded, one that never returns is worse than a crash: the
+#       process stays alive, so nothing restarts it and everything queues
+#       behind it permanently.
+probe "a witness cannot hold the total order open" test/ordered_participant_test.exs \
+  's@    case Task.yield(task, witness_deadline_ms()) || Task.shutdown(task, :brutal_kill) do@    case Task.yield(task, :infinity) do@' \
+  lib/ampd/participant.ex
+
+# M13 · `@ordered_ops` answers "must be called by the coordinator";
+#       classification answers "a lost reply may mean it happened". Collapsing
+#       them classifies `close_store` — which closes the dets handle and is
+#       deliberately unordered — as a read.
+probe "a mutation that is not ordered is still a mutation" test/ordered_participant_test.exs \
+  's|  @client_mutations @ordered_ops ++ \[:close_store\]|  @client_mutations @ordered_ops|' \
+  lib/ampd/loci.ex
+
+# M14 · Disposal belongs to every way out of B1, not to one branch of it. A
+#       participant failure in `moved/1` unwinds past the refusal branch that
+#       kills the owner.
+probe "a participant failure in B1 still disposes of the stream owner" test/terminal_possession_test.exs \
+  '/e in Ampd.Participant.Failure ->/,+1{s@      kill_owner(pid)@      :ok@}' \
+  lib/ampd/carrier/terminal.ex
 
 # NOT probed here: descriptor ownership on the receiving side.
 #

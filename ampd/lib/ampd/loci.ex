@@ -354,11 +354,22 @@ defmodule Ampd.Loci do
   # reply is lost is not a refusal — it may have been applied, or may be
   # about to be.
   #
-  # **The list is `@ordered_ops` itself**, not a second copy of it. This
-  # module already declares which tags are authority mutations, on the server
-  # side, to refuse unordered callers; a parallel list on the client side
-  # would be the same fact written twice and free to drift. Anything not in
-  # it is a read.
+  # **`@ordered_ops` is NOT this list, and the first version said it was.**
+  #
+  # The two are different predicates and the counterexample was already in
+  # this module:
+  #
+  #     @ordered_ops   "must be called by the coordinator"
+  #     @client_mutations  "a lost reply may mean it happened"
+  #
+  # `:close_store` closes the dets handle and sets `tab: nil`. It mutates, and
+  # it is deliberately *not* ordered. Classified from `@ordered_ops` it came
+  # out a read — so a lost reply reported `participant-unavailable`,
+  # `retryable: true`, under a hint reading "nothing was mutated", after the
+  # handle was gone. Two lists, because they answer two questions; the drift
+  # they could suffer is the price of not stating something false.
+  @client_mutations @ordered_ops ++ [:close_store]
+
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
     Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
@@ -367,7 +378,7 @@ defmodule Ampd.Loci do
   @doc false
   # Public so the census gate and the falsifiers read the classification
   # rather than infer it.
-  def class(tag), do: if(tag in @ordered_ops, do: :mutate, else: :read)
+  def class(tag), do: if(tag in @client_mutations, do: :mutate, else: :read)
 
   # --- ordered-authority boundary -------------------------------------
   # Creating a Lane is creating a position from which authority may be

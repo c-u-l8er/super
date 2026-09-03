@@ -1,6 +1,6 @@
 defmodule Ampd.OrderedParticipantTest do
   @moduledoc """
-  C1.0b·2 falsifiers — `P.1`..`P.18`.
+  C1.0b·2 falsifiers — `P.1`..`P.15`.
 
   The proposition:
 
@@ -228,19 +228,49 @@ defmodule Ampd.OrderedParticipantTest do
   end
 
   # ===================================================================== P.5
-  test "P.5 · the projection does not move because a participant failed", %{tab: tab} do
-    up(tab)
+  describe "P.5 · whether the revision moves depends on the class" do
+    test "a read that could not be obtained moves nothing", %{tab: tab} do
+      up(tab)
+      ops_before = AuthorityCoordinator.ops()
+      epoch_before = AuthorityCoordinator.epoch()
 
-    ops_before = AuthorityCoordinator.ops()
-    epoch_before = AuthorityCoordinator.epoch()
+      assert {:refused, r} = ask(:die_clean, :read)
+      assert r["code"] == "participant-unavailable"
 
-    assert {:refused, _} = ask(:die_clean, :mutate)
+      assert AuthorityCoordinator.ops() == ops_before,
+             "a failed read advanced the ordered revision"
 
-    assert AuthorityCoordinator.ops() == ops_before,
-           "a failed participant advanced the ordered revision"
+      assert AuthorityCoordinator.epoch() == epoch_before
+    end
 
-    assert AuthorityCoordinator.epoch() == epoch_before,
-           "a failed participant re-minted the projection epoch"
+    test "a mutation that never arrived moves nothing", %{tab: tab} do
+      _ = tab
+      down()
+      ops_before = AuthorityCoordinator.ops()
+
+      assert {:refused, r} = ask(:mutate_then_reply, :mutate)
+      assert r["code"] == "participant-not-applied"
+      assert AuthorityCoordinator.ops() == ops_before
+    end
+
+    test "an INDETERMINATE mutation moves the revision, because it may have", %{tab: tab} do
+      up(tab)
+      ops_before = AuthorityCoordinator.ops()
+      epoch_before = AuthorityCoordinator.epoch()
+
+      assert {:refused, r} = ask(:mutate_then_die, :mutate)
+      assert r["code"] == "participant-indeterminate"
+
+      # **The asymmetric error.** Advancing when nothing happened costs a
+      # resnapshot. Not advancing when it did leaves every subscriber
+      # rendering a world that is no longer true, with nothing to correct it
+      # until an unrelated later mutation.
+      assert AuthorityCoordinator.ops() == ops_before + 1,
+             "a mutation that may have landed did not move the revision"
+
+      # And the incarnation is untouched — the coordinator survived.
+      assert AuthorityCoordinator.epoch() == epoch_before
+    end
   end
 
   # ===================================================================== P.6
@@ -354,6 +384,126 @@ defmodule Ampd.OrderedParticipantTest do
     assert Loci.class(:patch) == :mutate
     assert Loci.class(:worker) == :read
     assert Loci.class(:lane) == :read
+  end
+
+  # ==================================================================== P.12
+  describe "P.12 · the READ path survives too, and it did not before" do
+    setup do
+      on_exit(fn ->
+        if Process.whereis(Ampd.Loci) == nil do
+          _ = Supervisor.restart_child(Ampd.Supervisor, Ampd.Loci)
+          Process.sleep(200)
+        end
+      end)
+
+      :ok
+    end
+
+    test "observe/1 does not take the coordinator down with the registry it read" do
+      :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Loci)
+      before = coordinator()
+
+      # This is the path the cockpit uses on every frame: `Ampd.Projection`
+      # reads `Ampd.Peer.list/0` and five `Ampd.Loci` collections through
+      # `observe/1`. The first version of this slice guarded `{:tx, …}` only.
+      assert_raise Failure, fn ->
+        AuthorityCoordinator.observe(fn -> Loci.workspaces() end)
+      end
+
+      assert coordinator() == before,
+             "an absent registry took the total order down through the read path"
+    end
+
+    test "observe_once/1 likewise" do
+      :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Loci)
+      before = coordinator()
+
+      assert_raise Failure, fn ->
+        AuthorityCoordinator.observe_once(fn -> Loci.workspaces() end)
+      end
+
+      assert coordinator() == before
+    end
+
+    test "and the failure lands in the caller, not in the content position" do
+      :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Loci)
+
+      # Returning a refusal as the content would put a refusal map where a
+      # projection belongs, and the cockpit would render it.
+      result =
+        try do
+          AuthorityCoordinator.observe(fn -> Loci.workspaces() end)
+        rescue
+          e in Failure -> {:raised, e.outcome}
+        end
+
+      assert result == {:raised, :unavailable}
+    end
+  end
+
+  # ==================================================================== P.13
+  test "P.13 · a witness that never returns does not hang the total order", %{tab: tab} do
+    up(tab)
+
+    # Inline, this is worse than a crash: the process stays alive so the
+    # supervisor never restarts it, `budget_ms/0` is the CLIENT's deadline and
+    # never applies, and every later transaction queues behind it forever.
+    started = System.monotonic_time(:millisecond)
+    assert {:refused, r} = ask(:die_clean, :mutate, witness: fn -> Process.sleep(30_000) end)
+    took = System.monotonic_time(:millisecond) - started
+
+    assert r["code"] == "participant-indeterminate", "an unusable witness narrows nothing"
+    assert took < 5_000, "the witness was not bounded (#{took}ms)"
+
+    # And the order still turns.
+    assert is_integer(AuthorityCoordinator.ops())
+  end
+
+  # ==================================================================== P.14
+  test "P.14 · close_store mutates, and is classified as one" do
+    # `@ordered_ops` answers "must be called by the coordinator";
+    # classification answers "a lost reply may mean it happened". They are
+    # different questions and this tag is the counterexample: it closes the
+    # dets handle and is deliberately not ordered.
+    assert Loci.class(:close_store) == :mutate,
+           "a lost reply would report `nothing was mutated` after the handle was gone"
+  end
+
+  # ==================================================================== P.15
+  test "P.15 · classification is what ask/2 actually passes, not what class/1 says" do
+    # `P.9` compares `class/1` against a list, which stays green if `ask/2` is
+    # rewritten to pass `:read` for everything. This drives the real client
+    # functions against an absent registry and reads the class off the answer.
+    :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Peer)
+
+    try do
+      mutations = [
+        fn -> Peer.detach_carrier("pr-x") end,
+        fn -> Peer.detach("pr-x") end,
+        fn -> Peer.remove_terminal("pr-x") end,
+        fn -> Peer.reap_settled("cr-x") end
+      ]
+
+      reads = [
+        fn -> Peer.resolve("pr-x") end,
+        fn -> Peer.carriers() end,
+        fn -> Peer.list() end,
+        fn -> Peer.terminal_attachments() end
+      ]
+
+      for f <- mutations do
+        assert {:refused, r} = ordered(f)
+        assert r["code"] == "participant-not-applied", "a mutation was classified as a read"
+      end
+
+      for f <- reads do
+        assert {:refused, r} = ordered(f)
+        assert r["code"] == "participant-unavailable", "a read was classified as a mutation"
+      end
+    after
+      _ = Supervisor.restart_child(Ampd.Supervisor, Ampd.Peer)
+      Process.sleep(200)
+    end
   end
 
   # ==================================================================== P.11
