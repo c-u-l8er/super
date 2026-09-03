@@ -459,6 +459,26 @@ defmodule Ampd.OrderedParticipantTest do
     assert is_integer(AuthorityCoordinator.ops())
   end
 
+  test "P.13b · a witness that exits abnormally does not kill the total order", %{tab: tab} do
+    up(tab)
+    before = coordinator()
+
+    # **The link, not the exception.** A `Task` links to its caller, and the
+    # caller is the coordinator — so an abnormal exit propagates through the
+    # link and kills it even though the task body catches everything a
+    # witness can raise. `spawn_monitor` has no link, which is why it is the
+    # primitive here.
+    for reason <- [:boom, :kill, :normal] do
+      assert {:refused, r} =
+               ask(:die_clean, :mutate, witness: fn -> exit(reason) end)
+
+      assert r["code"] == "participant-indeterminate"
+      up(tab)
+    end
+
+    assert coordinator() == before, "a witness took the total order down with it"
+  end
+
   # ==================================================================== P.14
   test "P.14 · close_store mutates, and is classified as one" do
     # `@ordered_ops` answers "must be called by the coordinator";

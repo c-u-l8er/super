@@ -1048,12 +1048,22 @@ probe "an observation survives the registry it was reading" test/ordered_partici
   '/defp survivable(fun) do/,/^  end/{s@    e in Ampd.Participant.Failure -> {:participant_failed, e}@    e in ArgumentError -> {:participant_failed, e}@}' \
   lib/ampd/authority_coordinator.ex
 
-# M12 · A witness runs on the coordinator process while the total order is
-#       held. Unbounded, one that never returns is worse than a crash: the
-#       process stays alive, so nothing restarts it and everything queues
-#       behind it permanently.
+# M12 · A witness runs while the total order is held. Unbounded, one that
+#       never returns is worse than a crash: the process stays alive, so
+#       nothing restarts it and everything queues behind it permanently.
 probe "a witness cannot hold the total order open" test/ordered_participant_test.exs \
-  's@    case Task.yield(task, witness_deadline_ms()) || Task.shutdown(task, :brutal_kill) do@    case Task.yield(task, :infinity) do@' \
+  '/defp run_witness(witness) do/,/^  end/{s@      witness_deadline_ms() ->@      99_999 ->@}' \
+  lib/ampd/participant.ex
+
+# M12b · And the LINK, which is a different hazard from the exception. A
+#        `Task` links to its caller; the caller is the coordinator. The task
+#        body catching everything is not the same as there being no link.
+#        Sabotaged by ADDING the link rather than by swapping the primitive:
+#        `spawn_link/1` returns a bare pid, so swapping it would redden this
+#        on a MatchError — red for a reason that has nothing to do with links,
+#        which is a probe that proves nothing while looking like it works.
+probe "a witness that dies abnormally does not kill its caller" test/ordered_participant_test.exs \
+  '/defp run_witness(witness) do/,/^  end/{s@    receive do@    Process.link(pid)\n    receive do@}' \
   lib/ampd/participant.ex
 
 # M13 · `@ordered_ops` answers "must be called by the coordinator";

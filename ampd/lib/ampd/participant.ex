@@ -269,20 +269,47 @@ defmodule Ampd.Participant do
   #
   # `:witness` is caller-supplied and this function is reachable from a public
   # API, so the bound is not a courtesy.
+  #
+  # **`spawn_monitor`, deliberately not `Task.async`.** A `Task` LINKS to its
+  # caller, and the caller here is the total order: an abnormal exit in the
+  # witness process propagates through that link and kills the coordinator
+  # unless it traps exits, which it does not. The body below catches
+  # everything a witness can raise, throw or exit with — but a witness is
+  # caller-supplied code and "nothing can make this process die abnormally"
+  # is not a claim to rest the control plane on when the alternative is one
+  # primitive with no link at all.
+  #
+  # So: no link, a monitor for the death, and a kill on the deadline. The
+  # coordinator cannot be taken down by a witness under any reason.
   defp run_witness(witness) do
-    task = Task.async(fn ->
-      try do
-        witness.()
-      rescue
-        _ -> :unknown
-      catch
-        _, _ -> :unknown
-      end
-    end)
+    me = self()
 
-    case Task.yield(task, witness_deadline_ms()) || Task.shutdown(task, :brutal_kill) do
-      {:ok, verdict} -> verdict
-      _ -> :unknown
+    {pid, ref} =
+      spawn_monitor(fn ->
+        verdict =
+          try do
+            witness.()
+          rescue
+            _ -> :unknown
+          catch
+            _, _ -> :unknown
+          end
+
+        send(me, {:witness, self(), verdict})
+      end)
+
+    receive do
+      {:witness, ^pid, verdict} ->
+        Process.demonitor(ref, [:flush])
+        verdict
+
+      {:DOWN, ^ref, :process, ^pid, _} ->
+        :unknown
+    after
+      witness_deadline_ms() ->
+        Process.exit(pid, :kill)
+        Process.demonitor(ref, [:flush])
+        :unknown
     end
   end
 
