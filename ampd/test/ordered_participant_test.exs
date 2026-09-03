@@ -57,7 +57,7 @@ defmodule Ampd.OrderedParticipantTest do
       {:reply, :applied, tab}
     end
 
-    def handle_call(:reply_then_die, from, tab) do
+    def handle_call(:reply_then_die, from, _tab) do
       GenServer.reply(from, :answered)
       exit(:probe_boom)
     end
