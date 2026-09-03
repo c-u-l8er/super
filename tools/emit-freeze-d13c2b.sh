@@ -15,12 +15,18 @@ OUT=docs/reviews/D_1_3C_2B_FREEZE.md
 
 need () { [ -n "$1" ] || { echo "REFUSING: could not derive $2" >&2; exit 1; }; }
 
-FROZEN=$(git rev-parse HEAD)
-TREE=$(git rev-parse HEAD^{tree})
-SUBJ=$(git log -1 --pretty=%s)
+# **The freeze point is a fixed commit, not HEAD.** The first version read
+# `git rev-parse HEAD` and so re-froze the slice at whatever had been
+# committed since — a receipt that moves is not a receipt. The ruled point is
+# the last commit of the slice itself; HEAD is reported separately as the
+# vantage the receipt was emitted from.
 SLICE=$(git rev-list -1 --grep='A terminal a Peer possesses' HEAD)
 REV1=$(git rev-list -1 --grep='Six ways a commit could take' HEAD)
 REV2=$(git rev-list -1 --grep='A comment that was false about its own supervisor' HEAD)
+FROZEN="$REV2"
+TREE=$(git rev-parse "$FROZEN^{tree}")
+SUBJ=$(git log -1 --pretty=%s "$FROZEN")
+AT=$(git rev-parse HEAD)
 C2A=$(git rev-list -1 --grep='Answers that are the wrong shape' HEAD)
 need "$SLICE" "the slice commit"; need "$REV1" "the first review commit"; need "$REV2" "the second review commit"
 
@@ -49,7 +55,9 @@ cat > "$OUT" <<EOF
     frozen at   $FROZEN
     tree        $TREE
     subject     $SUBJ
-    tree state  $([ "$DIRTY" = 0 ] && echo clean || echo "$DIRTY UNCOMMITTED PATHS")
+
+    receipt emitted from  $AT
+    tree state at emit    $([ "$DIRTY" = 0 ] && echo clean || echo "$DIRTY UNCOMMITTED PATHS")
 
 The slice and the two review rounds it took:
 

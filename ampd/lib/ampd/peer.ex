@@ -251,7 +251,7 @@ defmodule Ampd.Peer do
   end
 
   @doc "This incarnation's epoch. Every live handle carries it as a prefix."
-  def epoch, do: GenServer.call(__MODULE__, :epoch)
+  def epoch, do: ask(:epoch)
 
   @doc """
   Bind a newly created channel to an agent identity. Returns an opaque
@@ -265,7 +265,7 @@ defmodule Ampd.Peer do
   # equal five-second deadlines is a race, and F.8.2.1 shipped one — see
   # `Ampd.Transport.Connection`.
   def attach_agent(actor, opts \\ [], timeout \\ 5_000) when is_binary(actor),
-    do: GenServer.call(__MODULE__, {:attach, :agent, actor, opts}, timeout)
+    do: ask({:attach, :agent, actor, opts}, timeout)
 
   @doc """
   Claim the human control channel. **At most one is active at a time.**
@@ -284,17 +284,17 @@ defmodule Ampd.Peer do
   for the two places that had to be taught to agree about when.
   """
   def claim_control_channel(opts \\ [], timeout \\ 5_000),
-    do: GenServer.call(__MODULE__, {:claim_control, opts}, timeout)
+    do: ask({:claim_control, opts}, timeout)
 
   @doc "Resolve a handle to its `peer@1` record, or `nil`."
   def resolve(nil), do: nil
-  def resolve(id), do: GenServer.call(__MODULE__, {:resolve, id})
+  def resolve(id), do: ask({:resolve, id})
 
   @doc "Drop a binding — its channel closed."
-  def detach(id), do: GenServer.call(__MODULE__, {:detach, id})
+  def detach(id), do: ask({:detach, id})
 
   @doc "Every live binding, for the operator projection."
-  def list, do: GenServer.call(__MODULE__, :list)
+  def list, do: ask(:list)
 
   # ------------------------------------------------- carrier attachment
   @attachment_schema "carrier-attachment@1"
@@ -395,7 +395,7 @@ defmodule Ampd.Peer do
   """
   def attach_worker(peer_id, binding, reap \\ [])
       when is_binary(peer_id) and is_map(binding) and is_list(reap),
-      do: GenServer.call(__MODULE__, {:attach_worker, peer_id, binding, reap})
+      do: ask({:attach_worker, peer_id, binding, reap})
 
   @doc """
   The live attachment for `peer_id`, or `nil`.
@@ -405,11 +405,11 @@ defmodule Ampd.Peer do
   reason and deliberately redundant with the table being emptied on reset.
   """
   def attachment(nil), do: nil
-  def attachment(peer_id), do: GenServer.call(__MODULE__, {:attachment, peer_id})
+  def attachment(peer_id), do: ask({:attachment, peer_id})
 
   @doc "Release the attachment `peer_id` holds. `:ok` either way — releasing nothing is not an error."
   def detach_worker(peer_id) when is_binary(peer_id),
-    do: GenServer.call(__MODULE__, {:detach_worker, peer_id})
+    do: ask({:detach_worker, peer_id})
 
   @doc """
   Every live attachment, for the operator projection and for rendering
@@ -419,7 +419,7 @@ defmodule Ampd.Peer do
   enforceable. A position nobody can see the occupancy of is a position
   nobody can supervise.
   """
-  def attachments, do: GenServer.call(__MODULE__, :attachments)
+  def attachments, do: ask(:attachments)
 
   @doc """
   Install the live execution Carrier for a peer. Exactly one per peer.
@@ -428,16 +428,16 @@ defmodule Ampd.Peer do
   already has one means two admissions raced, and the survivable direction is
   for the second to be told so while the first keeps running.
   """
-  def attach_carrier(peer_id, inc), do: GenServer.call(__MODULE__, {:attach_carrier, peer_id, inc})
+  def attach_carrier(peer_id, inc), do: ask({:attach_carrier, peer_id, inc})
 
   @doc "The live execution Carrier for a peer, or nil."
-  def carrier(peer_id), do: GenServer.call(__MODULE__, {:carrier, peer_id})
+  def carrier(peer_id), do: ask({:carrier, peer_id})
 
   @doc "Every live execution Carrier in this incarnation."
-  def carriers, do: GenServer.call(__MODULE__, :carriers)
+  def carriers, do: ask(:carriers)
 
   @doc "Drop the live execution Carrier. Does not stop the process."
-  def detach_carrier(peer_id), do: GenServer.call(__MODULE__, {:detach_carrier, peer_id})
+  def detach_carrier(peer_id), do: ask({:detach_carrier, peer_id})
 
   @doc """
   End a Carrier's membership **and** record that its process is owed a reap,
@@ -451,17 +451,17 @@ defmodule Ampd.Peer do
   there is no window.
   """
   def detach_carrier_pending(peer_id),
-    do: GenServer.call(__MODULE__, {:detach_carrier_pending, peer_id})
+    do: ask({:detach_carrier_pending, peer_id})
 
   @doc "Carriers whose membership has ended and whose process is not yet established absent."
-  def pending_reaps, do: GenServer.call(__MODULE__, :pending_reaps)
+  def pending_reaps, do: ask(:pending_reaps)
 
   @doc """
   The reap of this Carrier has been settled — confirmed, or recorded as
   unconfirmed against the Worker. Either way the debt is discharged and a
   later sweep must not act on it again.
   """
-  def reap_settled(carrier_ref), do: GenServer.call(__MODULE__, {:reap_settled, carrier_ref})
+  def reap_settled(carrier_ref), do: ask({:reap_settled, carrier_ref})
 
   # ------------------------------------------------------- terminal possession
   @terminal_schema "terminal-attachment@1"
@@ -492,7 +492,7 @@ defmodule Ampd.Peer do
   assuming the caller happens to be it.
   """
   def owner_pid(nil), do: nil
-  def owner_pid(peer_id) when is_binary(peer_id), do: GenServer.call(__MODULE__, {:owner_pid, peer_id})
+  def owner_pid(peer_id) when is_binary(peer_id), do: ask({:owner_pid, peer_id})
 
   @doc """
   The `terminal-attachment@1` a peer possesses, or `nil`.
@@ -503,10 +503,10 @@ defmodule Ampd.Peer do
   def terminal_attachment(nil), do: nil
 
   def terminal_attachment(peer_id) when is_binary(peer_id),
-    do: GenServer.call(__MODULE__, {:terminal_attachment, peer_id})
+    do: ask({:terminal_attachment, peer_id})
 
   @doc "Every semantic terminal relation in this incarnation, as `peer_id => record`."
-  def terminal_attachments, do: GenServer.call(__MODULE__, :terminal_attachments)
+  def terminal_attachments, do: ask(:terminal_attachments)
 
   @doc """
   Install a `COMMITTING` terminal relation and start watching its stream owner.
@@ -523,7 +523,7 @@ defmodule Ampd.Peer do
   """
   def install_terminal(peer_id, record, pid)
       when is_binary(peer_id) and is_map(record) and is_pid(pid),
-      do: GenServer.call(__MODULE__, {:install_terminal, peer_id, record, pid})
+      do: ask({:install_terminal, peer_id, record, pid})
 
   @doc """
   `COMMITTING` → `ACTIVE`, addressed by the exact attachment identity.
@@ -536,7 +536,7 @@ defmodule Ampd.Peer do
   """
   def activate_terminal(peer_id, attachment_ref, attachment_epoch)
       when is_binary(peer_id) and is_binary(attachment_ref) and is_binary(attachment_epoch),
-      do: GenServer.call(__MODULE__, {:activate_terminal, peer_id, attachment_ref, attachment_epoch})
+      do: ask({:activate_terminal, peer_id, attachment_ref, attachment_epoch})
 
   @doc """
   End a peer's terminal relation and converge its stream. `:ok` either way.
@@ -547,7 +547,7 @@ defmodule Ampd.Peer do
   a peer of it.
   """
   def remove_terminal(peer_id) when is_binary(peer_id),
-    do: GenServer.call(__MODULE__, {:remove_terminal, peer_id})
+    do: ask({:remove_terminal, peer_id})
 
   @doc """
   The same, **addressed by the attachment identity**. `:ok` if it was
@@ -564,14 +564,14 @@ defmodule Ampd.Peer do
   """
   def remove_terminal(peer_id, attachment_ref, attachment_epoch)
       when is_binary(peer_id) and is_binary(attachment_ref) and is_binary(attachment_epoch),
-      do: GenServer.call(__MODULE__, {:remove_terminal, peer_id, attachment_ref, attachment_epoch})
+      do: ask({:remove_terminal, peer_id, attachment_ref, attachment_epoch})
 
   @doc false
   # The process owning a peer's terminal stream. **Runtime machinery**, not
   # part of the relation: it exists so `Ampd.Carrier.Terminal` can ask the
   # stream owner what phase it is in, and no caller may put it in a record.
   def terminal_owner(peer_id) when is_binary(peer_id),
-    do: GenServer.call(__MODULE__, {:terminal_owner, peer_id})
+    do: ask({:terminal_owner, peer_id})
 
   @doc """
   Tear down every binding and free the control claim.
@@ -581,7 +581,7 @@ defmodule Ampd.Peer do
   bound to a world that no longer exists is exactly the stale consent
   problem one layer down.
   """
-  def reset, do: GenServer.call(__MODULE__, :reset)
+  def reset, do: ask(:reset)
 
   @doc """
   The context a peer's commands run under — **derived, never supplied.**
@@ -606,6 +606,30 @@ defmodule Ampd.Peer do
   end
 
   def authoritative_context(_, _), do: nil
+
+
+  # ------------------------------------------------- the ordered boundary
+  #
+  # **Every client call in this module goes through here, and each declares
+  # whether it mutates.** See `Ampd.Participant`: inside the total order a
+  # `GenServer.call` that fails exits the coordinator, and a mutation whose
+  # reply is lost is not a refusal — it may have been applied, or may be
+  # about to be.
+  #
+  # The classification is a list rather than a judgement at each call site,
+  # because a boundary crossing whose class the caller forgot to decide would
+  # silently default to the safer-looking one. Every tag not named here is a read.
+  @mutations ~w(attach claim_control detach attach_worker detach_worker attach_carrier detach_carrier detach_carrier_pending reap_settled reset install_terminal activate_terminal remove_terminal)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the census gate and the falsifiers can read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @mutations, do: :mutate, else: :read)
 
   # ------------------------------------------------------------- server
   @impl true

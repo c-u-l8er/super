@@ -365,8 +365,41 @@ defmodule Ampd.AuthorityCoordinator do
           "view_revision" => Ampd.ViewClock.read()}
 
   defp run(fun, st) do
-    result = fun.()
+    case classify(fun) do
+      # **The revision does not move for a transaction that did not happen.**
+      #
+      # A participant failure is not an authority mutation, so advancing `seq`
+      # and ticking the view clock here would tell every subscriber the world
+      # changed because a registry was unreachable. The refusal is the result;
+      # the world is where it was.
+      {:participant_failed, failure} ->
+        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}
 
+      {:ok, result} ->
+        applied(result, st)
+    end
+  end
+
+  # **Caught by struct, and only by struct.**
+  #
+  # A bare `catch :exit` around the closure would turn every failure into an
+  # ordinary refusal — including one whose mutation had already landed, and
+  # one whose mutation is still queued and about to land. Those are three
+  # different facts (`Ampd.Participant` measures them) and collapsing them is
+  # the defect, not the repair.
+  #
+  # So this catches an exception the boundary itself constructed, carrying
+  # the class it established. An exit still propagates and still takes this
+  # process down, because an exit is a fault nobody has classified — and a
+  # coordinator that survived faults it could not name would be a coordinator
+  # whose survival meant nothing.
+  defp classify(fun) do
+    {:ok, fun.()}
+  rescue
+    e in Ampd.Participant.Failure -> {:participant_failed, e}
+  end
+
+  defp applied(result, st) do
     # Every authority mutation passes through here, so this is the one
     # place that can say "the world moved" without a poller. The re-entrant
     # path above returns before this clause, so a nested transaction does

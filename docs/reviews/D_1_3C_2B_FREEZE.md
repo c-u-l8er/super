@@ -3,7 +3,9 @@
     frozen at   ee3d0bcea1700c177d67844908e891000a117c04
     tree        2b16fcf05664519c763c24afab0fc0a4b13ddc03
     subject     A comment that was false about its own supervisor, and a timeout that is an answer
-    tree state  2 UNCOMMITTED PATHS
+
+    receipt emitted from  afd73fb4267a535126afd806a4d5e9cee84e0a7c
+    tree state at emit    1 UNCOMMITTED PATHS
 
 The slice and the two review rounds it took:
 
@@ -40,8 +42,8 @@ be attached to, and the host answers which **terminal** that Carrier had.
 | --- | --- |
 | ExUnit | 492 tests, 0 failures |
 | `super-host verify` | 284 held · 0 failed |
-| BEAM sabotage | beam sabotage: 103 falsified · 0 did not |
-| host sabotage | host sabotage: 45 falsified · 0 did not |
+| BEAM sabotage | 103 falsified · 0 did not |
+| host sabotage | 45 falsified · 0 did not |
 | BEAM sabotage probes | 103 |
 | host sabotage probes | 45 |
 

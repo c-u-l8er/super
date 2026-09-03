@@ -271,22 +271,22 @@ defmodule Ampd.Loci do
       "seq" => 0
     }
 
-  def sealed, do: GenServer.call(__MODULE__, :sealed)
-  def close_store, do: GenServer.call(__MODULE__, :close_store)
-  def load_state(s), do: GenServer.call(__MODULE__, {:load_state, s})
+  def sealed, do: ask(:sealed)
+  def close_store, do: ask(:close_store)
+  def load_state(s), do: ask({:load_state, s})
 
   # ------------------------------------------------------------- reads
-  def workspaces, do: GenServer.call(__MODULE__, {:all, "workspaces"})
-  def goals, do: GenServer.call(__MODULE__, {:all, "goals"})
-  def lanes, do: GenServer.call(__MODULE__, {:all, "lanes"})
-  def workers, do: GenServer.call(__MODULE__, {:all, "workers"})
-  def caps, do: GenServer.call(__MODULE__, {:all, "caps"})
+  def workspaces, do: ask({:all, "workspaces"})
+  def goals, do: ask({:all, "goals"})
+  def lanes, do: ask({:all, "lanes"})
+  def workers, do: ask({:all, "workers"})
+  def caps, do: ask({:all, "caps"})
 
-  def workspace(id), do: GenServer.call(__MODULE__, {:get, "workspaces", id})
-  def goal(id), do: GenServer.call(__MODULE__, {:get, "goals", id})
-  def lane(id), do: GenServer.call(__MODULE__, {:get, "lanes", id})
-  def worker(id), do: GenServer.call(__MODULE__, {:get, "workers", id})
-  def cap(id), do: GenServer.call(__MODULE__, {:get, "caps", id})
+  def workspace(id), do: ask({:get, "workspaces", id})
+  def goal(id), do: ask({:get, "goals", id})
+  def lane(id), do: ask({:get, "lanes", id})
+  def worker(id), do: ask({:get, "workers", id})
+  def cap(id), do: ask({:get, "caps", id})
 
   @doc "Every Worker assigned to one Lane, open or closed."
   def workers_of(lane_id),
@@ -315,14 +315,14 @@ defmodule Ampd.Loci do
   end
 
   # --------------------------------------------------------- mutations
-  def create_workspace(f), do: GenServer.call(__MODULE__, {:create, "workspaces", "ws_", f})
-  def create_goal(f), do: GenServer.call(__MODULE__, {:create, "goals", "gl_", f})
-  def create_lane(f), do: GenServer.call(__MODULE__, {:create, "lanes", "ln_", f})
-  def create_worker(f), do: GenServer.call(__MODULE__, {:create, "workers", "wk_", f})
-  def create_cap(f), do: GenServer.call(__MODULE__, {:create, "caps", "wc_", f})
-  def put_cap(id, patch), do: GenServer.call(__MODULE__, {:patch, "caps", id, patch})
-  def put_lane(id, patch), do: GenServer.call(__MODULE__, {:patch, "lanes", id, patch})
-  def put_worker(id, patch), do: GenServer.call(__MODULE__, {:patch, "workers", id, patch})
+  def create_workspace(f), do: ask({:create, "workspaces", "ws_", f})
+  def create_goal(f), do: ask({:create, "goals", "gl_", f})
+  def create_lane(f), do: ask({:create, "lanes", "ln_", f})
+  def create_worker(f), do: ask({:create, "workers", "wk_", f})
+  def create_cap(f), do: ask({:create, "caps", "wc_", f})
+  def put_cap(id, patch), do: ask({:patch, "caps", id, patch})
+  def put_lane(id, patch), do: ask({:patch, "lanes", id, patch})
+  def put_worker(id, patch), do: ask({:patch, "workers", id, patch})
 
   # --- carrier start attempts -----------------------------------------
   #
@@ -338,11 +338,36 @@ defmodule Ampd.Loci do
   # from a CSPRNG in `Ampd.Carrier` and the record must carry the same id the
   # machine phase was handed, or the commit would be matching on a value the
   # store chose after the fact.
-  def create_attempt(ticket), do: GenServer.call(__MODULE__, {:create_attempt, ticket})
-  def patch_attempt(id, patch), do: GenServer.call(__MODULE__, {:patch, "carrier_attempts", id, patch})
-  def attempts, do: GenServer.call(__MODULE__, {:all, "carrier_attempts"}) |> Map.values()
-  def attempt(id), do: GenServer.call(__MODULE__, {:get, "carrier_attempts", id})
-  def reset, do: GenServer.call(__MODULE__, :reset)
+  def create_attempt(ticket), do: ask({:create_attempt, ticket})
+  def patch_attempt(id, patch), do: ask({:patch, "carrier_attempts", id, patch})
+  def attempts, do: ask({:all, "carrier_attempts"}) |> Map.values()
+  def attempt(id), do: ask({:get, "carrier_attempts", id})
+  def reset, do: ask(:reset)
+
+  @ordered_ops [:create, :create_attempt, :patch, :reset, :load_state]
+
+  # ------------------------------------------------- the ordered boundary
+  #
+  # **Every client call in this module goes through here, and each declares
+  # whether it mutates.** See `Ampd.Participant`: inside the total order a
+  # `GenServer.call` that fails exits the coordinator, and a mutation whose
+  # reply is lost is not a refusal — it may have been applied, or may be
+  # about to be.
+  #
+  # **The list is `@ordered_ops` itself**, not a second copy of it. This
+  # module already declares which tags are authority mutations, on the server
+  # side, to refuse unordered callers; a parallel list on the client side
+  # would be the same fact written twice and free to drift. Anything not in
+  # it is a read.
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the census gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @ordered_ops, do: :mutate, else: :read)
 
   # --- ordered-authority boundary -------------------------------------
   # Creating a Lane is creating a position from which authority may be
@@ -351,7 +376,6 @@ defmodule Ampd.Loci do
   # grant registry has held since C1.1.0, for the same reason: a mutation
   # that cannot be attributed cannot be ordered against a concurrent
   # revocation.
-  @ordered_ops [:create, :create_attempt, :patch, :reset, :load_state]
   @impl true
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or

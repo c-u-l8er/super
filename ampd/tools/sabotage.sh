@@ -954,6 +954,75 @@ probe "a terminal that is busy is not mistaken for one that is not yet possessed
 # so a future unordered caller would make this reachable. The addressing is
 # there for that day.
 
+# --- C1.0b·2 · ordered participant failure semantics -----------------------
+#
+# Nine probes. The weak proposition — "a registry crash does not crash the
+# coordinator" — is easy to satisfy and worthless on its own: a coordinator
+# that survives by calling every failure a refusal reports "did not happen"
+# about mutations that did. So most of these attack the CLASSIFICATION rather
+# than the survival.
+
+# M1 · The survival itself. Restoring the exiting call is the defect the slice
+#      exists for, and it takes the total order down with the registry.
+probe "an ordered transaction survives a participant it cannot reach" test/ordered_participant_test.exs \
+  's@    if inside?() do@    if false do@' \
+  lib/ampd/participant.ex
+
+# M2 · A timeout is not a refusal. The request was abandoned; the WORK was
+#      not, so calling it "not applied" is a claim the caller cannot make and
+#      the mutation can land behind the transaction that refused.
+probe "a timed-out mutation is not reported as one that did not happen" test/ordered_participant_test.exs \
+  's@  defp after_timeout(:mutate), do: :indeterminate@  defp after_timeout(:mutate), do: :not_applied@' \
+  lib/ampd/participant.ex
+
+# M3 · Nor is a death. Without a witness there is no evidence either way, and
+#      "no evidence" is not "did not happen".
+probe "a mutation whose participant died is not reported as one that did not" test/ordered_participant_test.exs \
+  's@  defp after_death(:mutate, nil), do: :indeterminate@  defp after_death(:mutate, nil), do: :not_applied@' \
+  lib/ampd/participant.ex
+
+# M4 · **The asymmetry.** Consulting the witness after a timeout reads a world
+#      that has not settled: the participant is alive, still holds the
+#      request, and applies it afterwards. A false NOT_APPLIED is worse than
+#      an honest unknown.
+probe "a witness is not consulted while the participant still holds the request" test/ordered_participant_test.exs \
+  's@        raise Failure.new(after_timeout(class), server, op, :timeout)@        raise Failure.new(after_death(class, witness), server, op, :timeout)@' \
+  lib/ampd/participant.ex
+
+# M5 · A mutation classified as a read gets a read's failure semantics, which
+#      is how an indeterminate write becomes a retryable "basis unavailable".
+probe "every mutation tag is classified as one" test/ordered_participant_test.exs \
+  's@ install_terminal activate_terminal remove_terminal)a@ activate_terminal remove_terminal)a@' \
+  lib/ampd/peer.ex
+
+# M6 · The coordinator's catch must match the boundary's own exception. Aimed
+#      elsewhere, the failure propagates and the total order dies — which is
+#      the pre-slice behaviour wearing the new machinery.
+probe "the coordinator catches the failure the boundary raises" test/ordered_participant_test.exs \
+  's@    e in Ampd.Participant.Failure -> {:participant_failed, e}@    e in RuntimeError -> {:participant_failed, e}@' \
+  lib/ampd/authority_coordinator.ex
+
+# M7 · A transaction that did not happen must not move the world. Advancing
+#      the revision here tells every subscriber the world changed because a
+#      registry was unreachable.
+probe "a failed participant does not advance the ordered revision" test/ordered_participant_test.exs \
+  's@        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}@        applied({:refused, Ampd.Participant.refusal(failure)}, st)@' \
+  lib/ampd/authority_coordinator.ex
+
+# M8 · A witness that FINDS the mutation does not make the operation a
+#      success, and must not narrow it to "did not happen" either — the
+#      caller never received the answer, so it is still not repeatable.
+probe "a witness that finds the mutation does not report it absent" test/ordered_participant_test.exs \
+  's@      :applied -> :indeterminate@      :applied -> :not_applied@' \
+  lib/ampd/participant.ex
+
+# M9 · Retryability is the operator-facing half of the classification. An
+#      indeterminate mutation marked retryable invites the second execution
+#      the class exists to forbid.
+probe "an indeterminate mutation is never marked retryable" test/ordered_participant_test.exs \
+  's@      retryable: f.outcome in \[:unavailable, :not_applied\],@      retryable: true,@' \
+  lib/ampd/participant.ex
+
 # NOT probed here: descriptor ownership on the receiving side.
 #
 # The integer path is reached only by an SCM_RIGHTS receive from the host.

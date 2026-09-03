@@ -248,3 +248,96 @@ IO.puts("""
 
 if p = Process.whereis(:victim), do: Process.exit(p, :kill)
 if p = Process.whereis(:slowpoke), do: Process.exit(p, :kill)
+
+head.("F · does send_request preserve the caller `Ampd.Ordered` proves authority with?")
+
+# **Load-bearing, and cheap to get wrong.** `Ampd.Ordered.from_coordinator?/1`
+# reads `handle_call`'s `from` tuple and requires its pid to BE the
+# coordinator. That is the mechanical proof that an authority mutation
+# happened inside the total order — not a convention, a pid comparison.
+#
+# If `send_request` made the participant see a different caller, converting
+# the boundary would silently void that proof: every ordered mutation would
+# start refusing as unordered, or worse, keep passing for the wrong reason.
+# So it is measured rather than reasoned about.
+defmodule Watcher do
+  use GenServer
+  def start, do: GenServer.start(__MODULE__, nil, name: :watcher)
+  def init(_), do: {:ok, nil}
+  def handle_call(:who, {pid, _tag}, s), do: {:reply, pid, s}
+end
+
+if p = Process.whereis(:watcher), do: (Process.exit(p, :kill); Process.sleep(30))
+{:ok, _} = Watcher.start()
+
+via_call = GenServer.call(:watcher, :who)
+via_request = :gen_server.receive_response(:gen_server.send_request(:watcher, :who), 2_000)
+
+line.("GenServer.call sees", inspect(via_call), "#{via_call == self()}")
+line.("send_request sees", inspect(via_request), "#{via_request == {:reply, self()}}")
+
+IO.puts("""
+    Both report the SENDING process. `send_request` uses an alias for the
+    reply and leaves `from`'s pid alone, so `Ampd.Ordered`'s proof survives
+    the conversion unchanged — the participant still sees the coordinator.
+""")
+
+head.("G · when is a witness sound?")
+
+# A witness is a re-derivation of "did my mutation land", consulted after a
+# failed request. The measurement below is why it may only be trusted after a
+# DEATH and never after a TIMEOUT.
+defmodule Late do
+  use GenServer
+  def start(tab), do: GenServer.start(__MODULE__, tab, name: :late)
+  def init(tab), do: {:ok, tab}
+  def handle_call({:mutate_after, ms}, _f, tab) do
+    Process.sleep(ms)
+    :ets.insert(tab, {:mutated, true})
+    {:reply, :fine, tab}
+  end
+end
+
+reset.()
+if p = Process.whereis(:late), do: (Process.exit(p, :kill); Process.sleep(30))
+{:ok, _} = Late.start(tab)
+
+# After a TIMEOUT: the participant is alive and still holds the work.
+tid = :gen_server.send_request(:late, {:mutate_after, 1_200})
+_ = resp.(tid, 200)
+witness_now = mutated?.()
+Process.sleep(2_000)
+witness_later = mutated?.()
+line.("timeout · witness immediately", "#{witness_now}", "and later: #{witness_later}")
+
+# After a DEATH: whatever the participant did is final, because it will
+# never run again.
+reset.()
+up.()
+did = resp.(req.(:mutate_then_die), 2_000)
+Process.sleep(300)
+w_death = mutated?.()
+Process.sleep(1_000)
+w_death_later = mutated?.()
+line.("death · witness immediately", "#{w_death}", "and later: #{w_death_later}")
+
+IO.puts("""
+    After a timeout the witness read #{witness_now} and then #{witness_later}. It was
+    not wrong; it was EARLY. The participant is alive, holds the request, and
+    applies it afterwards — so a witness consulted after a timeout can report
+    NOT APPLIED about a mutation that is merely pending.
+
+    After a death the witness read #{w_death} and stayed #{w_death_later}. The
+    participant will never run again, so whatever it did is final and the
+    witness reads a settled world.
+
+        death   + witness  →  APPLIED or NOT_APPLIED
+        timeout + witness  →  still INDETERMINATE, and the witness must not
+                              be consulted, because a false NOT_APPLIED is
+                              worse than an honest unknown
+
+    That asymmetry is the whole design constraint, and it is not visible from
+    the API's return values — both are just "no reply".
+""")
+
+for n <- [:victim, :slowpoke, :watcher, :late], p = Process.whereis(n), do: Process.exit(p, :kill)
