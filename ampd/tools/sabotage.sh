@@ -999,7 +999,7 @@ probe "every mutation tag is classified as one" test/ordered_participant_test.ex
 #      elsewhere, the failure propagates and the total order dies — which is
 #      the pre-slice behaviour wearing the new machinery.
 probe "the coordinator catches the failure the boundary raises" test/ordered_participant_test.exs \
-  's@    e in Ampd.Participant.Failure -> {:participant_failed, e}@    e in RuntimeError -> {:participant_failed, e}@' \
+  '/defp classify(fun) do/,/^  end/{s@    e in Ampd.Participant.Failure -> {:participant_failed, e}@    e in RuntimeError -> {:participant_failed, e}@}' \
   lib/ampd/authority_coordinator.ex
 
 # M7 · A read that established nothing must not move the world. The
@@ -1009,12 +1009,17 @@ probe "an unavailable read does not advance the ordered revision" test/ordered_p
   '/{:participant_failed, failure} ->/,+1{s@        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}@        applied({:refused, Ampd.Participant.refusal(failure)}, st)@}' \
   lib/ampd/authority_coordinator.ex
 
-# M7b · And the other direction. An indeterminate mutation that does NOT move
-#       the clocks leaves every subscriber rendering a world that may no
-#       longer be true, with nothing to correct it — the LIVE LOCAL defect,
-#       reached through the one class that cannot say whether it happened.
-probe "an indeterminate mutation does advance the ordered revision" test/ordered_participant_test.exs \
-  '/{:participant_failed, %{outcome: :indeterminate} = failure} ->/,+1{s@        applied({:refused, Ampd.Participant.refusal(failure)}, st)@        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}@}' \
+# M7b · And the other direction. An indeterminate mutation that ANNOUNCES
+#       nothing leaves every subscriber rendering a world that may no longer
+#       be true, with nothing to correct it — the LIVE LOCAL defect, reached
+#       through the one class that cannot say whether it happened.
+#
+#       It is the view clock, not the ordered revision: `Ampd.RefusalLog`
+#       normally ticks it as a side effect of building any refusal, so the
+#       falsifier drives this with that process absent and only the explicit
+#       call can move it.
+probe "an indeterminate mutation announces even with no refusal log" test/ordered_participant_test.exs \
+  '/{:participant_failed, %{outcome: :indeterminate} = failure} ->/,/{:reply/{s@        touched()@        :ok@}' \
   lib/ampd/authority_coordinator.ex
 
 # M8 · A witness that FINDS the mutation does not make the operation a

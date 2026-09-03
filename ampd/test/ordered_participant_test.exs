@@ -228,11 +228,12 @@ defmodule Ampd.OrderedParticipantTest do
   end
 
   # ===================================================================== P.5
-  describe "P.5 · whether the revision moves depends on the class" do
+  describe "P.5 · what moves on a failure, and what must not" do
     test "a read that could not be obtained moves nothing", %{tab: tab} do
       up(tab)
       ops_before = AuthorityCoordinator.ops()
       epoch_before = AuthorityCoordinator.epoch()
+      view_before = Ampd.ViewClock.read()
 
       assert {:refused, r} = ask(:die_clean, :read)
       assert r["code"] == "participant-unavailable"
@@ -241,6 +242,7 @@ defmodule Ampd.OrderedParticipantTest do
              "a failed read advanced the ordered revision"
 
       assert AuthorityCoordinator.epoch() == epoch_before
+      _ = view_before
     end
 
     test "a mutation that never arrived moves nothing", %{tab: tab} do
@@ -253,7 +255,7 @@ defmodule Ampd.OrderedParticipantTest do
       assert AuthorityCoordinator.ops() == ops_before
     end
 
-    test "an INDETERMINATE mutation moves the revision, because it may have", %{tab: tab} do
+    test "an INDETERMINATE mutation announces, and is still not a mutation", %{tab: tab} do
       up(tab)
       ops_before = AuthorityCoordinator.ops()
       epoch_before = AuthorityCoordinator.epoch()
@@ -261,12 +263,43 @@ defmodule Ampd.OrderedParticipantTest do
       assert {:refused, r} = ask(:mutate_then_die, :mutate)
       assert r["code"] == "participant-indeterminate"
 
-      # **The asymmetric error.** Advancing when nothing happened costs a
-      # resnapshot. Not advancing when it did leaves every subscriber
-      # rendering a world that is no longer true, with nothing to correct it
-      # until an unrelated later mutation.
-      assert AuthorityCoordinator.ops() == ops_before + 1,
-             "a mutation that may have landed did not move the revision"
+      # **The asymmetric error, and it is the VIEW clock that answers it.**
+      # Not announcing when the mutation landed leaves every subscriber
+      # rendering a world that is no longer true. Announcing when it did not
+      # costs one resnapshot.
+      #
+      # Asserted with `Ampd.RefusalLog` **absent**, which is what isolates the
+      # mechanism. Constructing any refusal normally ticks this clock —
+      # `Ampd.Refusal.new/2` casts to the log and the log calls `touched/0` —
+      # so a plain assertion here would hold with the explicit call deleted.
+      # `RefusalLog.record/1` tolerates the process being gone and returns the
+      # refusal unchanged, ticking nothing; with it down, the only thing that
+      # can move this clock is the branch under test.
+      # The probe died answering the first ask; without this the second one
+      # measures an absent participant and reports `not-applied`, which is a
+      # correct answer to a different question.
+      up(tab)
+      :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.RefusalLog)
+      view_before = Ampd.ViewClock.read()
+
+      try do
+        assert {:refused, r2} = ask(:mutate_then_die, :mutate)
+        assert r2["code"] == "participant-indeterminate"
+
+        assert Ampd.ViewClock.read() > view_before,
+               "a mutation that may have landed announced nothing"
+      after
+        _ = Supervisor.restart_child(Ampd.Supervisor, Ampd.RefusalLog)
+        Process.sleep(100)
+      end
+
+      # **And the ordered revision does NOT move.** It is the wire field
+      # saying which durable authority state a frame is based on, counting
+      # committed authority mutations. A refusal is not one, and half the
+      # time nothing happened at all — so bumping it would write a number
+      # asserting a commit beside a refusal saying nobody knows.
+      assert AuthorityCoordinator.ops() == ops_before,
+             "an indeterminate refusal was counted as an authority mutation"
 
       # And the incarnation is untouched — the coordinator survived.
       assert AuthorityCoordinator.epoch() == epoch_before
@@ -386,6 +419,77 @@ defmodule Ampd.OrderedParticipantTest do
     assert Loci.class(:lane) == :read
   end
 
+  # ==================================================================== P.16
+  test "P.16 · reconciling a live member records the commit instead of killing it" do
+    # The downstream half of `record_committed/1`. An attempt left
+    # START_ADMITTED by a committed start whose ledger write was lost is not
+    # in `reconcile/1`'s short-circuit set, so it used to fall to the branch
+    # that asks the machine to terminate — while `Ampd.Peer` still held the
+    # incarnation and the projection still reported RUNNING over a dead
+    # process. The operator projection offers that button for exactly this
+    # attempt.
+    Application.put_env(:ampd, :carrier_machine, Ampd.Carrier.Machine.Harness)
+    Ampd.Carrier.Machine.Harness.reset()
+
+    on_exit(fn ->
+      Application.delete_env(:ampd, :carrier_machine)
+      Peer.reset()
+    end)
+
+    {:ok, peer} = Peer.attach_agent("kestrel")
+
+    # A Carrier embodies a position, so `attach_carrier/2` refuses without an
+    # occupancy. The binding is synthesised rather than built through the Lane
+    # tree because nothing under test reads it — `live_member/1` looks only at
+    # `carrier_ref`, and building three Loci objects to reach one map entry
+    # would put a Lane's correctness in front of a reconcile test.
+    {:ok, _} =
+      Peer.attach_worker(peer, %{
+        "schema" => "carrier-attachment@1",
+        "locus_ref" => "ln_p16",
+        "worker_ref" => "wk_p16",
+        "worker_generation" => 1,
+        "peer_epoch" => Peer.epoch(),
+        "world_ref" => Ampd.World.lineage()
+      })
+    ref = "cr_" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+    tid = "ct_" <> Base.encode16(:crypto.strong_rand_bytes(6), case: :lower)
+
+    inc = %{
+      "schema" => "carrier-incarnation@1",
+      "carrier_ref" => ref,
+      "carrier_epoch" => String.duplicate("a", 32),
+      "status" => "RUNNING"
+    }
+
+    {:ok, _} = Peer.attach_carrier(peer, inc)
+
+    {:ok, _} =
+      AuthorityCoordinator.transact(fn ->
+        Loci.create_attempt(%{
+          "schema" => "carrier-start-ticket@1",
+          "ticket_id" => tid,
+          "carrier_ref" => ref,
+          "state" => "START_ADMITTED"
+        })
+      end)
+
+    before = Ampd.Carrier.Machine.Harness.terminated()
+    _ = Ampd.Carrier.reconcile(tid)
+
+    # The durable state, not the return shape — that is the property, and
+    # `reconcile/1`'s two branches did not agree on a return shape before this
+    # change either.
+    assert Loci.attempt(tid)["state"] == "COMMITTED",
+           "a live member was reconciled as though it were never running"
+
+    assert Ampd.Carrier.Machine.Harness.terminated() == before,
+           "reconciling a live member asked the machine to terminate it"
+
+    assert Enum.any?(Peer.carriers(), &(&1["carrier_ref"] == ref)),
+           "the incarnation was dropped"
+  end
+
   # ==================================================================== P.12
   describe "P.12 · the READ path survives too, and it did not before" do
     setup do
@@ -399,6 +503,15 @@ defmodule Ampd.OrderedParticipantTest do
       :ok
     end
 
+    # **Narrower than it first claimed.** The first version said this is "the
+    # path the cockpit uses on every frame". It is not: `Ampd.Projection`'s
+    # optimistic attempts run `fun.()` in the CALLER's process, where
+    # `Ampd.Participant` deliberately degrades to a bare `GenServer.call` — so
+    # a frame usually never reaches the coordinator at all, and an absent
+    # registry exits `Ampd.Subscriptions` instead. That exposure is
+    # pre-existing, unchanged by this slice, and is recorded as a residual
+    # rather than claimed as covered. What `observe/1` covers is the ordered
+    # fallback the projection takes under churn.
     test "observe/1 does not take the coordinator down with the registry it read" do
       :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Loci)
       before = coordinator()
@@ -463,20 +576,29 @@ defmodule Ampd.OrderedParticipantTest do
     up(tab)
     before = coordinator()
 
-    # **The link, not the exception.** A `Task` links to its caller, and the
-    # caller is the coordinator — so an abnormal exit propagates through the
-    # link and kills it even though the task body catches everything a
-    # witness can raise. `spawn_monitor` has no link, which is why it is the
-    # primitive here.
-    for reason <- [:boom, :kill, :normal] do
-      assert {:refused, r} =
-               ask(:die_clean, :mutate, witness: fn -> exit(reason) end)
+    # **The link, not the exception — and the first version of this test did
+    # not tell them apart.** It used `exit(:boom)` inside the witness, which
+    # the body's own `catch _, _` catches, so it passed under the linked
+    # implementation it was written to falsify. A falsifier that cannot fail
+    # is the exact defect this lane exists to find, and it appeared in the
+    # test for it.
+    #
+    # These two kill the witness process from OUTSIDE its own execution,
+    # which no `try` inside it can bind: a linked child that dies, and an
+    # untrappable signal to itself.
+    killers = [
+      fn -> spawn_link(fn -> exit(:boom) end); Process.sleep(500) end,
+      fn -> Process.exit(self(), :kill) end
+    ]
 
+    for killer <- killers do
+      assert {:refused, r} = ask(:die_clean, :mutate, witness: killer)
       assert r["code"] == "participant-indeterminate"
+      assert coordinator() == before, "a witness took the total order down with it"
       up(tab)
     end
 
-    assert coordinator() == before, "a witness took the total order down with it"
+    assert coordinator() == before
   end
 
   # ==================================================================== P.14
@@ -522,6 +644,44 @@ defmodule Ampd.OrderedParticipantTest do
       end
     after
       _ = Supervisor.restart_child(Ampd.Supervisor, Ampd.Peer)
+      Process.sleep(200)
+    end
+  end
+
+  test "P.15b · and the same for Ampd.Loci, including the unordered mutation" do
+    # **The module the classification repair actually changed.** `P.15` drove
+    # `Ampd.Peer` only, so rewriting `Ampd.Loci`'s `ask/2` to pass `:read`
+    # unconditionally left it, `P.9` and `P.14` all green while every Loci
+    # mutation reported `retryable: true` under a hint saying nothing was
+    # mutated.
+    :ok = Supervisor.terminate_child(Ampd.Supervisor, Ampd.Loci)
+
+    try do
+      mutations = [
+        fn -> Loci.create_attempt(%{"ticket_id" => "ct_x"}) end,
+        fn -> Loci.patch_attempt("ct_x", %{}) end,
+        # Mutating and deliberately NOT ordered — the tag whose two
+        # classifications disagree, and the reason they are two lists.
+        fn -> Loci.close_store() end
+      ]
+
+      reads = [
+        fn -> Loci.worker("wk_x") end,
+        fn -> Loci.lane("ln_x") end,
+        fn -> Loci.attempts() end
+      ]
+
+      for f <- mutations do
+        assert {:refused, r} = ordered(f)
+        assert r["code"] == "participant-not-applied", "a Loci mutation was classified as a read"
+      end
+
+      for f <- reads do
+        assert {:refused, r} = ordered(f)
+        assert r["code"] == "participant-unavailable", "a Loci read was classified as a mutation"
+      end
+    after
+      _ = Supervisor.restart_child(Ampd.Supervisor, Ampd.Loci)
       Process.sleep(200)
     end
   end

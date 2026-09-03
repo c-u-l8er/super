@@ -26,9 +26,9 @@
     },
     "Ampd.Loci": {
       "sends": 9,
-      "mutations": 5,
-      "reads": 4,
-      "declared_mutations": 5,
+      "mutations": 6,
+      "reads": 3,
+      "declared_mutations": 6,
       "dead": [],
       "bare": 0
     }

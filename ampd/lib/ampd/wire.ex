@@ -109,6 +109,22 @@ defmodule Ampd.Wire do
         try do
           Ampd.Control.command(peer_id, cmd, decoded)
         rescue
+          # **The read class had no conversion, and it is the one that says
+          # "nothing was mutated, try again".**
+          #
+          # C1.0b·2 made an ordered participant failure a typed refusal for
+          # mutations and left reads as an exception that no caller rescues —
+          # so a command whose projection read a registry that was absent
+          # killed the connection process, while the identical failure on a
+          # mutation returned `participant-unavailable`, `retryable: true`.
+          #
+          # It keeps its own code and its own retryability rather than being
+          # folded into `invalid-command-arguments`: the caller did nothing
+          # wrong and there is nothing to correct in the request.
+          e in [Ampd.Participant.Failure] ->
+            r = Ampd.Participant.refusal(e)
+            %{"allow" => false, "reason" => r["public_message"], "refusal" => project(r, peer_id)}
+
           e in [FunctionClauseError, BadArityError, ArgumentError, KeyError, BadMapError] ->
             r =
               refuse("invalid-command-arguments", %{

@@ -413,8 +413,11 @@ defmodule Ampd.Carrier do
           # of refusal further along than the one that was already closed.
           #
           # The attempt stays START_ADMITTED, which `unresolved/0` reports and
-          # the boot sweep converges. That is the same outcome as a VM death
-          # between these two lines, which this ledger was built for.
+          # which `reconcile/1` now settles by consulting membership rather
+          # than by terminating what it finds — the correction that repair
+          # needed, because `START_ADMITTED` is not in `reconcile/1`'s
+          # short-circuit set and it would otherwise have killed the Carrier
+          # this branch exists to preserve.
           _ = record_committed(ticket)
           {:ok, stored}
 
@@ -629,21 +632,67 @@ defmodule Ampd.Carrier do
       %{"state" => s} = a when s in ~w(COMMITTED STALE FAILED RESOLVED) ->
         {:ok, a}
 
+      # **A live member is not an unresolved attempt, and reconciling one
+      # would kill it.**
+      #
+      # `reconcile/1` exists for an attempt whose process may or may not be
+      # running with nothing in the runtime referring to it. It reached that
+      # conclusion from the attempt's state alone — so an attempt left
+      # `START_ADMITTED` by a *committed* start whose ledger write was lost
+      # fell to the branch below and was terminated, while `Ampd.Peer` still
+      # held its incarnation and `status_of/1` still reported RUNNING over a
+      # dead process. The inverted orphan, arrived at by the button the
+      # operator projection offers for exactly this attempt.
+      #
+      # The runtime KNOWS whether it is a member; it does not have to infer it
+      # from a durable record it failed to write. So membership is consulted
+      # first, and a reconcile of a live member records what is true rather
+      # than acting on what was assumed.
       a ->
-        # Outside the order: this asks a machine to do something and waits.
-        case Ampd.Carrier.Machine.Gate.terminate_carrier(a, %{}) do
-          :ok ->
-            AuthorityCoordinator.transact(fn ->
-              Loci.patch_attempt(ticket_id, %{
-                "state" => "RESOLVED",
-                "resolved_as" => "the host confirmed no such carrier is running"
-              })
-            end)
-
-          {:error, why} ->
-            {:refused,
-             refuse("carrier-reconcile-indeterminate", Map.put(a, "reason", why))}
+        case live_member(a) do
+          nil -> reconcile_absent(ticket_id, a)
+          _inc -> reconcile_committed(ticket_id, a)
         end
+    end
+  end
+
+  defp live_member(%{"carrier_ref" => ref}) when is_binary(ref) do
+    Enum.find(Peer.carriers(), &(&1["carrier_ref"] == ref))
+  end
+
+  defp live_member(_), do: nil
+
+  # The ledger write that was lost, performed now that its store is reachable.
+  # Nothing is asked of the machine: the process is a member and is running.
+  defp reconcile_committed(ticket_id, a) do
+    require Logger
+
+    Logger.warning(
+      "ampd: attempt #{ticket_id} was unresolved and its carrier #{a["carrier_ref"]} is a " <>
+        "live member — recording the commit rather than terminating it"
+    )
+
+    AuthorityCoordinator.transact(fn ->
+      Loci.patch_attempt(ticket_id, %{
+        "state" => "COMMITTED",
+        "resolved_as" => "the runtime holds this carrier as a live member"
+      })
+    end)
+  end
+
+  defp reconcile_absent(ticket_id, a) do
+    # Outside the order: this asks a machine to do something and waits.
+    case Ampd.Carrier.Machine.Gate.terminate_carrier(a, %{}) do
+      :ok ->
+        AuthorityCoordinator.transact(fn ->
+          Loci.patch_attempt(ticket_id, %{
+            "state" => "RESOLVED",
+            "resolved_as" => "the host confirmed no such carrier is running"
+          })
+        end)
+
+      {:error, why} ->
+        {:refused, refuse("carrier-reconcile-indeterminate", Map.put(a, "reason", why))}
     end
   end
 
@@ -915,8 +964,20 @@ defmodule Ampd.Carrier do
     end
   end
 
+  # **An exception is not an exit, and this `catch` stopped firing.**
+  #
+  # It was written when `Peer.epoch/0` was a bare `GenServer.call` that exited
+  # its caller. Inside the order that call now raises instead, so the exit
+  # clause became unreachable and an absent registry produced
+  # `participant-unavailable` rather than the
+  # `carrier-runtime-incarnation-unready` this function exists to reach.
+  #
+  # Both are kept: the exit for callers outside the order, where the
+  # degradation to `GenServer.call` is deliberate, and the rescue for inside.
   defp peer_epoch do
     Peer.epoch()
+  rescue
+    _ in Ampd.Participant.Failure -> nil
   catch
     :exit, _ -> nil
   end

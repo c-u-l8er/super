@@ -422,8 +422,24 @@ defmodule Ampd.AuthorityCoordinator do
       # here — but `Ampd.Loci` never calls it at all and relies entirely on
       # this function. A durable Loci write that lands and loses its reply
       # would otherwise notify nobody until some unrelated later mutation.
+      #
+      # **`touched/0`, not `applied/2`, and the difference is the whole reason
+      # this module keeps two clocks.** `applied/2` bumps `st.seq`, which is
+      # the wire field `revision` — *which durable authority state this frame
+      # is based on*, counting ordered authority mutations. An indeterminate
+      # refusal is not one, and in the half where nothing landed there was no
+      # mutation at all; incrementing it there writes a number that says an
+      # authority operation committed, beside a refusal saying nobody knows
+      # whether one did.
+      #
+      # What is actually wanted is the resnapshot, and that is the view clock.
+      # `touched/0` ticks it and announces — a cast, so it is safe from inside
+      # this process — and leaves authority history alone. The first repair
+      # reached for `applied/2` and corrupted the evidence to fix the
+      # notification.
       {:participant_failed, %{outcome: :indeterminate} = failure} ->
-        applied({:refused, Ampd.Participant.refusal(failure)}, st)
+        touched()
+        {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}
 
       {:participant_failed, failure} ->
         {:reply, {:refused, Ampd.Participant.refusal(failure)}, st}

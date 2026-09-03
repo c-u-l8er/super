@@ -153,11 +153,15 @@ if (timeoutClauses.length === 0) {
 // second execution the class exists to forbid.
 const CONVERTED = {
   'lib/ampd/peer.ex': { mod: 'Ampd.Peer', attr: /@mutations ~w\(([^)]*)\)a/ },
-  'lib/ampd/loci.ex': { mod: 'Ampd.Loci', attr: /@ordered_ops \[([^\]]*)\]/ },
+  // **`@client_mutations`, not `@ordered_ops`.** The gate built to make
+  // classification auditable was reading the list the code no longer
+  // classifies by, and the committed census filed `close_store` under reads
+  // in direct contradiction of `Loci.class(:close_store)` on the same commit.
+  'lib/ampd/loci.ex': { mod: 'Ampd.Loci', attr: /@client_mutations @ordered_ops \+\+ \[([^\]]*)\]/, plus: /@ordered_ops \[([^\]]*)\]/ },
 }
 
 const census = {}
-for (const [rel, { mod, attr }] of Object.entries(CONVERTED)) {
+for (const [rel, { mod, attr, plus }] of Object.entries(CONVERTED)) {
   const code = codeOnly(readFileSync(join(LIB, rel.replace('lib/ampd/', 'ampd/')), 'utf8'))
 
   const sent = [
@@ -167,7 +171,10 @@ for (const [rel, { mod, attr }] of Object.entries(CONVERTED)) {
 
   const m = code.match(attr)
   if (!m) { no(`${rel} declares its mutations`, 'the classification list could not be read'); continue }
-  const mutations = m[1].split(/[\s,]+/).map((t) => t.replace(/^:/, '')).filter(Boolean)
+  const parse = (x) => x.split(/[\s,]+/).map((t) => t.replace(/^:/, '')).filter(Boolean)
+  const mutations = parse(m[1]).concat(plus ? parse((code.match(plus) || [, ''])[1]) : [])
+  if (plus && mutations.length === parse(m[1]).length)
+    no(`${rel}'s composed list resolves`, 'the base list it extends could not be read')
 
   const dead = mutations.filter((t) => !sent.includes(t))
   const reads = sent.filter((t) => !mutations.includes(t))
