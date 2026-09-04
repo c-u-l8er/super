@@ -136,9 +136,15 @@ defmodule Ampd.Carrier.Terminal do
     case {shape(obs["attached"], true), shape(obs["refused"], :string), sockets} do
       {:present, :absent, [sock]} ->
         case malformed_identity(obs) do
-          [] -> {:ok, obs, sock}
-          bad -> reject(sockets, "the host reported an attachment whose physical identity is not " <>
-                   "well formed: #{Enum.join(bad, ", ")}")
+          [] ->
+            {:ok, obs, sock}
+
+          bad ->
+            reject(
+              sockets,
+              "the host reported an attachment whose physical identity is not " <>
+                "well formed: #{Enum.join(bad, ", ")}"
+            )
         end
 
       {:absent, :present, []} ->
@@ -212,6 +218,7 @@ defmodule Ampd.Carrier.Terminal do
     Enum.each(sockets, &:socket.close/1)
     {:error, "the attach answer was not a valid #{@attach_observation}: #{why}"}
   end
+
   # ==========================================================================
   # D.1.3c·2b·1 — semantic terminal possession
   # ==========================================================================
@@ -334,7 +341,9 @@ defmodule Ampd.Carrier.Terminal do
       c ->
         if Ampd.Carrier.still_current?(c, worker),
           do: {:ok, c},
-          else: {:refused, refuse("terminal-carrier-not-current", %{"carrier_ref" => c["carrier_ref"]})}
+          else:
+            {:refused,
+             refuse("terminal-carrier-not-current", %{"carrier_ref" => c["carrier_ref"]})}
     end
   end
 
@@ -343,15 +352,22 @@ defmodule Ampd.Carrier.Terminal do
   # peer that already possesses one means two commits raced.
   defp no_terminal(peer) do
     case Peer.terminal_attachment(peer["id"]) do
-      nil -> :ok
-      r -> {:refused, refuse("terminal-already-attached", %{"attachment_ref" => r["attachment_ref"]})}
+      nil ->
+        :ok
+
+      r ->
+        {:refused,
+         refuse("terminal-already-attached", %{"attachment_ref" => r["attachment_ref"]})}
     end
   end
 
   defp owner_present(peer) do
     case Peer.owner_pid(peer["id"]) do
-      nil -> {:refused, refuse("terminal-peer-owner-gone", %{"peer_ref" => peer["id"]})}
-      pid -> if Process.alive?(pid), do: :ok, else: {:refused, refuse("terminal-peer-owner-gone", %{})}
+      nil ->
+        {:refused, refuse("terminal-peer-owner-gone", %{"peer_ref" => peer["id"]})}
+
+      pid ->
+        if Process.alive?(pid), do: :ok, else: {:refused, refuse("terminal-peer-owner-gone", %{})}
     end
   end
 
@@ -482,8 +498,11 @@ defmodule Ampd.Carrier.Terminal do
         }
 
         case Peer.install_terminal(ticket["peer_ref"], record, pid) do
-          {:ok, stored} -> {:ok, stored}
-          {:refused, why} -> {:refused, refuse("terminal-commit-refused", %{"reason" => to_string(why)})}
+          {:ok, stored} ->
+            {:ok, stored}
+
+          {:refused, why} ->
+            {:refused, refuse("terminal-commit-refused", %{"reason" => to_string(why)})}
         end
 
       reason ->
@@ -843,21 +862,50 @@ defmodule Ampd.Carrier.Terminal do
     carrier = peer && Peer.carrier(peer["id"])
 
     cond do
-      peer == nil -> "terminal-peer-gone"
-      att == nil -> "carrier-not-attached"
-      lane == nil -> "locus-unknown"
-      worker == nil -> "worker-unknown"
-      att["peer_epoch"] != ticket["peer_epoch"] -> "attachment-epoch-stale"
-      att["locus_ref"] != ticket["locus_ref"] -> "carrier-attached-elsewhere"
-      att["worker_ref"] != ticket["worker_ref"] -> "terminal-worker-drift"
-      World.lineage() != ticket["world_ref"] -> "terminal-world-generation-stale"
-      (worker["generation"] || 1) != ticket["worker_generation"] -> "terminal-worker-generation-stale"
-      worker["status"] != "open" -> "worker-not-open"
-      peer["actor"] != ticket["actor"] -> "terminal-actor-drift"
-      carrier == nil -> "terminal-no-live-carrier"
-      carrier["carrier_ref"] != ticket["carrier_ref"] -> "terminal-carrier-replaced"
-      carrier["carrier_epoch"] != ticket["carrier_epoch"] -> "terminal-carrier-replaced"
-      true -> nil
+      peer == nil ->
+        "terminal-peer-gone"
+
+      att == nil ->
+        "carrier-not-attached"
+
+      lane == nil ->
+        "locus-unknown"
+
+      worker == nil ->
+        "worker-unknown"
+
+      att["peer_epoch"] != ticket["peer_epoch"] ->
+        "attachment-epoch-stale"
+
+      att["locus_ref"] != ticket["locus_ref"] ->
+        "carrier-attached-elsewhere"
+
+      att["worker_ref"] != ticket["worker_ref"] ->
+        "terminal-worker-drift"
+
+      World.lineage() != ticket["world_ref"] ->
+        "terminal-world-generation-stale"
+
+      (worker["generation"] || 1) != ticket["worker_generation"] ->
+        "terminal-worker-generation-stale"
+
+      worker["status"] != "open" ->
+        "worker-not-open"
+
+      peer["actor"] != ticket["actor"] ->
+        "terminal-actor-drift"
+
+      carrier == nil ->
+        "terminal-no-live-carrier"
+
+      carrier["carrier_ref"] != ticket["carrier_ref"] ->
+        "terminal-carrier-replaced"
+
+      carrier["carrier_epoch"] != ticket["carrier_epoch"] ->
+        "terminal-carrier-replaced"
+
+      true ->
+        nil
     end
   end
 
@@ -910,7 +958,9 @@ defmodule Ampd.Carrier.Terminal do
             {:refused, refuse("terminal-peer-owner-gone", ticket)}
 
           owner ->
-            case safely(fn -> Ampd.TerminalAttachment.prepare(pid, Map.merge(record, identity), owner) end) do
+            case safely(fn ->
+                   Ampd.TerminalAttachment.prepare(pid, Map.merge(record, identity), owner)
+                 end) do
               :ok ->
                 # **B2 converges its own refusal**, so there is nothing to do
                 # here on that path. A second removal from out here — outside
@@ -920,7 +970,9 @@ defmodule Ampd.Carrier.Terminal do
 
               other ->
                 abandon(ticket, record, pid)
-                {:refused, refuse("terminal-owner-identity-mismatch", %{"reason" => inspect(other)})}
+
+                {:refused,
+                 refuse("terminal-owner-identity-mismatch", %{"reason" => inspect(other)})}
             end
         end
 
@@ -943,7 +995,11 @@ defmodule Ampd.Carrier.Terminal do
   defp abandon(ticket, record, pid) do
     _ =
       AuthorityCoordinator.transact(fn ->
-        Peer.remove_terminal(ticket["peer_ref"], record["attachment_ref"], record["attachment_epoch"])
+        Peer.remove_terminal(
+          ticket["peer_ref"],
+          record["attachment_ref"],
+          record["attachment_epoch"]
+        )
       end)
 
     kill_owner(pid)
@@ -1001,7 +1057,8 @@ defmodule Ampd.Carrier.Terminal do
   not hold. The payload carries rows and columns and no `TIOCSWINSZ`: the
   host owns the ioctl and the Carrier's floor attests that it does.
   """
-  def resize(peer_ref, rows, cols) when is_binary(peer_ref) and is_integer(rows) and is_integer(cols) do
+  def resize(peer_ref, rows, cols)
+      when is_binary(peer_ref) and is_integer(rows) and is_integer(cols) do
     case Peer.terminal_attachment(peer_ref) do
       nil -> {:refused, refuse("terminal-not-attached", %{"peer_ref" => peer_ref})}
       record -> resize_record(record, rows, cols)
@@ -1046,7 +1103,8 @@ defmodule Ampd.Carrier.Terminal do
         {:refused,
          refuse("terminal-stream-not-active", %{
            "status" => current["status"],
-           "reason" => "the World record is ACTIVE and the stream owner has not finished becoming so"
+           "reason" =>
+             "the World record is ACTIVE and the stream owner has not finished becoming so"
          })}
 
       rows < 1 or cols < 1 ->
@@ -1086,12 +1144,39 @@ defmodule Ampd.Carrier.Terminal do
         :gone
 
       pid ->
-        case safely(fn -> Ampd.TerminalAttachment.state(pid, 1_000) end) do
+        case safely(fn -> Ampd.TerminalAttachment.state(pid, stream_probe_ms()) end) do
           :unreachable -> :active
           phase -> phase
         end
     end
   end
+
+  @doc """
+  How long `stream_phase/1` waits for the byte owner before reading the
+  silence as `:active`.
+
+  **An accessor because it was a bare literal, and the deadline chain could
+  not see it.** `test/effect_channel_test.exs`'s `C14` asserts that every
+  mechanism wait reachable from inside the total order is strictly under the
+  transaction budget, and it does that by reading the numbers off the modules
+  that own them — precisely so a chain maintained by hand cannot drift. A
+  `1_000` typed at a call site has no owner to read it off, so this wait was
+  outside the one check built to catch exactly this shape. That is how
+  `Ampd.Embodiment.identity/0` came to wait 30 000 ms inside a 15 000 ms
+  budget for as long as it did.
+
+  **One wait is not the hazard here; the multiplication is.** This is a
+  per-*presentation* cost and it is correct at that size. What made it a
+  defect was `status_of/1` paying it once per Worker on a projection that
+  `Ampd.AuthorityCoordinator` can re-run three times — an unbounded Worker
+  table times this number times three, inside the order. Measured in
+  `probes/projection_latency.exs`: at sixteen busy terminals the old shape
+  did not finish inside the budget at all. That is closed structurally
+  rather than arithmetically, because the table has no bound: the control
+  projection does not reach this function. `T.14`/`T.15` and
+  `tools/check-presentation-authority.mjs` are what hold it closed.
+  """
+  def stream_probe_ms, do: 1_000
 
   defp ask_resize(record, rows, cols) do
     case Ampd.Bridge.carrier_endpoint() do

@@ -67,6 +67,16 @@ bash tools/sabotage-scope.sh
 # browser's source. One literal NUL in `app-prototype.html` meant it was not.
 node tools/check-source-hygiene.mjs
 
+# **D.1.3c·2c·1a · the terminal disclosure boundary, and it holds two laws
+# that pull against each other.** The derivation without the human-control
+# predicate must not be reachable from outside its module — it spent one
+# commit public under `@doc false`, one commit after a bypass was removed
+# from it — and the control projection must not reach the process that owns
+# a terminal's bytes, which it did once per Worker over an unbounded table.
+# Deleting the stream check satisfies the second law and breaks the first,
+# so the gate asserts both directions.
+node tools/check-presentation-authority.mjs
+
 node tools/verify-artifact.mjs
 node tools/emit-proof.mjs > /dev/null
 node tools/inject-proof.mjs

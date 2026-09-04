@@ -135,7 +135,9 @@ defmodule Ampd.EffectChannelTest do
     {control, agent} = Ampd.attach_pair("kestrel")
     ws = ok!(Control.command(control, :open_workspace, ["acme"]), "workspace")
     goal = ok!(Control.command(control, :open_goal, [ws["id"], "reach the mechanism"]), "goal")
-    lane = ok!(Control.command(control, :open_lane, [goal["id"], "kestrel", r["ref"], nil]), "lane")
+
+    lane =
+      ok!(Control.command(control, :open_lane, [goal["id"], "kestrel", r["ref"], nil]), "lane")
 
     w = ok!(Control.command(control, :open_worker, [lane["id"], "implement"]), "worker")
     ok!(Control.command(agent, :attach_worker, [w["id"]]), "worker")
@@ -161,7 +163,9 @@ defmodule Ampd.EffectChannelTest do
         # Restoring *absence* matters as much as restoring a value: leaving
         # the sabotage set makes `C2` pass for the wrong reason, which is
         # how a falsifier quietly stops falsifying anything.
-        if prior, do: System.put_env("SUPER_HOST_BIN", prior), else: System.delete_env("SUPER_HOST_BIN")
+        if prior,
+          do: System.put_env("SUPER_HOST_BIN", prior),
+          else: System.delete_env("SUPER_HOST_BIN")
       end)
 
       r = Control.command(ctx.agent, :establish_worktree, [ctx.lane["id"], "wt-c1"])
@@ -180,7 +184,13 @@ defmodule Ampd.EffectChannelTest do
       # stripped first, so what is left is what runs.
       src = code_only(File.read!("lib/ampd/worktree/effect_channel.ex"))
 
-      for forbidden <- ["Port.open", "System.cmd", ":os.cmd", "spawn_executable", "find_executable"] do
+      for forbidden <- [
+            "Port.open",
+            "System.cmd",
+            ":os.cmd",
+            "spawn_executable",
+            "find_executable"
+          ] do
         refute src =~ forbidden,
                "the channel effector reaches a program by name: #{forbidden}"
       end
@@ -198,6 +208,7 @@ defmodule Ampd.EffectChannelTest do
       # No channel is bound. The binary genuinely exists and is executable,
       # so the only thing missing is possession.
       assert Bridge.effect_endpoint() == nil
+
       assert File.exists?(Ampd.Worktree.Effector.Host.binary()),
              "this falsifier is vacuous unless the named binary is really there"
 
@@ -310,7 +321,9 @@ defmodule Ampd.EffectChannelTest do
       {h, _inc} =
         channel!(fn req, n ->
           other = if n == 1, do: "req-two-placeholder", else: "req-one-placeholder"
-          {:reply, req |> observation(req["channel_epoch"], "deadbeef") |> Map.put("request_id", other)}
+
+          {:reply,
+           req |> observation(req["channel_epoch"], "deadbeef") |> Map.put("request_id", other)}
         end)
 
       t1 = Task.async(fn -> EffectChannel.submit(base_request("c5-a"), 1_500) end)
@@ -384,7 +397,9 @@ defmodule Ampd.EffectChannelTest do
       {h, _inc} =
         channel!(fn req, _n ->
           _ = real_effect(req)
-          {:reply, req |> observation(req["channel_epoch"], "cafe") |> Map.put("request_id", "not-yours")}
+
+          {:reply,
+           req |> observation(req["channel_epoch"], "cafe") |> Map.put("request_id", "not-yours")}
         end)
 
       grant!(ctx.lane["id"])
@@ -402,7 +417,12 @@ defmodule Ampd.EffectChannelTest do
     end
 
     test "binding a replacement channel does not resubmit anything", ctx do
-      {h1, _} = channel!(fn req, _n -> _ = real_effect(req); :close end)
+      {h1, _} =
+        channel!(fn req, _n ->
+          _ = real_effect(req)
+          :close
+        end)
+
       grant!(ctx.lane["id"])
       Control.command(ctx.agent, :establish_worktree, [ctx.lane["id"], "wt-c7b"])
       assert length(Host.requests(h1)) == 1
@@ -452,7 +472,11 @@ defmodule Ampd.EffectChannelTest do
       # correctly stops being exercisable — F10.
       {_h, _inc} = channel!(perform_policy())
       grant!(ctx.lane["id"])
-      ok!(Control.command(ctx.agent, :establish_worktree, [ctx.lane["id"], "wt-chan"]), "resource")
+
+      ok!(
+        Control.command(ctx.agent, :establish_worktree, [ctx.lane["id"], "wt-chan"]),
+        "resource"
+      )
 
       ref_dir = Path.join(Worktree.root(), "wt-ref")
       chan_dir = Path.join(Worktree.root(), "wt-chan")
@@ -528,6 +552,7 @@ defmodule Ampd.EffectChannelTest do
       assert EffectChannel.current_incarnation() != nil
 
       Bridge.reset()
+
       assert EffectChannel.current_incarnation() == nil,
              "a possessed mechanism survived the world it was bound to"
     end
@@ -623,6 +648,22 @@ defmodule Ampd.EffectChannelTest do
       # one nothing checked. Found by the C1.0b·2·1 reachability census.
       identity = Ampd.Embodiment.identity_deadline_ms()
 
+      # **The sixth number, and it was a bare `1_000` at a call site.**
+      # `Ampd.Carrier.Terminal.stream_phase/1` waits on the process that owns
+      # a terminal's bytes, and it is reachable from inside an ordered
+      # observation. It had no accessor, so this chain — which exists because
+      # a hand-maintained chain drifts — could not read it, which is the same
+      # shape as `identity` above: the wait nothing checked.
+      #
+      # The ordering claim here is about ONE wait. The hazard D.1.3c·2c·1a's
+      # repair closes is the MULTIPLICATION — an unbounded Worker table times
+      # this number times the coordinator's three re-runs — and arithmetic
+      # cannot close that, because the table has no bound. It is closed
+      # structurally instead: the control projection does not reach this
+      # function. `Ampd.TerminalPresentationTest`'s `T.14`/`T.15` and
+      # `tools/check-presentation-authority.mjs` hold that, not this.
+      stream_probe = Ampd.Carrier.Terminal.stream_probe_ms()
+
       assert channel < call,
              "the channel outlives the call that encloses it: #{channel} >= #{call}"
 
@@ -637,6 +678,13 @@ defmodule Ampd.EffectChannelTest do
       assert identity < budget,
              "the embodiment measurement outlives the transaction that encloses it: " <>
                "#{identity} >= #{budget}"
+
+      assert stream_probe < budget,
+             "the terminal stream probe outlives its transaction budget: " <>
+               "#{stream_probe} >= #{budget}"
+
+      assert budget - stream_probe >= 2_000,
+             "less than 2s of margin for the terminal stream probe"
 
       assert budget - call >= 2_000, "less than 2s of margin under the transaction budget"
       assert budget - identity >= 2_000, "less than 2s of margin for the embodiment measurement"
@@ -671,7 +719,10 @@ defmodule Ampd.EffectChannelTest do
       # taken the coordinator's caller down with it, and the next command
       # would time out rather than answer.
       proj = Control.command(ctx.control, :operator_projection, [])
-      assert is_map(proj) and proj["refusal"] == nil, "the coordinator did not survive: #{inspect(proj)}"
+
+      assert is_map(proj) and proj["refusal"] == nil,
+             "the coordinator did not survive: #{inspect(proj)}"
+
       assert is_map(proj["projection"]) or is_map(proj["result"]) or map_size(proj) > 0
     end
   end
@@ -827,7 +878,7 @@ defmodule Ampd.EffectChannelTest do
     |> String.split("\n")
     |> Enum.reduce({[], false}, fn line, {acc, in_doc} ->
       cond do
-        in_doc -> {acc, not String.contains?(line, ~s(""")) }
+        in_doc -> {acc, not String.contains?(line, ~s("""))}
         String.contains?(line, ~s(""")) -> {acc, true}
         true -> {[String.replace(line, ~r/#.*$/, "") | acc], false}
       end

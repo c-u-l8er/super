@@ -74,13 +74,25 @@ defmodule Ampd.TerminalPresentationTest do
     {control, agent} = Ampd.attach_pair("kestrel")
     ws = ok!(Control.command(control, :open_workspace, ["acme"]), "workspace")
     goal = ok!(Control.command(control, :open_goal, [ws["id"], "present a terminal"]), "goal")
-    lane = ok!(Control.command(control, :open_lane, [goal["id"], "kestrel", r["ref"], nil]), "lane")
+
+    lane =
+      ok!(Control.command(control, :open_lane, [goal["id"], "kestrel", r["ref"], nil]), "lane")
+
     w = ok!(Control.command(control, :open_worker, [lane["id"], "work"]), "worker")
     ok!(Control.command(agent, :attach_worker, [w["id"]]), "worker")
 
     {:ok, inc} = Carrier.start(agent, lane["id"])
 
-    %{control: control, agent: agent, lane: lane, worker: w, inc: inc, litter: litter}
+    %{
+      control: control,
+      agent: agent,
+      goal: goal,
+      repo: r["ref"],
+      lane: lane,
+      worker: w,
+      inc: inc,
+      litter: litter
+    }
   end
 
   # ----------------------------------------------------------- fixture glue
@@ -113,6 +125,7 @@ defmodule Ampd.TerminalPresentationTest do
 
   defp obs do
     hex = fn n -> Base.encode16(:crypto.strong_rand_bytes(div(n, 2)), case: :lower) end
+
     %{
       "schema" => "carrier-pty-attach-observation@1",
       "attached" => true,
@@ -143,6 +156,23 @@ defmodule Ampd.TerminalPresentationTest do
   defp bound(id), do: Peer.resolve(id)
   defp code({:refused, r}), do: r["code"]
   defp code(other), do: {:unexpected, other}
+
+  # **A stream owner blocked inside synchronous terminal I/O**, which is the
+  # ordinary state of a terminal that is printing rather than a pathology.
+  # `handle_call({:read, …})` runs `:socket.recv/3` inside the attachment
+  # process, and nothing is ever written to the other end of the fixture's
+  # socketpair, so the owner is unable to answer `:state` for the whole
+  # window. That is exactly what makes `stream_phase/1` spend its entire
+  # one-second bound before reading the timeout as `:active`.
+  defp busy!(pid, ms) do
+    t = Task.async(fn -> TA.read(pid, 4096, ms) end)
+    # The call has to be *in* the process, not merely in its mailbox, or the
+    # first measurement races the send and measures an idle owner.
+    Process.sleep(80)
+    t
+  end
+
+  defp ms(fun), do: div(elem(:timer.tc(fun), 0), 1000)
 
   # ===================================================================== T.1
   test "T.1 · the human-control role resolves a presentation for a possessed terminal", ctx do
@@ -303,7 +333,7 @@ defmodule Ampd.TerminalPresentationTest do
     possess!(ctx)
     ref = ctx.worker["id"]
 
-    assert P.status_of(Loci.worker(ref)) == "ACTIVE"
+    assert P.status_of(Loci.worker(ref)) == "PRESENT"
 
     _ = T.release(ctx.agent)
     assert P.status_of(Loci.worker(ref)) == "NONE"
@@ -312,7 +342,7 @@ defmodule Ampd.TerminalPresentationTest do
     # identity, asserted against the serialized row.
     row = Worker.projected(Loci.workers())[ref]
     json = JSON.encode!(row)
-    assert row["terminal"] in ["ACTIVE", "NONE"]
+    assert row["terminal"] in ["PRESENT", "NONE"]
 
     for forbidden <- ~w(attachment_ref attachment_epoch pty_epoch peer_ref) do
       refute String.contains?(json, forbidden), "#{forbidden} is in the Worker projection"
@@ -348,5 +378,144 @@ defmodule Ampd.TerminalPresentationTest do
     refute code(stale) == code(current),
            "a stale designation and a current one gave the same answer — the generation " <>
              "comparison is not doing anything, and the page could name any incarnation"
+  end
+
+  # ==================================================================== T.14
+  test "T.14 · the control projection does not wait on a terminal that is printing", ctx do
+    # **The A2 falsifier, and it is about cost rather than about an answer.**
+    #
+    # `Ampd.Worker.projected/1` calls `P.status_of/1` once per Worker, and
+    # the operator projection is built inside an ordered observation. For one
+    # commit `status_of/1` ran the whole chain including the stream owner —
+    # so a Worker whose terminal was busy contributed up to a full second to
+    # the total order, and sixteen of them approached the transaction budget,
+    # to render a badge.
+    #
+    # The badge must still be right. A busy terminal is a possessed terminal,
+    # so `"PRESENT"` is the honest answer and `"NONE"` would be a regression
+    # in the opposite direction — trading a stall for a lie.
+    %{pid: pid} = possess!(ctx)
+    ref = ctx.worker["id"]
+    task = busy!(pid, 3_000)
+
+    {elapsed, row} = :timer.tc(fn -> Worker.projected(Loci.workers())[ref] end)
+    took = div(elapsed, 1000)
+
+    assert row["terminal"] == "PRESENT",
+           "a busy terminal is a possessed terminal; the projection reported #{inspect(row["terminal"])}"
+
+    assert took < 400,
+           "the operator projection took #{took} ms with ONE busy terminal — it is asking " <>
+             "the byte owner again, and this scales with the number of Workers"
+
+    assert {:error, _} = Task.await(task, 6_000)
+  end
+
+  # ==================================================================== T.15
+  test "T.15 · opening a presentation does ask the byte owner, and that is the split", ctx do
+    # **The other side of T.14, and it must be two-sided or it is not a
+    # boundary.** T.14 alone is satisfied by deleting the stream check
+    # entirely, which would let a presentation open over an owner that does
+    # not agree it is streaming. So: the projection must not pay the probe,
+    # and `resolve/3` must.
+    #
+    # There is no answer that distinguishes them — a busy owner is an ACTIVE
+    # owner by D.1.3c·2b·1's measured rule, so both say the terminal is
+    # there. The observable difference is what it costs, which is the whole
+    # claim: a status row is information and opening the data plane is a
+    # decision.
+    %{pid: pid} = possess!(ctx)
+    ref = ctx.worker["id"]
+    g = gen(ref)
+    task = busy!(pid, 3_000)
+
+    hint = ms(fn -> P.status_of(Loci.worker(ref)) end)
+    {decision_ms, decision} = :timer.tc(fn -> P.resolve(bound(ctx.control), ref, g) end)
+    decision_ms = div(decision_ms, 1000)
+
+    assert {:ok, _} = decision
+
+    assert decision_ms >= 900,
+           "resolve/3 answered in #{decision_ms} ms over an owner that could not reply — " <>
+             "it is no longer asking the stream owner at all, and a presentation could " <>
+             "open over a stream that has not finished becoming one"
+
+    assert hint < 400,
+           "status_of/1 took #{hint} ms — the hint is paying the decision's price"
+
+    assert decision_ms - hint >= 500,
+           "the hint and the decision cost the same (#{hint} ms vs #{decision_ms} ms), so " <>
+             "they are running the same chain"
+
+    assert {:error, _} = Task.await(task, 6_000)
+  end
+
+  # ==================================================================== T.16
+  test "T.16 · the unauthorised half of the resolver is not callable from outside" do
+    # **The A1 falsifier.** `derive/2` spent one commit public under
+    # `@doc false`, immediately after a repair that removed a bypass in which
+    # code manufactured a `%{"channel" => :human_control}` to satisfy the
+    # role check. `@doc false` hides a name from `h`; it confines nothing.
+    #
+    # The equality is deliberate and will fire on a *new* public function
+    # too. Adding one to this module is adding a way to reach the derivation,
+    # and that should be a decision somebody makes on purpose — writing the
+    # name here is that decision.
+    Code.ensure_loaded!(P)
+
+    refute function_exported?(P, :derive, 2),
+           "the chain without the role check is public again"
+
+    refute function_exported?(P, :derive_semantic, 2),
+           "the semantic chain without the role check is public"
+
+    surface = P.__info__(:functions) |> Enum.reject(&match?({:__info__, _}, &1)) |> Enum.sort()
+
+    assert surface == [
+             {:current?, 1},
+             {:presentable, 1},
+             {:resolve, 3},
+             {:schema, 0},
+             {:status_of, 1}
+           ],
+           "the module's public surface changed: #{inspect(surface)}"
+
+    src = File.read!("lib/ampd/terminal/presentation.ex")
+
+    assert String.contains?(src, "defp derive(worker_ref, expected_generation) do")
+    assert String.contains?(src, "defp derive_semantic(worker_ref, expected_generation)")
+  end
+
+  # ==================================================================== T.17
+  test "T.17 · a refusal about a Worker names the Worker", ctx do
+    # **A3.** `carrier-not-present` carried `"worker_ref" => nil` while the
+    # Worker was in the caller's scope — a field whose only job is to tell an
+    # operator which row went wrong, reporting that the runtime did not know.
+    #
+    # Producing it needs an occupied Worker whose occupant holds no Carrier,
+    # which is the ordinary state of a position somebody has taken and not
+    # yet started anything at.
+    # A **second Lane**, because a Lane holds one occupant — putting the
+    # bare Worker on `ctx.lane` is refused `locus-already-occupied`. And a
+    # second *agent*, not `Ampd.attach_pair/1`, which would claim a second
+    # control channel: `Ampd.Peer` refuses that, and that refusal is `T.10`'s
+    # assumption holding rather than a fixture problem.
+    lane2 =
+      ok!(
+        Control.command(ctx.control, :open_lane, [ctx.goal["id"], "merlin", ctx.repo, nil]),
+        "lane"
+      )
+
+    second = ok!(Control.command(ctx.control, :open_worker, [lane2["id"], "bare"]), "worker")
+    {:ok, a2} = Peer.attach_agent("merlin")
+    ok!(Control.command(a2, :attach_worker, [second["id"]]), "worker")
+
+    ref = second["id"]
+    assert {:refused, r} = P.resolve(bound(ctx.control), ref, gen(ref))
+    assert r["code"] == "carrier-not-present"
+
+    assert r["operator_detail"]["worker_ref"] == ref,
+           "the refusal did not name the Worker it is about: " <>
+             inspect(r["operator_detail"])
   end
 end

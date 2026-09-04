@@ -60,15 +60,45 @@ defmodule Ampd.Terminal.Presentation do
 
       worker_ref + expected_worker_generation + the bound control connection
               │
-              ▼  Loci.worker/1              worker-unknown
-              ▼  generation == expected      worker-generation-stale
-              ▼  status == "open"            worker-not-open
-              ▼  occupancy                   worker-not-occupied
-              ▼  occupying agent Peer
-              ▼  Peer.carrier/1              carrier-not-present
-              ▼  Peer.terminal_attachment/1  terminal-not-attached
-              ▼  status == "ACTIVE"          terminal-not-possessed
-              ▼  stream owner phase          terminal-stream-not-active
+      ┌───────┴──────────────────────────────── SEMANTIC · World only ──┐
+      │       ▼  Loci.worker/1               worker-unknown             │
+      │       ▼  generation == expected      worker-generation-stale    │
+      │       ▼  status == "open"            worker-not-open            │
+      │       ▼  occupancy                   worker-not-occupied        │
+      │       ▼  occupying agent Peer                                   │
+      │       ▼  Peer.carrier/1              carrier-not-present        │
+      │       ▼  Peer.terminal_attachment/1  terminal-not-attached      │
+      │       ▼  status == "ACTIVE"          terminal-not-possessed     │
+      └───────┬──────────────────────────────────────────────────────────┘
+      ┌───────┴──────────────────── STREAM OWNER · asks the byte process ┐
+      │       ▼  stream owner phase          terminal-stream-not-active  │
+      └──────────────────────────────────────────────────────────────────┘
+
+  ## The split is a cost boundary, and it was measured after it was wrong
+
+  The two halves are drawn where they are because **only the lower one can
+  block**. Everything semantic is a question for `Ampd.Loci` and `Ampd.Peer`,
+  registries that answer from state. The lower link asks
+  `Ampd.Carrier.Terminal.stream_phase/1`, which asks the process that owns
+  the terminal's bytes — and that process runs `:socket.recv/3` synchronously
+  inside itself, so an owner with output flowing can take arbitrarily long to
+  answer. `stream_phase/1` bounds the wait at one second and reads a timeout
+  as `:active`, because a busy owner *is* an active owner.
+
+  That is correct for **opening one presentation** and was wrong under
+  `status_of/1`, which `Ampd.Worker.projected/1` calls **once per Worker** on
+  every operator projection, inside an ordered observation. Sixteen Workers
+  with busy terminals bought a badge with up to sixteen seconds of the total
+  order. Measured in `probes/projection_latency.exs`.
+
+  So the rule is:
+
+      status_of/1     a hint      semantic only, non-blocking, "PRESENT"
+      resolve/3       a decision  the whole chain, may refuse at the owner
+
+  A control projection may be built as often as the world changes. Opening
+  the data plane happens when a person asks for it. Those must not cost the
+  same, and the word `"ACTIVE"` in a projection was what made them.
 
   The page never receives or supplies `peer_ref`, `attachment_ref`,
   `attachment_epoch`, `pty_epoch`, `carrier_ref`, `carrier_epoch`, a pid, a
@@ -121,7 +151,8 @@ defmodule Ampd.Terminal.Presentation do
   def resolve(_peer, _worker_ref, _expected),
     do: {:refused, refuse("terminal-presentation-malformed", %{})}
 
-  @doc false
+  # ------------------------------------------------------ the two chains
+
   # **The chain without the role check, and the split is not a convenience.**
   # `current?/1` and `status_of/1` re-derive a relation that has already been
   # authorised; making them call `resolve/3` meant handing it a synthetic
@@ -129,15 +160,38 @@ defmodule Ampd.Terminal.Presentation do
   # looks for in order to get past it. A check you can satisfy by building
   # its argument is not a check, and leaving that pattern in the module
   # would teach the next caller to do it on a path where it matters.
-  def derive(worker_ref, expected_generation)
-      when is_binary(worker_ref) and is_integer(expected_generation) do
+  #
+  # **Private, and `@doc false` was not enough.** For one commit this was a
+  # public function carrying `@doc false`, immediately after the repair
+  # above. Documentation is not confinement: `@doc false` hides a name from
+  # `h Ampd.Terminal.Presentation` and changes nothing about who may call
+  # it. The unauthorised half of a resolver that has just had a bypass
+  # removed from it is the last thing that should be reachable from outside
+  # the module, so it is `defp` and `tools/check-presentation-authority.mjs`
+  # fails if it stops being.
+  defp derive(worker_ref, expected_generation) do
+    with {:ok, p} <- derive_semantic(worker_ref, expected_generation),
+         :ok <- streaming(p) do
+      {:ok, p}
+    end
+  end
+
+  # **The semantic chain — every link the World can answer by itself.**
+  #
+  # Everything here is a question for `Ampd.Loci` and `Ampd.Peer`: registries
+  # that hold records and answer from state. None of them is the process that
+  # owns the terminal's bytes, so none of them can be blocked by a terminal
+  # that is busy printing. That is the property this split exists to protect,
+  # and it is a property of *which processes are asked*, not of how long the
+  # asking is given.
+  defp derive_semantic(worker_ref, expected_generation)
+       when is_binary(worker_ref) and is_integer(expected_generation) do
     with {:ok, w} <- worker(worker_ref),
          :ok <- fresh(w, expected_generation),
          :ok <- open(w),
          {:ok, att, occupant} <- occupancy(w),
-         :ok <- carrier(occupant),
-         {:ok, record} <- terminal(occupant),
-         :ok <- streaming(occupant) do
+         :ok <- carrier(w, occupant),
+         {:ok, record} <- terminal(w, occupant) do
       {:ok, presentation(w, att, occupant, record)}
     end
   end
@@ -196,9 +250,7 @@ defmodule Ampd.Terminal.Presentation do
   defp open(%{"status" => "open"}), do: :ok
 
   defp open(w),
-    do:
-      {:refused,
-       refuse("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
+    do: {:refused, refuse("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
 
   # The occupant is found the way `Ampd.Worker.status_of/1` finds it — by
   # asking `occupancy_of/3` rather than by trusting the attachment table,
@@ -237,12 +289,18 @@ defmodule Ampd.Terminal.Presentation do
     end
   end
 
-  defp carrier(occupant) do
+  # **The Worker is passed in because the refusal names it.** This read
+  # `"worker_ref" => nil` for one commit — a field whose whole purpose is to
+  # tell an operator *which row* went wrong, filled with a null while the
+  # Worker was sitting in the caller's scope. A diagnostic that omits the
+  # one fact it was added to carry is worse than no field: it reads as "the
+  # runtime does not know", which was not true.
+  defp carrier(w, occupant) do
     case Peer.carrier(occupant["id"]) do
       nil ->
         {:refused,
          refuse("carrier-not-present", %{
-           "worker_ref" => nil,
+           "worker_ref" => w["id"],
            "hint" => "the occupant holds no Carrier, so nothing is embodying this position"
          })}
 
@@ -251,11 +309,12 @@ defmodule Ampd.Terminal.Presentation do
     end
   end
 
-  defp terminal(occupant) do
+  defp terminal(w, occupant) do
     case Peer.terminal_attachment(occupant["id"]) do
       nil ->
         {:refused,
          refuse("terminal-not-attached", %{
+           "worker_ref" => w["id"],
            "hint" => "this Carrier possesses no terminal, so there is no output to observe"
          })}
 
@@ -265,6 +324,7 @@ defmodule Ampd.Terminal.Presentation do
       record ->
         {:refused,
          refuse("terminal-not-possessed", %{
+           "worker_ref" => w["id"],
            "status" => record["status"],
            "hint" =>
              "the terminal relation is not finished becoming one — a record that is not " <>
@@ -278,14 +338,23 @@ defmodule Ampd.Terminal.Presentation do
   # The World can say ACTIVE over a stream owner that is gone or not yet
   # finalised — `Ampd.Carrier.Terminal.finalise_stream/4` states that as the
   # worst case it tolerates. A presentation must not be opened over one.
-  defp streaming(occupant) do
-    case Ampd.Carrier.Terminal.stream_phase(occupant["id"]) do
+  # **Reached from `resolve/3` and from nothing else, and that is the whole
+  # of the A2 repair.** `stream_phase/1` asks the process that owns the
+  # bytes, with a one-second bound that it reads as `:active` on timeout
+  # because a busy owner is an active owner. That is the right answer when
+  # something is opening one presentation. It was the wrong thing to put
+  # under `status_of/1`, which the operator projection calls once per Worker
+  # inside an ordered observation: sixteen Workers with busy terminals was
+  # up to sixteen seconds of the total order, spent to render a badge.
+  defp streaming(p) do
+    case Ampd.Carrier.Terminal.stream_phase(p["peer_ref"]) do
       :active ->
         :ok
 
       phase ->
         {:refused,
          refuse("terminal-stream-not-active", %{
+           "worker_ref" => p["worker_ref"],
            "phase" => to_string(phase),
            "hint" =>
              "the World holds this terminal as possessed and its stream owner does not " <>
@@ -343,9 +412,17 @@ defmodule Ampd.Terminal.Presentation do
   when any of those moves the presentation is over, and it does not follow
   the replacement. The falsifiers name each of those four ways separately
   because they are four different events to an operator.
+
+  **Semantic, and the stream owner's phase is deliberately not one of the
+  four identities.** It was checked at `resolve/3` and it is not an identity
+  — a terminal that is busy printing has moved nothing. Making revalidation
+  ask the byte owner would mean a presentation whose validity depends on
+  whether its own output happens to be flowing, and would put the one-second
+  probe on whatever path revalidates. The owner's *death* is a different
+  fact and is delivered by monitor rather than by asking.
   """
   def current?(%{"schema" => @schema} = p) do
-    case derive(p["worker_ref"], p["worker_generation"]) do
+    case derive_semantic(p["worker_ref"], p["worker_generation"]) do
       {:ok, now} ->
         now["peer_ref"] == p["peer_ref"] and
           now["attachment_ref"] == p["attachment_ref"] and
@@ -361,16 +438,30 @@ defmodule Ampd.Terminal.Presentation do
   Whether a Worker has a terminal that could be presented — the one thing
   the control plane discloses.
 
-  `"ACTIVE"` or `"NONE"`, and deliberately nothing else: not an
+  `"PRESENT"` or `"NONE"`, and deliberately nothing else: not an
   `attachment_ref`, not a `peer_ref`, not an epoch. A status is a fact about
   a position the operator can already see; an identifier is a handle, and a
   handle in a projection is the beginning of a bearer credential.
 
+  **It said `"ACTIVE"` for one commit, and the word was the defect.** To say
+  ACTIVE is to assert that the process owning the bytes agrees it is
+  streaming, and the only way to learn that is to ask it — which is what the
+  old `status_of/1` did, once per Worker, on every operator projection, with
+  a one-second bound each. The word was paid for in the total order. What is
+  honestly derivable from the World alone is *possession*: this Worker is
+  open, occupied, its occupant holds a Carrier, and that Carrier's terminal
+  record says ACTIVE. `"PRESENT"` says exactly that and no more.
+
+  So a `"PRESENT"` badge is a hint and `resolve/3` is the decision.
+  Opening a presentation runs the whole chain including the stream owner and
+  may still refuse `terminal-stream-not-active`. A status row and an
+  authority decision should not cost the same, and before this they did.
+
   Derived on read rather than stored, so it cannot be stale.
   """
   def status_of(worker) when is_map(worker) do
-    case derive(worker["id"], generation(worker)) do
-      {:ok, _} -> "ACTIVE"
+    case derive_semantic(worker["id"], generation(worker)) do
+      {:ok, _} -> "PRESENT"
       _ -> "NONE"
     end
   end
