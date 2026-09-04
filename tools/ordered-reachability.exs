@@ -567,7 +567,15 @@ grouped =
       "kind" => cs |> hd() |> Map.get(:kind) |> to_string(),
       "lines" => cs |> Enum.map(& &1.at) |> Enum.uniq() |> Enum.sort(),
       "roots" => cs |> Enum.map(& &1.root) |> Enum.uniq() |> Enum.sort(),
-      "shortest_path" => cs |> Enum.min_by(&length(&1.path)) |> Map.get(:path)
+      # **Ties broken deterministically, and this is not cosmetic.** Several
+      # crossings are reachable by two paths of equal length, and `min_by/2`
+      # returns whichever the enumeration reached first — which is map
+      # iteration order, and is not stable between runs. The artifact then
+      # changed while its subject did not, which makes a committed census
+      # useless as a diff and makes "working tree clean" flap. Sorting on
+      # `{length, path}` makes the choice total.
+      "shortest_path" =>
+        cs |> Enum.map(& &1.path) |> Enum.min_by(&{length(&1), &1})
     }
   end)
   |> Enum.sort_by(& &1["id"])

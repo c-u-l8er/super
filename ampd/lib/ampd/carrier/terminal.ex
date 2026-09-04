@@ -1057,8 +1057,16 @@ defmodule Ampd.Carrier.Terminal do
     end
   end
 
+  @doc false
   # The stream owner's phase, or `:gone`. The pid is runtime machinery and
   # does not leave this module — what crosses the boundary is a phase.
+  #
+  # **Public as of D.1.3c·2c·1a, and a phase is the reason that is safe.**
+  # `Ampd.Terminal.Presentation` has to establish that a record saying
+  # ACTIVE has a stream owner that agrees, and the alternative was to hand
+  # it `Peer.terminal_owner/1` — a pid, which this module exists to keep
+  # inside itself. A caller that receives `:active` has learned a fact and
+  # cannot address anything with it.
   #
   # **A busy owner is an ACTIVE owner, and reading a timeout as "not yet
   # active" was a real regression.** `read/1` and `write/2` run
@@ -1072,7 +1080,7 @@ defmodule Ampd.Carrier.Terminal do
   # of a terminal that was merely busy, with a message saying the stream had
   # not finished becoming active. That is the ordinary case — someone
   # resizing a window while the terminal is printing.
-  defp stream_phase(peer_ref) do
+  def stream_phase(peer_ref) do
     case Peer.terminal_owner(peer_ref) do
       nil ->
         :gone

@@ -952,7 +952,7 @@ probe "removing a terminal record is addressed by identity" test/terminal_posses
 #       answer rather than an absence of one. Reading it as `:gone` refuses a
 #       legitimate resize of a terminal that is merely printing.
 probe "a terminal that is busy is not mistaken for one that is not yet possessed" test/terminal_possession_test.exs \
-  '/defp stream_phase(peer_ref) do/,/^  end/{s@          :unreachable -> :active@          :unreachable -> :gone@}' \
+  '/def stream_phase(peer_ref) do/,/^  end/{s@          :unreachable -> :active@          :unreachable -> :gone@}' \
   lib/ampd/carrier/terminal.ex
 
 # NOT probed, and not counted: `Ampd.Carrier.Terminal.release/1`'"'"'s identity
@@ -1177,6 +1177,33 @@ probe "the embodiment measurement fits inside the transaction budget" test/effec
 probe "an unreachable embodiment cache is still fail-closed" test/ordered_closure_test.exs \
   's|    e in Ampd.Participant.Failure ->|    e in Ampd.Participant.NoSuchFailure ->|' \
   lib/ampd/embodiment.ex
+
+# ========================================================== D.1.3c·2c·1a
+#
+# The presentation authority. Each of these removes one half of the ruled
+# relation and requires the falsifier named for it to go red — because the
+# other twelve tests stay green through all three, which is exactly how a
+# disclosure rule ends up enforced by nothing.
+
+# The role. The agent that OCCUPIES the Worker and possesses the terminal is
+# the one refused, so this is not a check about strangers.
+probe "only the human-control role may observe a terminal" test/terminal_presentation_test.exs \
+  's|  defp human_control(%{"channel" => :human_control}), do: :ok|  defp human_control(_any), do: :ok|' \
+  lib/ampd/terminal/presentation.ex
+
+# The freshness witness. With the comparison gone, a page naming the
+# incarnation it saw and a page naming the current one get the same answer —
+# so the designation stops meaning anything and a stale view silently
+# follows a reopened position.
+probe "a stale page does not follow a reopened Worker" test/terminal_presentation_test.exs \
+  's|    if current == expected do|    if true do|' \
+  lib/ampd/terminal/presentation.ex
+
+# The disclosure boundary. One derived identifier added to what crosses to
+# the page turns an unguessable name into a handle the page can designate.
+probe "no derived identity crosses to the page" test/terminal_presentation_test.exs \
+  's|      "worker_generation" => p\["worker_generation"\]$|      "worker_generation" => p["worker_generation"], "peer_ref" => p["peer_ref"]|' \
+  lib/ampd/terminal/presentation.ex
 
 echo
 # **PREFIXED AT W.1.4.2, BECAUSE THIS LINE AND `sabotage-host.sh`'s WERE THE

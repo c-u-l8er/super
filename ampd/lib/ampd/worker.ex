@@ -590,7 +590,18 @@ defmodule Ampd.Worker do
   def projected(workers) when is_map(workers),
     do:
       Map.new(workers, fn {id, w} ->
-        {id, w |> Map.put("occupancy", status_of(w)) |> Map.put("carrier", Ampd.Carrier.status_of(w))}
+        {id,
+         w
+         |> Map.put("occupancy", status_of(w))
+         |> Map.put("carrier", Ampd.Carrier.status_of(w))
+         # **A status, and deliberately never an identity.** D.1.3c·2c·1a
+         # rules that the operator may observe a current Worker's terminal,
+         # so the operator-visible World may say whether there is one. What
+         # it must not say is `attachment_ref`, `peer_ref` or any epoch: a
+         # status is a fact about a position the operator can already see,
+         # and an identifier in a projection is the beginning of a bearer
+         # credential. The page designates the Worker it already had.
+         |> Map.put("terminal", Ampd.Terminal.Presentation.status_of(w))}
       end)
 
   # ------------------------------------------------------------ refusals
