@@ -749,16 +749,24 @@ defmodule Ampd.Carrier.Terminal do
   # The real distinction is the one that justifies the line being drawn
   # here: **a `TerminalAttachment` dying is the normal path** — it is
   # `:temporary`, it is killed by the Carrier-removal funnel, it dies with
-  # its owner — whereas `Ampd.Peer` and `Ampd.Loci` dying is a fault. Every
-  # ordered transaction in this tree calls both bare, and has since C1.0b.1;
-  # wrapping them here alone would protect one transaction and misrepresent
-  # the rest as protected too.
+  # its owner — whereas `Ampd.Peer` and `Ampd.Loci` dying is a fault.
   #
-  # **So this is an accepted residual with a stated scope**, not a closed
-  # question: a registry crash can still exit a transaction, in this module
-  # exactly as in `Ampd.Carrier`. Closing it is a tree-wide change to how
-  # ordered transactions call registries, and it does not belong in a slice
-  # about terminals.
+  # **What this comment used to say next is no longer true, and it is worth
+  # saying that it changed rather than quietly deleting it.** Through
+  # D.1.3c·2b·1 it read: *every ordered transaction in this tree calls both
+  # bare, and a registry crash can still exit a transaction — an accepted
+  # residual with a stated scope, and closing it is a tree-wide change that
+  # does not belong in a slice about terminals.* C1.0b·2·1 is that tree-wide
+  # change. `Ampd.Peer`, `Ampd.Loci` and every other participant the
+  # reachability census reaches now route through `Ampd.Participant`, so a
+  # registry crash inside a transaction raises a classified failure the
+  # coordinator catches by struct instead of exiting the total order.
+  #
+  # This wrapper stays for a different reason, and only for reads: for THIS
+  # participant a timeout carries information the class system would
+  # discard — measured in D.1.3c·2b·1, exactly one phase can fail to answer
+  # in time, so a busy owner is an ACTIVE owner. The MUTATION on the same
+  # participant goes through the boundary; see `ask_activate/2`.
   #
   # A timeout is not a death and is not reported as one. The two are told
   # apart because "the owner is gone" and "the owner did not answer in time"

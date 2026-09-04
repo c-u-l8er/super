@@ -27,3 +27,8 @@ and-super-rev-*.zip
 .DS_Store
 *.swp
 *~
+
+# Sabotage battery evidence. Append-only on disk, not in history: a run log
+# is a measurement of one execution, and the bundle summarises every one it
+# finds. Committing them would make the tree grow by ~50 KB per battery.
+.sabotage-runs/

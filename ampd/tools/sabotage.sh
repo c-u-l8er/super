@@ -8,6 +8,27 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
+# ---------------------------------------------------------------- evidence
+#
+# **Every execution writes its own immutable log, and a rerun may not erase
+# the run that caused it.** C1.0b·2·1 lost a battery log exactly that way:
+# the run that found a real non-falsifier was overwritten by the re-run its
+# own finding triggered, so the bundle could describe that miss only from
+# memory. Evidence is append-only from here.
+#
+# The caller's own redirection still works and is untouched — this is a tee,
+# not a replacement. `set -C` makes the create fail rather than clobber if a
+# path ever collides, and the name carries the second and the commit so two
+# runs of the same tree are still distinguishable.
+__runs="$(cd "$(dirname "$0")" && pwd)/../../.sabotage-runs"
+mkdir -p "$__runs"
+__stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+__sha="$(git rev-parse --short=12 HEAD 2>/dev/null || echo nogit)"
+__run_log="$__runs/beam-$__stamp-$__sha.log"
+( set -C; : > "$__run_log" ) || { echo "REFUSING: $__run_log already exists" >&2; exit 1; }
+exec > >(tee -a "$__run_log") 2>&1
+echo "# beam battery · $__stamp · $__sha"
+
 pass=0; fail=0
 
 # **Restore the tree on any exit, not just the happy one.**
