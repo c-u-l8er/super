@@ -171,16 +171,45 @@ defmodule Ampd.Control do
     end
   end
 
+  # **C1.0b·2·2 — two dispatchers, and the branch below is now the only
+  # place the two classes meet.**
+  #
+  # This used to build ONE closure over ONE `dispatch/3` and choose at
+  # runtime whether to hand it to `Ampd.Projection.framed/2`:
+  #
+  #     run = fn -> dispatch(peer, cmd, args) end
+  #     cond do
+  #       cmd in @retry_once -> Projection.framed_once(lineage, run)
+  #       cmd in @reads      -> Projection.framed(lineage, run)
+  #       true               -> run.()      # not ordered
+  #     end
+  #
+  # The runtime behaviour was right. The *proof* was not available: `framed/2`
+  # is an ordered-reachability root, `dispatch/3` was one compiled function
+  # holding all 38 clauses, and so every mutation subtree — Carrier starts,
+  # terminal acquisition, effect execution — was reachable from an ordered
+  # root as far as any static reader could tell. The only thing keeping a
+  # host round trip out of the coordinator was a `kind:` value in
+  # `Ampd.CommandSpec`, one word away in a different file, with no gate
+  # between the two.
+  #
+  # Now the class is a call-graph fact. An ordered root reaches
+  # `dispatch_read/3` and there is no edge from there to `dispatch_mutation/3`
+  # — not because an exclusions file says the edge is never taken, but
+  # because it does not exist.
   defp in_lineage(peer, lineage, cmd, args) do
     Ampd.Authority.in_world(lineage, fn ->
-      run = fn -> dispatch(peer, cmd, args) end
-
       cond do
         # A read that constructs a refusal writes as it decides, so it is
         # assembled once on the ordered path rather than speculated on.
-        cmd in @retry_once -> Projection.framed_once(lineage, run)
-        cmd in @reads -> Projection.framed(lineage, run)
-        true -> run.()
+        cmd in @retry_once ->
+          Projection.framed_once(lineage, fn -> dispatch_read(peer, cmd, args) end)
+
+        cmd in @reads ->
+          Projection.framed(lineage, fn -> dispatch_read(peer, cmd, args) end)
+
+        true ->
+          dispatch_mutation(peer, cmd, args)
       end
     end)
   end
@@ -234,61 +263,55 @@ defmodule Ampd.Control do
     )
   end
 
+  # ==========================================================================
+  # C1.0b·2·2 — the READ half, and it is a half because of where it runs
+  # ==========================================================================
+  #
+  # **Every clause below can execute inside `Ampd.AuthorityCoordinator`.**
+  # `in_lineage/4` hands a closure over this function to
+  # `Ampd.Projection.framed/2`, which is one of the ordered-reachability
+  # census's root signatures, so everything reachable from here is reachable
+  # inside the total order and is adjudicated as such by
+  # `tools/check-ordered-closure.mjs`.
+  #
+  # That was true of the mutation clauses too until this slice, and it was
+  # true only to the census — at runtime `in_lineage/4` sent them down the
+  # unordered branch. One compiled function held both classes, so no static
+  # reader could tell them apart, and the whole safety argument rested on a
+  # `kind:` value in `Ampd.CommandSpec`. Adding one legitimate agent mutation
+  # (`acquire_terminal`) opened fourteen unadjudicated crossings — a raw
+  # `:socket.close/1`, a bare `GenServer.call/2` into `TerminalAttachment`,
+  # and the whole `Worktree.EffectChannel` socket surface — because the
+  # census had to assume the worst and was right to.
+  #
+  # **Nothing here may call `dispatch_mutation/3`, and nothing there may call
+  # this.** There is no generic dispatcher left to route between them.
+  # `tools/check-dispatch-partition.mjs` holds both directions, and holds the
+  # membership of each against `Ampd.CommandSpec` so that the declaration and
+  # the implementation cannot drift: flipping a mutation's `kind:` to `:read`
+  # now fails a gate instead of quietly moving it inside the coordinator.
+
   # --------------------------------------------------------------- agent
   # Note what is *absent* from every signature below: a context. The actor
   # comes from the binding, the workspace and run come from the session
   # the runtime holds, and the only thing the caller contributes is a
   # placement preference, which lives in the request where it belongs.
-  defp dispatch(peer, :preflight, [cap, resource, request]),
+  defp dispatch_read(peer, :preflight, [cap, resource, request]),
     do: Gateway.preflight(cap, resource, Peer.authoritative_context(peer, request), request)
 
-  defp dispatch(peer, :preflight, [cap, resource]),
-    do: dispatch(peer, :preflight, [cap, resource, nil])
+  defp dispatch_read(peer, :preflight, [cap, resource]),
+    do: dispatch_read(peer, :preflight, [cap, resource, nil])
 
-  defp dispatch(peer, :agent_projection, _), do: Projection.agent(peer["actor"])
+  defp dispatch_read(peer, :agent_projection, _), do: Projection.agent(peer["actor"])
 
-  defp dispatch(peer, :request_effect, [cap, resource, request]),
-    do: Gateway.perform(cap, resource, Peer.authoritative_context(peer, request), request)
+  defp dispatch_read(_peer, :inspect_refusal, [id]), do: inspect_refusal(id)
 
-  defp dispatch(peer, :request_grant, [cap, resource, opts]) do
-    Authority.request_grant(%{
-      "actor" => peer["actor"],
-      "capability" => cap,
-      "resource" => resource,
-      "requested_duration" => opts["duration"] || "workspace",
-      "reason" => opts["reason"]
-    })
-    |> settled(fn q ->
-      %{
-        "allow" => false,
-        "held" => true,
-        "grant_request" => q,
-        "reason" => "grant-requested · a person decides this, not the runtime"
-      }
-    end)
-  end
-
-  defp dispatch(peer, :request_grant, [cap, resource]),
-    do: dispatch(peer, :request_grant, [cap, resource, %{}])
-
-  defp dispatch(_peer, :inspect_refusal, [id]), do: inspect_refusal(id)
-
-  # ------------------------------------------------------------ loci · D.1.1
-  # The Carrier is `peer`, and it is the runtime's record of the binding
-  # rather than anything the caller sent. That is the whole of F8: a fresh
-  # Carrier attaching as somebody else reaches no capability, however well
-  # it knows the ids.
-  defp dispatch(peer, :establish_worktree, [locus_ref, name]) do
-    Authority.establish_worktree(peer, locus_ref, name)
-    |> settled(fn r -> Map.put(r, "allow", true) end)
-  end
-
-  defp dispatch(peer, :observe_worktree, [cap_ref]) do
+  defp dispatch_read(peer, :observe_worktree, [cap_ref]) do
     Ampd.Locus.observe(peer, cap_ref)
     |> settled(fn v -> %{"allow" => true, "resource" => v} end)
   end
 
-  defp dispatch(peer, :attach_locus, [locus_ref]) do
+  defp dispatch_read(peer, :attach_locus, [locus_ref]) do
     Ampd.Locus.reconstruct(peer, locus_ref)
     |> settled(fn r -> Map.put(r, "allow", true) end)
   end
@@ -301,7 +324,7 @@ defmodule Ampd.Control do
   # position, not a permission: no capability is reconstructed here, and a
   # Carrier that wants to know what it can now do asks `attach_locus`,
   # which re-derives the set from scratch.
-  defp dispatch(peer, :attach_worker, [worker_ref]) do
+  defp dispatch_read(peer, :attach_worker, [worker_ref]) do
     Ampd.Worker.attach(peer, worker_ref)
     |> settled(fn r ->
       %{
@@ -313,64 +336,11 @@ defmodule Ampd.Control do
     end)
   end
 
-  # Admit → machine → commit, with the machine phase outside the total order.
-  # This call can therefore take as long as starting a process takes without
-  # holding the coordinator, which is the entire point of the shape.
-  defp dispatch(_peer, :reconcile_carrier_attempt, [ticket_id]) do
-    case Ampd.Carrier.reconcile(ticket_id) do
-      {:refused, r} -> %{"allow" => false, "refusal" => r}
-      {:ok, a} -> %{"allow" => true, "attempt" => a}
-      other -> %{"allow" => true, "attempt" => other}
-    end
-  end
-
-  defp dispatch(peer, :start_carrier, [locus_ref]) do
-    case Ampd.Carrier.start(peer["id"], locus_ref) do
-      {:ok, inc} ->
-        # The incarnation, minus nothing — it carries no authority-shaped key
-        # by construction and `E2` reads it back recursively to prove it.
-        %{"allow" => true, "carrier" => inc}
-
-      {:refused, r} ->
-        %{"allow" => false, "refusal" => r}
-    end
-  end
-
-  # **`:ok = ...` raised on the one outcome the closure just introduced.**
-  # `Carrier.stop/1` now legitimately returns `{:indeterminate, why}` when the
-  # host does not confirm the process is gone, and a match on `:ok` turned
-  # that expected safety state into a MatchError through the public command
-  # path. A fail-closed state that crashes is not fail-closed.
-  defp dispatch(peer, :stop_carrier, _) do
-    case Ampd.Carrier.stop(peer["id"]) do
-      :ok ->
-        %{"allow" => true, "carrier" => nil}
-
-      {:indeterminate, why} ->
-        %{
-          "allow" => false,
-          "refusal" =>
-            Ampd.Refusal.new("carrier-stop-indeterminate",
-              component: "Ampd.Carrier",
-              retryable: false,
-              requires_human: true,
-              public_message: "The runtime could not confirm the carrier stopped.",
-              operator_detail: %{
-                "reason" => why,
-                "hint" =>
-                  "membership has ended, but a process may still exist — a replacement " <>
-                    "is refused until reconcile_carrier_attempt establishes absence"
-              }
-            )
-        }
-    end
-  end
-
   # **Detaching ends the occupancy that authorized the execution.** A Carrier
   # left RUNNING at a position nobody occupies is exactly the state
   # `Carrier.still_current?/2` refuses to report, and leaving the process alive
   # would make that refusal cosmetic.
-  defp dispatch(peer, :detach_worker, _) do
+  defp dispatch_read(peer, :detach_worker, _) do
     r =
       Ampd.Worker.detach(peer)
       |> settled(fn r -> Map.merge(%{"allow" => true, "occupancy" => "OFFLINE"}, r) end)
@@ -383,7 +353,7 @@ defmodule Ampd.Control do
   # agent that cannot see another actor's Lane must not be handed that
   # actor's assignments, which name the Lane in `locus_ref`. The operator
   # sees the world, because the operator is who the world is for.
-  defp dispatch(peer, :list_workers, _) do
+  defp dispatch_read(peer, :list_workers, _) do
     all = Ampd.Loci.workers()
 
     mine =
@@ -412,7 +382,7 @@ defmodule Ampd.Control do
   # workspaces — rather than a whole-table read with one filter on top.
   # The operator's projection stays world-complete, because the operator is
   # who the world is for.
-  defp dispatch(peer, :list_loci, _) do
+  defp dispatch_read(peer, :list_loci, _) do
     all_lanes = Ampd.Loci.lanes()
     operator? = peer["channel"] == :human_control
 
@@ -442,12 +412,154 @@ defmodule Ampd.Control do
   end
 
   # ------------------------------------------------------- human control
-  defp dispatch(_peer, :operator_projection, _), do: Projection.operator()
+  defp dispatch_read(_peer, :operator_projection, _), do: Projection.operator()
+
+  # History is paged, not pushed. The filter is the peer's own actor — the
+  # operator has none and therefore sees the world's, an agent sees only
+  # its own. That is the same rule the projections apply, reused rather
+  # than restated, because a second copy of a filter is a second thing that
+  # can be wrong.
+  defp dispatch_read(peer, :list_receipts, [cursor, limit]),
+    do: Projection.page(Projection.history_for(:receipts, peer["actor"]), cursor, limit)
+
+  defp dispatch_read(peer, :list_effect_history, [cursor, limit]),
+    do: Projection.page(Projection.history_for(:effects, peer["actor"]), cursor, limit)
+
+  defp dispatch_read(peer, :list_grant_requests, [cursor, limit]),
+    do: Projection.page(Projection.history_for(:grant_requests, peer["actor"]), cursor, limit)
+
+  # Reports seals. It does **not** recover: there is no recovery
+  # transition yet, and a command called `recover_world` that only
+  # describes the damage is a name making a promise the code does not
+  # keep. When the transition exists it gets its own name and its own
+  # falsifier — `Ampd.Authority.advance_lineage/2` is the runtime half of
+  # it, and it is deliberately not on a channel until the restore that
+  # calls it exists.
+  defp dispatch_read(_peer, :recovery_status, _) do
+    %{
+      "schema" => "recovery-status@1",
+      "seals" =>
+        Enum.map(Ampd.seals(), fn {m, reason} ->
+          %{"registry" => inspect(m), "reason" => reason}
+        end),
+      "world" => %{
+        "manifest_state" => to_string(Ampd.World.manifest_state()),
+        "lineage" => Ampd.World.lineage()
+      },
+      "recoverable" => false,
+      "note" => "reporting only — no recovery transition is implemented yet"
+    }
+  end
+
+  # ==========================================================================
+  # C1.0b·2·2 — the MUTATION half, which never runs inside the order
+  # ==========================================================================
+  #
+  # **`in_lineage/4` calls this directly, not through a closure handed to
+  # `Ampd.Projection.framed/2`.** That is the entire point of the split: the
+  # census follows calls, so a function the ordered roots do not call is a
+  # function the ordered roots do not reach — as a fact about the compiled
+  # call graph rather than as a claim about a runtime `cond`.
+  #
+  # These clauses are free to do what a read may not: run an unbounded host
+  # round trip, take a descriptor, hold a socket. `Ampd.Carrier.start/2` and
+  # `Ampd.Carrier.Terminal.acquire/1` each contain an explicitly unordered
+  # machine phase for exactly that reason, and each re-enters the order for
+  # its own commits. Reaching them from an ordered projection would put that
+  # machine phase inside a 15-second transaction budget with a participant
+  # fault able to take the coordinator down.
+
+  defp dispatch_mutation(peer, :request_effect, [cap, resource, request]),
+    do: Gateway.perform(cap, resource, Peer.authoritative_context(peer, request), request)
+
+  defp dispatch_mutation(peer, :request_grant, [cap, resource, opts]) do
+    Authority.request_grant(%{
+      "actor" => peer["actor"],
+      "capability" => cap,
+      "resource" => resource,
+      "requested_duration" => opts["duration"] || "workspace",
+      "reason" => opts["reason"]
+    })
+    |> settled(fn q ->
+      %{
+        "allow" => false,
+        "held" => true,
+        "grant_request" => q,
+        "reason" => "grant-requested · a person decides this, not the runtime"
+      }
+    end)
+  end
+
+  defp dispatch_mutation(peer, :request_grant, [cap, resource]),
+    do: dispatch_mutation(peer, :request_grant, [cap, resource, %{}])
+
+  # ------------------------------------------------------------ loci · D.1.1
+  # The Carrier is `peer`, and it is the runtime's record of the binding
+  # rather than anything the caller sent. That is the whole of F8: a fresh
+  # Carrier attaching as somebody else reaches no capability, however well
+  # it knows the ids.
+  defp dispatch_mutation(peer, :establish_worktree, [locus_ref, name]) do
+    Authority.establish_worktree(peer, locus_ref, name)
+    |> settled(fn r -> Map.put(r, "allow", true) end)
+  end
+
+  # Admit → machine → commit, with the machine phase outside the total order.
+  # This call can therefore take as long as starting a process takes without
+  # holding the coordinator, which is the entire point of the shape.
+  defp dispatch_mutation(_peer, :reconcile_carrier_attempt, [ticket_id]) do
+    case Ampd.Carrier.reconcile(ticket_id) do
+      {:refused, r} -> %{"allow" => false, "refusal" => r}
+      {:ok, a} -> %{"allow" => true, "attempt" => a}
+      other -> %{"allow" => true, "attempt" => other}
+    end
+  end
+
+  defp dispatch_mutation(peer, :start_carrier, [locus_ref]) do
+    case Ampd.Carrier.start(peer["id"], locus_ref) do
+      {:ok, inc} ->
+        # The incarnation, minus nothing — it carries no authority-shaped key
+        # by construction and `E2` reads it back recursively to prove it.
+        %{"allow" => true, "carrier" => inc}
+
+      {:refused, r} ->
+        %{"allow" => false, "refusal" => r}
+    end
+  end
+
+  # **`:ok = ...` raised on the one outcome the closure just introduced.**
+  # `Carrier.stop/1` now legitimately returns `{:indeterminate, why}` when the
+  # host does not confirm the process is gone, and a match on `:ok` turned
+  # that expected safety state into a MatchError through the public command
+  # path. A fail-closed state that crashes is not fail-closed.
+  defp dispatch_mutation(peer, :stop_carrier, _) do
+    case Ampd.Carrier.stop(peer["id"]) do
+      :ok ->
+        %{"allow" => true, "carrier" => nil}
+
+      {:indeterminate, why} ->
+        %{
+          "allow" => false,
+          "refusal" =>
+            Ampd.Refusal.new("carrier-stop-indeterminate",
+              component: "Ampd.Carrier",
+              retryable: false,
+              requires_human: true,
+              public_message: "The runtime could not confirm the carrier stopped.",
+              operator_detail: %{
+                "reason" => why,
+                "hint" =>
+                  "membership has ended, but a process may still exist — a replacement " <>
+                    "is refused until reconcile_carrier_attempt establishes absence"
+              }
+            )
+        }
+    end
+  end
 
   # Opening a Lane names the actor that may occupy it. That is a person
   # deciding who stands where, and it is the only place the association is
   # made — an agent cannot open a Lane and cannot name itself into one.
-  defp dispatch(_peer, :open_workspace, [name]) do
+  defp dispatch_mutation(_peer, :open_workspace, [name]) do
     Authority.open_workspace(%{"name" => name, "world_ref" => Ampd.World.lineage()})
     |> settled(fn w -> %{"allow" => true, "workspace" => w} end)
   end
@@ -459,7 +571,7 @@ defmodule Ampd.Control do
   # established surrounding. `open_goal` accepted any `workspace_ref` that
   # merely had the right prefix, so a Goal could be created under a
   # Workspace that has never existed, and a Lane could then stand on it.
-  defp dispatch(_peer, :open_goal, [workspace_ref, title]) do
+  defp dispatch_mutation(_peer, :open_goal, [workspace_ref, title]) do
     if Ampd.Loci.workspace(workspace_ref) == nil do
       refuse("workspace-unknown", "No such workspace.", %{"workspace_ref" => workspace_ref})
     else
@@ -468,7 +580,7 @@ defmodule Ampd.Control do
     end
   end
 
-  defp dispatch(_peer, :open_lane, [goal_ref, actor, repository_ref, base_revision]) do
+  defp dispatch_mutation(_peer, :open_lane, [goal_ref, actor, repository_ref, base_revision]) do
     goal = Ampd.Loci.goal(goal_ref)
 
     cond do
@@ -504,7 +616,7 @@ defmodule Ampd.Control do
   #
   # Referential closure is enforced before the mutation, not inside it, so
   # a Worker naming a Lane that never existed cannot become durable.
-  defp dispatch(_peer, :open_worker, [locus_ref, purpose]) do
+  defp dispatch_mutation(_peer, :open_worker, [locus_ref, purpose]) do
     Authority.open_worker(locus_ref, purpose)
     |> settled(fn w -> %{"allow" => true, "worker" => w} end)
   end
@@ -515,7 +627,7 @@ defmodule Ampd.Control do
   # process keeps running would make the supervision primitive supervise half
   # the thing. Closing advances the generation, so `converge/1` finds the
   # incarnation stale by re-derivation rather than by being told.
-  defp dispatch(_peer, :close_worker, [worker_ref]) do
+  defp dispatch_mutation(_peer, :close_worker, [worker_ref]) do
     r =
       Authority.close_worker(worker_ref) |> settled(fn w -> %{"allow" => true, "worker" => w} end)
 
@@ -523,7 +635,7 @@ defmodule Ampd.Control do
     r
   end
 
-  defp dispatch(_peer, :reopen_worker, [worker_ref]) do
+  defp dispatch_mutation(_peer, :reopen_worker, [worker_ref]) do
     Authority.reopen_worker(worker_ref)
     |> settled(fn w -> %{"allow" => true, "worker" => w} end)
   end
@@ -543,7 +655,7 @@ defmodule Ampd.Control do
   # other way, a refused request would still have consumed the descriptor,
   # and a page could exhaust a cockpit's endpoints by asking for Workers it
   # may not see.
-  defp dispatch(peer, :terminal_bind, [worker_ref, expected_generation, endpoint_ref]) do
+  defp dispatch_mutation(peer, :terminal_bind, [worker_ref, expected_generation, endpoint_ref]) do
     case Ampd.Terminal.Presentation.resolve(peer, worker_ref, expected_generation) do
       {:refused, r} ->
         %{"allow" => false, "refusal" => r}
@@ -559,10 +671,10 @@ defmodule Ampd.Control do
     end
   end
 
-  defp dispatch(_peer, :approve_effect, [request_id, approval_id]),
+  defp dispatch_mutation(_peer, :approve_effect, [request_id, approval_id]),
     do: approve_effect(request_id, approval_id)
 
-  defp dispatch(_peer, :deny_effect, [approval_id, why]) do
+  defp dispatch_mutation(_peer, :deny_effect, [approval_id, why]) do
     Authority.deny_approval(approval_id, why)
     |> settled(fn _ -> %{"allow" => false, "denied" => approval_id} end)
   end
@@ -570,7 +682,7 @@ defmodule Ampd.Control do
   # One grant, by id, because the person is looking at one grant object.
   # This used to take a *capability* and revoke every actor's grant for it:
   # an operator revoking Kestrel's `github.repo.read` took Mallory's too.
-  defp dispatch(_peer, :revoke_grant, [grant_id]) do
+  defp dispatch_mutation(_peer, :revoke_grant, [grant_id]) do
     Authority.revoke_one(grant_id)
     |> settled(fn g -> %{"allow" => true, "revoked" => g["id"], "grant" => g} end)
   end
@@ -597,7 +709,7 @@ defmodule Ampd.Control do
   #
   # The scope still has to be bounded, and that check stays here because it
   # reads only the argument: `%{}` is unbounded whatever the world holds.
-  defp dispatch(_peer, :revoke_capability_domain, [scope, expected_ids]) do
+  defp dispatch_mutation(_peer, :revoke_capability_domain, [scope, expected_ids]) do
     scope = Map.take(scope || %{}, ["actor", "capability", "resource"])
 
     if scope == %{} or Enum.all?(scope, fn {_, v} -> v == nil end) do
@@ -615,60 +727,23 @@ defmodule Ampd.Control do
   # A channel asking to be pushed its own projection when the world moves.
   # Not an authority operation: what arrives is what this channel could
   # already ask for, so subscribing grants no read it did not have.
-  defp dispatch(peer, :subscribe, _),
+  defp dispatch_mutation(peer, :subscribe, _),
     do: Ampd.Subscriptions.subscribe(peer)
 
-  defp dispatch(peer, :unsubscribe, _),
+  defp dispatch_mutation(peer, :unsubscribe, _),
     do: Ampd.Subscriptions.unsubscribe(peer["id"])
 
-  # History is paged, not pushed. The filter is the peer's own actor — the
-  # operator has none and therefore sees the world's, an agent sees only
-  # its own. That is the same rule the projections apply, reused rather
-  # than restated, because a second copy of a filter is a second thing that
-  # can be wrong.
-  defp dispatch(peer, :list_receipts, [cursor, limit]),
-    do: Projection.page(Projection.history_for(:receipts, peer["actor"]), cursor, limit)
+  defp dispatch_mutation(_peer, :approve_grant_request, [id]),
+    do: dispatch_mutation(nil, :approve_grant_request, [id, nil])
 
-  defp dispatch(peer, :list_effect_history, [cursor, limit]),
-    do: Projection.page(Projection.history_for(:effects, peer["actor"]), cursor, limit)
-
-  defp dispatch(peer, :list_grant_requests, [cursor, limit]),
-    do: Projection.page(Projection.history_for(:grant_requests, peer["actor"]), cursor, limit)
-
-  defp dispatch(_peer, :approve_grant_request, [id]),
-    do: dispatch(nil, :approve_grant_request, [id, nil])
-
-  defp dispatch(_peer, :approve_grant_request, [id, duration]) do
+  defp dispatch_mutation(_peer, :approve_grant_request, [id, duration]) do
     Authority.approve_grant_request(id, duration)
     |> settled(fn g -> %{"allow" => true, "granted" => g} end)
   end
 
-  defp dispatch(_peer, :deny_grant_request, [id, why]) do
+  defp dispatch_mutation(_peer, :deny_grant_request, [id, why]) do
     Authority.deny_grant_request(id, why)
     |> settled(fn q -> %{"allow" => false, "denied" => q} end)
-  end
-
-  # Reports seals. It does **not** recover: there is no recovery
-  # transition yet, and a command called `recover_world` that only
-  # describes the damage is a name making a promise the code does not
-  # keep. When the transition exists it gets its own name and its own
-  # falsifier — `Ampd.Authority.advance_lineage/2` is the runtime half of
-  # it, and it is deliberately not on a channel until the restore that
-  # calls it exists.
-  defp dispatch(_peer, :recovery_status, _) do
-    %{
-      "schema" => "recovery-status@1",
-      "seals" =>
-        Enum.map(Ampd.seals(), fn {m, reason} ->
-          %{"registry" => inspect(m), "reason" => reason}
-        end),
-      "world" => %{
-        "manifest_state" => to_string(Ampd.World.manifest_state()),
-        "lineage" => Ampd.World.lineage()
-      },
-      "recoverable" => false,
-      "note" => "reporting only — no recovery transition is implemented yet"
-    }
   end
 
   # The plane's failures are runtime facts rather than authority ones — an

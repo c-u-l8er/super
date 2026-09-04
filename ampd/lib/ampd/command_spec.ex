@@ -541,6 +541,25 @@ defmodule Ampd.CommandSpec do
       |> Enum.sort()
 
   @doc """
+  Every command that is not a read.
+
+  **The complement of `reads/0`, derived rather than listed.** C1.0b·2·2
+  makes the read/mutation split a call-graph fact in `Ampd.Control` —
+  `dispatch_read/3` is reachable from an ordered projection and
+  `dispatch_mutation/3` is not — and `tools/check-dispatch-partition.mjs`
+  holds each dispatcher's clause set against one of these two functions. A
+  second hand-maintained list here would be a second thing to keep in step
+  with `kind:`, which is the shape of defect the split exists to remove: the
+  declaration must have exactly one home.
+  """
+  def mutations,
+    do:
+      @commands
+      |> Enum.filter(fn {_, s} -> s[:kind] != :read end)
+      |> Enum.map(fn {_, s} -> s.cmd end)
+      |> Enum.sort()
+
+  @doc """
   Reads that must be executed **exactly once**, on the ordered path, because
   executing them is not free — see `Ampd.Projection.framed_once/2`.
   """

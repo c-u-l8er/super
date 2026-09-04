@@ -818,34 +818,72 @@ defmodule Ampd.TerminalPlaneTest do
 
   # ==================================================================== B.18
   test "B.18 · the data plane's authority is not on a read path" do
-    # **The premise an ordered-boundary exclusion rests on, made falsifiable.**
+    # **C1.0b·2·2 — this test used to compensate for a missing structure, and
+    # now it asserts the structure. Its own failure is what found the seam.**
     #
-    # `tools/ordered-reachability.exs` builds a FUNCTION-level call graph, so
-    # the closure `Ampd.Control.in_lineage/4` hands to `Projection.framed/2`
-    # for read commands admits every clause of `dispatch/3` — including
-    # `terminal_bind`, which reaches `Plane.open/2`,
-    # `Presentations.claim_endpoint/1` and the terminal stream probe. Four
-    # crossings are excluded on the ground that the program does not reach
-    # them that way: a `:mutation` runs `run.()` directly, outside the order.
+    # What it said before, and it was true when written:
     #
-    # Change `terminal_bind` to `kind: :read` and every one of those
-    # exclusions becomes silently wrong while the census output looks
-    # identical — the call graph does not change. So the classification is
-    # read here rather than trusted.
+    #     `tools/ordered-reachability.exs` builds a FUNCTION-level call graph,
+    #     so the closure `Ampd.Control.in_lineage/4` hands to
+    #     `Projection.framed/2` for read commands admits every clause of
+    #     `dispatch/3` — including `terminal_bind`. Four crossings are
+    #     excluded on the ground that the program does not reach them that
+    #     way: a `:mutation` runs `run.()` directly, outside the order.
+    #     Change `terminal_bind` to `kind: :read` and every one of those
+    #     exclusions becomes silently wrong while the census output looks
+    #     identical — THE CALL GRAPH DOES NOT CHANGE.
+    #
+    # That last clause was the defect, stated exactly, a slice before anything
+    # acted on it. It also planted the canary that caught this change: the
+    # final assertion matched the literal old source of `in_lineage/4`, so a
+    # rewrite of the dispatch shape could not pass silently. It did not.
+    #
+    # **The call graph changes now.** `dispatch_read/3` and
+    # `dispatch_mutation/3` are two functions with no edge between them, so a
+    # mutation is not reachable from `framed/2` as a fact about the compiled
+    # program rather than as a claim about a runtime `cond`. Three of the four
+    # crossings this test was defending — `Terminal.Plane.open/2`'s
+    # `:socket.close/1`, `Plane.handed/3`'s `DynamicSupervisor.start_child/2`,
+    # and `TerminalAttachment.state/2`'s `GenServer.call/3` — are gone from
+    # the census entirely; see `_removed_C1_0B_2_2` in
+    # `tools/ordered-boundary-exclusions.json` for each one's old ordered path.
+    #
+    # The classification is still read here, because it is still a real
+    # property that `terminal_bind` is a person's mutation. What is no longer
+    # asserted is that an exclusions file's reasoning survives — there is no
+    # such exclusion left to reason about.
     spec = Ampd.CommandSpec.get("terminal_bind")
 
     assert spec.kind == :mutation,
-           "terminal_bind is #{inspect(spec.kind)}: four ordered-boundary exclusions rest on " <>
-             "it being a mutation, and the reachability census cannot tell the difference"
+           "terminal_bind is #{inspect(spec.kind)}: it takes a descriptor and reaches the " <>
+             "host, and a read may run inside the coordinator"
 
     assert spec.channel == :human_control
 
-    # And the other half of the premise: reads are what `framed/2` wraps.
     src = File.read!("lib/ampd/control.ex")
 
-    assert String.contains?(src, "cmd in @reads -> Projection.framed(lineage, run)"),
-           "`Ampd.Control.in_lineage/4` no longer routes reads through the seqlock — the " <>
-             "exclusions' reasoning is about a dispatch shape that has changed"
+    # The partition itself. `tools/check-dispatch-partition.mjs` holds this
+    # exhaustively against `Ampd.CommandSpec`; what is checked here is the
+    # one command this file is about, so that a possession falsifier fails
+    # if the plane's authority ever lands on the ordered path again.
+    assert src =~ ~r/^  defp dispatch_mutation\(\s*peer, :terminal_bind/m,
+           "terminal_bind is no longer implemented in the mutation dispatcher"
+
+    refute src =~ ~r/^  defp dispatch_read\(\s*_?peer, :terminal_bind/m,
+           "terminal_bind is implemented on the READ path — it would run inside " <>
+             "Ampd.AuthorityCoordinator, with a host round trip and a descriptor"
+
+    refute src =~ ~r/^  defp dispatch\(/m,
+           "the collapsed dispatcher is back: one function holding both classes is what " <>
+             "made every mutation subtree ordered-reachable"
+
+    assert src =~ ~r/framed\(lineage, fn -> dispatch_read\(/,
+           "`Ampd.Control.in_lineage/4` no longer wraps the READ dispatcher in the seqlock"
+
+    assert src =~ ~r/true ->\s*\n\s*dispatch_mutation\(/,
+           "`Ampd.Control.in_lineage/4` no longer sends mutations straight to the mutation " <>
+             "dispatcher — if they went through a closure to `framed/2`, the plane's " <>
+             "authority would be on a read path again"
   end
 
   # ==================================================================== B.17
