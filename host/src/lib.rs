@@ -1902,6 +1902,69 @@ impl Runtime {
         Ok(ours)
     }
 
+    /// D.1.3c·2c·1b — **a terminal data-plane endpoint, and it names nothing.**
+    ///
+    /// The narrowest bridge command in the runtime, deliberately. It carries
+    /// no Worker, no generation, no actor and no incarnation: it hands the
+    /// runtime a socket and gets back an opaque reference to the socket the
+    /// caller already owns the other end of. There is no argument here that
+    /// could designate a position, so there is nothing here to get wrong.
+    ///
+    /// The authority for a presentation arrives **separately, on the human
+    /// control channel**, where `Ampd.Control` has already resolved the bound
+    /// connection. The bridge carries no operator identity and never will —
+    /// which is exactly why the Worker is not named here.
+    ///
+    /// Returns `(our end, endpoint_ref)`. The reference is for the caller's
+    /// own next call and must not be handed to a page.
+    ///
+    /// Same socketpair, same `SCM_RIGHTS`, same adoption, same disposal as
+    /// `effect_channel` and `carrier_channel` above. One more bridge command
+    /// and no new descriptor mechanism.
+    pub fn terminal_endpoint(&self) -> Result<(RawFd, String), String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        let fdpass::Pair(ours, theirs) =
+            fdpass::pair_stream().map_err(|e| format!("terminal socketpair: {e}"))?;
+
+        let cmd = json!({
+            "schema": "bridge-command@1",
+            "command": "bind_terminal_endpoint",
+        });
+
+        let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
+        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        fdpass::close_fd(theirs);
+        sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
+
+        let reply =
+            fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
+
+        if v["ok"] != true {
+            fdpass::close_fd(ours);
+            return Err(format!(
+                "the runtime refused the terminal endpoint: {}",
+                v["refusal"]["code"]
+            ));
+        }
+
+        // **Top level, not under `result`.** `Ampd.Transport.HostBridge`'s
+        // `ok/1` merges `{"schema", "ok"}` over the payload map, so a bridge
+        // reply is flat — `v["result"]["endpoint_ref"]` reads `null` on a
+        // perfectly good answer and closes a socket the runtime has adopted.
+        match v["endpoint_ref"].as_str() {
+            Some(r) => Ok((ours, r.to_string())),
+            // **Closed here, and this branch is not defensive padding.** A
+            // reply we cannot read is a socket the runtime has adopted and we
+            // still hold — the one shape where both ends stay open forever
+            // because each is waiting to be told what to do with it.
+            None => {
+                fdpass::close_fd(ours);
+                Err("the runtime answered without an endpoint_ref".to_string())
+            }
+        }
+    }
+
     /// The **Carrier lifecycle** channel — a second possessed endpoint.
     ///
     /// Deliberately its own channel and not a second protocol on the effect

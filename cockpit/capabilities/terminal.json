@@ -1,0 +1,10 @@
+{
+  "identifier": "terminal",
+  "description": "D.1.3c·2c·1b — the terminal pane WEBVIEW, and only it, may offer a byte sink, acknowledge consumed output, and close the presentation. It holds no `intent`, so it cannot submit a mutation; no `bind_frame_stream`, so it cannot become a second reader of the world; and no core permission, so it cannot reach the application's event bus. The three it does hold are the read-only terminal surface and there is no fourth: terminal input and terminal resize have no command in this process, which is what makes OBSERVE a scope rather than a stage. `webviews` and not `windows` for the reason default.json states — tauri's resolver is an OR over the two lists, so a window grant reaches every webview inside that window, and this pane lives inside the cockpit's own window.",
+  "webviews": ["terminal"],
+  "permissions": [
+    "allow-terminal-stream",
+    "allow-terminal-ack",
+    "allow-terminal-close"
+  ]
+}

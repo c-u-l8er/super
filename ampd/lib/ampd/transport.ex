@@ -380,7 +380,8 @@ defmodule Ampd.Transport do
                   retryable: false,
                   requires_human: false,
                   public_message: "That frame is larger than this protocol accepts.",
-                  operator_detail: %{"announced" => n, "max" => Ampd.Frame.max_bytes()})
+                  operator_detail: %{"announced" => n, "max" => Ampd.Frame.max_bytes()}
+                )
             }
           })
 
@@ -502,8 +503,10 @@ defmodule Ampd.Transport do
       base =
         case Ampd.Frame.decode(body) do
           {:ok, f} ->
-            %{"client_request_id" => f["client_request_id"],
-              "result" => Ampd.Wire.command(peer_id, f["command"], f["args"])}
+            %{
+              "client_request_id" => f["client_request_id"],
+              "result" => Ampd.Wire.command(peer_id, f["command"], f["args"])
+            }
 
           {:error, code, detail} ->
             r =
@@ -515,9 +518,14 @@ defmodule Ampd.Transport do
                 operator_detail: detail
               )
 
-            %{"client_request_id" => nil,
-              "result" => %{"allow" => false, "reason" => r["public_message"],
-                            "refusal" => project(r, peer_id)}}
+            %{
+              "client_request_id" => nil,
+              "result" => %{
+                "allow" => false,
+                "reason" => r["public_message"],
+                "refusal" => project(r, peer_id)
+              }
+            }
         end
 
       base
@@ -532,10 +540,15 @@ defmodule Ampd.Transport do
       end
     end
 
-    defp frame_message("identity-not-claimable"), do: "Identity comes from the connection, not from the command."
+    defp frame_message("identity-not-claimable"),
+      do: "Identity comes from the connection, not from the command."
+
     defp frame_message("frame-too-large"), do: "That frame is larger than this protocol accepts."
     defp frame_message("unknown-command"), do: "No such command."
-    defp frame_message("invalid-command-arguments"), do: "The command arguments were not the shape this command takes."
+
+    defp frame_message("invalid-command-arguments"),
+      do: "The command arguments were not the shape this command takes."
+
     defp frame_message(_), do: "That is not a frame this protocol accepts."
   end
 
@@ -796,6 +809,50 @@ defmodule Ampd.Transport do
       end
     end
 
+    # **D.1.3c·2c·1b — a descriptor, and deliberately nothing else.**
+    #
+    # This arm is the narrowest one on the bridge and that is its whole
+    # design. It takes no Worker, no generation, no actor, no incarnation: it
+    # adopts a socket and returns an opaque reference to it. There is no
+    # argument a caller could supply here that would make it a presentation,
+    # so there is nothing here to get wrong.
+    #
+    # The authority arrives later and on a different socket. `terminal_bind`
+    # is a `:human_control` mutation, so `Ampd.Control` has already resolved
+    # the bound connection before it dispatches, and
+    # `Ampd.Terminal.Presentation.resolve/3` runs the chain against that
+    # peer. Only then is this endpoint claimed.
+    #
+    # The reverse ordering — authorise first, then present a ticket here with
+    # the descriptor — puts an identifier that must never reach a page onto
+    # `Ampd.Control`'s reply, which is the one wire that ends in JavaScript.
+    defp run("bind_terminal_endpoint", _f, [fd | rest]) do
+      Enum.each(rest, &close_fd/1)
+
+      case Ampd.NativeFd.adopt_socket(fd) do
+        :error ->
+          close_fd(fd)
+          err("invalid-terminal-endpoint", %{"reason" => "the descriptor could not be adopted"})
+
+        {:ok, sock} ->
+          case Ampd.Terminal.Presentations.park(sock) do
+            {:ok, ref} ->
+              ok(%{
+                "endpoint_ref" => ref,
+                "expires_in_ms" => Ampd.Terminal.Presentations.ttl_ms()
+              })
+
+            other ->
+              _ = :socket.close(sock)
+
+              err("invalid-terminal-endpoint", %{
+                "reason" => "the endpoint could not be parked",
+                "detail" => inspect(other)
+              })
+          end
+      end
+    end
+
     defp run("list_channels", _f, fds) do
       Enum.each(fds, &close_fd/1)
       ok(%{"channels" => Ampd.Bridge.list()})
@@ -810,11 +867,15 @@ defmodule Ampd.Transport do
     defp run(cmd, _f, fds) do
       Enum.each(fds, &close_fd/1)
 
-      err("invalid-bridge-command",
-        %{"command" => cmd,
+      err(
+        "invalid-bridge-command",
+        %{
+          "command" => cmd,
           "hint" =>
             "binding a channel requires the channel: pass its descriptor in an SCM_RIGHTS " <>
-              "control message on the same sequenced packet"})
+              "control message on the same sequenced packet"
+        }
+      )
     end
 
     # **This is where the leak was worse than the brief said.**
@@ -831,7 +892,9 @@ defmodule Ampd.Transport do
     # One sink for every descriptor out of ancillary data.
     defp close_fd(fd), do: Ampd.NativeFd.discard(fd)
 
-    defp installed({:refused, r}, _), do: %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+    defp installed({:refused, r}, _),
+      do: %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+
     defp installed(_, pack), do: ok(%{"pack" => pack})
 
     # The shape only. Whether the basis is *the right one* is a question with
@@ -848,14 +911,18 @@ defmodule Ampd.Transport do
     defp ok(map), do: Map.merge(%{"schema" => "bridge-reply@1", "ok" => true}, map)
 
     defp err(code, detail) do
-      %{"schema" => "bridge-reply@1", "ok" => false,
+      %{
+        "schema" => "bridge-reply@1",
+        "ok" => false,
         "refusal" =>
           Ampd.Refusal.new(code,
             component: "Ampd.Transport.HostBridge",
             retryable: false,
             requires_human: false,
             public_message: "That is not a bridge command.",
-            operator_detail: detail)}
+            operator_detail: detail
+          )
+      }
     end
   end
 end

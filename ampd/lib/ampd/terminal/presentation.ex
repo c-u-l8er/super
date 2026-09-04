@@ -145,7 +145,22 @@ defmodule Ampd.Terminal.Presentation do
   def resolve(peer, worker_ref, expected_generation)
       when is_binary(worker_ref) and is_integer(expected_generation) do
     with :ok <- human_control(peer),
-         do: derive(worker_ref, expected_generation)
+         {:ok, p} <- derive(worker_ref, expected_generation) do
+      # **The control-channel incarnation is part of the basis, and it is
+      # added HERE rather than in the chain because the chain has no peer.**
+      # A presentation is opened by a person over a bound connection; when
+      # that connection ends the person watching is gone, and a data plane
+      # that outlived it would be output with nobody entitled to it on the
+      # other end. `Ampd.Peer.owner_pid/1` is the process holding the socket,
+      # so its death IS the channel closing — which is why the field is a
+      # pid and not an id: an id would have to be looked up later, and by
+      # then the answer is `nil` for both "closed" and "never existed".
+      {:ok,
+       Map.merge(p, %{
+         "control_peer_ref" => peer["id"],
+         "control_owner" => Peer.owner_pid(peer["id"])
+       })}
+    end
   end
 
   def resolve(_peer, _worker_ref, _expected),

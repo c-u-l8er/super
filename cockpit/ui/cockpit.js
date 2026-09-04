@@ -429,11 +429,39 @@ export function render(frame) {
       who: `${l.actor} · ${short(l.goal_ref)} · ${held} capabilit${held === 1 ? 'y' : 'ies'}`,
     });
 
+    /* ── D.1.3c·2c·1b · watching a Worker's terminal ──────────────────
+       The action is offered when the projection says a terminal is
+       PRESENT, which is a HINT and not a decision: `terminal_bind` runs
+       the whole chain including the stream owner and may still refuse
+       `terminal-stream-not-active`. A badge and an authority decision
+       must not cost the same — D.1.3c·2c·1a's A2 repair is exactly that
+       separation, and offering the button on the hint is what makes the
+       hint worth deriving.
+
+       Two arguments and no third. `endpoint_ref` is the socket this
+       cockpit process parks over the bridge, and `worker.rs` fills it in;
+       a page cannot be given a descriptor and is not given a name for
+       one. `w.generation` is the incarnation this row was rendered from,
+       so clicking a row the world has since replaced is refused
+       `worker-generation-stale` rather than silently followed to whoever
+       stands there now. */
     const workerRows = mine.map((w) =>
       rowNode({
         id: w.id,
         cap: `└ ${w.id}`,
-        who: `Worker · ${w.occupancy ?? 'OFFLINE'}${w.status === 'closed' ? ' · closed' : ''} · ${w.purpose ?? ''}`,
+        who: `Worker · ${w.occupancy ?? 'OFFLINE'}${w.status === 'closed' ? ' · closed' : ''}${
+          w.terminal === 'PRESENT' ? ' · terminal' : ''
+        } · ${w.purpose ?? ''}`,
+        actions:
+          w.terminal === 'PRESENT' && w.status === 'open'
+            ? [
+                {
+                  label: 'Watch terminal',
+                  intent: 'terminal_bind',
+                  args: { worker_ref: w.id, expected_worker_generation: w.generation ?? 1 },
+                },
+              ]
+            : [],
       }),
     );
 

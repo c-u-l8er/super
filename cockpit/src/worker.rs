@@ -250,6 +250,18 @@ pub const INTENT_SURFACE: &[&str] = &[
     // proposition true — the form in `ui/cockpit.js` and the attempts block in
     // the projection are.
     "reconcile_carrier_attempt",
+    // **D.1.3c·2c·1b, and the one intent whose arguments the page cannot
+    // finish.** `terminal_bind` takes a third field, `endpoint_ref`, naming a
+    // socket that only this process can make — so `apply` parks one and adds
+    // it. The page supplies the two identifiers it already had.
+    //
+    // It is here rather than behind a bespoke command because
+    // `tools/check-intent-surface.mjs` requires set equality with `ampd`'s
+    // `:human_control` mutations, and that law is right: an authority
+    // operation a person cannot reach from the cockpit should be a decision
+    // somebody makes on purpose. A person can reach this one — it is the
+    // *Watch terminal* action on a Worker row.
+    "terminal_bind",
 ];
 
 /// **W.2.3.3 · which established position a bind or unbind is addressed to.**
@@ -312,6 +324,18 @@ pub enum Msg {
     HoldBegin(String),
     /// Releases one key from `holds`. Control lane.
     HoldEnd(String),
+    /// D.1.3c·2c·1b — the terminal pane hands over its byte sink. Control
+    /// lane, and it must arrive **before** any `terminal_bind`: bytes with
+    /// nowhere to go are bytes this process would have to buffer, and the
+    /// whole claim of the data plane is that nothing on it buffers.
+    TerminalSink { sink: Channel<Value> },
+    /// The pane has CONSUMED through `seq` — not received it. Cumulative,
+    /// and it is the only thing that returns credit. Control lane, for the
+    /// same reason `Ack` is: an acknowledgement that can be discarded under
+    /// load wedges the stream it was meant to unwedge.
+    TerminalAck { seq: u64 },
+    /// The pane is done. Control lane.
+    TerminalClose,
 }
 
 /// The two senders, handed to Tauri's command layer as one piece of state.
@@ -892,10 +916,12 @@ fn drain(
     rx: &Receiver<Msg>,
     delivery: &mut Delivery,
     chan: Option<&super_host::Chan>,
+    rt: Option<&super_host::Runtime>,
+    term: &mut crate::terminal::Terminal,
 ) -> bool {
     loop {
         match ctl.try_recv() {
-            Ok(m) => apply(m, delivery, chan),
+            Ok(m) => apply(m, delivery, chan, rt, term),
             Err(std::sync::mpsc::TryRecvError::Empty) => break,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
         }
@@ -903,7 +929,7 @@ fn drain(
 
     loop {
         match rx.try_recv() {
-            Ok(m) => apply(m, delivery, chan),
+            Ok(m) => apply(m, delivery, chan, rt, term),
             Err(std::sync::mpsc::TryRecvError::Empty) => return true,
             Err(std::sync::mpsc::TryRecvError::Disconnected) => return false,
         }
@@ -913,7 +939,18 @@ fn drain(
 /// One message, applied. Blocking is confined to the `Intent` arm — which
 /// is why draining control to empty *first* costs nothing and waiting
 /// behind mutations costs a full round trip each.
-fn apply(m: Msg, delivery: &mut Delivery, chan: Option<&super_host::Chan>) {
+fn apply(
+    m: Msg,
+    delivery: &mut Delivery,
+    chan: Option<&super_host::Chan>,
+    // **`Option`, because there is a loop in `run` with no Runtime at all.**
+    // When `Runtime::start` fails the cockpit parks and keeps serving frames
+    // that say `acquiring` — and a terminal cannot be opened against a
+    // runtime that does not exist, which `submit` says in a sentence rather
+    // than by panicking.
+    rt: Option<&super_host::Runtime>,
+    term: &mut crate::terminal::Terminal,
+) {
     match m {
         Msg::Bind { stream, sink } => delivery.bind(stream, sink),
         Msg::Unbind(stream) => delivery.unbind(stream),
@@ -924,15 +961,76 @@ fn apply(m: Msg, delivery: &mut Delivery, chan: Option<&super_host::Chan>) {
         Msg::HoldEnd(id) => {
             delivery.holds.remove(&id);
         }
+        Msg::TerminalSink { sink } => term.bind_sink(sink),
+        Msg::TerminalAck { seq } => {
+            let _ = term.ack(seq);
+        }
+        Msg::TerminalClose => term.close(),
         Msg::Intent { name, args, reply } => {
             let out = match chan {
                 None => Err("no control channel — the cockpit is not live".to_string()),
-                Some(c) => c
-                    .call(&name, args)
-                    .map(|v| v["result"].clone())
-                    .map_err(|e| e.to_string()),
+                Some(c) => submit(c, rt, term, &name, args),
             };
             let _ = reply.send(out);
+        }
+    }
+}
+
+/// One intent, submitted.
+///
+/// **`terminal_bind` is special-cased here, and the special case is the
+/// point rather than a shortcut.** Every other intent is a message the page
+/// can compose in full. This one needs a descriptor, and a descriptor is not
+/// something a webview can be given — so the page names the position and the
+/// incarnation, and this process makes the socket, hands one end to `ampd`
+/// over the bridge, and fills in the third argument.
+///
+/// The `endpoint_ref` never leaves this function. It is not returned to the
+/// page, it is not stored, and it is single-use on the far side. That is what
+/// keeps the page's designation to the two identifiers it already had.
+///
+/// Ordering: park, then submit. Reversed, `ampd` would have to authorise a
+/// bind naming an endpoint that does not exist yet.
+fn submit(
+    c: &super_host::Chan,
+    rt: Option<&super_host::Runtime>,
+    term: &mut crate::terminal::Terminal,
+    name: &str,
+    args: Value,
+) -> Result<Value, String> {
+    if name != "terminal_bind" {
+        return c.call(name, args).map(|v| v["result"].clone()).map_err(|e| e.to_string());
+    }
+
+    let endpoint = term.park(rt.ok_or("the cockpit is not live")?)?;
+    let mut a = args;
+    a["endpoint_ref"] = Value::String(endpoint);
+
+    match c.call(name, a) {
+        Err(e) => {
+            // The bind never happened, so the socket this process is holding
+            // will never be read. Closing it here is what keeps a refused
+            // request from costing the cockpit a descriptor per attempt.
+            term.close();
+            Err(e.to_string())
+        }
+        Ok(v) => {
+            let r = v["result"].clone();
+            if r["allow"] == true {
+                // **The reader must start or the presentation must end.** `?`
+                // here returned the error and left the plane live on the far
+                // side, streaming into a socket nothing was reading — which
+                // fills, and then blocks `ampd`'s plane rather than telling
+                // anyone. A bind whose reader did not start is a bind that
+                // did not happen.
+                if let Err(e) = term.started() {
+                    term.close();
+                    return Err(e);
+                }
+            } else {
+                term.close();
+            }
+            Ok(r)
         }
     }
 }
@@ -945,6 +1043,12 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
 
     let mut delivery = Delivery::new();
 
+    // Declared before the Runtime, because the parked branch below needs one
+    // too: a pane may bind a sink at any moment, including into a cockpit
+    // whose runtime never started, and a `TerminalSink` message with nowhere
+    // to land would be a message silently dropped.
+    let mut term = crate::terminal::Terminal::new();
+
     let rt = match Runtime::start(&cfg.ampd_dir, world_for(&dir)) {
         Ok(r) => r,
         Err(e) => {
@@ -955,7 +1059,7 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
             // binds is told — including a page that arrives after a reload.
             let note = format!("the runtime did not start: {e}");
             loop {
-                if !drain(&ctl, &rx, &mut delivery, None) {
+                if !drain(&ctl, &rx, &mut delivery, None, None, &mut term) {
                     return;
                 }
                 if delivery.open() && delivery.sent.is_none() {
@@ -1008,7 +1112,7 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
         // Drained before the world is touched, so a click never waits
         // behind a projection poll. `lp.channel()` is read here rather than
         // hoisted out of the loop: a reacquisition replaces it.
-        if !drain(&ctl, &rx, &mut delivery, lp.channel()) {
+        if !drain(&ctl, &rx, &mut delivery, lp.channel(), Some(&rt), &mut term) {
             return;
         }
 

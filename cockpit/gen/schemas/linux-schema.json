@@ -207,6 +207,24 @@
           "markdownDescription": "Enables the intent command without any pre-configured scope."
         },
         {
+          "description": "Enables the terminal_ack command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-ack",
+          "markdownDescription": "Enables the terminal_ack command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-close",
+          "markdownDescription": "Enables the terminal_close command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the terminal_stream command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-stream",
+          "markdownDescription": "Enables the terminal_stream command without any pre-configured scope."
+        },
+        {
           "description": "Enables the unbind_frame_stream command without any pre-configured scope.",
           "type": "string",
           "const": "allow-unbind-frame-stream",
@@ -241,6 +259,24 @@
           "type": "string",
           "const": "deny-intent",
           "markdownDescription": "Denies the intent command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_ack command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-ack",
+          "markdownDescription": "Denies the terminal_ack command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_close command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-close",
+          "markdownDescription": "Denies the terminal_close command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_stream command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-stream",
+          "markdownDescription": "Denies the terminal_stream command without any pre-configured scope."
         },
         {
           "description": "Denies the unbind_frame_stream command without any pre-configured scope.",

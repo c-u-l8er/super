@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>[&amp;] Super — terminal</title>
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <link rel="stylesheet" href="cockpit.css">
+  <style>
+    html, body { margin: 0; height: 100%; }
+    #wrap { display: flex; flex-direction: column; height: 100%; }
+    #term { flex: 1; min-height: 0; }
+    #state { font: 11px/1.6 ui-monospace, monospace; padding: 2px 6px; opacity: .75; }
+  </style>
+</head>
+<body>
+  <!-- D.1.3c·2c·1b — the read-only terminal pane.
+
+       A child webview of the cockpit window holding its OWN capability:
+       `terminal_stream`, `terminal_ack`, `terminal_close`, and no fourth.
+       It cannot submit an intent, cannot bind the frame stream, and holds no
+       core permission. `pane.html` beside it is granted nothing at all and
+       exists so that refusal is measured; this one is the first surface in
+       the application that holds *some* authority and not the cockpit's.
+
+       There is no input handler and no resize handler, and their absence is
+       the scope rather than a stage: SHAPE and DRIVE have no command in this
+       process to be reached by. -->
+  <div id="wrap">
+    <div id="state">no presentation</div>
+    <div id="term"></div>
+  </div>
+  <script src="vendor/xterm.js"></script>
+  <script src="terminal.js"></script>
+</body>
+</html>

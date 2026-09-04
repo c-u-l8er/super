@@ -84,8 +84,11 @@ defmodule Ampd.Bootstrap do
   # an operator can act on.
   defp complaint(state, fields) when state in [:migration_required, :unsupported] do
     m = Ampd.World.read_raw() || %{}
+
     "declares schema_version #{inspect(m["schema_version"])}; this build is at #{Ampd.World.schema_version()}"
-    |> then(&if(state == :unsupported, do: &1 <> " — this world is newer than this build", else: &1))
+    |> then(
+      &if(state == :unsupported, do: &1 <> " — this world is newer than this build", else: &1)
+    )
     |> then(&(&1 <> " · fields differing from this build's shape: #{Enum.join(fields, ", ")}"))
   end
 
@@ -119,6 +122,14 @@ defmodule Ampd.Bootstrap do
     # Before `Ampd.Peer.reset/0`, deliberately: the bridge detaches each
     # identity as it disposes of its channel, and it can only do that while
     # the table that holds them is still the one that minted them.
+    # **Before the bridge and before `Ampd.Peer`**, and the order is the same
+    # argument the comment above makes one level down. A data plane is bound
+    # to a Worker incarnation in the world being reset; closing them first
+    # means each plane tears down against a Peer table that still holds the
+    # attachment it was watching, rather than discovering after the fact
+    # that its basis has become unresolvable. It also closes every parked
+    # endpoint, which is an adopted descriptor with no owner if it is not.
+    if Process.whereis(Ampd.Terminal.Presentations), do: Ampd.Terminal.Presentations.reset()
     if Process.whereis(Ampd.Bridge), do: Ampd.Bridge.reset()
     if Process.whereis(Ampd.Peer), do: Ampd.Peer.reset()
     close_all!()

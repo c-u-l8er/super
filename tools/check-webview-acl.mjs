@@ -35,7 +35,7 @@
    window**, since W.2.2 — and requires **Tauri** to refuse `intent` from
    it, not our JavaScript and not `INTENT_SURFACE`.                      */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -57,7 +57,29 @@ console.log('[&] Super — cockpit webview ACL\n');
 
 const main = readFileSync(`${ROOT}/cockpit/src/main.rs`, 'utf8');
 const build = readFileSync(`${ROOT}/cockpit/build.rs`, 'utf8');
-const cap = JSON.parse(readFileSync(`${ROOT}/cockpit/capabilities/default.json`, 'utf8'));
+/* **EVERY capability file, and reading only `default.json` was a hole.**
+
+   This gate read one file and asserted its `webviews` list had exactly one
+   entry — which reads like "authority is granted to one webview" and is
+   not. A second file in this directory is loaded by Tauri exactly as the
+   first is, and was invisible here: the gate would have reported a
+   perfectly closed boundary over a `capabilities/anything.json` granting
+   `intent` to `*`.
+
+   D.1.3c·2c·1b is what made that reachable rather than theoretical — the
+   terminal pane is the first webview in this application that holds SOME
+   authority and not the cockpit's, so there is now a second file. The
+   per-file laws below are unchanged; what changed is that they are applied
+   to all of them, and that the union is what the command lists are checked
+   against. */
+const capDir = `${ROOT}/cockpit/capabilities`;
+const capFiles = readdirSync(capDir).filter((f) => f.endsWith('.json')).sort();
+const caps = capFiles.map((f) => ({
+  file: f,
+  json: JSON.parse(readFileSync(`${capDir}/${f}`, 'utf8')),
+}));
+
+const cap = (caps.find((c) => c.file === 'default.json') ?? {}).json;
 
 /* `generate_handler![a, b, c]` — read as source rather than as a comment
    about the source. */
@@ -73,10 +95,17 @@ const declared = [...manifest.matchAll(/"([a-z_]+)"/g)].map((m) => m[1]).sort();
 
 const snake = (s) => s.replace(/_/g, '-');
 const granted = (cap.permissions ?? []).slice().sort();
-const grantedCommands = granted
-  .filter((p) => p.startsWith('allow-'))
-  .map((p) => p.slice('allow-'.length))
-  .sort();
+
+/* The union across every capability, because "is this command dead" and
+   "does this grant name something real" are questions about the
+   application, not about one file. Which webview holds which is the
+   per-file question, checked below. */
+const allGranted = caps.flatMap((c) => c.json.permissions ?? []);
+const grantedCommands = [
+  ...new Set(
+    allGranted.filter((p) => p.startsWith('allow-')).map((p) => p.slice('allow-'.length)),
+  ),
+].sort();
 
 check(
   'the three lists can be read at all',
@@ -100,14 +129,14 @@ check(
 
 const ungranted = declared.filter((c) => !grantedCommands.includes(snake(c)));
 check(
-  'every declared command is granted to the cockpit — none is dead',
+  'every declared command is granted to some webview — none is dead',
   ungranted.length === 0,
   `declared but not granted: ${ungranted.join(', ')}`,
 );
 
 const orphan = grantedCommands.filter((c) => !declared.map(snake).includes(c));
 check(
-  'the capability grants nothing that does not exist',
+  'no capability grants anything that does not exist',
   orphan.length === 0,
   `granted with no matching command: ${orphan.join(', ')}`,
 );
@@ -119,9 +148,9 @@ check(
    is a Channel the frontend hands over, so the cockpit needs no core
    permission at all, and having none is a stronger statement than having
    a carefully chosen few. */
-const core = granted.filter((p) => p.startsWith('core:'));
+const core = allGranted.filter((p) => p.startsWith('core:'));
 check(
-  'the cockpit holds no core permission — the frame stream is a Channel, not the event bus',
+  'NO capability holds a core permission — the frame stream is a Channel, not the event bus',
   core.length === 0,
   `core permissions granted: ${core.join(', ')}`,
 );
@@ -152,24 +181,73 @@ check(
    refused here rather than reviewed.                                     */
 
 check(
-  'authority is granted to the trusted WEBVIEW label',
+  'the cockpit\'s authority is granted to the trusted WEBVIEW label',
   Array.isArray(cap.webviews) && cap.webviews.length === 1 && cap.webviews[0] === 'main',
   `webviews: ${JSON.stringify(cap.webviews)}`,
 );
 
+for (const { file, json } of caps) {
+  check(
+    `${file} grants to exactly one webview, by label`,
+    Array.isArray(json.webviews) && json.webviews.length === 1,
+    `webviews: ${JSON.stringify(json.webviews)}`,
+  );
+
+  check(
+    `${file} names no window — a window grant reaches every webview inside it`,
+    !('windows' in json),
+    `windows: ${JSON.stringify(json.windows)} — this grants every child webview of that `
+      + 'window, which is what a browser, terminal or Motor pane is',
+  );
+
+  check(
+    `${file} grants nothing by pattern`,
+    !(json.webviews ?? []).some((w) => /[*?[\]]/.test(w))
+      && !(json.windows ?? []).some((w) => /[*?[\]]/.test(w)),
+    JSON.stringify({ windows: json.windows, webviews: json.webviews }),
+  );
+}
+
+/* **No two capabilities may name the same webview**, because the resolver
+   takes the UNION of everything that matches. Two files each looking
+   narrow would compose into a grant neither of them states, and the file a
+   reader opens would not be the answer. */
+const byWebview = new Map();
+for (const { file, json } of caps) {
+  for (const w of json.webviews ?? []) {
+    byWebview.set(w, [...(byWebview.get(w) ?? []), file]);
+  }
+}
+const doubled = [...byWebview.entries()].filter(([, f]) => f.length > 1);
 check(
-  'the capability names no window — a window grant reaches every webview inside it',
-  !('windows' in cap),
-  `windows: ${JSON.stringify(cap.windows)} — this grants every child webview of that window, `
-    + 'which is what a browser or Motor pane will be',
+  'no webview is named by two capabilities — a grant is one file, readable in one place',
+  doubled.length === 0,
+  doubled.map(([w, f]) => `${w}: ${f.join(' + ')}`).join('; '),
 );
 
-check(
-  'nothing is granted by pattern',
-  !(cap.webviews ?? []).some((w) => /[*?[\]]/.test(w))
-    && !(cap.windows ?? []).some((w) => /[*?[\]]/.test(w)),
-  JSON.stringify({ windows: cap.windows, webviews: cap.webviews }),
-);
+/* **The terminal pane holds the read-only surface and no fourth command.**
+   Not a restatement of the file: `intent` reaching this webview would be a
+   terminal renderer holding a person\'s authority, and `bind_frame_stream`
+   would make it a second reader of the world. Both are one line away in a
+   file whose prose would go on describing a boundary that had stopped
+   existing — which is the same shape as the `windows`/`webviews` slip
+   above, and is refused here rather than reviewed. */
+const term = caps.find((c) => c.file === 'terminal.json');
+if (term) {
+  const p = (term.json.permissions ?? []).slice().sort();
+  check(
+    'the terminal pane holds exactly the read-only byte surface',
+    JSON.stringify(p) === JSON.stringify(['allow-terminal-ack', 'allow-terminal-close', 'allow-terminal-stream']),
+    `terminal.json permissions: ${JSON.stringify(p)}`,
+  );
+
+  check(
+    'and no command for input or resize exists anywhere in this process',
+    !/terminal_input|terminal_resize|terminal_write/.test(main + build),
+    'SHAPE or DRIVE has an entry point — read-only is meant to be structural, '
+      + 'not a stage the code is passing through',
+  );
+}
 
 /* ── W.2.2 · and the same rule where it is actually enforced ─────────────
    A lossy send on a message that RELEASES the delivery valve is the second

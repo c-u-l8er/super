@@ -68,6 +68,23 @@ defmodule Ampd.Application do
       # adopted socket and the fact that a socket dies with its owner. The
       # semantic relation lives on `Ampd.Peer`.
       Ampd.TerminalAttachment.Supervisor,
+      # D.1.3c·2c·1b. Two children for one plane, and the split is the same
+      # one everywhere else in this tree: a registry that outlives what it
+      # registers, and the things themselves under a supervisor that will not
+      # restart them.
+      #
+      # `Presentations` holds parked descriptors and the one-plane-per-
+      # attachment claim. It is `:one_for_one` like everything here, and a
+      # restart of it drops every parked endpoint — correct, because a parked
+      # endpoint whose registry forgot it is a descriptor with no exit, and
+      # the socket dies with the process either way.
+      #
+      # Both are **after** `Ampd.TerminalAttachment.Supervisor`, because a
+      # plane subscribes to an attachment, and **before** the bridge, because
+      # `bind_terminal_endpoint` arrives on the bridge and must find a
+      # registry to park into rather than a name that does not resolve.
+      Ampd.Terminal.Presentations,
+      Ampd.Terminal.Plane.Supervisor,
       # Last: the bridge creates the sockets the outside world arrives on,
       # and nothing should be reachable before the registries that answer
       # it are up. A channel that accepted a connection during boot would
@@ -91,7 +108,10 @@ defmodule Ampd.Application do
 
         if moved != [] do
           require Logger
-          Logger.warning("ampd: #{length(moved)} effect(s) recovered as UNKNOWN — reconcile required: #{inspect(moved)}")
+
+          Logger.warning(
+            "ampd: #{length(moved)} effect(s) recovered as UNKNOWN — reconcile required: #{inspect(moved)}"
+          )
         end
 
         # Same rule, one layer out — and it takes all three durable stores
@@ -107,7 +127,9 @@ defmodule Ampd.Application do
 
           Logger.warning(
             "ampd: #{length(unresolved)} worktree(s) need recovery — " <>
-              Enum.map_join(unresolved, "; ", fn {ref, state, why} -> "#{ref} #{state}: #{why}" end)
+              Enum.map_join(unresolved, "; ", fn {ref, state, why} ->
+                "#{ref} #{state}: #{why}"
+              end)
           )
         end
 

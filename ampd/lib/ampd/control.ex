@@ -109,12 +109,17 @@ defmodule Ampd.Control do
             project(%{"allow" => false, "refusal" => impersonation_refusal(cmd)}, channel)
 
           cmd in @agent and channel != :agent ->
-            project(%{"allow" => false, "refusal" => wrong_channel_refusal(cmd, channel)}, channel)
+            project(
+              %{"allow" => false, "refusal" => wrong_channel_refusal(cmd, channel)},
+              channel
+            )
 
           cmd not in @human and cmd not in @agent and cmd not in @both and cmd not in @open ->
             project(
-              %{"allow" => false,
-                "refusal" => Refusal.new("unknown-command", component: to_string(cmd))},
+              %{
+                "allow" => false,
+                "refusal" => Refusal.new("unknown-command", component: to_string(cmd))
+              },
               channel
             )
 
@@ -237,7 +242,8 @@ defmodule Ampd.Control do
   defp dispatch(peer, :preflight, [cap, resource, request]),
     do: Gateway.preflight(cap, resource, Peer.authoritative_context(peer, request), request)
 
-  defp dispatch(peer, :preflight, [cap, resource]), do: dispatch(peer, :preflight, [cap, resource, nil])
+  defp dispatch(peer, :preflight, [cap, resource]),
+    do: dispatch(peer, :preflight, [cap, resource, nil])
 
   defp dispatch(peer, :agent_projection, _), do: Projection.agent(peer["actor"])
 
@@ -253,8 +259,12 @@ defmodule Ampd.Control do
       "reason" => opts["reason"]
     })
     |> settled(fn q ->
-      %{"allow" => false, "held" => true, "grant_request" => q,
-        "reason" => "grant-requested · a person decides this, not the runtime"}
+      %{
+        "allow" => false,
+        "held" => true,
+        "grant_request" => q,
+        "reason" => "grant-requested · a person decides this, not the runtime"
+      }
     end)
   end
 
@@ -350,7 +360,8 @@ defmodule Ampd.Control do
                 "hint" =>
                   "membership has ended, but a process may still exist — a replacement " <>
                     "is refused until reconcile_carrier_attempt establishes absence"
-              })
+              }
+            )
         }
     end
   end
@@ -360,7 +371,10 @@ defmodule Ampd.Control do
   # `Carrier.still_current?/2` refuses to report, and leaving the process alive
   # would make that refusal cosmetic.
   defp dispatch(peer, :detach_worker, _) do
-    r = Ampd.Worker.detach(peer) |> settled(fn r -> Map.merge(%{"allow" => true, "occupancy" => "OFFLINE"}, r) end)
+    r =
+      Ampd.Worker.detach(peer)
+      |> settled(fn r -> Map.merge(%{"allow" => true, "occupancy" => "OFFLINE"}, r) end)
+
     Ampd.Carrier.converge("the occupancy was detached")
     r
   end
@@ -502,7 +516,9 @@ defmodule Ampd.Control do
   # the thing. Closing advances the generation, so `converge/1` finds the
   # incarnation stale by re-derivation rather than by being told.
   defp dispatch(_peer, :close_worker, [worker_ref]) do
-    r = Authority.close_worker(worker_ref) |> settled(fn w -> %{"allow" => true, "worker" => w} end)
+    r =
+      Authority.close_worker(worker_ref) |> settled(fn w -> %{"allow" => true, "worker" => w} end)
+
     Ampd.Carrier.converge("the worker was closed")
     r
   end
@@ -510,6 +526,37 @@ defmodule Ampd.Control do
   defp dispatch(_peer, :reopen_worker, [worker_ref]) do
     Authority.reopen_worker(worker_ref)
     |> settled(fn w -> %{"allow" => true, "worker" => w} end)
+  end
+
+  # **D.1.3c·2c·1b — the one place a terminal data plane is authorised, and
+  # `peer` is the bound connection rather than an argument.**
+  #
+  # Everything the page may say is in the head: the position it designates,
+  # the incarnation of it that it saw, and the endpoint its own process
+  # parked over the bridge. The Peer, the Carrier, the attachment and the
+  # stream owner are derived by `Ampd.Terminal.Presentation.resolve/3` from
+  # those, and none of them is returned — `presentable/1` hands back the two
+  # identifiers the page already had. A derived identifier crossing to a page
+  # is how an unguessable name becomes a bearer token.
+  #
+  # **The endpoint is claimed only after the authority holds.** Ordered the
+  # other way, a refused request would still have consumed the descriptor,
+  # and a page could exhaust a cockpit's endpoints by asking for Workers it
+  # may not see.
+  defp dispatch(peer, :terminal_bind, [worker_ref, expected_generation, endpoint_ref]) do
+    case Ampd.Terminal.Presentation.resolve(peer, worker_ref, expected_generation) do
+      {:refused, r} ->
+        %{"allow" => false, "refusal" => r}
+
+      {:ok, presentation} ->
+        case Ampd.Terminal.Plane.open(endpoint_ref, presentation) do
+          {:ok, _pid, presentable} ->
+            %{"allow" => true, "presentation" => presentable}
+
+          {:error, reason} ->
+            %{"allow" => false, "refusal" => plane_refusal(reason)}
+        end
+    end
   end
 
   defp dispatch(_peer, :approve_effect, [request_id, approval_id]),
@@ -554,9 +601,11 @@ defmodule Ampd.Control do
     scope = Map.take(scope || %{}, ["actor", "capability", "resource"])
 
     if scope == %{} or Enum.all?(scope, fn {_, v} -> v == nil end) do
-      refuse("bulk-scope-unbounded",
+      refuse(
+        "bulk-scope-unbounded",
         "A bulk revocation must name at least one of actor, capability, or resource.",
-        %{"scope" => scope})
+        %{"scope" => scope}
+      )
     else
       Authority.revoke_matching(scope, expected_ids)
       |> settled(fn ids -> %{"allow" => true, "revoked" => ids, "count" => length(ids)} end)
@@ -586,7 +635,8 @@ defmodule Ampd.Control do
   defp dispatch(peer, :list_grant_requests, [cursor, limit]),
     do: Projection.page(Projection.history_for(:grant_requests, peer["actor"]), cursor, limit)
 
-  defp dispatch(_peer, :approve_grant_request, [id]), do: dispatch(nil, :approve_grant_request, [id, nil])
+  defp dispatch(_peer, :approve_grant_request, [id]),
+    do: dispatch(nil, :approve_grant_request, [id, nil])
 
   defp dispatch(_peer, :approve_grant_request, [id, duration]) do
     Authority.approve_grant_request(id, duration)
@@ -609,7 +659,9 @@ defmodule Ampd.Control do
     %{
       "schema" => "recovery-status@1",
       "seals" =>
-        Enum.map(Ampd.seals(), fn {m, reason} -> %{"registry" => inspect(m), "reason" => reason} end),
+        Enum.map(Ampd.seals(), fn {m, reason} ->
+          %{"registry" => inspect(m), "reason" => reason}
+        end),
       "world" => %{
         "manifest_state" => to_string(Ampd.World.manifest_state()),
         "lineage" => Ampd.World.lineage()
@@ -617,6 +669,29 @@ defmodule Ampd.Control do
       "recoverable" => false,
       "note" => "reporting only — no recovery transition is implemented yet"
     }
+  end
+
+  # The plane's failures are runtime facts rather than authority ones — an
+  # endpoint that expired, a stream owner that died between the derivation
+  # and the bind, a terminal something else is already presenting. They get
+  # their own names for the same reason every link in the resolution chain
+  # does: `terminal-already-presented` and `terminal-endpoint-unknown` call
+  # for opposite responses from whoever reads them.
+  defp plane_refusal(reason) do
+    code =
+      case reason do
+        :unknown_terminal_endpoint -> "terminal-endpoint-unknown"
+        :terminal_already_presented -> "terminal-already-presented"
+        :terminal_stream_gone -> "terminal-stream-gone"
+        other -> "terminal-plane-refused-#{other}"
+      end
+
+    Ampd.Refusal.new(code,
+      component: "Ampd.Terminal.Plane",
+      retryable: false,
+      requires_human: false,
+      operator_detail: %{"reason" => to_string(reason)}
+    )
   end
 
   @doc """
@@ -631,9 +706,11 @@ defmodule Ampd.Control do
   def inspect_refusal(id) do
     case Ampd.RefusalLog.get(id) do
       nil ->
-        refuse("refusal-unknown",
+        refuse(
+          "refusal-unknown",
           "No refusal with that correlation id is still in the ring.",
-          %{"correlation_id" => id, "ring_capacity" => Ampd.RefusalLog.capacity()})
+          %{"correlation_id" => id, "ring_capacity" => Ampd.RefusalLog.capacity()}
+        )
 
       r ->
         %{"allow" => false, "schema" => "refusal-lookup@1", "refusal" => r}
@@ -722,7 +799,10 @@ defmodule Ampd.Control do
   refusal.
   """
   def settled(result, on_ok)
-  def settled({:refused, r}, _on_ok), do: %{"allow" => false, "reason" => r["public_message"], "refusal" => r}
+
+  def settled({:refused, r}, _on_ok),
+    do: %{"allow" => false, "reason" => r["public_message"], "refusal" => r}
+
   def settled({:ok, v}, on_ok), do: on_ok.(v)
   def settled(v, on_ok), do: on_ok.(v)
 

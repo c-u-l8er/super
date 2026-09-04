@@ -92,6 +92,7 @@
 //! comes back, because the substitution is one word and reopens the class
 //! silently.
 
+mod terminal;
 mod worker;
 
 use std::path::PathBuf;
@@ -254,6 +255,42 @@ async fn hold_end(id: String, queue: State<'_, Queues>) -> Result<(), String> {
     control(&queue, Msg::HoldEnd(id)).await
 }
 
+/// D.1.3c·2c·1b — **the terminal pane offers its byte sink.**
+///
+/// Granted to the `terminal` webview and to nothing else. It is a separate
+/// capability file rather than another permission on `default.json`, because
+/// `default.json` grants the cockpit `intent` — and a pane that could submit
+/// intents would be a terminal renderer holding a person's authority.
+///
+/// The sink must be bound before a presentation is opened. Bytes with
+/// nowhere to go are bytes this process would have to buffer, and the claim
+/// of the data plane is that nothing on it buffers.
+#[tauri::command]
+async fn terminal_stream(channel: Channel<Value>, queue: State<'_, Queues>) -> Result<(), String> {
+    control(&queue, Msg::TerminalSink { sink: channel }).await
+}
+
+/// The pane has **consumed** through `seq` — xterm's write callback, not the
+/// arrival of the message. Cumulative, and the only thing that returns
+/// credit: with none outstanding the runtime stops pulling, the socketpair
+/// fills, and the Carrier blocks in `write(2)`.
+///
+/// On the control lane for the same reason `frame_ack` is. An acknowledgement
+/// that can be discarded under load wedges the stream it exists to unwedge.
+#[tauri::command]
+async fn terminal_ack(seq: u64, queue: State<'_, Queues>) -> Result<(), String> {
+    control(&queue, Msg::TerminalAck { seq }).await
+}
+
+/// The pane is done looking. **Read-only, and there is nothing else here.**
+/// No input, no resize, no dormant method for either — D.1.3c·2c·1a's scope
+/// is structural: a power with no entry point cannot be reached by supplying
+/// a different argument.
+#[tauri::command]
+async fn terminal_close(queue: State<'_, Queues>) -> Result<(), String> {
+    control(&queue, Msg::TerminalClose).await
+}
+
 /// Where `ampd` is. `AMPD_DIR`, or `ampd/` beside the working directory —
 /// the same resolution `super-host` uses, because two answers to "which
 /// runtime" is two products.
@@ -319,7 +356,10 @@ fn main() {
             intent,
             frame_ack,
             hold_begin,
-            hold_end
+            hold_end,
+            terminal_stream,
+            terminal_ack,
+            terminal_close
         ])
         .setup(move |app| {
             let cfg = worker::Config { ampd_dir: dir.clone(), fixture };
@@ -350,6 +390,25 @@ fn main() {
                     ),
                     tauri::LogicalPosition::new(0., 600.),
                     tauri::LogicalSize::new(520., 200.),
+                )?;
+
+                // **D.1.3c·2c·1b — a THIRD webview, and it is the point of
+                // the second capability file.** `pane` is granted nothing;
+                // `terminal` is granted three commands and no fourth. It is
+                // the first surface in this application that holds *some*
+                // authority and not the cockpit's, which is the shape every
+                // later pane will have — a browser, a Motor surface, a game.
+                //
+                // A window-scoped capability would have handed it every
+                // permission the cockpit holds, which is W.2.1's defect and
+                // why `capabilities/default.json` names no window.
+                main.add_child(
+                    tauri::webview::WebviewBuilder::new(
+                        "terminal",
+                        tauri::WebviewUrl::App("terminal.html".into()),
+                    ),
+                    tauri::LogicalPosition::new(560., 600.),
+                    tauri::LogicalSize::new(600., 200.),
                 )?;
             }
             Ok(())

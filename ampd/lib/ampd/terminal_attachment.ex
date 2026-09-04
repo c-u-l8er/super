@@ -149,6 +149,10 @@ defmodule Ampd.TerminalAttachment do
   a commit could be reaped five seconds before its own worst case. The
   margin is a third interval on top, not a rounding.
   """
+  # A guard cannot call a function, and `chunks/1` guards on this. Two
+  # numbers that must agree is how they come to disagree.
+  @chunk 4_096
+
   def setup_deadline_ms, do: 2 * Ampd.AuthorityCoordinator.budget_ms() + 3 * 5_000
 
   # ------------------------------------------------------------------ api
@@ -264,6 +268,77 @@ defmodule Ampd.TerminalAttachment do
   @doc "Bytes from the terminal, up to `n`. **Refused before ACTIVE.**"
   def read(pid, n \\ 4096, timeout \\ 0), do: GenServer.call(pid, {:read, n, timeout})
 
+  @doc """
+  Bytes out of the terminal, to **one** reader, under a window that reader
+  opens with acks. D.1.3c·2c·1b's data plane.
+
+  `{:ok, chunk_bytes}` or `{:error, reason}`. Refused unless ACTIVE, for the
+  same reason `read/3` and `write/2` are: reading a terminal is an act of
+  possession and a process that does not yet represent one may not do it.
+  Refused if a reader is already bound — **one presentation per attachment**
+  — because two readers of one stream is not fan-out, it is each of them
+  seeing an arbitrary half of the output.
+
+  ## Why this exists next to `read/3` rather than instead of it
+
+  `read/3` is a synchronous `:socket.recv/3` inside this process, so a reader
+  using it holds the mailbox for its whole timeout — which is what makes
+  `state/2` slow, and what D.1.3c·2c·1a's A2 repair is about. A data plane
+  built on it would put that cost on the ordered surface permanently.
+
+  This path never blocks. It asks the socket with `:nowait`, gets back a
+  select token, and returns to the mailbox; the bytes arrive later as a
+  message from the runtime. So an attachment streaming megabytes still
+  answers `:state` immediately.
+
+  ## The window is the whole mechanism, and it is credits rather than bytes
+
+  Each delivered chunk consumes one credit. `ack/2` is **cumulative**: acking
+  sequence *n* returns every credit through *n*, so a lost ack costs latency
+  and never correctness. At zero credits this process stops selecting on the
+  socket — it does not buffer, it stops asking. The consequence travels the
+  whole way down:
+
+      page stops acking
+        → this stops selecting
+        → the socketpair to the host fills          (SO_RCVBUF)
+        → the host's pump stops draining the master
+        → the Carrier blocks in write(2)
+
+  which is a terminal that has been told to wait, not one whose output is
+  being dropped. Nothing on this plane may coalesce or discard: the control
+  plane's valve does both, correctly, because a projection frame supersedes
+  its predecessor. A byte does not supersede anything.
+  """
+  def subscribe(pid, consumer, credits)
+      when is_pid(consumer) and is_integer(credits) and credits > 0,
+      do: GenServer.call(pid, {:subscribe, consumer, credits})
+
+  @doc "Release the reader binding. Idempotent; a stranger's call is refused."
+  def unsubscribe(pid, consumer) when is_pid(consumer),
+    do: GenServer.call(pid, {:unsubscribe, consumer})
+
+  @doc """
+  Return credits through `seq`, and let the pull resume.
+
+  A cast, because an ack is not a question and the reader must not be made
+  to wait on the process it is unblocking.
+  """
+  def ack(pid, seq) when is_integer(seq), do: GenServer.cast(pid, {:ack, self(), seq})
+
+  @doc """
+  The largest chunk this will deliver in one message.
+
+  **Bounded here rather than by the socket**, because `:socket.recv/4` with
+  length 0 returns everything available — up to the receive buffer, which is
+  64 KiB on this host and not a number this module chose. A window counted in
+  chunks is only a memory bound if a chunk has a size, so the read is split
+  here and the remainder is held. That remainder is the one buffer on this
+  path, it is at most one socket read, and `probes/terminal_backpressure.exs`
+  measures it rather than asserting it.
+  """
+  def chunk_bytes, do: @chunk
+
   # ----------------------------------------------------------------- impl
 
   @impl true
@@ -297,10 +372,11 @@ defmodule Ampd.TerminalAttachment do
     # attachment reaches its deadline and closes without ever having meant
     # anything. Reconnecting the monitor would be machinery for a window in
     # which the thing it protects cannot exist.
-    registry_ref = case Process.whereis(Ampd.Peer) do
-      nil -> nil
-      p -> Process.monitor(p)
-    end
+    registry_ref =
+      case Process.whereis(Ampd.Peer) do
+        nil -> nil
+        p -> Process.monitor(p)
+      end
 
     {:ok,
      %{
@@ -313,7 +389,13 @@ defmodule Ampd.TerminalAttachment do
        identity: identity,
        owner: nil,
        owner_ref: nil,
-       record: nil
+       record: nil,
+       # D.1.3c·2c·1b. `nil` until a presentation binds a reader; at most one
+       # ever, and it does not survive this process.
+       reader: nil,
+       # Undelivered tail of the last socket read, held because the read is
+       # not the chunk. Empty whenever credits are available.
+       pending: []
      }}
   end
 
@@ -335,7 +417,14 @@ defmodule Ampd.TerminalAttachment do
         Process.demonitor(s.setup_ref, [:flush])
 
         {:reply, :ok,
-         %{s | phase: :prepared, record: record, owner: owner, owner_ref: owner_ref, setup_ref: nil}}
+         %{
+           s
+           | phase: :prepared,
+             record: record,
+             owner: owner,
+             owner_ref: owner_ref,
+             setup_ref: nil
+         }}
 
       bad ->
         {:reply, {:error, {:identity_mismatch, bad}}, s}
@@ -376,11 +465,69 @@ defmodule Ampd.TerminalAttachment do
   def handle_call({:write, data}, _from, %{phase: :active} = s),
     do: {:reply, :socket.send(s.sock, data), s}
 
+  # **Refused while a presentation holds the stream**, and not for tidiness.
+  # Both read the same socket, so a `read/3` alongside a bound reader takes
+  # bytes the reader will never see and cannot know it missed — a gap in a
+  # plane whose entire claim is that it has none.
+  def handle_call({:read, _, _}, _from, %{phase: :active, reader: r} = s) when not is_nil(r),
+    do: {:reply, {:error, :presented}, s}
+
   def handle_call({:read, n, timeout}, _from, %{phase: :active} = s),
     do: {:reply, :socket.recv(s.sock, n, timeout), s}
 
+  # ------------------------------------------------- the reader binding
+
+  def handle_call({:subscribe, _consumer, _credits}, _from, %{phase: p} = s) when p != :active,
+    do: {:reply, {:error, p}, s}
+
+  # **One, and the second is refused rather than queued.** Two readers of one
+  # terminal stream is not spectator fan-out; each would receive whichever
+  # bytes the runtime happened to hand it. Fan-out needs a mechanism that
+  # copies, and that mechanism is not this slice.
+  def handle_call({:subscribe, _consumer, _credits}, _from, %{reader: r} = s) when not is_nil(r),
+    do: {:reply, {:error, :already_presented}, s}
+
+  def handle_call({:subscribe, consumer, credits}, _from, s) do
+    ref = Process.monitor(consumer)
+
+    reader = %{
+      pid: consumer,
+      ref: ref,
+      credits: credits,
+      limit: credits,
+      seq: 0,
+      acked: 0,
+      # The outstanding `:nowait` token, if one is. Selecting twice on one
+      # socket is an error, so this is what says "already asked".
+      select: nil
+    }
+
+    {:reply, {:ok, chunk_bytes()}, pump(%{s | reader: reader})}
+  end
+
+  def handle_call({:unsubscribe, consumer}, _from, %{reader: %{pid: consumer}} = s),
+    do: {:reply, :ok, release(s)}
+
+  def handle_call({:unsubscribe, _consumer}, _from, s), do: {:reply, :ok, s}
+
   def handle_call({:write, _}, _from, s), do: {:reply, {:error, s.phase}, s}
   def handle_call({:read, _, _}, _from, s), do: {:reply, {:error, s.phase}, s}
+
+  @impl true
+  # **Cumulative, and bounded by what was actually sent.** An ack for a
+  # sequence this process never delivered is a reader inventing credit, and a
+  # reader that can invent credit can make the window meaningless without
+  # ever looking wrong. An ack that goes backwards is dropped rather than
+  # refused: it is a duplicate, which is ordinary.
+  def handle_cast({:ack, from, seq}, %{reader: %{pid: from} = r} = s) do
+    cond do
+      seq > r.seq -> {:noreply, release(s)}
+      seq <= r.acked -> {:noreply, s}
+      true -> {:noreply, pump(%{s | reader: %{r | acked: seq, credits: r.limit - (r.seq - seq)}})}
+    end
+  end
+
+  def handle_cast({:ack, _from, _seq}, s), do: {:noreply, s}
 
   @impl true
   # **Two lifetimes, and they are not the same one.**
@@ -433,8 +580,90 @@ defmodule Ampd.TerminalAttachment do
     {:stop, :normal, %{s | timer: nil}}
   end
 
+  # The reader is gone, so the pull stops and the credits die with it. The
+  # possession does not: closing a presentation must leave the terminal
+  # ACTIVE, which is why this is a `release/1` and not a `{:stop, …}`.
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, %{reader: %{ref: ref}} = s),
+    do: {:noreply, release(s)}
+
   def handle_info(:setup_deadline, s), do: {:noreply, s}
+
+  # The runtime says the socket has something. The token is spent — asking
+  # again without clearing it is what makes `:socket.recv/4` return
+  # `{:error, :einval}` on the second select.
+  def handle_info({:"$socket", sock, :select, _ref}, %{sock: sock, reader: r} = s)
+      when not is_nil(r),
+      do: {:noreply, pump(%{s | reader: %{r | select: nil}})}
+
+  def handle_info({:"$socket", _sock, :abort, _info}, %{reader: r} = s) when not is_nil(r),
+    do: {:stop, :normal, s}
+
   def handle_info(_, s), do: {:noreply, s}
+
+  # ------------------------------------------------------------- the pull
+
+  # **Ask only when there is somewhere to put the answer.** Every early
+  # return here is backpressure: no reader, no credits, or a question already
+  # outstanding. None of them buffers, and that is the difference between
+  # this and a queue that grows until something dies.
+  defp pump(%{reader: nil} = s), do: s
+  defp pump(%{reader: %{select: sel}} = s) when not is_nil(sel), do: s
+  defp pump(%{reader: %{credits: c}} = s) when c <= 0, do: s
+
+  defp pump(%{pending: [piece | rest]} = s) do
+    r = s.reader
+    seq = r.seq + 1
+    send(r.pid, {:terminal_out, self(), seq, piece})
+    pump(%{s | pending: rest, reader: %{r | seq: seq, credits: r.credits - 1}})
+  end
+
+  defp pump(%{pending: []} = s) do
+    case :socket.recv(s.sock, 0, [], :nowait) do
+      {:ok, data} when byte_size(data) > 0 ->
+        pump(%{s | pending: chunks(data)})
+
+      # A partial answer WITH a token: OTP has given what it had and will say
+      # when there is more. Both halves matter — dropping the data here loses
+      # bytes on a plane that claims it cannot, and dropping the token stops
+      # the stream for good.
+      {:select, {select_info, data}} when is_binary(data) and byte_size(data) > 0 ->
+        pump(%{s | pending: chunks(data), reader: %{s.reader | select: select_info}})
+
+      {:select, select_info} ->
+        %{s | reader: %{s.reader | select: select_info}}
+
+      {:ok, _empty} ->
+        s
+
+      {:error, {_reason, data}} when is_binary(data) and byte_size(data) > 0 ->
+        pump(%{s | pending: chunks(data)})
+
+      {:error, :closed} ->
+        send(s.reader.pid, {:terminal_closed, self(), :closed})
+        release(s)
+
+      {:error, _other} ->
+        s
+    end
+  end
+
+  # A socket read is not a chunk. `:socket.recv/4` with length 0 hands back
+  # everything the receive buffer holds, so the window is only a memory bound
+  # once the read has been cut to a size this module chose.
+  defp chunks(data) when byte_size(data) <= @chunk, do: [data]
+
+  defp chunks(<<head::binary-size(@chunk), rest::binary>>), do: [head | chunks(rest)]
+
+  # Drop the reader, keep the possession. Undelivered bytes go with it —
+  # `Ampd.Terminal.Plane` states why reopening begins empty rather than
+  # replaying: there is no server-side scrollback to replay from, and
+  # inventing one would make the runtime hold a person's terminal history.
+  defp release(%{reader: nil} = s), do: s
+
+  defp release(%{reader: r} = s) do
+    Process.demonitor(r.ref, [:flush])
+    %{s | reader: nil, pending: []}
+  end
 
   # The five fields that say *which* attachment this is. Physical identity,
   # not authority: agreeing on them does not make a record permitted, it

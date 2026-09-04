@@ -177,21 +177,26 @@ async function labels() {
                              m.currentWebview && m.currentWebview.label] : null;`);
 }
 
-async function findCockpitAndPane() {
+/* **Three webviews as of D.1.3c·2c·1b, and the count is derived rather
+   than typed.** This returned a fixed `{cockpit, pane}` and two probes
+   asserted `count === 2`; adding the terminal pane turned both red for a
+   reason that had nothing to do with authority. A topology assertion
+   should say what the topology IS — one trusted cockpit, N panes inside
+   the same window, every label distinct — not how many there happened to
+   be when it was written. */
+async function findWebviews() {
   const hs = await handles();
   const seen = [];
-  let cockpit = null;
-  let pane = null;
   for (const h of hs) {
     await focus(h);
     const l = await labels();
     if (!l) continue;
     const [win, view] = l;
     seen.push({ handle: h, window: win, webview: view });
-    if (view === 'main') cockpit = h;
-    if (view === 'pane') pane = h;
   }
-  return { cockpit, pane, count: hs.length, seen };
+  const by = Object.fromEntries(seen.map((v) => [v.webview, v.handle]));
+  return { cockpit: by.main ?? null, pane: by.pane ?? null, terminal: by.terminal ?? null,
+           count: hs.length, seen };
 }
 
 /* ── the run ─────────────────────────────────────────────────────────── */
@@ -339,25 +344,27 @@ async function main() {
 
 let COCKPIT = null;
 let PANE = null;
+let TERMINAL = null;
 let SEEN = [];
 
 async function run() {
   /* ── two webviews, and only one of them is trusted ─────────────────── */
 
-  const found = await waitFor('both webviews to open',
+  const found = await waitFor('every webview to open',
     async () => {
-      const f = await findCockpitAndPane();
-      return f.cockpit && f.pane ? f : null;
+      const f = await findWebviews();
+      return f.cockpit && f.pane && f.terminal ? f : null;
     },
     60_000);
 
   COCKPIT = found.cockpit;
   PANE = found.pane;
+  TERMINAL = found.terminal;
   SEEN = found.seen;
   check(
-    'the application opens the trusted cockpit and an untrusted pane beside it',
-    !!COCKPIT && !!PANE && found.count === 2,
-    `${found.count} webviews`,
+    'the application opens the trusted cockpit and two panes beside it',
+    !!COCKPIT && !!PANE && !!TERMINAL && found.count === SEEN.length,
+    `${found.count} webviews: ${SEEN.map((v) => v.webview).join(', ')}`,
   );
 
   /* ── W.2.2 · and the pane is INSIDE the trusted window ────────────────
@@ -376,14 +383,16 @@ async function run() {
 
   const topo = Object.fromEntries(SEEN.map((s) => [s.webview, s.window]));
   check(
-    'the untrusted pane is a child webview of the TRUSTED window, not a second window',
-    topo.main === 'main' && topo.pane === 'main',
+    'every pane is a child webview of the TRUSTED window, not a second window',
+    SEEN.length > 1 && SEEN.every((v) => v.window === 'main'),
     `labels: ${JSON.stringify(SEEN)}`,
   );
 
+  const views = SEEN.map((v) => v.webview);
   check(
-    'and it is a distinct webview — the two are told apart by the label the ACL resolves against',
-    SEEN.length === 2 && SEEN[0].webview !== SEEN[1].webview,
+    'and each is a distinct webview — they are told apart by the label the ACL resolves against',
+    new Set(views).size === views.length && views.includes('main') && views.includes('pane')
+      && views.includes('terminal'),
     JSON.stringify(SEEN),
   );
 
@@ -1914,6 +1923,91 @@ async function run() {
     'and it may not bind the frame stream either — it cannot become a second reader of the world',
     paneBind.ok === false && /not allowed by ACL/.test(paneBind.e ?? ''),
     JSON.stringify(paneBind),
+  );
+
+  /* ── D.1.3c·2c·1b · the terminal pane, which holds SOME authority ─────
+
+     `pane` is granted nothing, which makes its refusals easy. `terminal` is
+     the first webview in this application granted *some* authority and not
+     the cockpit's — the shape every later pane will have — so the
+     interesting assertions are about the boundary of what it holds, in
+     both directions. Every one of these is Tauri's ACL answering, not our
+     JavaScript: the pane's own script never tests a permission. */
+
+  await focus(TERMINAL);
+
+  const termBound = await waitSoft(
+    () => script('return window.terminalPane ? window.terminalPane.bound : null')
+      .then((v) => (v === true ? true : null)),
+    20_000,
+  );
+  check(
+    'the terminal pane may offer its byte sink — the read-only surface it does hold',
+    termBound === true,
+    'terminal_stream was refused, or the pane never loaded',
+  );
+
+  const termAck = await scriptAsync(`
+    const done = arguments[arguments.length - 1];
+    window.__TAURI__.core.invoke('terminal_ack', { seq: 0 })
+      .then(() => done({ ok: true }), (e) => done({ ok: false, e: String(e) }));
+  `);
+  check(
+    'and it may acknowledge — the credit that drives the stream is the pane\'s to give',
+    termAck.ok === true || !/not allowed by ACL/.test(termAck.e ?? ''),
+    JSON.stringify(termAck),
+  );
+
+  const termIntent = await scriptAsync(`
+    const done = arguments[arguments.length - 1];
+    window.__TAURI__.core.invoke('intent', { name: 'revoke_grant', args: {} })
+      .then((v) => done({ ok: true, v }), (e) => done({ ok: false, e: String(e) }));
+  `);
+  check(
+    'a terminal renderer may not submit an intent — it holds bytes, not a person\'s authority',
+    termIntent.ok === false && /not allowed by ACL/.test(termIntent.e ?? ''),
+    JSON.stringify(termIntent),
+  );
+
+  const termFrames = await scriptAsync(`
+    const done = arguments[arguments.length - 1];
+    const ch = new window.__TAURI__.core.Channel();
+    window.__TAURI__.core.invoke('bind_frame_stream', { channel: ch })
+      .then(() => done({ ok: true }), (e) => done({ ok: false, e: String(e) }));
+  `);
+  check(
+    'and it may not bind the frame stream — the data plane is not a way to reach the control one',
+    termFrames.ok === false && /not allowed by ACL/.test(termFrames.e ?? ''),
+    JSON.stringify(termFrames),
+  );
+
+  const paneTerm = await (async () => {
+    await focus(PANE);
+    return scriptAsync(`
+      const done = arguments[arguments.length - 1];
+      const ch = new window.__TAURI__.core.Channel();
+      window.__TAURI__.core.invoke('terminal_stream', { channel: ch })
+        .then(() => done({ ok: true }), (e) => done({ ok: false, e: String(e) }));
+    `);
+  })();
+  check(
+    'the granted-nothing pane may not offer a terminal sink either — the grant is per webview',
+    paneTerm.ok === false && /not allowed by ACL/.test(paneTerm.e ?? ''),
+    JSON.stringify(paneTerm),
+  );
+
+  const cockpitTerm = await (async () => {
+    await focus(COCKPIT);
+    return scriptAsync(`
+      const done = arguments[arguments.length - 1];
+      window.__TAURI__.core.invoke('terminal_ack', { seq: 1 })
+        .then(() => done({ ok: true }), (e) => done({ ok: false, e: String(e) }));
+    `);
+  })();
+  check(
+    'and the COCKPIT may not acknowledge terminal output — a grant is not a hierarchy',
+    cockpitTerm.ok === false && /not allowed by ACL/.test(cockpitTerm.e ?? ''),
+    JSON.stringify(cockpitTerm),
   );
 
   await focus(COCKPIT);

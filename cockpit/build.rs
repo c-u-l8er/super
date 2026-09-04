@@ -25,6 +25,9 @@ fn main() {
                 "frame_ack",
                 "hold_begin",
                 "hold_end",
+                "terminal_stream",
+                "terminal_ack",
+                "terminal_close",
             ]),
         ),
     )

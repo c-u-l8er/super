@@ -79,6 +79,7 @@ defmodule Ampd.CommandSpec do
   @request_bytes 64 * 1024
   @scope_bytes 4 * 1024
   @max_expected_ids 512
+  @max_generation 1_000_000
 
   # A worktree leaf name. 64 B rather than 512 because it becomes one path
   # segment, and the limit that matters is the one the filesystem has —
@@ -93,7 +94,13 @@ defmodule Ampd.CommandSpec do
   # ---------------------------------------------------------------------
   @commands %{
     # ------------------------------------------------------------ agent
-    "agent_projection" => %{cmd: :agent_projection, channel: :agent, kind: :read, retry: :safe, fields: []},
+    "agent_projection" => %{
+      cmd: :agent_projection,
+      channel: :agent,
+      kind: :read,
+      retry: :safe,
+      fields: []
+    },
     "preflight" => %{
       cmd: :preflight,
       channel: :agent,
@@ -130,8 +137,20 @@ defmodule Ampd.CommandSpec do
     },
 
     # ---------------------------------------------------------- human
-    "operator_projection" => %{cmd: :operator_projection, channel: :human_control, kind: :read, retry: :safe, fields: []},
-    "recovery_status" => %{cmd: :recovery_status, channel: :human_control, kind: :read, retry: :safe, fields: []},
+    "operator_projection" => %{
+      cmd: :operator_projection,
+      channel: :human_control,
+      kind: :read,
+      retry: :safe,
+      fields: []
+    },
+    "recovery_status" => %{
+      cmd: :recovery_status,
+      channel: :human_control,
+      kind: :read,
+      retry: :safe,
+      fields: []
+    },
     "approve_effect" => %{
       cmd: :approve_effect,
       channel: :human_control,
@@ -176,7 +195,12 @@ defmodule Ampd.CommandSpec do
       fields: [
         %{name: "request_id", type: {:id, "gq_"}, required: true},
         # nil means "as requested"; the enum is closed either way.
-        %{name: "duration", type: {:enum, ~w(once run agent workspace)}, required: false, default: nil}
+        %{
+          name: "duration",
+          type: {:enum, ~w(once run agent workspace)},
+          required: false,
+          default: nil
+        }
       ]
     },
     "deny_grant_request" => %{
@@ -197,7 +221,13 @@ defmodule Ampd.CommandSpec do
       retry: :once,
       fields: [%{name: "correlation_id", type: {:string, 128}, required: true}]
     },
-    "runtime_status" => %{cmd: :runtime_status, channel: :open, kind: :read, retry: :safe, fields: []},
+    "runtime_status" => %{
+      cmd: :runtime_status,
+      channel: :open,
+      kind: :read,
+      retry: :safe,
+      fields: []
+    },
 
     # A subscription is a wire concern, not an authority one: it asks the
     # runtime to push this channel's own projection when it changes. What
@@ -354,6 +384,33 @@ defmodule Ampd.CommandSpec do
       fields: [%{name: "worker_ref", type: {:id, "wk_"}, required: true}]
     },
 
+    # **D.1.3c·2c·1b, and it is a mutation rather than a read.** It reads the
+    # World to derive a presentation, so `:read` is the tempting answer — and
+    # it is wrong twice. A read on the `:human_control` surface is precisely
+    # what `tools/check-intent-surface.mjs` exists to forbid: a cockpit that
+    # can ask the world a question has a second, uncursored view. And this is
+    # not a question. It is the moment a person's terminal output starts
+    # flowing to a screen, which is a change to what is disclosed even though
+    # no authority moves. The three fields are the two the page designates
+    # plus the endpoint the cockpit process parked over the bridge; nothing
+    # derived is supplied and nothing derived is returned.
+    "terminal_bind" => %{
+      cmd: :terminal_bind,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "worker_ref", type: {:id, "wk_"}, required: true},
+        # `{:count, _}` rather than a new `:integer` type: a generation is a
+        # whole number that starts at 1 and only rises, which is exactly what
+        # this already means. A bound of a million is not a claim about how
+        # many times a Worker can be reopened — it is a refusal to let the
+        # wire hand the runtime an arbitrary integer, and a designation above
+        # it is stale by any reading.
+        %{name: "expected_worker_generation", type: {:count, @max_generation}, required: true},
+        %{name: "endpoint_ref", type: {:id, "te_"}, required: true}
+      ]
+    },
+
     # `retry: :once` for the same reason `attach_locus` is: it refuses far
     # more often than it succeeds, and `Ampd.Refusal.new/2` writes to the
     # refusal ring as it constructs. A `:safe` read that refuses deposits
@@ -436,7 +493,9 @@ defmodule Ampd.CommandSpec do
   # `subscribe` is a mutation despite returning a snapshot. It registers a
   # monitor, so retrying it under the seqlock would register twice; its
   # snapshot is made coherent inside `Ampd.Subscriptions.build/1` instead.
-  @missing_kind @commands |> Enum.reject(fn {_w, s} -> Map.has_key?(s, :kind) end) |> Enum.map(&elem(&1, 0))
+  @missing_kind @commands
+                |> Enum.reject(fn {_w, s} -> Map.has_key?(s, :kind) end)
+                |> Enum.map(&elem(&1, 0))
   if @missing_kind != [] do
     raise "command-spec@1: no `kind:` declared for #{inspect(@missing_kind)} — " <>
             "every command must say whether it reads or mutates"
@@ -461,7 +520,9 @@ defmodule Ampd.CommandSpec do
   # A mutation has no `retry:` — it is never speculated on. Every read must
   # declare one, and the build fails if it does not.
   @missing_retry @commands
-                 |> Enum.filter(fn {_w, s} -> s[:kind] == :read and not Map.has_key?(s, :retry) end)
+                 |> Enum.filter(fn {_w, s} ->
+                   s[:kind] == :read and not Map.has_key?(s, :retry)
+                 end)
                  |> Enum.map(&elem(&1, 0))
   if @missing_retry != [] do
     raise "command-spec@1: no `retry:` declared for the read(s) #{inspect(@missing_retry)} — " <>
@@ -473,7 +534,11 @@ defmodule Ampd.CommandSpec do
   everything else moves the world.
   """
   def reads,
-    do: @commands |> Enum.filter(fn {_, s} -> s.kind == :read end) |> Enum.map(fn {_, s} -> s.cmd end) |> Enum.sort()
+    do:
+      @commands
+      |> Enum.filter(fn {_, s} -> s.kind == :read end)
+      |> Enum.map(fn {_, s} -> s.cmd end)
+      |> Enum.sort()
 
   @doc """
   Reads that must be executed **exactly once**, on the ordered path, because
@@ -509,7 +574,10 @@ defmodule Ampd.CommandSpec do
   def exclusive_to(channel), do: atoms_where(&(&1 == channel))
 
   defp atoms_where(pred) do
-    @commands |> Enum.filter(fn {_, s} -> pred.(s.channel) end) |> Enum.map(fn {_, s} -> s.cmd end) |> Enum.sort()
+    @commands
+    |> Enum.filter(fn {_, s} -> pred.(s.channel) end)
+    |> Enum.map(fn {_, s} -> s.cmd end)
+    |> Enum.sort()
   end
 
   @doc """
@@ -540,8 +608,11 @@ defmodule Ampd.CommandSpec do
       # one means a client that misspells `expected_ids` gets a bulk
       # revocation it did not confirm.
       {:error, "invalid-command-arguments",
-       %{"reason" => "unknown field", "fields" => Enum.sort(unknown),
-         "declared" => Enum.map(spec.fields, & &1.name)}}
+       %{
+         "reason" => "unknown field",
+         "fields" => Enum.sort(unknown),
+         "declared" => Enum.map(spec.fields, & &1.name)
+       }}
     else
       collect(spec, fn f -> {Map.has_key?(args, f.name), Map.get(args, f.name)} end)
     end
@@ -550,8 +621,12 @@ defmodule Ampd.CommandSpec do
   defp bind_spec(spec, args) when is_list(args) do
     if length(args) > length(spec.fields) do
       {:error, "invalid-command-arguments",
-       %{"reason" => "too many arguments", "count" => length(args),
-         "declared" => length(spec.fields), "fields" => Enum.map(spec.fields, & &1.name)}}
+       %{
+         "reason" => "too many arguments",
+         "count" => length(args),
+         "declared" => length(spec.fields),
+         "fields" => Enum.map(spec.fields, & &1.name)
+       }}
     else
       indexed = Enum.with_index(args) |> Map.new(fn {v, i} -> {i, v} end)
 
@@ -567,7 +642,9 @@ defmodule Ampd.CommandSpec do
   end
 
   defp bind_spec(_spec, args),
-    do: {:error, "invalid-command-arguments", %{"reason" => "arguments must be a map or a list", "got" => tag(args)}}
+    do:
+      {:error, "invalid-command-arguments",
+       %{"reason" => "arguments must be a map or a list", "got" => tag(args)}}
 
   # Walks the declared fields in order, so the result is always exactly the
   # declared arity — an absent optional becomes its default, not a shorter
@@ -579,16 +656,20 @@ defmodule Ampd.CommandSpec do
       cond do
         not present? or value == nil ->
           if Map.get(f, :required, false) do
-            {:halt, {:error, "invalid-command-arguments",
-                     %{"reason" => "missing required field", "field" => f.name}}}
+            {:halt,
+             {:error, "invalid-command-arguments",
+              %{"reason" => "missing required field", "field" => f.name}}}
           else
             {:cont, {:ok, acc ++ [Map.get(f, :default)]}}
           end
 
         true ->
           case check(f.type, value) do
-            :ok -> {:cont, {:ok, acc ++ [value]}}
-            {:error, why} -> {:halt, {:error, "invalid-command-arguments", Map.put(why, "field", f.name)}}
+            :ok ->
+              {:cont, {:ok, acc ++ [value]}}
+
+            {:error, why} ->
+              {:halt, {:error, "invalid-command-arguments", Map.put(why, "field", f.name)}}
           end
       end
     end)
@@ -609,9 +690,14 @@ defmodule Ampd.CommandSpec do
 
   defp check({:id, prefix}, v) when is_binary(v) do
     cond do
-      byte_size(v) > 128 -> {:error, %{"reason" => "field too large", "bytes" => byte_size(v), "max" => 128}}
-      not String.starts_with?(v, prefix) -> {:error, %{"reason" => "identifier has the wrong prefix", "expected_prefix" => prefix}}
-      true -> :ok
+      byte_size(v) > 128 ->
+        {:error, %{"reason" => "field too large", "bytes" => byte_size(v), "max" => 128}}
+
+      not String.starts_with?(v, prefix) ->
+        {:error, %{"reason" => "identifier has the wrong prefix", "expected_prefix" => prefix}}
+
+      true ->
+        :ok
     end
   end
 
@@ -621,8 +707,11 @@ defmodule Ampd.CommandSpec do
     # Recursive, because the whole point is that a 5 MB string one level
     # down is still 5 MB. `Ampd.Frame.logical_size/1` is the shared walk.
     case Ampd.Frame.logical_size(v, max) do
-      {:ok, _} -> :ok
-      {:over, n} -> {:error, %{"reason" => "field too large", "bytes_at_least" => n, "max" => max}}
+      {:ok, _} ->
+        :ok
+
+      {:over, n} ->
+        {:error, %{"reason" => "field too large", "bytes_at_least" => n, "max" => max}}
     end
   end
 
@@ -634,12 +723,15 @@ defmodule Ampd.CommandSpec do
       else: {:error, %{"reason" => "out of range", "given" => v, "min" => 1, "max" => max}}
   end
 
-  defp check({:count, _}, v), do: {:error, %{"reason" => "expected a whole number", "got" => tag(v)}}
+  defp check({:count, _}, v),
+    do: {:error, %{"reason" => "expected a whole number", "got" => tag(v)}}
 
   defp check({:enum, allowed}, v) do
     if v in allowed,
       do: :ok,
-      else: {:error, %{"reason" => "not an allowed value", "given" => tag_value(v), "allowed" => allowed}}
+      else:
+        {:error,
+         %{"reason" => "not an allowed value", "given" => tag_value(v), "allowed" => allowed}}
   end
 
   defp check({:ids, prefix, max_len}, v) when is_list(v) do
@@ -661,7 +753,8 @@ defmodule Ampd.CommandSpec do
     end
   end
 
-  defp check({:ids, _, _}, v), do: {:error, %{"reason" => "expected a list of identifiers", "got" => tag(v)}}
+  defp check({:ids, _, _}, v),
+    do: {:error, %{"reason" => "expected a list of identifiers", "got" => tag(v)}}
 
   defp tag_value(v) when is_binary(v), do: String.slice(v, 0, 64)
   defp tag_value(v), do: tag(v)
