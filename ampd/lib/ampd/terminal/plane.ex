@@ -353,17 +353,47 @@ defmodule Ampd.Terminal.Plane do
     end
   end
 
+  # **Cumulative, and therefore reorder-tolerant. D.1.3c·2c·1b·1 repair.**
+  #
+  # This used to read `if seq > s.seq or seq < s.acked`, which killed the
+  # presentation on an ack that arrived after a newer one. That is a real
+  # sequence the page can produce and it is nobody's fault:
+  #
+  #     page consumes 1 ── invoke terminal_ack(1) ─┐
+  #     page consumes 2 ── invoke terminal_ack(2) ─┤ two async commands
+  #                                                 │ two spawn_blocking tasks
+  #     this process reads                          │ no ordering between them
+  #         ACK 2   → acked = 2                    ─┘
+  #         ACK 1   → 1 < 2 → presentation killed
+  #
+  # `cockpit/src/main.rs` documents that mechanism for `bind`/`unbind` in the
+  # same words and then this module did not apply it. A cumulative ack cannot
+  # invent credit by being old: `2` already said everything `1` says. Only
+  # one direction is a fault.
+  #
+  #     seq > s.seq          the page acknowledged what was never sent, so
+  #                          the two ends disagree about what was delivered
+  #     seq <= s.acked       a stale or repeated cumulative ack, which is
+  #                          ordinary — and is also the terminal pane's
+  #                          liveness beat, which re-sends the high-water it
+  #                          already sent so that silence means something
+  #     otherwise            advance
+  #
+  # `Ampd.TerminalAttachment.handle_cast({:ack, _, _})` has held exactly this
+  # law since D.1.3c·2b. The two ends of one credit window disagreeing about
+  # what an ack means is the defect, not the reordering.
   defp consume(%{inbuf: <<@ack, seq::big-64, rest::binary>>} = s) do
-    # An ack for something never sent is a page inventing credit. It is
-    # refused by ending the presentation rather than by ignoring the frame:
-    # the page and this process no longer agree about what was delivered, and
-    # a stream whose two ends disagree about ordering has already failed.
-    if seq > s.seq or seq < s.acked do
-      send(self(), {:"$socket", s.sock, :abort, :bad_ack})
-      %{s | inbuf: rest}
-    else
-      TA.ack(s.owner, seq)
-      consume(%{s | inbuf: rest, acked: seq})
+    cond do
+      seq > s.seq ->
+        send(self(), {:"$socket", s.sock, :abort, :bad_ack})
+        %{s | inbuf: rest}
+
+      seq <= s.acked ->
+        consume(%{s | inbuf: rest})
+
+      true ->
+        TA.ack(s.owner, seq)
+        consume(%{s | inbuf: rest, acked: seq})
     end
   end
 

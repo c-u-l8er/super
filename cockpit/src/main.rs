@@ -95,6 +95,12 @@
 mod terminal;
 mod worker;
 
+/// The terminal surface's label and page. **Constants, not parameters.**
+/// `terminal_surface` takes a boolean and nothing a page could point at
+/// something else — see its doc comment.
+const TERMINAL_LABEL: &str = "terminal";
+const TERMINAL_URL: &str = "terminal.html";
+
 use std::path::PathBuf;
 use std::sync::mpsc::sync_channel;
 
@@ -282,6 +288,85 @@ async fn terminal_ack(seq: u64, queue: State<'_, Queues>) -> Result<(), String> 
     control(&queue, Msg::TerminalAck { seq }).await
 }
 
+/// **D.1.3c·2c·1b·1 — the terminal surface, as a product surface.**
+///
+/// Until this slice, both the untrusted witness pane and the terminal
+/// webview were created only under `SUPER_COCKPIT_PANE=1`. That variable is
+/// a W.2.2 *testing* witness — `tools/cockpit-battery.mjs` sets it to prove
+/// a refusal — and it had quietly become the switch that decided whether
+/// Super has a terminal at all. Normal Super therefore rendered *Watch
+/// terminal* on every `PRESENT` Worker and could not have shown one: no
+/// terminal webview, so no sink, so [`terminal::Terminal::park`] refuses
+/// before a socket is ever made. **A capability reachable only from a test
+/// harness is not a capability.**
+///
+/// So the two are separated. `SUPER_COCKPIT_PANE` now governs only the
+/// untrusted pane. The terminal surface is created here, lazily, when a
+/// person asks to watch one — which is also better than the old fixed
+/// child at (560, 600): a terminal nobody opened should not be occupying
+/// the window.
+///
+/// **What the page may designate: nothing.** `open` is a boolean. The
+/// label and the URL are the two constants below and are not parameters,
+/// so this cannot be turned into "create a webview at a URL of my
+/// choosing" by supplying a different argument — the same structural
+/// argument D.1.3c·2c·1a makes about input and resize.
+/// `tools/check-webview-acl.mjs` holds that shape.
+///
+/// Returns `bound` so the caller can wait for the pane to offer its sink
+/// rather than racing `terminal_bind` against a page that is still loading.
+#[tauri::command]
+async fn terminal_surface(
+    open: bool,
+    app: tauri::AppHandle,
+    queue: State<'_, Queues>,
+) -> Result<Value, String> {
+    if !open {
+        control(&queue, Msg::TerminalClose).await?;
+        if let Some(w) = app.get_webview(TERMINAL_LABEL) {
+            w.close().map_err(|e| format!("terminal surface: {e}"))?;
+        }
+        return Ok(json!({"present": false, "bound": false}));
+    }
+
+    if app.get_webview(TERMINAL_LABEL).is_none() {
+        let main = app.get_window("main").ok_or("no main window to host the terminal")?;
+        // Sized from the window rather than pinned, so the surface is a
+        // product pane and not a fixed rectangle chosen for a battery.
+        let (w, h) = match main.inner_size() {
+            Ok(s) => {
+                let f = main.scale_factor().unwrap_or(1.0);
+                (s.width as f64 / f, s.height as f64 / f)
+            }
+            Err(_) => (900., 700.),
+        };
+        // Bottom-right quadrant. Derived from the window rather than
+        // pinned, and deliberately clear of the bottom-LEFT rectangle the
+        // untrusted witness pane occupies when `SUPER_COCKPIT_PANE=1`:
+        // under the battery both exist at once, and a terminal drawn over
+        // the pane would fail the refusal probe for a reason that has
+        // nothing to do with authority.
+        let th = (h * 0.35).clamp(160., 320.);
+        main.add_child(
+            tauri::webview::WebviewBuilder::new(
+                TERMINAL_LABEL,
+                tauri::WebviewUrl::App(TERMINAL_URL.into()),
+            ),
+            tauri::LogicalPosition::new(w / 2., h - th),
+            tauri::LogicalSize::new(w / 2., th),
+        )
+        .map_err(|e| format!("terminal surface: {e}"))?;
+    }
+
+    let (reply, wait) = sync_channel(1);
+    control(&queue, Msg::TerminalBound { reply }).await?;
+    let bound = wait
+        .recv_timeout(std::time::Duration::from_secs(2))
+        .map_err(|_| "no reply from the cockpit worker".to_string())?;
+
+    Ok(json!({"present": true, "bound": bound}))
+}
+
 /// The pane is done looking. **Read-only, and there is nothing else here.**
 /// No input, no resize, no dormant method for either — D.1.3c·2c·1a's scope
 /// is structural: a power with no entry point cannot be reached by supplying
@@ -359,7 +444,8 @@ fn main() {
             hold_end,
             terminal_stream,
             terminal_ack,
-            terminal_close
+            terminal_close,
+            terminal_surface
         ])
         .setup(move |app| {
             let cfg = worker::Config { ampd_dir: dir.clone(), fixture };
@@ -392,24 +478,16 @@ fn main() {
                     tauri::LogicalSize::new(520., 200.),
                 )?;
 
-                // **D.1.3c·2c·1b — a THIRD webview, and it is the point of
-                // the second capability file.** `pane` is granted nothing;
-                // `terminal` is granted three commands and no fourth. It is
-                // the first surface in this application that holds *some*
-                // authority and not the cockpit's, which is the shape every
-                // later pane will have — a browser, a Motor surface, a game.
-                //
-                // A window-scoped capability would have handed it every
-                // permission the cockpit holds, which is W.2.1's defect and
-                // why `capabilities/default.json` names no window.
-                main.add_child(
-                    tauri::webview::WebviewBuilder::new(
-                        "terminal",
-                        tauri::WebviewUrl::App("terminal.html".into()),
-                    ),
-                    tauri::LogicalPosition::new(560., 600.),
-                    tauri::LogicalSize::new(600., 200.),
-                )?;
+                // **D.1.3c·2c·1b·1 — the terminal webview used to be created
+                // here too, and that was the defect.** It is granted three
+                // commands and no fourth, which makes it the first surface
+                // in this application holding *some* authority and not the
+                // cockpit's — the shape every later pane will have. But it
+                // is a PRODUCT surface, and this branch is a test witness.
+                // Creating it here meant normal Super offered *Watch
+                // terminal* on a `PRESENT` Worker and had nowhere to put
+                // one. It is created by `terminal_surface` now, when a
+                // person asks for it, in every configuration.
             }
             Ok(())
         })

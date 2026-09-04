@@ -161,11 +161,17 @@ function rowNode({ id, cap, who, actions = [] }) {
 
   row.append(c, w, spacer);
 
-  for (const { label, intent, args, danger } of actions) {
+  for (const { label, intent, surface, args, danger } of actions) {
     const b = document.createElement('button');
     b.textContent = label;
-    b.dataset.intent = intent;
-    b.dataset.args = JSON.stringify(args);
+    /* **`surface` is not an intent and must not look like one.** It changes
+       nothing in the world; it opens or dismisses a webview inside this
+       process. Giving it its own attribute keeps `data-intent` meaning
+       exactly one thing — a mutation submitted to the runtime — rather
+       than becoming "a button that does something". */
+    if (surface) b.dataset.surface = surface;
+    else b.dataset.intent = intent;
+    b.dataset.args = JSON.stringify(args ?? {});
     if (danger) b.dataset.danger = 'true';
     row.append(b);
   }
@@ -460,6 +466,9 @@ export function render(frame) {
                   intent: 'terminal_bind',
                   args: { worker_ref: w.id, expected_worker_generation: w.generation ?? 1 },
                 },
+                ...(surface.present
+                  ? [{ label: 'Stop watching', surface: 'close' }]
+                  : []),
               ]
             : [],
       }),
@@ -612,6 +621,37 @@ const holdEnd = (id) => invoke('hold_end', { id });
 
 let holds = 0;
 
+/* ── D.1.3c·2c·1b·1 · the terminal surface ────────────────────────────
+ *
+ * **What this fixes.** `Watch terminal` was rendered whenever a Worker's
+ * projection said `PRESENT`, and in normal Super it could not work: the
+ * terminal webview existed only under `SUPER_COCKPIT_PANE=1`, a testing
+ * witness, so there was no sink and `Terminal::park` refused before a
+ * socket was made. The button was reachable and the capability was not.
+ *
+ * The surface is opened first and awaited. `terminal_surface` creates the
+ * pane if it is absent and reports whether that pane has offered its sink
+ * yet; a page takes a moment to load, so this asks again rather than
+ * submitting a `terminal_bind` the runtime would have to refuse for a
+ * reason that is about our own startup order and not about authority. */
+const surface = { present: false };
+
+async function terminalSurface(open) {
+  if (!open) {
+    const s = await invoke('terminal_surface', { open: false });
+    surface.present = false;
+    return s;
+  }
+  const deadline = Date.now() + 5000;
+  for (;;) {
+    const s = await invoke('terminal_surface', { open: true });
+    surface.present = !!(s && s.present);
+    if (s && s.bound) return s;
+    if (Date.now() > deadline) throw new Error('the terminal surface never offered a sink');
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
 async function submit(name, args) {
   /* One token per submission, never a shared flag. */
   const id = `hold-${++holds}`;
@@ -622,6 +662,11 @@ async function submit(name, args) {
   await window.cockpit.holdBegin(id);
   receipt(name, 'submitted', '');
   try {
+    /* The one intent that needs a surface before it can be honoured. It
+       is done inside the hold so the screen stays still across both, and
+       before the intent so a failure to open the pane is reported as the
+       refusal it is rather than as a bind that mysteriously did nothing. */
+    if (name === 'terminal_bind') await terminalSurface(true);
     const result = await invoke('intent', { name, args });
     const refusal = result?.refusal?.code;
     receipt(name, refusal ? 'refused' : 'accepted', refusal ?? '');
@@ -635,6 +680,17 @@ async function submit(name, args) {
 }
 
 document.addEventListener('click', (ev) => {
+  const s = ev.target.closest('button[data-surface]');
+  if (s) {
+    /* No hold. A hold exists to keep the world still across a mutation,
+       and this is not one — nothing in the world moves when a person puts
+       a terminal away. */
+    terminalSurface(s.dataset.surface === 'open').catch((e) => {
+      receipt('terminal_surface', 'refused', String(e));
+    });
+    return;
+  }
+
   const b = ev.target.closest('button[data-intent]');
   if (b) { submit(b.dataset.intent, JSON.parse(b.dataset.args)); return; }
 
@@ -660,7 +716,7 @@ document.addEventListener('click', (ev) => {
 });
 
 window.cockpit = {
-  render, ack, holdBegin, holdEnd,
+  render, ack, holdBegin, holdEnd, terminalSurface, surface,
   frame: null, frames: 0, bound: false,
   /* Set only by the terminal path in `ack` above. Null means the stream has
      not told us it stopped, which is not the same as the world being quiet

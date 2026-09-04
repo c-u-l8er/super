@@ -35,6 +35,9 @@
 use std::io::{Read, Write};
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixStream;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 use tauri::ipc::Channel;
@@ -44,6 +47,30 @@ use super_host::Runtime;
 const OUT: u8 = 1;
 const ACK: u8 = 2;
 const CLOSE: u8 = 3;
+
+/// How often the reader wakes with no bytes to ask whether its renderer is
+/// still there. It is a `SO_RCVTIMEO` on the read, not a second thread: a
+/// watchdog that needs its own thread to notice a stalled one has two things
+/// to keep alive instead of one.
+const WATCH_TICK: Duration = Duration::from_millis(250);
+
+/// One process-wide origin for `now_ms`. `Instant` is monotonic, so this
+/// cannot be moved by the clock being set.
+static START: OnceLock<Instant> = OnceLock::new();
+
+fn now_ms() -> u64 {
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
+}
+
+/// How long a presentation survives hearing nothing at all from its
+/// renderer. Overridable so the falsifiers can measure the bound rather
+/// than wait out a shipped one.
+fn silence_ms() -> u64 {
+    std::env::var("SUPER_TERMINAL_SILENCE_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(5_000)
+}
 
 /// Terminal bytes as base64, hand-rolled.
 ///
@@ -79,15 +106,61 @@ pub struct Terminal {
     sink: Option<Channel<Value>>,
     /// Our end of the socketpair. `None` when no presentation is open.
     stream: Option<UnixStream>,
+    /// **Which renderer.** Bumped on every `bind_sink`. A presentation
+    /// captures the value current when its reader started, and the reader
+    /// stops the moment the two differ.
+    generation: Arc<AtomicU64>,
+    /// `now_ms()` of the last thing this process heard from the pane.
+    last_heard: Arc<AtomicU64>,
 }
 
 impl Terminal {
     pub fn new() -> Self {
-        Terminal { sink: None, stream: None }
+        Terminal {
+            sink: None,
+            stream: None,
+            generation: Arc::new(AtomicU64::new(0)),
+            last_heard: Arc::new(AtomicU64::new(now_ms())),
+        }
     }
 
+    /// A pane offers its sink. **This is also how a lost renderer is
+    /// detected, and it is the only positive signal available.**
+    ///
+    /// `ui/terminal.js` binds exactly once, at load. So a bind arriving
+    /// while a presentation is open cannot have come from the page that
+    /// presentation was opened for — that page has reloaded, been replaced,
+    /// or been destroyed and recreated. Whichever it was, the renderer that
+    /// owed acknowledgements for the open presentation is gone and is not
+    /// coming back to send them, so the presentation ends here rather than
+    /// stalling until its credits run out and then holding the attachment's
+    /// single reader binding forever.
+    ///
+    /// **Why this is not `Channel::send` returning an error.**
+    /// D.1.3c·2c·1b·1's review asked for renderer loss to be detected by a
+    /// failed send. In this configuration it cannot be:
+    /// `Channel::send` calls `Webview::eval`, which for tauri 2.11 without
+    /// the `tracing` feature is `send_user_message` — a post to the event
+    /// loop that returns `Ok` as soon as the proxy accepts it, and never
+    /// learns whether a webview received anything. `WebviewEvent` carries
+    /// one variant, `DragDrop`, so there is no destruction event either.
+    /// The send result is still checked below, because an `Err` does mean
+    /// the event loop is gone; it is simply not the mechanism, and saying
+    /// it was would be prose describing a boundary that does not exist.
     pub fn bind_sink(&mut self, sink: Channel<Value>) {
+        if self.stream.is_some() {
+            self.close();
+        }
+        self.generation.fetch_add(1, Ordering::SeqCst);
+        self.last_heard.store(now_ms(), Ordering::SeqCst);
         self.sink = Some(sink);
+    }
+
+    /// Is a sink bound? Asked by `terminal_surface` so the cockpit can wait
+    /// for the pane it just created to be ready, instead of submitting a
+    /// `terminal_bind` that `park` would refuse.
+    pub fn bound(&self) -> bool {
+        self.sink.is_some()
     }
 
     /// Step 1 + 2: make a socketpair, hand one end to ampd over the bridge,
@@ -124,11 +197,66 @@ impl Terminal {
         let mut r = s.try_clone().map_err(|e| format!("terminal clone: {e}"))?;
         let sink = self.sink.clone().ok_or("no terminal sink")?;
 
+        // **The read wakes even when there is nothing to read.** Without
+        // this the thread parks in `read` forever and the two liveness
+        // questions below are asked only when the Carrier happens to speak.
+        r.set_read_timeout(Some(WATCH_TICK)).map_err(|e| format!("terminal timeout: {e}"))?;
+
+        // Captured, not shared: this reader belongs to the renderer that was
+        // bound when it started, and to no later one.
+        let mine = self.generation.load(Ordering::SeqCst);
+        let generation = self.generation.clone();
+        let last_heard = self.last_heard.clone();
+        last_heard.store(now_ms(), Ordering::SeqCst);
+        let silence = silence_ms();
+
         std::thread::spawn(move || {
             let mut buf: Vec<u8> = Vec::new();
             let mut chunk = [0u8; 16 * 1024];
             loop {
+                // ── is the renderer this presentation belongs to still here?
+                //
+                // **Two questions, and only one of them is a timeout.**
+                //
+                // A generation change is a POSITIVE fact: another page bound
+                // a sink, so this one is gone. Nothing is inferred.
+                //
+                // Silence is not. It says the renderer has stopped proving
+                // it is there — which is weaker than "it is dead", and the
+                // distinction is the one D.1.3c·2c·1a had to make about
+                // terminal possession. It is nevertheless the right thing to
+                // act on HERE, because of an asymmetry that does not hold
+                // there: closing a presentation destroys nothing. The
+                // possession stays ACTIVE, no durable state is lost, there
+                // is no server-side scrollback to forfeit, and the remedy
+                // for a false positive is the person clicking *Watch
+                // terminal* again. Not closing strands the attachment's one
+                // reader binding for the life of the runtime. A recoverable
+                // wrong answer against an unrecoverable one is why this is
+                // allowed to act on a timeout and `INDETERMINATE` is not.
+                if generation.load(Ordering::SeqCst) != mine {
+                    let _ = r.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+                if now_ms().saturating_sub(last_heard.load(Ordering::SeqCst)) > silence {
+                    let _ = sink
+                        .send(json!({"schema":"terminal-close@1","code":"renderer-silent"}));
+                    let _ = r.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+
                 match r.read(&mut chunk) {
+                    // The watchdog tick. `SO_RCVTIMEO` surfaces as
+                    // `WouldBlock` on Linux and `TimedOut` elsewhere; both
+                    // mean "no bytes yet", which is not the stream ending.
+                    Err(e)
+                        if matches!(
+                            e.kind(),
+                            std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        continue
+                    }
                     Ok(0) | Err(_) => {
                         let _ = sink.send(json!({"schema":"terminal-close@1","code":"stream-ended"}));
                         return;
@@ -150,6 +278,14 @@ impl Terminal {
                         // reader resynchronises onto the middle of a frame
                         // and reports its offsets as sequence numbers.
                         Some(Frame::Unreadable) => return,
+                        // The event loop is gone. Not the renderer-loss
+                        // mechanism — see `bind_sink` for why this cannot
+                        // be — but a send that fails has certainly not
+                        // arrived, so the socket goes with it.
+                        Some(Frame::Gone) => {
+                            let _ = r.shutdown(std::net::Shutdown::Both);
+                            return;
+                        }
                         Some(Frame::Rest(rest)) => buf = rest,
                         None => break,
                     }
@@ -160,8 +296,24 @@ impl Terminal {
     }
 
     /// The pane has consumed through `seq`. Cumulative.
+    ///
+    /// **It is also the liveness beat, and that is why it does not fail
+    /// when nothing is open.** `ui/terminal.js` re-sends its high-water on
+    /// a timer so that hearing nothing means something; a beat that arrived
+    /// between presentations would otherwise be answered with an error the
+    /// page would file as a fault. There is nothing to refuse: an ack
+    /// returns credit against a presentation, and with no presentation
+    /// there is no credit and no window to corrupt.
+    ///
+    /// The mark is set before the write and unconditionally. What it
+    /// records is that the pane's JavaScript ran and reached this process —
+    /// which is the whole question — not that the frame went anywhere.
     pub fn ack(&mut self, seq: u64) -> Result<(), String> {
-        let s = self.stream.as_mut().ok_or("no terminal presentation is open")?;
+        self.last_heard.store(now_ms(), Ordering::SeqCst);
+        let s = match self.stream.as_mut() {
+            Some(s) => s,
+            None => return Ok(()),
+        };
         let mut f = [0u8; 9];
         f[0] = ACK;
         f[1..].copy_from_slice(&seq.to_be_bytes());
@@ -182,6 +334,8 @@ enum Frame {
     Rest(Vec<u8>),
     /// The stream cannot be resynchronised. The presentation is over.
     Unreadable,
+    /// The sink refused the frame. Nothing is on the other end of it.
+    Gone,
 }
 
 /// Decode ONE frame from the front of `buf` and push it at the sink.
@@ -194,11 +348,16 @@ fn emit(buf: &[u8], sink: &Channel<Value>) -> Option<Frame> {
             if buf.len() < 13 + len {
                 return None;
             }
-            let _ = sink.send(json!({
-                "schema": "terminal-out@1",
-                "seq": seq,
-                "b64": b64(&buf[13..13 + len]),
-            }));
+            if sink
+                .send(json!({
+                    "schema": "terminal-out@1",
+                    "seq": seq,
+                    "b64": b64(&buf[13..13 + len]),
+                }))
+                .is_err()
+            {
+                return Some(Frame::Gone);
+            }
             Some(Frame::Rest(buf[13 + len..].to_vec()))
         }
         Some(&CLOSE) if buf.len() >= 3 => {

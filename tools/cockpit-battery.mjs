@@ -350,10 +350,14 @@ let SEEN = [];
 async function run() {
   /* ── two webviews, and only one of them is trusted ─────────────────── */
 
-  const found = await waitFor('every webview to open',
+  /* **The terminal is deliberately NOT waited for.** Since D.1.3c·2c·1b·1
+     it is created by `terminal_surface`, on demand, and its absence here
+     is itself an assertion — see the probe below. Waiting for it would
+     have hung this battery for sixty seconds on the repair working. */
+  const found = await waitFor('the cockpit and the untrusted pane to open',
     async () => {
       const f = await findWebviews();
-      return f.cockpit && f.pane && f.terminal ? f : null;
+      return f.cockpit && f.pane ? f : null;
     },
     60_000);
 
@@ -362,9 +366,27 @@ async function run() {
   TERMINAL = found.terminal;
   SEEN = found.seen;
   check(
-    'the application opens the trusted cockpit and two panes beside it',
-    !!COCKPIT && !!PANE && !!TERMINAL && found.count === SEEN.length,
+    'the application opens the trusted cockpit and the untrusted witness pane',
+    !!COCKPIT && !!PANE && found.count === SEEN.length,
     `${found.count} webviews: ${SEEN.map((v) => v.webview).join(', ')}`,
+  );
+
+  /* ── D.1.3c·2c·1b·1 · the terminal is NOT here, and that is the repair ─
+
+     This battery sets `SUPER_COCKPIT_PANE=1`, and until this slice that
+     variable created the terminal webview too. So the terminal surface
+     existed exactly when a test harness asked for it and never in the
+     product: normal Super offered `Watch terminal` on every PRESENT Worker
+     and had nowhere to put one — no webview, no sink, and
+     `Terminal::park` refuses before a socket is made.
+
+     The strongest place to hold the separation is here, in the run that
+     DOES set the variable: if the terminal is absent now and present after
+     `terminal_surface`, then the product path is what created it. */
+  check(
+    'the testing witness does not create a terminal — the surface is not behind a test flag',
+    TERMINAL === null,
+    `a terminal webview exists at startup under SUPER_COCKPIT_PANE=1: ${JSON.stringify(SEEN)}`,
   );
 
   /* ── W.2.2 · and the pane is INSIDE the trusted window ────────────────
@@ -391,8 +413,7 @@ async function run() {
   const views = SEEN.map((v) => v.webview);
   check(
     'and each is a distinct webview — they are told apart by the label the ACL resolves against',
-    new Set(views).size === views.length && views.includes('main') && views.includes('pane')
-      && views.includes('terminal'),
+    new Set(views).size === views.length && views.includes('main') && views.includes('pane'),
     JSON.stringify(SEEN),
   );
 
@@ -1934,6 +1955,39 @@ async function run() {
      both directions. Every one of these is Tauri's ACL answering, not our
      JavaScript: the pane's own script never tests a permission. */
 
+  /* ── D.1.3c·2c·1b·1 · the surface is opened THE WAY A PERSON OPENS IT ──
+
+     `terminal_surface` is what `cockpit.js` invokes before submitting
+     `terminal_bind`, from the trusted webview, with no argument but a
+     boolean. Everything below is measured against a terminal that this
+     call created — not one a test flag left lying around. */
+  await focus(COCKPIT);
+
+  /* **The product's own function, not a reimplementation of it.** A page
+     takes a moment to load and offer its sink, so `cockpit.js` asks again
+     until it does; a battery that invoked the raw command once would be
+     measuring its own retry policy, or the absence of one. This is the
+     same call `submit` makes before it sends `terminal_bind`. */
+  const opened = await scriptAsync(`
+    const done = arguments[arguments.length - 1];
+    window.cockpit.terminalSurface(true)
+      .then((v) => done({ ok: true, v }), (e) => done({ ok: false, e: String(e) }));
+  `);
+  check(
+    'the cockpit may open the terminal surface, and it reports a bound sink',
+    opened.ok === true && opened.v && opened.v.present === true && opened.v.bound === true,
+    JSON.stringify(opened),
+  );
+
+  const after = await findWebviews();
+  TERMINAL = after.terminal;
+  SEEN = after.seen;
+  check(
+    'a terminal webview now exists, inside the trusted window, with its own label',
+    !!TERMINAL && after.seen.some((v) => v.webview === 'terminal' && v.window === 'main'),
+    JSON.stringify(after.seen),
+  );
+
   await focus(TERMINAL);
 
   const termBound = await waitSoft(
@@ -1946,6 +2000,181 @@ async function run() {
     termBound === true,
     'terminal_stream was refused, or the pane never loaded',
   );
+
+  /* ── C · sequencing fails CLOSED ──────────────────────────────────────
+
+     The plane will not produce a gap, a duplicate or a malformed frame —
+     that is what the plane is for, and `B.5` falsifies it where it lives.
+     So the page's own rule is exercised by putting the frame into this
+     page's decoder directly. `window.__terminalDeliver` is the same
+     function the Channel calls and grants nothing: see `ui/terminal.js`.
+
+     Each case is checked on a FRESH page, because a fault is terminal by
+     design — the second case would otherwise be measuring the first one's
+     refusal. */
+  const b64of = (str) => Buffer.from(str, 'utf8').toString('base64');
+
+  async function freshTerminal() {
+    await focus(COCKPIT);
+    await scriptAsync(`
+      const done = arguments[arguments.length - 1];
+      window.cockpit.terminalSurface(false).then(done, done);
+    `);
+    const gone = await waitSoft(async () => {
+      const w = await findWebviews();
+      return w.terminal === null ? true : null;
+    }, 10_000);
+    await focus(COCKPIT);
+    await scriptAsync(`
+      const done = arguments[arguments.length - 1];
+      window.cockpit.terminalSurface(true).then(done, done);
+    `);
+    const w = await findWebviews();
+    TERMINAL = w.terminal;
+    await focus(TERMINAL);
+    await waitSoft(
+      () => script('return window.terminalPane ? window.terminalPane.bound : null')
+        .then((v) => (v === true ? true : null)),
+      20_000,
+    );
+    return gone === true;
+  }
+
+  /* Feed frames and report what the page did with them. */
+  async function feed(frames) {
+    return scriptAsync(`
+      const done = arguments[arguments.length - 1];
+      const fs = ${JSON.stringify(frames)};
+      for (const f of fs) window.__terminalDeliver(f);
+      setTimeout(() => done({
+        applied: window.terminalPane.applied,
+        acked: window.terminalPane.acked,
+        consumed: window.terminalPane.consumed,
+        bytes: window.terminalPane.bytes,
+        gaps: window.terminalPane.gaps,
+        duplicates: window.terminalPane.duplicates,
+        fault: window.terminalPane.fault,
+      }), 400);
+    `);
+  }
+
+  const gap = await feed([
+    { schema: 'terminal-out@1', seq: 1, b64: b64of('one') },
+    { schema: 'terminal-out@1', seq: 3, b64: b64of('three') },
+  ]);
+  check(
+    'a sequence gap renders nothing and acknowledges nothing past the hole',
+    gap.fault === 'sequence-gap' && gap.applied === 1 && gap.acked <= 1 && gap.gaps === 1
+      && gap.bytes === 3,
+    JSON.stringify(gap),
+  );
+
+  await freshTerminal();
+  const dup = await feed([
+    { schema: 'terminal-out@1', seq: 1, b64: b64of('one') },
+    { schema: 'terminal-out@1', seq: 1, b64: b64of('one') },
+  ]);
+  check(
+    'a repeated sequence is a fault, not a frame to skip — OUT is never retransmitted',
+    dup.fault === 'duplicate-or-old-sequence' && dup.duplicates === 1 && dup.bytes === 3,
+    JSON.stringify(dup),
+  );
+
+  await freshTerminal();
+  const late = await feed([{ schema: 'terminal-out@1', seq: 2, b64: b64of('two') }]);
+  check(
+    'a presentation that does not begin at 1 is refused rather than joined mid-stream',
+    late.fault === 'sequence-gap' && late.applied === 0 && late.bytes === 0,
+    JSON.stringify(late),
+  );
+
+  await freshTerminal();
+  const bad = await feed([
+    { schema: 'terminal-out@1', seq: 1, b64: b64of('one') },
+    { schema: 'terminal-out@1', seq: '2', b64: b64of('two') },
+  ]);
+  check(
+    'a non-integer sequence is a fault — a decoder that coerces one is guessing',
+    bad.fault === 'non-integer-seq' && bad.applied === 1,
+    JSON.stringify(bad),
+  );
+
+  await freshTerminal();
+  const shape = await feed([{ schema: 'terminal-out@1', seq: 1 }]);
+  check(
+    'a frame with no payload is a fault — nothing is rendered from a shape that is wrong',
+    shape.fault === 'malformed-frame' && shape.bytes === 0,
+    JSON.stringify(shape),
+  );
+
+  /* ── D2 · one acknowledgement in flight, carrying the highest consumed ─
+
+     The previous page invoked `terminal_ack` from every xterm callback with
+     no gate, so several were outstanding at once — and two Tauri invokes
+     issued in order do not reach the `SyncSender` in order. This measures
+     that the page no longer creates that race: many frames, and the acks
+     that leave are monotonic and fewer than the frames. */
+  await freshTerminal();
+  const ackRun = await scriptAsync(`
+    const done = arguments[arguments.length - 1];
+    for (let i = 1; i <= 12; i += 1) {
+      window.__terminalDeliver({ schema: 'terminal-out@1', seq: i, b64: btoa('chunk' + i) });
+    }
+    setTimeout(() => done({
+      applied: window.terminalPane.applied,
+      consumed: window.terminalPane.consumed,
+      acked: window.terminalPane.acked,
+      fault: window.terminalPane.fault,
+    }), 700);
+  `);
+  check(
+    'twelve contiguous frames render, and the acknowledgement reaches the last of them',
+    ackRun.fault === null && ackRun.applied === 12 && ackRun.consumed === 12
+      && ackRun.acked === 12,
+    JSON.stringify(ackRun),
+  );
+
+  /* ── G · the page can be held without going silent ────────────────────
+
+     The hold lowers the value this page acknowledges; it does not stop the
+     invoke. So xterm keeps parsing, `consumed` keeps rising, and the beat
+     keeps proving the renderer is here — which is the difference between
+     measuring backpressure and measuring the renderer-loss watchdog. */
+  const held = await scriptAsync(`
+    const done = arguments[arguments.length - 1];
+    window.__terminalHold = true;
+    const base = window.terminalPane.consumed;
+    for (let i = base + 1; i <= base + 6; i += 1) {
+      window.__terminalDeliver({ schema: 'terminal-out@1', seq: i, b64: btoa('held' + i) });
+    }
+    setTimeout(() => {
+      const mid = {
+        consumed: window.terminalPane.consumed,
+        acked: window.terminalPane.acked,
+        beats: window.terminalPane.beats,
+        fault: window.terminalPane.fault,
+      };
+      window.__terminalHold = false;
+      setTimeout(() => done({ mid, after: {
+        consumed: window.terminalPane.consumed,
+        acked: window.terminalPane.acked,
+        fault: window.terminalPane.fault,
+      } }), 600);
+    }, 900);
+  `);
+  check(
+    'held, the page still parses and still beats, but returns no new credit',
+    held.mid.fault === null && held.mid.consumed > held.mid.acked && held.mid.beats > 0,
+    JSON.stringify(held),
+  );
+  check(
+    'and releasing the hold returns exactly the credit that was withheld',
+    held.after.fault === null && held.after.acked === held.after.consumed
+      && held.after.consumed === held.mid.consumed,
+    JSON.stringify(held),
+  );
+
+  await freshTerminal();
 
   const termAck = await scriptAsync(`
     const done = arguments[arguments.length - 1];

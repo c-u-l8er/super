@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-terminal-surface"
+description = "Enables the terminal_surface command without any pre-configured scope."
+commands.allow = ["terminal_surface"]
+
+[[permission]]
+identifier = "deny-terminal-surface"
+description = "Denies the terminal_surface command without any pre-configured scope."
+commands.deny = ["terminal_surface"]

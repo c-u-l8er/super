@@ -531,6 +531,142 @@ defmodule Ampd.TerminalPlaneTest do
     assert TA.state(p.pid, 1_000) == :active
   end
 
+  # ==================================================================== B.19
+  #
+  # **D.1.3c·2c·1b·1.** `consume/1` read
+  #
+  #     if seq > s.seq or seq < s.acked, do: bad_ack
+  #
+  # and the second half of that disjunction is wrong. The page issues one
+  # `terminal_ack` invoke per consumed chunk; each is its own
+  # `async_runtime::spawn` and its own `spawn_blocking`, so two issued in
+  # order can reach the `SyncSender` in either order — which
+  # `cockpit/src/main.rs` documents for `bind`/`unbind` and this module then
+  # did not apply. A cumulative ack cannot invent credit by being old: the
+  # newer one already said everything the older one says.
+  #
+  # The old law turned an ordinary scheduling outcome into a killed
+  # presentation, and there was no falsifier because the BEAM probe drives
+  # the socket directly and therefore always in order.
+  test "B.19 · cumulative acknowledgements may arrive out of order without ending the stream",
+       ctx do
+    p = possess!(ctx)
+    {mine, _} = bind(ctx)
+
+    payload = :binary.copy("abcdefgh", 40_000)
+    printer!(p.pty, payload)
+    Process.sleep(400)
+
+    {first, buf} = drain(mine)
+    last = List.last(seqs(first))
+    assert is_integer(last) and last >= 2, "the window did not fill, so there is nothing to reorder"
+
+    {nothing, buf} = drain(mine, buf, [], 250)
+    assert nothing == [], "the stream did not stop when the credit ran out"
+
+    # The reordering, deliberately: the NEWER cumulative ack first.
+    :socket.send(mine, <<@ack, last::big-64>>)
+    :socket.send(mine, <<@ack, last - 1::big-64>>)
+    Process.sleep(300)
+
+    refute Presentations.live() == %{},
+           "an older cumulative ack arriving after a newer one ended the presentation — " <>
+             "a page that acknowledges two chunks in order can produce exactly this"
+
+    [{_ref, plane}] = Map.to_list(Presentations.live())
+    info = Plane.info(plane)
+
+    assert info.acked == last,
+           "the stale ack moved the cumulative mark backwards to #{info.acked} — " <>
+             "an old ack must be ignored, not applied"
+
+    {more, _} = drain(mine, buf, [], 600)
+    resumed = seqs(more)
+    refute resumed == [], "the reordered acks returned no credit at all"
+
+    assert resumed == Enum.to_list((last + 1)..(last + length(resumed))),
+           "the stream did not continue from #{last} after the reordered acks"
+
+    all = bytes(first) <> bytes(more)
+
+    assert binary_part(payload, 0, byte_size(all)) == all,
+           "the bytes after the reordered acks are not the bytes that follow"
+  end
+
+  # ==================================================================== B.20
+  #
+  # **An invariant, not a falsifier of B.19's repair — and saying so is the
+  # point.** The old law refused `seq < acked`, so an ack of exactly `acked`
+  # passed under it too and this test is green either way. It is here
+  # because `ui/terminal.js` now re-sends its high-water on a timer, so that
+  # hearing nothing from the pane means something, and a beat that could
+  # buy credit would be a liveness signal with a side effect on the window.
+  # B.19 is the falsifier; this is the property the beat rides on.
+  test "B.20 · a repeated cumulative acknowledgement is ordinary, and invents no credit", ctx do
+    p = possess!(ctx)
+    {mine, _} = bind(ctx)
+
+    payload = :binary.copy("abcdefgh", 40_000)
+    printer!(p.pty, payload)
+    Process.sleep(400)
+
+    {first, buf} = drain(mine)
+    last = List.last(seqs(first))
+    assert is_integer(last)
+
+    :socket.send(mine, <<@ack, last::big-64>>)
+    Process.sleep(200)
+    {resumed, buf} = drain(mine, buf, [], 400)
+    after_first = length(seqs(resumed))
+    refute after_first == 0, "the first ack returned no credit"
+
+    # The same mark again — the beat. It must move nothing.
+    [{_ref, plane}] = Map.to_list(Presentations.live())
+    before = Plane.info(plane)
+    :socket.send(mine, <<@ack, last::big-64>>)
+    :socket.send(mine, <<@ack, last::big-64>>)
+    Process.sleep(300)
+
+    refute Presentations.live() == %{}, "a repeated cumulative ack ended the presentation"
+
+    {extra, _} = drain(mine, buf, [], 300)
+    now = Plane.info(plane)
+
+    assert now.acked == before.acked,
+           "a repeated ack moved the cumulative mark from #{before.acked} to #{now.acked}"
+
+    assert now.seq - now.acked <= Plane.credits(),
+           "the window grew past #{Plane.credits()} chunks — repeated acks bought credit"
+
+    # It may deliver more, because the FIRST ack's credit is still being
+    # spent; what it must not do is deliver more than the window allows.
+    assert length(seqs(extra)) <= Plane.credits(),
+           "more than one window arrived after two repeated acks"
+  end
+
+  # ==================================================================== B.21
+  test "B.21 · an acknowledgement one past what was sent still ends the presentation", ctx do
+    p = possess!(ctx)
+    {mine, _} = bind(ctx)
+    :socket.send(p.pty, "hello")
+    Process.sleep(200)
+    {got, _} = drain(mine)
+    refute got == []
+    last = List.last(seqs(got))
+
+    # **The tight boundary, and B.8 only had the loose one.** `9_999_999` is
+    # refused by any rule that looks at the number at all; `sent + 1` is
+    # refused only by a rule that compares it with what was actually sent,
+    # which is the property being claimed.
+    :socket.send(mine, <<@ack, last + 1::big-64>>)
+    Process.sleep(300)
+
+    assert Presentations.live() == %{},
+           "a page acknowledged one chunk more than was ever sent and kept its plane"
+
+    assert TA.state(p.pid, 1_000) == :active
+  end
+
   # ===================================================================== B.9
   test "B.9 · closing the presentation leaves the terminal possessed", ctx do
     p = possess!(ctx)

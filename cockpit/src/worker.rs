@@ -334,6 +334,12 @@ pub enum Msg {
     /// same reason `Ack` is: an acknowledgement that can be discarded under
     /// load wedges the stream it was meant to unwedge.
     TerminalAck { seq: u64 },
+    /// **Is a terminal sink bound?** Asked by `terminal_surface` after it
+    /// has created the pane, so the cockpit waits for the page to offer its
+    /// sink instead of racing `terminal_bind` against a loading webview.
+    /// It carries its own reply channel for the same reason `Intent` does:
+    /// the control lane is one-way, and a question needs an answer.
+    TerminalBound { reply: std::sync::mpsc::SyncSender<bool> },
     /// The pane is done. Control lane.
     TerminalClose,
 }
@@ -964,6 +970,9 @@ fn apply(
         Msg::TerminalSink { sink } => term.bind_sink(sink),
         Msg::TerminalAck { seq } => {
             let _ = term.ack(seq);
+        }
+        Msg::TerminalBound { reply } => {
+            let _ = reply.send(term.bound());
         }
         Msg::TerminalClose => term.close(),
         Msg::Intent { name, args, reply } => {

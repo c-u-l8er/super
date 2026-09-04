@@ -28,6 +28,7 @@ fn main() {
                 "terminal_stream",
                 "terminal_ack",
                 "terminal_close",
+                "terminal_surface",
             ]),
         ),
     )

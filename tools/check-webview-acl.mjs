@@ -57,6 +57,7 @@ console.log('[&] Super — cockpit webview ACL\n');
 
 const main = readFileSync(`${ROOT}/cockpit/src/main.rs`, 'utf8');
 const build = readFileSync(`${ROOT}/cockpit/build.rs`, 'utf8');
+const cockpitJs = readFileSync(`${ROOT}/cockpit/ui/cockpit.js`, 'utf8');
 /* **EVERY capability file, and reading only `default.json` was a hole.**
 
    This gate read one file and asserted its `webviews` list had exactly one
@@ -246,6 +247,109 @@ if (term) {
     !/terminal_input|terminal_resize|terminal_write/.test(main + build),
     'SHAPE or DRIVE has an entry point — read-only is meant to be structural, '
       + 'not a stage the code is passing through',
+  );
+
+  check(
+    'the pane that renders a terminal cannot decide one exists',
+    !(term.json.permissions ?? []).includes('allow-terminal-surface'),
+    'terminal.json holds allow-terminal-surface — the renderer could then '
+      + 'create its own surface, and a webview that can open webviews is not '
+      + 'a leaf',
+  );
+}
+
+/* ── D.1.3c·2c·1b·1 · the terminal surface is a PRODUCT surface ──────────
+
+   Two properties, and the second is the security-relevant one.
+
+   **It is not behind the testing witness.** `SUPER_COCKPIT_PANE=1` is what
+   `tools/cockpit-battery.mjs` sets to open the untrusted pane. Until this
+   slice the terminal webview was created in the same branch, so normal
+   Super rendered `Watch terminal` on every PRESENT Worker and had nowhere
+   to put one: no webview, no sink, and `Terminal::park` refuses before a
+   socket exists. A capability reachable only from a test harness is not a
+   capability, and the gate holds the separation rather than the comment.
+
+   **It cannot be aimed.** `terminal_surface` creates a webview, which is
+   the one command in this process that could become "open a page of my
+   choosing inside the trusted window" by growing an argument. The label
+   and the URL are module constants; the command's only page-supplied
+   parameter is a boolean. That is checked structurally, because the
+   difference between this and an arbitrary-webview factory is one
+   parameter.                                                            */
+{
+  const decl = main.match(/async fn terminal_surface\(([\s\S]*?)\)\s*->/);
+  check(
+    'terminal_surface exists and is declared once',
+    !!decl,
+    'no `async fn terminal_surface(..) ->` in main.rs',
+  );
+
+  if (decl) {
+    /* Everything the caller could supply. `app` and `queue` are injected by
+       Tauri from managed state and are not page arguments.
+
+       Split at depth zero: `queue: State<'_, Queues>` contains a comma and
+       naive splitting reported a parameter called `Queues>`, which is the
+       parser being wrong about the source rather than the source being
+       wrong — and a gate that fails for its own reasons trains people to
+       ignore it. */
+    const params = [];
+    let depth = 0;
+    let cur = '';
+    for (const ch of decl[1]) {
+      if (ch === '<' || ch === '(' || ch === '[') depth += 1;
+      if (ch === '>' || ch === ')' || ch === ']') depth -= 1;
+      if (ch === ',' && depth === 0) { params.push(cur.trim()); cur = ''; continue; }
+      cur += ch;
+    }
+    if (cur.trim()) params.push(cur.trim());
+    const supplied = params.filter(
+      (s) => s && !/^app\s*:/.test(s) && !/^queue\s*:/.test(s),
+    );
+    check(
+      'terminal_surface takes exactly one page-supplied argument, a boolean',
+      supplied.length === 1 && /^open\s*:\s*bool$/.test(supplied[0]),
+      `page-supplied parameters: ${JSON.stringify(supplied)}`,
+    );
+  }
+
+  check(
+    'the terminal label and page are constants, not parameters',
+    /const TERMINAL_LABEL: &str = "terminal";/.test(main)
+      && /const TERMINAL_URL: &str = "terminal.html";/.test(main)
+      && /WebviewBuilder::new\(\s*TERMINAL_LABEL,\s*tauri::WebviewUrl::App\(TERMINAL_URL\.into\(\)\),/.test(main),
+    'the terminal webview is built from something other than the two constants',
+  );
+
+  /* Every webview this process can construct, by the string it is built
+     from. Two, and both are literals in this file. */
+  const built = [...main.matchAll(/WebviewUrl::App\(([\s\S]*?)\.into\(\)\)/g)]
+    .map((m) => m[1].trim());
+  check(
+    'this process can construct exactly two webviews, both named in source',
+    built.length === 2 && built.includes('"pane.html"') && built.includes('TERMINAL_URL'),
+    `WebviewUrl::App call sites: ${JSON.stringify(built)}`,
+  );
+
+  /* The `if pane {` block, isolated, so what it still governs is checked
+     rather than described. */
+  const witness = main.match(/if pane \{([\s\S]*?)\n            \}/);
+  check(
+    'SUPER_COCKPIT_PANE governs the untrusted witness and nothing else',
+    !!witness
+      && /"pane"/.test(witness[1])
+      && !/TERMINAL_LABEL/.test(witness[1])
+      && !/terminal\.html/.test(witness[1]),
+    'the terminal webview is created inside the SUPER_COCKPIT_PANE branch — '
+      + 'the product surface would exist only when a test harness asks for it',
+  );
+
+  check(
+    'the product path opens the surface before it binds a terminal',
+    /if \(name === 'terminal_bind'\) await terminalSurface\(true\);/.test(cockpitJs),
+    'cockpit.js submits terminal_bind without ensuring a sink — the runtime '
+      + 'would refuse it for a reason about our startup order, not authority',
   );
 }
 

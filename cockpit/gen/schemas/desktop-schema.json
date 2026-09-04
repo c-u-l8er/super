@@ -225,6 +225,12 @@
           "markdownDescription": "Enables the terminal_stream command without any pre-configured scope."
         },
         {
+          "description": "Enables the terminal_surface command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-terminal-surface",
+          "markdownDescription": "Enables the terminal_surface command without any pre-configured scope."
+        },
+        {
           "description": "Enables the unbind_frame_stream command without any pre-configured scope.",
           "type": "string",
           "const": "allow-unbind-frame-stream",
@@ -277,6 +283,12 @@
           "type": "string",
           "const": "deny-terminal-stream",
           "markdownDescription": "Denies the terminal_stream command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the terminal_surface command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-terminal-surface",
+          "markdownDescription": "Denies the terminal_surface command without any pre-configured scope."
         },
         {
           "description": "Denies the unbind_frame_stream command without any pre-configured scope.",
