@@ -531,6 +531,57 @@ defmodule Ampd.Control do
   # host does not confirm the process is gone, and a match on `:ok` turned
   # that expected safety state into a MatchError through the public command
   # path. A fail-closed state that crashes is not fail-closed.
+  # D.1.3c·2c·1c — the occupant takes possession of its Carrier's terminal.
+  #
+  # The host allocates the pty unconditionally when a Carrier starts
+  # (`host/src/lib.rs`, `Pty::open()`), so the terminal is a physical fact
+  # about the Carrier before anyone asks for it. What this installs is the
+  # runtime's SEMANTIC record of it — the thing a presentation is authorised
+  # against, and the thing `Presentation.status_of/1` reads to answer
+  # `"PRESENT"`.
+  #
+  # It is a mutation and it lives here, which is not a formality: `acquire/1`
+  # runs an unbounded host round trip between two ordered transactions, and
+  # C1.0b·2·2 is what makes "this cannot execute inside the coordinator" a
+  # property of the call graph rather than of a `kind:` field. Adding this
+  # clause to the collapsed `dispatch/3` is what opened fourteen
+  # unadjudicated crossings and blocked this slice.
+  defp dispatch_mutation(peer, :acquire_terminal, _) do
+    case Ampd.Carrier.Terminal.acquire(peer["id"]) do
+      {:ok, record} ->
+        # **A chosen subset, not the record.** `terminal-attachment@1` carries
+        # `attachment_ref`, `attachment_epoch` and `pty_epoch` — machine
+        # identities the agent did not supply, cannot use, and has no reason
+        # to learn. Returning the map because it happens to contain no
+        # descriptor is how a disclosure boundary erodes: the next field added
+        # to the record would be disclosed by default. What the caller asked
+        # is "do I possess my Carrier's terminal", and this answers that.
+        %{
+          "allow" => true,
+          "terminal" => Map.take(record, ~w(schema status worker_ref worker_generation))
+        }
+
+      {:refused, r} ->
+        %{"allow" => false, "refusal" => r}
+
+      {:error, why} ->
+        # The machine could not say whether the attachment exists. It is not
+        # retried here for the same reason `Ampd.Carrier.start/2` does not
+        # retry its own: a second attempt against an unknown first one is how
+        # you get two.
+        %{
+          "allow" => false,
+          "refusal" =>
+            Ampd.Refusal.new("terminal-acquire-indeterminate",
+              component: "Ampd.Carrier.Terminal",
+              retryable: false,
+              requires_human: false,
+              operator_detail: %{"reason" => to_string(why)}
+            )
+        }
+    end
+  end
+
   defp dispatch_mutation(peer, :stop_carrier, _) do
     case Ampd.Carrier.stop(peer["id"]) do
       :ok ->

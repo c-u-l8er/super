@@ -1090,6 +1090,37 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
         }
     };
 
+    // **D.1.3c·2c·1c — the cockpit becomes a host that can run Carriers.**
+    //
+    // Until this slice only `super-host run` and `super-host verify` served
+    // these two channels, so a cockpit's runtime had no carrier endpoint at
+    // all: `Ampd.Bridge.carrier_endpoint/0` answered `nil` and every Carrier
+    // start was refused *"no host carrier channel is possessed — refusing to
+    // resolve and execute the host by name instead"*. A person running Super
+    // could open a Workspace, a Goal, a Lane and a Worker, and then nothing
+    // could ever occupy it. That is the third layer of the same defect this
+    // round has been unpicking — the first was a terminal webview only a
+    // test flag created, the second a possession only a test could acquire,
+    // and this is the machine only a different binary could serve.
+    //
+    // **Degraded rather than fatal, and the wording is the host's own.** A
+    // cockpit that cannot serve Carriers still renders the world; the
+    // runtime refuses starts by name rather than resolving an executable,
+    // which is the property D.1.3a installed and it has to hold here too.
+    match rt.effect_channel() {
+        Ok(fd) => {
+            std::thread::spawn(move || super_host::serve_effects(fd));
+        }
+        Err(e) => eprintln!("cockpit: effect channel UNAVAILABLE: {e}"),
+    }
+    match rt.carrier_channel() {
+        Ok(fd) => {
+            let root = super_host::world_dir_for_carriers();
+            std::thread::spawn(move || super_host::serve_carrier(fd, root));
+        }
+        Err(e) => eprintln!("cockpit: carrier channel UNAVAILABLE: {e}"),
+    }
+
     let seeded = if cfg.fixture { seed_fixture(&rt).ok() } else { None };
     let (_kestrel, fixture_request) = match seeded {
         Some((c, id)) => (Some(c), Some(id)),

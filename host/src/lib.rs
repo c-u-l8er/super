@@ -401,7 +401,7 @@ pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
 /// accumulate in a developer's tree. Each Carrier gets its own subdirectory
 /// and that subdirectory is the *only* thing its Landlock policy grants
 /// write access to.
-fn world_dir_for_carriers() -> PathBuf {
+pub fn world_dir_for_carriers() -> PathBuf {
     let base = std::env::var_os("AMPD_DATA_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);

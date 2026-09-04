@@ -458,6 +458,40 @@ defmodule Ampd.CommandSpec do
       kind: :mutation,
       fields: []
     },
+    # **D.1.3c·2c·1c — the door terminal possession never had.**
+    #
+    # `Ampd.Carrier.Terminal.acquire/1` has existed and been falsified since
+    # D.1.3c·2b, and nothing in the product ever called it: its only call
+    # site in the tree was one NEGATIVE test. So no Peer ever held a terminal
+    # record, `Ampd.Terminal.Presentation.status_of/1` could never answer
+    # `"PRESENT"`, and the cockpit's *Watch terminal* action — wired end to
+    # end since D.1.3c·2c·1b — was offered on a condition that could not
+    # become true. A capability reachable only from a test is not a
+    # capability, which is what D.1.3c·2c·1b·1 fixed one layer up for the
+    # terminal webview and this fixes for the possession under it.
+    #
+    # **No field, and that is the authority argument.** The Peer whose
+    # terminal is acquired is the Peer on the connection; there is nothing
+    # here to name someone else's Carrier with, so there is no argument to
+    # get wrong. `Ampd.Carrier.Terminal.admit_attach/1` re-derives the whole
+    # chain — occupancy, the Worker, the embodying Carrier — from that Peer
+    # alone, which is why this grammar can afford to be empty. It says
+    # "acquire the terminal belonging to the position I already occupy",
+    # never "acquire this terminal I have named".
+    #
+    # **Deliberately not folded into `start_carrier`.** A Carrier need not
+    # possess a terminal; keeping the two separate keeps a headless Carrier
+    # expressible. Every possession falsifier in `terminal_possession_test`
+    # also builds its fixture from `admit_attach/1` forward, so an implicit
+    # acquire at start would refuse them all `terminal-already-attached` —
+    # but that is the smaller reason. The larger one is that a runtime
+    # should not hand an agent a possession it did not ask for.
+    "acquire_terminal" => %{
+      cmd: :acquire_terminal,
+      channel: :agent,
+      kind: :mutation,
+      fields: []
+    },
     "attach_worker" => %{
       cmd: :attach_worker,
       channel: :agent,
