@@ -372,6 +372,22 @@ defmodule Ampd.Gateway do
           rcpt = emit_receipt(cap, auth, e["id"], attempt, ctx)
           Map.merge(auth, %{"effect_id" => e["id"], "receipt" => rcpt})
         rescue
+          # **A participant failure is not the adapter raising, and this
+          # rescue is wide enough to say it was.** `Effects.commit/2` and
+          # `emit_receipt/5` (via `Receipts.emit/1`) both cross the boundary
+          # now, so `Ampd.Participant.Failure` can arrive here and be
+          # relabelled "adapter raised" — factually false, and it collapses
+          # `:not_applied` (retryable, nothing was mutated) into UNKNOWN.
+          #
+          # Not live today: `perform/4` runs after `claim_and_consume/4`
+          # returns, deliberately outside the order (see the block comment
+          # above), where the boundary degrades to `GenServer.call` and
+          # exits rather than raising. It becomes live the day anyone puts
+          # this under a transaction, which is exactly when nobody will be
+          # looking at this rescue.
+          e2 in Ampd.Participant.Failure ->
+            reraise e2, __STACKTRACE__
+
           err ->
             Effects.unknown(e["id"], "adapter raised: #{Exception.message(err)}")
 

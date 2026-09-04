@@ -611,25 +611,115 @@ defmodule Ampd.Carrier.Terminal do
       # monitor the moment the owner goes.
       case Peer.activate_terminal(peer_ref, record["attachment_ref"], record["attachment_epoch"]) do
         {:ok, active} ->
-          case safely(fn ->
-                 Ampd.TerminalAttachment.activate(pid, record["attachment_ref"], record["attachment_epoch"])
-               end) do
-            :ok ->
-              {:ok, active}
-
-            other ->
-              # Includes `:gone` — the owner died between the check above and
-              # this call. The World has already said ACTIVE, so this removes
-              # it again by identity rather than leaving a possession whose
-              # stream never finished becoming one.
-              _ = Peer.remove_terminal(peer_ref, record["attachment_ref"], record["attachment_epoch"])
-              {:refused, refuse("terminal-owner-refused-activation", %{"reason" => inspect(other)})}
-          end
+          finalise_stream(peer_ref, record, pid, active)
 
         {:refused, why} ->
           {:refused, refuse("terminal-commit-refused", %{"reason" => inspect(why)})}
       end
     end
+  end
+
+  # **The one ordered operation in this tree that mutates two independently
+  # failing participants, so its failure cut is stated for each of them
+  # rather than assumed.**
+  #
+  #     Ampd.Peer                activate_terminal   COMMITTING → ACTIVE
+  #     Ampd.TerminalAttachment  activate            PREPARED   → ACTIVE
+  #
+  # There is no rollback layer here and this does not invent one. It proves
+  # the cut for each way the second participant can fail:
+  #
+  #     replied :ok         both applied
+  #     replied otherwise   the stream refused. The record is removed by
+  #                         identity — a compensation, and a sound one,
+  #                         because the participant ANSWERED
+  #     never delivered     `:noproc`; the owner is gone, and a gone owner
+  #                         holds no stream. Remove
+  #     died                whatever it did before dying, the stream died
+  #                         with it. Remove
+  #     did not answer      **INDETERMINATE, and nothing is compensated.**
+  #
+  # The last one is the whole reason this function exists. `safely/1` mapped
+  # a timeout to `:unreachable` and fell into the same arm as a refusal, so a
+  # stream owner that was merely busy — queued behind a `:socket.send` on a
+  # full buffer — had its World record removed while its activation was
+  # still in the mailbox. That leaves an ACTIVE stream with nothing in the
+  # World naming it: unrevokable, and invisible to the projection.
+  #
+  # Leaving the record is the safe direction, and it is not a new state: an
+  # ACTIVE record over a PREPARED stream is the worst case the ordering
+  # above was already chosen to tolerate — it refuses every byte, and the
+  # owner's monitor removes it the moment the owner goes.
+  #
+  # The class is read off `Ampd.Participant.Failure.reason`, which is what
+  # the mechanism MEASURED, rather than re-derived from `Process.alive?/1`
+  # out here — an answer that is stale the instant it returns.
+  defp finalise_stream(peer_ref, record, pid, active) do
+    case ask_activate(pid, record) do
+      :ok ->
+        {:ok, active}
+
+      {:indeterminate, why} ->
+        {:refused,
+         refuse("terminal-activation-indeterminate", %{
+           "reason" => why,
+           "attachment_ref" => record["attachment_ref"]
+         })}
+
+      {:gone, why} ->
+        undo_activation(peer_ref, record, why)
+
+      {:refused_by_owner, other} ->
+        undo_activation(peer_ref, record, inspect(other))
+    end
+  end
+
+  # **The rescue wraps the crossing and nothing else, and the first version
+  # did not.** Attached to the whole of `finalise_stream/4` it also covered
+  # `undo_activation/3` — which crosses a SECOND participant,
+  # `Ampd.Peer.remove_terminal/3`. So a failure there re-entered the same
+  # rescue, removed the record a second time, and if that second failure
+  # happened to be a timeout reported it as an ACTIVATION that was
+  # indeterminate. Two participants, one handler, and the mislabel this
+  # function exists to remove reintroduced through the branch that was
+  # supposed to be the safe one.
+  defp ask_activate(pid, record) do
+    case Ampd.Participant.call(
+           pid,
+           {:activate, record["attachment_ref"], record["attachment_epoch"]},
+           :mutate
+         ) do
+      :ok -> :ok
+      other -> {:refused_by_owner, other}
+    end
+  rescue
+    e in Ampd.Participant.Failure ->
+      # **`reason`, not `outcome`, and the difference is the whole point.**
+      # `outcome` is `:indeterminate` for a timeout AND for a death, because
+      # `Ampd.Participant` will not narrow a death without a witness — and it
+      # is right not to. What follows narrows one of them on DOMAIN grounds,
+      # and the ground is deliberately not "the mutation did not happen":
+      #
+      #   timeout  the owner is ALIVE and still holds the request. The
+      #            activation may be queued behind a `:socket.send` blocked on
+      #            a full buffer. Nothing may be compensated.
+      #   gone     never reached, or died. Whatever it did before dying, THE
+      #            STREAM DIED WITH IT — so the World record must not go on
+      #            naming a possession whose stream no longer exists. The
+      #            record is removed because the RESOURCE is gone, not
+      #            because the mutation was not applied.
+      #
+      # A `:witness` would be the mechanism's way to narrow the death, and it
+      # is not used because a witness answers "did my mutation land" and the
+      # question here is "is there anything left for the record to name".
+      if e.reason == :timeout,
+        do: {:indeterminate, Exception.message(e)},
+        else: {:gone, Exception.message(e)}
+  end
+
+  defp undo_activation(peer_ref, record, why) do
+    _ = Peer.remove_terminal(peer_ref, record["attachment_ref"], record["attachment_epoch"])
+    {:refused, refuse("terminal-owner-refused-activation", %{"reason" => why})}
   end
 
   # **Every call this transaction makes to a stream owner goes through here.**

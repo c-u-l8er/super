@@ -67,6 +67,31 @@ defmodule Ampd.Subscriptions do
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  @participant_mutations ~w(subscribe unsubscribe)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
+
   @impl true
   def init(:ok), do: {:ok, %{subs: %{}, monitors: %{}, timer: nil}}
 
@@ -120,8 +145,21 @@ defmodule Ampd.Subscriptions do
   # A monitor rather than a link, and in this direction only: a link would
   # mean one dying connection takes the subscription server down for
   # everyone.
+  # **This must not be called from inside the total order, and nothing
+  # mechanical says so.** `handle_call({:subscribe, …})` builds the first
+  # snapshot, which reaches `Ampd.Projection.framed/2` and from there
+  # `AuthorityCoordinator.observe/2` — so a subscribe issued from inside a
+  # transaction would have the coordinator waiting on this process while this
+  # process waits on the coordinator.
+  #
+  # What keeps it out is one field: `Ampd.CommandSpec` declares `subscribe`
+  # `kind: :mutation`, so `Ampd.Control.in_lineage/4` runs it on the
+  # unordered `run.()` branch rather than through `framed/2`. The
+  # reachability census lists this crossing under the ordered roots anyway,
+  # because that closure is shared between both branches — which is the
+  # census being conservative, not a claim that this path is ordered.
   def subscribe(peer) when is_map(peer) do
-    case GenServer.call(__MODULE__, {:subscribe, peer["id"], self()}) do
+    case ask({:subscribe, peer["id"], self()}) do
       %{"refusal" => _} = refused ->
         refused
 
@@ -150,7 +188,7 @@ defmodule Ampd.Subscriptions do
       ref -> Process.demonitor(ref, [:flush]) && Process.delete(:ampd_subs_monitor)
     end
 
-    GenServer.call(__MODULE__, {:unsubscribe, peer_id})
+    ask({:unsubscribe, peer_id})
   end
 
   @doc "The current snapshot for a peer, without subscribing."
@@ -167,7 +205,7 @@ defmodule Ampd.Subscriptions do
   def changed, do: GenServer.cast(__MODULE__, :changed)
 
   @doc "How many subscribers are live. Diagnostic only."
-  def count, do: GenServer.call(__MODULE__, :count)
+  def count, do: ask(:count)
 
   # ------------------------------------------------------------- server
   @impl true

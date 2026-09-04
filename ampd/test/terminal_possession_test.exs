@@ -760,6 +760,72 @@ defmodule Ampd.TerminalPossessionTest do
     assert closed?(mine)
   end
 
+  # ================================================================== K.23
+  #
+  # C1.0b·2·1. B2 mutates TWO independently failing participants — the World
+  # record in `Ampd.Peer`, then the stream phase in `Ampd.TerminalAttachment`
+  # — and the cut between them was wrong for exactly one of the four ways the
+  # second can fail.
+  #
+  # `safely/1` mapped a TIMEOUT to `:unreachable` and dropped it into the
+  # same arm as a refusal, so a stream owner that was merely busy had its
+  # World record removed while its activation was still in the mailbox. What
+  # that leaves is an ACTIVE stream with nothing in the World naming it:
+  # unrevokable, and absent from every projection.
+  #
+  # The stub is what makes this measurable. Suspending the real attachment
+  # cannot isolate it — `snapshot` is called first and `held == :unreachable`
+  # refuses `terminal-owner-unreachable` before `activate` is ever reached.
+  # So the owner here answers the snapshot truthfully and then does not
+  # answer the activation, which is the only shape that reaches the cut.
+  defmodule SlowOwner do
+    @moduledoc false
+    use GenServer
+
+    def start(record, owner), do: GenServer.start(__MODULE__, {record, owner})
+    def init(st), do: {:ok, st}
+
+    def handle_call(:snapshot, _f, {record, owner} = st),
+      do: {:reply, %{phase: :prepared, record: record, owner: owner}, st}
+
+    # Alive, and not answering. Longer than `Ampd.Participant`'s default so
+    # the caller gives up first, which is the whole condition being tested.
+    def handle_call({:activate, _, _}, _f, st), do: (Process.sleep(9_000); {:reply, :ok, st})
+  end
+
+  test "K.23 · a stream owner that did not answer is INDETERMINATE, and nothing is compensated",
+       ctx do
+    p = provision(ctx)
+    {:ok, record} = T.commit_b1(p.ticket, p.obs, p.pid)
+    :ok = TA.prepare(p.pid, Map.merge(record, p.identity), Peer.owner_pid(p.peer))
+
+    current = Peer.terminal_attachment(p.peer)
+    {:ok, slow} = SlowOwner.start(current, Peer.owner_pid(p.peer))
+    track_pid(ctx, slow)
+
+    coord = Process.whereis(Ampd.AuthorityCoordinator)
+    assert {:refused, r} = T.commit_b2(p.ticket, record, slow)
+
+    assert r["code"] == "terminal-activation-indeterminate",
+           "a busy stream owner was reported as one that refused: #{r["code"]}"
+
+    assert Process.whereis(Ampd.AuthorityCoordinator) == coord,
+           "a stream owner that did not answer took the total order down"
+
+    # **The half that is the repair.** The World said ACTIVE before the
+    # stream was asked; an INDETERMINATE answer must leave it that way. An
+    # ACTIVE record over a not-yet-ACTIVE stream refuses every byte and is
+    # removed by the owner's monitor — which is the worst case B2's ordering
+    # was already chosen to tolerate.
+    after_ = Peer.terminal_attachment(p.peer)
+
+    assert after_ != nil,
+           "the record was removed for a participant that may have applied the mutation"
+
+    assert after_["attachment_ref"] == record["attachment_ref"]
+    assert after_["status"] == "ACTIVE"
+  end
+
   describe "K.20 · ending the Carrier relation ends the terminal relation" do
     test "detach_carrier", ctx do
       p = possess!(ctx)

@@ -571,7 +571,7 @@ probe "the view clock is not the authority clock" test/cockpit_test.exs \
   lib/ampd/authority_coordinator.ex
 
 probe "a refusal reaches the operator's diagnostic view" test/cockpit_test.exs \
-  '66 s|^    Ampd.AuthorityCoordinator.touched()$|    _ = :no_touch|' \
+  's|^    Ampd.AuthorityCoordinator.touched()$|    _ = :no_touch|' \
   lib/ampd/refusal_log.ex
 
 # A subscription is a lease. `:one_for_one` means `Ampd.Subscriptions` can
@@ -1103,6 +1103,59 @@ probe "a participant failure in B1 still disposes of the stream owner" test/term
 # probes that would have caught it are in `tools/sabotage-host.sh`, and
 # they run the real host against a real runtime because that is the only
 # place the case exists.
+
+# ============================================================ C1.0b·2·1
+#
+# The closure round. C1.0b·2 converted two participants; the reachability
+# census (`tools/ordered-reachability.exs`) named the rest, and these probes
+# are what stop the conversion from being a source-enumeration exercise.
+#
+# Each one removes a different half of the same claim: that a crossing is
+# routed through the boundary AND carries a class AND is cut correctly when
+# the participant does not answer.
+
+# The class is a list, so it can be deleted without touching a call site —
+# which turns every mutation in the registry into a read, and every lost
+# reply into a retryable "nothing was mutated".
+probe "a mutation in a converted registry is classified as one" test/ordered_closure_test.exs \
+  's|def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)|def class(_tag), do: :read|' \
+  lib/ampd/grant_registry.ex
+
+# The funnel, bypassed. This is what the tree looked like before the round:
+# an absent participant exits the caller, and the caller is the total order.
+probe "an ordered call to an absent registry does not exit the coordinator" test/ordered_closure_test.exs \
+  's|Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)|GenServer.call(__MODULE__, msg, timeout)|' \
+  lib/ampd/approvals.ex
+
+probe "the worktree registry answers through the boundary" test/ordered_closure_test.exs \
+  's|Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)|GenServer.call(__MODULE__, msg, timeout)|' \
+  lib/ampd/worktree.ex
+
+# The two lists answer two questions, and only one direction is a defect:
+# an op served ONLY for the coordinator that is classified a read gives an
+# indeterminate write a retryable "nothing was mutated".
+probe "an ordered op is not classified as a read" test/ordered_closure_test.exs \
+  's|@participant_mutations ~w(close_store load_state world end_run reset)a|@participant_mutations ~w(close_store load_state end_run reset)a|' \
+  lib/ampd/session.ex
+
+# The two-participant cut. `if false` makes an INDETERMINATE activation
+# compensate, which removes the World record of a possession that may be
+# about to become live.
+probe "a stream owner that did not answer is not compensated for" test/terminal_possession_test.exs \
+  's|^      if e.reason == :timeout,$|      if false,|' \
+  lib/ampd/carrier/terminal.ex
+
+# The deadline that outlived its own budget for as long as nothing read it.
+probe "the embodiment measurement fits inside the transaction budget" test/effect_channel_test.exs \
+  's|@identity_deadline_ms 12_000|@identity_deadline_ms 30_000|' \
+  lib/ampd/embodiment.ex
+
+# Absent measurement must refuse, not raise. Without the rescue the
+# boundary's exception leaves through the coordinator and a fail-closed
+# measurement becomes a failed transaction.
+probe "an unreachable embodiment cache is still fail-closed" test/ordered_closure_test.exs \
+  's|    e in Ampd.Participant.Failure ->|    e in Ampd.Participant.NoSuchFailure ->|' \
+  lib/ampd/embodiment.ex
 
 echo
 # **PREFIXED AT W.1.4.2, BECAUSE THIS LINE AND `sabotage-host.sh`'s WERE THE

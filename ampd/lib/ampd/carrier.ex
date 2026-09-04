@@ -983,8 +983,23 @@ defmodule Ampd.Carrier do
   end
 
   # The basis the selected machine would launch. Reads channel metadata; makes
-  # no request and takes no deadline — see the callback docs. Safe inside the
-  # order for that reason and for no other.
+  # no request to the machine and takes no deadline — see the callback docs.
+  #
+  # **That was the whole argument for it being safe inside the order, and it
+  # was incomplete.** It makes no request to the MACHINE and it does make one
+  # to `Ampd.Bridge`: `Ampd.Carrier.Machine.Channel.execution_basis/0` calls
+  # `Bridge.carrier_endpoint/0`. Before C1.0b·2·1 that was a bare
+  # `GenServer.call` with no catch anywhere between here and the coordinator,
+  # so a Bridge that was absent or mid-restart exited the total order — the
+  # exact fault this comment claimed could not happen. The C1.0b·2·1
+  # reachability census is what found it; no test did.
+  #
+  # `Ampd.Bridge` is a participant now, so its absence arrives as a
+  # classified `Ampd.Participant.Failure` that the coordinator catches by
+  # struct. The refusal is `participant-unavailable` rather than
+  # `carrier-execution-basis-unavailable` in that one case — a real loss of
+  # diagnosis, and a smaller one than losing the control plane. The
+  # channel-present-but-empty case still refuses by the name below.
   defp execution_basis do
     case machine().execution_basis() do
       {:ok, b} when is_map(b) ->

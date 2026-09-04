@@ -49,6 +49,31 @@ defmodule Ampd.Effects do
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  @participant_mutations ~w(close_store load_state propose to claim attempt recover)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
+
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
@@ -69,41 +94,41 @@ defmodule Ampd.Effects do
   """
   def sealed_state, do: %{"effects" => [], "seq" => 0}
 
-  def sealed, do: GenServer.call(__MODULE__, :sealed)
-  def close_store, do: GenServer.call(__MODULE__, :close_store)
-  def load_state(s), do: GenServer.call(__MODULE__, {:load_state, s})
-  def all, do: GenServer.call(__MODULE__, :all)
+  def sealed, do: ask(:sealed)
+  def close_store, do: ask(:close_store)
+  def load_state(s), do: ask({:load_state, s})
+  def all, do: ask(:all)
   def get(id), do: Enum.find(all(), &(&1["id"] == id))
   def count, do: length(all())
 
   @doc "Open a proposal. Nothing is authorized and nothing has happened."
-  def propose(env), do: GenServer.call(__MODULE__, {:propose, env})
+  def propose(env), do: ask({:propose, env})
 
   @doc "Record that the gateway allowed this proposal under a frozen snapshot."
-  def authorized(id, meta), do: GenServer.call(__MODULE__, {:to, id, "AUTHORIZED", meta})
+  def authorized(id, meta), do: ask({:to, id, "AUTHORIZED", meta})
 
   @doc "Record that human consent was bound to this exact proposal."
-  def approved(id, meta), do: GenServer.call(__MODULE__, {:to, id, "APPROVED", meta})
+  def approved(id, meta), do: ask({:to, id, "APPROVED", meta})
 
   @doc """
   Take exclusive ownership of a proposal. Durable *before* any grant or
   approval is consumed, and refused if someone already holds it.
   """
-  def claim(id), do: GenServer.call(__MODULE__, {:claim, id})
+  def claim(id), do: ask({:claim, id})
 
   @doc "Durable before the adapter is touched. After this, UNKNOWN is possible."
-  def attempt(id, adapter), do: GenServer.call(__MODULE__, {:attempt, id, adapter})
+  def attempt(id, adapter), do: ask({:attempt, id, adapter})
 
-  def commit(id, result), do: GenServer.call(__MODULE__, {:to, id, "COMMITTED", %{"result" => result}})
-  def fail(id, why), do: GenServer.call(__MODULE__, {:to, id, "FAILED", %{"reason" => why}})
-  def unknown(id, why), do: GenServer.call(__MODULE__, {:to, id, "UNKNOWN", %{"reason" => why}})
+  def commit(id, result), do: ask({:to, id, "COMMITTED", %{"result" => result}})
+  def fail(id, why), do: ask({:to, id, "FAILED", %{"reason" => why}})
+  def unknown(id, why), do: ask({:to, id, "UNKNOWN", %{"reason" => why}})
 
   @doc """
   Boot-time truth. Anything still CLAIMED or ATTEMPTED when the process
   died is, by definition, of unknown outcome — the world may have moved.
   Recovery never resolves these silently; it marks them and queues them.
   """
-  def recover!, do: GenServer.call(__MODULE__, :recover)
+  def recover!, do: ask(:recover)
 
   @doc "Effects whose real-world outcome is unresolved and must be reconciled."
   def reconcile_queue, do: Enum.filter(all(), &(&1["state"] == "UNKNOWN"))

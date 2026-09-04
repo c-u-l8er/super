@@ -102,6 +102,33 @@ defmodule Ampd.Participant do
   This catches an exception the mechanism itself constructed, carrying the
   class it measured.
 
+  ## Two participants in one operation — the standing rule
+
+  **This module classifies ONE crossing. It does not make a transaction
+  atomic, and nothing in this tree does.**
+
+  A transaction that mutates participant A and then fails while mutating
+  participant B leaves A mutated. There is no saga layer, no compensation
+  framework, and building one is deliberately not this slice — it is a major
+  new semantic mechanism and it should be forced by a real application rather
+  than anticipated.
+
+  What is required instead, and is enforced by review rather than by code:
+
+  > Until ComputeDriven has explicit multi-participant transaction /
+  > reconciliation semantics, **every ordered operation that mutates more
+  > than one independently failing participant must prove its failure cuts
+  > individually.** It either has a mechanical reconciliation for each cut,
+  > or it represents the result as indeterminate. It may not claim atomicity
+  > merely because the operations occur under one coordinator.
+
+  The tree has exactly one such path today and it is worked through in
+  `Ampd.Carrier.Terminal.finalise_stream/4`: `Ampd.Peer` then
+  `Ampd.TerminalAttachment`, with a stated cut for *replied*, *never
+  delivered*, *died* and *did not answer* — and no compensation on the last
+  one, because compensating an INDETERMINATE mutation is how a live
+  possession gets destroyed by a participant that was merely busy.
+
   ## Outside the total order, nothing changes
 
   A caller that is not the coordinator gets a plain `GenServer.call`, byte

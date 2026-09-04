@@ -1,19 +1,7 @@
 {
   "bare": {
-    "lib/ampd/approvals.ex": 8,
     "lib/ampd/authority_coordinator.ex": 6,
-    "lib/ampd/bridge.ex": 9,
-    "lib/ampd/capability_registry.ex": 9,
-    "lib/ampd/carrier/machine.ex": 2,
-    "lib/ampd/carrier/reaper.ex": 2,
-    "lib/ampd/effects.ex": 13,
-    "lib/ampd/embodiment.ex": 3,
-    "lib/ampd/grant_registry.ex": 16,
-    "lib/ampd/receipts.ex": 6,
-    "lib/ampd/refusal_log.ex": 4,
-    "lib/ampd/session.ex": 9,
-    "lib/ampd/subscriptions.ex": 3,
-    "lib/ampd/worktree.ex": 15
+    "lib/ampd/carrier/machine.ex": 2
   },
   "converted": {
     "Ampd.Peer": {
@@ -29,6 +17,102 @@
       "mutations": 6,
       "reads": 3,
       "declared_mutations": 6,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.GrantRegistry": {
+      "sends": 16,
+      "mutations": 13,
+      "reads": 3,
+      "declared_mutations": 13,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.CapabilityRegistry": {
+      "sends": 9,
+      "mutations": 6,
+      "reads": 3,
+      "declared_mutations": 6,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Approvals": {
+      "sends": 8,
+      "mutations": 6,
+      "reads": 2,
+      "declared_mutations": 6,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Effects": {
+      "sends": 9,
+      "mutations": 7,
+      "reads": 2,
+      "declared_mutations": 7,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Session": {
+      "sends": 8,
+      "mutations": 5,
+      "reads": 3,
+      "declared_mutations": 5,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Worktree": {
+      "sends": 11,
+      "mutations": 8,
+      "reads": 3,
+      "declared_mutations": 8,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Bridge": {
+      "sends": 9,
+      "mutations": 6,
+      "reads": 3,
+      "declared_mutations": 6,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Receipts": {
+      "sends": 6,
+      "mutations": 4,
+      "reads": 2,
+      "declared_mutations": 4,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.RefusalLog": {
+      "sends": 4,
+      "mutations": 1,
+      "reads": 3,
+      "declared_mutations": 1,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Subscriptions": {
+      "sends": 3,
+      "mutations": 2,
+      "reads": 1,
+      "declared_mutations": 2,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Embodiment": {
+      "sends": 3,
+      "mutations": 1,
+      "reads": 2,
+      "declared_mutations": 1,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Carrier.Reaper": {
+      "sends": 2,
+      "mutations": 0,
+      "reads": 2,
+      "declared_mutations": 0,
       "dead": [],
       "bare": 0
     }

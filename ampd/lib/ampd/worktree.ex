@@ -85,6 +85,31 @@ defmodule Ampd.Worktree do
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  @participant_mutations ~w(close_store load_state reset register_repo request set_state create recover)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
+
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
@@ -105,13 +130,13 @@ defmodule Ampd.Worktree do
   def sealed_state, do: %{"repos" => %{}, "resources" => %{}, "seq" => 0}
   def initial, do: %{"repos" => %{}, "resources" => %{}, "seq" => 0}
 
-  def sealed, do: GenServer.call(__MODULE__, :sealed)
-  def close_store, do: GenServer.call(__MODULE__, :close_store)
-  def load_state(s), do: GenServer.call(__MODULE__, {:load_state, s})
-  def reset, do: GenServer.call(__MODULE__, :reset)
+  def sealed, do: ask(:sealed)
+  def close_store, do: ask(:close_store)
+  def load_state(s), do: ask({:load_state, s})
+  def reset, do: ask(:reset)
 
   @doc "Every registered repository, `rp_XXXX => %{...}`. Operator-facing."
-  def repos, do: GenServer.call(__MODULE__, {:all, "repos"})
+  def repos, do: ask({:all, "repos"})
 
   @doc """
   Every known resource, `wt_XXXX => record`.
@@ -120,10 +145,10 @@ defmodule Ampd.Worktree do
   never projected onto an agent channel. `Ampd.Locus.observe/2` returns
   the redacted view a Lane may see.
   """
-  def resources, do: GenServer.call(__MODULE__, {:all, "resources"})
+  def resources, do: ask({:all, "resources"})
 
-  def resource(ref), do: GenServer.call(__MODULE__, {:get, "resources", ref})
-  def repo(ref), do: GenServer.call(__MODULE__, {:get, "repos", ref})
+  def resource(ref), do: ask({:get, "resources", ref})
+  def repo(ref), do: ask({:get, "repos", ref})
 
   @doc """
   The confinement root for this runtime, as an absolute path.
@@ -161,7 +186,7 @@ defmodule Ampd.Worktree do
   `unordered-authority-mutation`.
   """
   def register_repository!(path) do
-    GenServer.call(__MODULE__, {:register_repo, path})
+    ask({:register_repo, path})
   end
 
   # ------------------------------------------------------- name checking
@@ -213,10 +238,10 @@ defmodule Ampd.Worktree do
   Creates no directory and confers nothing. The ref exists so the rest of
   the flow can be spoken about without a path.
   """
-  def request(fields), do: GenServer.call(__MODULE__, {:request, fields})
+  def request(fields), do: ask({:request, fields})
 
   @doc "Mark a requested resource admitted. Called only after `Ampd.Locus` has decided."
-  def admitted(ref), do: GenServer.call(__MODULE__, {:set_state, ref, "ADMITTED", %{}})
+  def admitted(ref), do: ask({:set_state, ref, "ADMITTED", %{}})
 
   @doc """
   The deadline this call gives the mechanism, **below the transaction
@@ -252,10 +277,10 @@ defmodule Ampd.Worktree do
   `OBSERVED_CREATED` or a recovery state. Returns `{:ok, record}` or
   `{:error, code, detail}`.
   """
-  def create(ref), do: GenServer.call(__MODULE__, {:create, ref}, call_deadline_ms())
+  def create(ref), do: ask({:create, ref}, call_deadline_ms())
 
   @doc "Mark the resource committed — reached only once a receipt is durable."
-  def committed(ref), do: GenServer.call(__MODULE__, {:set_state, ref, "COMMITTED_READY", %{}})
+  def committed(ref), do: ask({:set_state, ref, "COMMITTED_READY", %{}})
 
   @doc """
   Reclassify anything still in `CREATING` as `INDETERMINATE`.
@@ -265,7 +290,7 @@ defmodule Ampd.Worktree do
   honest reading is *the disk has not been consulted*, not *it worked* and
   not *it failed*.
   """
-  def recover, do: GenServer.call(__MODULE__, :recover)
+  def recover, do: ask(:recover)
 
   @doc """
   Resolve a ref to its record **including the path**. Trusted callers only.
@@ -282,7 +307,7 @@ defmodule Ampd.Worktree do
   here.
   """
   def quarantine_as(ref, state, why) when state in @states,
-    do: GenServer.call(__MODULE__, {:set_state, ref, state, %{"recovery_reason" => why}})
+    do: ask({:set_state, ref, state, %{"recovery_reason" => why}})
 
   # ---------------------------------------------------------- internals
   # --- ordered-authority boundary -------------------------------------

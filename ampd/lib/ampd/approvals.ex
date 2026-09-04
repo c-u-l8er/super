@@ -3,6 +3,31 @@ defmodule Ampd.Approvals do
   use GenServer
   @store "approvals"
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  @participant_mutations ~w(close_store load_state push new_pending mark reset)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
+
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
@@ -20,20 +45,20 @@ defmodule Ampd.Approvals do
   """
   def sealed_state, do: %{"approvals" => [], "seq" => 0}
 
-  def sealed, do: GenServer.call(__MODULE__, :sealed)
-  def close_store, do: GenServer.call(__MODULE__, :close_store)
-  def load_state(s), do: GenServer.call(__MODULE__, {:load_state, s})
+  def sealed, do: ask(:sealed)
+  def close_store, do: ask(:close_store)
+  def load_state(s), do: ask({:load_state, s})
   def initial, do: %{"approvals" => [], "seq" => 36}
-  def all, do: GenServer.call(__MODULE__, :all)
-  def push(m), do: GenServer.call(__MODULE__, {:push, m})
+  def all, do: ask(:all)
+  def push(m), do: ask({:push, m})
   def new_pending(fields) do
-    GenServer.call(__MODULE__, {:new_pending, fields})
+    ask({:new_pending, fields})
   end
-  def mark(id, status, reason \\ nil), do: GenServer.call(__MODULE__, {:mark, id, status, reason})
+  def mark(id, status, reason \\ nil), do: ask({:mark, id, status, reason})
   def last_pending do
     all() |> Enum.reverse() |> Enum.find(&(&1["status"] == "pending"))
   end
-  def reset, do: GenServer.call(__MODULE__, :reset)
+  def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
   @ordered_ops [:push, :new_pending, :mark, :reset, :load_state]

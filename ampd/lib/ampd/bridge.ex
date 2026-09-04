@@ -37,6 +37,31 @@ defmodule Ampd.Bridge do
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  @participant_mutations ~w(adopt bind_effect drop_effect bind_carrier drop_carrier reset)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
+
   @impl true
   def init(opts) do
     # The bridge descriptor the host handed us at spawn. Its number is
@@ -119,10 +144,10 @@ defmodule Ampd.Bridge do
   see `handle_call/3`.
   """
   def adopt_channel(fd_or_socket, kind, actor \\ nil),
-    do: GenServer.call(__MODULE__, {:adopt, fd_or_socket, kind, actor}, 10_000)
+    do: ask({:adopt, fd_or_socket, kind, actor}, 10_000)
 
   @doc "Every channel this bridge is serving, for the operator projection."
-  def list, do: GenServer.call(__MODULE__, :list)
+  def list, do: ask(:list)
 
   # =================================================== D.1.3a · the effect endpoint
   @doc """
@@ -148,7 +173,7 @@ defmodule Ampd.Bridge do
   bridge holding two effect endpoints has no way to say which is current.
   """
   def bind_effect_endpoint(fd_or_socket, incarnation) when is_map(incarnation),
-    do: GenServer.call(__MODULE__, {:bind_effect, fd_or_socket, incarnation}, 10_000)
+    do: ask({:bind_effect, fd_or_socket, incarnation}, 10_000)
 
   @doc """
   The possessed endpoint and its incarnation, or `nil`.
@@ -161,7 +186,7 @@ defmodule Ampd.Bridge do
   no longer resolves an executable by pathname. Same-UID in-process
   reachability is D.1.3b's question and is not answered here.
   """
-  def effect_endpoint, do: GenServer.call(__MODULE__, :effect_endpoint)
+  def effect_endpoint, do: ask(:effect_endpoint)
 
   @doc """
   Drop the effect endpoint — the channel is gone.
@@ -170,7 +195,7 @@ defmodule Ampd.Bridge do
   incarnation; it says nothing about whether an effect submitted on it
   happened. `Ampd.Worktree.EffectChannel` is where that rule lives.
   """
-  def drop_effect_endpoint, do: GenServer.call(__MODULE__, :drop_effect)
+  def drop_effect_endpoint, do: ask(:drop_effect)
 
   @doc """
   Bind the **Carrier lifecycle** channel.
@@ -186,13 +211,13 @@ defmodule Ampd.Bridge do
   framing, pointed at a second thing.
   """
   def bind_carrier_endpoint(fd_or_socket, incarnation) when is_map(incarnation),
-    do: GenServer.call(__MODULE__, {:bind_carrier, fd_or_socket, incarnation}, 10_000)
+    do: ask({:bind_carrier, fd_or_socket, incarnation}, 10_000)
 
   @doc "The possessed Carrier lifecycle endpoint and its incarnation, or `nil`."
-  def carrier_endpoint, do: GenServer.call(__MODULE__, :carrier_endpoint)
+  def carrier_endpoint, do: ask(:carrier_endpoint)
 
   @doc "Drop the Carrier lifecycle endpoint. Never a reason to replay."
-  def drop_carrier_endpoint, do: GenServer.call(__MODULE__, :drop_carrier)
+  def drop_carrier_endpoint, do: ask(:drop_carrier)
 
   @doc """
   Close every channel and free the control claim.
@@ -220,7 +245,7 @@ defmodule Ampd.Bridge do
   # closed either way, and it is closed by the process that owns it.
   @reset_budget_ms 3_000
 
-  def reset, do: GenServer.call(__MODULE__, :reset, @reset_budget_ms + 7_000)
+  def reset, do: ask(:reset, @reset_budget_ms + 7_000)
 
   @doc false
   # **Called by a connection when it ends, and this is not optional.**

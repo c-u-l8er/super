@@ -1,18 +1,6 @@
 {
   "bare": {
-    "lib/ampd/approvals.ex": 8,
     "lib/ampd/authority_coordinator.ex": 6,
-    "lib/ampd/bridge.ex": 9,
-    "lib/ampd/capability_registry.ex": 9,
-    "lib/ampd/carrier/machine.ex": 2,
-    "lib/ampd/carrier/reaper.ex": 2,
-    "lib/ampd/effects.ex": 13,
-    "lib/ampd/embodiment.ex": 3,
-    "lib/ampd/grant_registry.ex": 16,
-    "lib/ampd/receipts.ex": 6,
-    "lib/ampd/refusal_log.ex": 4,
-    "lib/ampd/session.ex": 9,
-    "lib/ampd/subscriptions.ex": 3,
-    "lib/ampd/worktree.ex": 15
+    "lib/ampd/carrier/machine.ex": 2
   }
 }

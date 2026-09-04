@@ -75,10 +75,49 @@ defmodule Ampd.Carrier.Reaper do
   def orphaned(inc) when is_map(inc), do: GenServer.cast(__MODULE__, {:orphaned, inc})
 
   @doc "For tests: wait until the queue is empty. Not used in production."
-  def drain(timeout \\ 5_000), do: GenServer.call(__MODULE__, :drain, timeout)
+  def drain(timeout \\ 5_000), do: ask(:drain, timeout)
 
   @doc "Carriers this incarnation could not confirm dead."
-  def unconfirmed, do: GenServer.call(__MODULE__, :unconfirmed)
+  def unconfirmed, do: ask(:unconfirmed)
+
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  # **Empty, and `:drain` is the reason it is worth saying so.** `drain/1` is
+  # a mailbox barrier — `handle_call(:drain, _f, st), do: {:reply, :ok, st}`,
+  # mutating nothing — so classifying it a mutation would make a barrier that
+  # did not answer INDETERMINATE: `retryable: false`, `requires_human: true`,
+  # for a test-only synchronisation that changed nothing. An over-claim in
+  # the most expensive direction. What drains ahead of it are casts, and a
+  # cast is not this call's mutation.
+  @participant_mutations ~w()a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  # **`Enum.member?/2` rather than `in`, and only in this module.** `tag in []`
+  # is a compile-time-constant `false` and the compiler says so, which
+  # `--warnings-as-errors` turns into a build failure. Deleting the attribute
+  # instead would be worse: `tools/check-ordered-boundary.mjs` names this file
+  # explicitly so that a module which stops declaring a list stops being
+  # censused loudly rather than quietly. So the list stays, empty, and the
+  # membership test is the one that does not fold.
+  def class(tag), do: if(Enum.member?(@participant_mutations, tag), do: :mutate, else: :read)
 
   @impl true
   def init(:ok) do

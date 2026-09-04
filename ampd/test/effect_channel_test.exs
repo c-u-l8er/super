@@ -608,11 +608,20 @@ defmodule Ampd.EffectChannelTest do
   describe "C14 · machine latency cannot raise inside the total order" do
     test "every mechanism wait is strictly inside the deadline that encloses it" do
       # Read off the modules that own them, not typed here. A chain
-      # maintained by hand is a chain that drifts; this one fails.
+      # maintained by hand is a chain that drifts; this one fails. It was
+      # four numbers and is five — see `identity` below.
       channel = Ampd.Worktree.EffectChannel.deadline_ms()
       named = Ampd.Worktree.Effector.Host.deadline_ms()
       call = Ampd.Worktree.call_deadline_ms()
       budget = Ampd.AuthorityCoordinator.budget_ms()
+
+      # **The fifth number, and it was 30_000 under a 15_000 budget.**
+      # `Ampd.Embodiment.identity/0` is reachable from inside a transaction —
+      # `Ampd.Carrier.admit_start/2` → `Ampd.Locus.profile_digest/0` →
+      # `Ampd.Worktree.Effector.identity/0` → here — and this chain never read
+      # it, so the one wait in the tree that outlived its own budget was the
+      # one nothing checked. Found by the C1.0b·2·1 reachability census.
+      identity = Ampd.Embodiment.identity_deadline_ms()
 
       assert channel < call,
              "the channel outlives the call that encloses it: #{channel} >= #{call}"
@@ -625,7 +634,22 @@ defmodule Ampd.EffectChannelTest do
 
       # Margin, not merely ordering. A chain that fits by a millisecond is
       # one scheduler hiccup away from the defect it is meant to close.
+      assert identity < budget,
+             "the embodiment measurement outlives the transaction that encloses it: " <>
+               "#{identity} >= #{budget}"
+
       assert budget - call >= 2_000, "less than 2s of margin under the transaction budget"
+      assert budget - identity >= 2_000, "less than 2s of margin for the embodiment measurement"
+
+      # The embodiment handler is not a leaf: it reaches `Ampd.Bridge` through
+      # the effect channel, so its own deadline encloses `channel` and at
+      # 10_000 it exactly equalled it. Per wait, not per handler — the sum of
+      # the two waits that handler can make exceeds the budget itself, and
+      # what bounds that is this deadline rather than any arithmetic on it.
+      assert channel < identity,
+             "the embodiment deadline does not clear the channel wait: #{channel} >= #{identity}"
+
+      assert identity - channel >= 2_000, "less than 2s of margin over the channel wait"
       assert call - channel >= 1_000, "less than 1s of margin under the effect call"
     end
 

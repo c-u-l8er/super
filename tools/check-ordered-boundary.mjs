@@ -160,9 +160,30 @@ const CONVERTED = {
   'lib/ampd/loci.ex': { mod: 'Ampd.Loci', attr: /@client_mutations @ordered_ops \+\+ \[([^\]]*)\]/, plus: /@ordered_ops \[([^\]]*)\]/ },
 }
 
+// C1.0b·2·1 converted twelve more, and they all declare the same attribute.
+// Listed here rather than discovered by globbing `@participant_mutations`,
+// because a module that LOSES its funnel would then simply stop being
+// censused — which is the gate going quiet about exactly the regression it
+// exists to catch.
+for (const [rel, mod] of [
+  ['lib/ampd/grant_registry.ex', 'Ampd.GrantRegistry'],
+  ['lib/ampd/capability_registry.ex', 'Ampd.CapabilityRegistry'],
+  ['lib/ampd/approvals.ex', 'Ampd.Approvals'],
+  ['lib/ampd/effects.ex', 'Ampd.Effects'],
+  ['lib/ampd/session.ex', 'Ampd.Session'],
+  ['lib/ampd/worktree.ex', 'Ampd.Worktree'],
+  ['lib/ampd/bridge.ex', 'Ampd.Bridge'],
+  ['lib/ampd/receipts.ex', 'Ampd.Receipts'],
+  ['lib/ampd/refusal_log.ex', 'Ampd.RefusalLog'],
+  ['lib/ampd/subscriptions.ex', 'Ampd.Subscriptions'],
+  ['lib/ampd/embodiment.ex', 'Ampd.Embodiment'],
+  ['lib/ampd/carrier/reaper.ex', 'Ampd.Carrier.Reaper'],
+])
+  CONVERTED[rel] = { mod, attr: /@participant_mutations ~w\(([^)]*)\)a/ }
+
 const census = {}
 for (const [rel, { mod, attr, plus }] of Object.entries(CONVERTED)) {
-  const code = codeOnly(readFileSync(join(LIB, rel.replace('lib/ampd/', 'ampd/')), 'utf8'))
+  const code = codeOnly(readFileSync(join(LIB, rel.replace(/^lib\//, '')), 'utf8'))
 
   const sent = [
     ...code.matchAll(/ask\(\{:(\w+)/g),
@@ -185,9 +206,26 @@ for (const [rel, { mod, attr, plus }] of Object.entries(CONVERTED)) {
     reads: reads.length, declared_mutations: mutations.length, dead, bare,
   }
 
+  // **`@ordered_ops` must be a SUBSET of the mutation list**, and this is the
+  // one direction that is mechanically checkable. The two lists answer two
+  // different questions — `@ordered_ops` is *must the caller be the
+  // coordinator*, the mutation list is *may a lost reply mean it happened* —
+  // so a mutation outside `@ordered_ops` is ordinary and expected
+  // (`close_store`, `emit`, `recover`). An ordered op OUTSIDE the mutation
+  // list is not: it is a write the boundary would classify as a read, which
+  // gives an indeterminate mutation a retryable "nothing was mutated" and
+  // invites the second execution the class exists to forbid. That is exactly
+  // the drift `Ampd.Loci` avoided by composing one list from the other, and
+  // the twelve modules C1.0b·2·1 converted declare theirs independently.
+  const oo = code.match(/@ordered_ops \[([^\]]*)\]/)
+  const orderedOps = oo ? parse(oo[1].replace(/\n/g, ' ')) : []
+  const unclassified = orderedOps.filter((t) => !mutations.includes(t))
+
   if (bare) no(`${rel} sends everything through the boundary`, `${bare} bare call(s)`)
   else if (dead.length) no(`${rel} has no dead classification entries`, `${dead.join(', ')} named but never sent`)
-  else ok(`${rel}: ${sent.length} messages sent — ${census[mod].mutations} mutations, ${reads.length} reads, 0 dead`)
+  else if (unclassified.length)
+    no(`${rel} classifies every ordered op as a mutation`, `${unclassified.join(', ')} is served only for the coordinator and yet is classified a read`)
+  else ok(`${rel}: ${sent.length} messages sent — ${census[mod].mutations} mutations, ${reads.length} reads, 0 dead${orderedOps.length ? `, ${orderedOps.length} ordered ops all classified` : ''}`)
 }
 
 writeFileSync(join(ROOT, 'tools/ordered-boundary-census.json'),

@@ -4,6 +4,31 @@ defmodule Ampd.GrantRegistry do
   @store "grant_registry"
   alias Ampd.Session
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  @participant_mutations ~w(close_store load_state mint draft request_grant resolve_request dur revoke_domain revoke_one revoke_matching consume commit reset)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
+
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
@@ -46,9 +71,9 @@ defmodule Ampd.GrantRegistry do
   def sealed_state,
     do: %{"grants" => [], "seq" => 0, "dur" => nil, "draft" => %{}, "requests" => [], "req_seq" => 0}
 
-  def sealed, do: GenServer.call(__MODULE__, :sealed)
-  def close_store, do: GenServer.call(__MODULE__, :close_store)
-  def load_state(s), do: GenServer.call(__MODULE__, {:load_state, s})
+  def sealed, do: ask(:sealed)
+  def close_store, do: ask(:close_store)
+  def load_state(s), do: ask({:load_state, s})
   defp do_mint(s, f) do
     g = Map.merge(%{"id" => "gr_" <> String.pad_leading(Integer.to_string(s["seq"]), 4, "0"),
         "actor" => "kestrel", "resource" => "traaviis/trvm", "duration" => "workspace",
@@ -56,14 +81,14 @@ defmodule Ampd.GrantRegistry do
         "workspace" => "trvm", "run" => Session.run_or("run-b51")}, f)
     {g, %{s | "grants" => s["grants"] ++ [g], "seq" => s["seq"] + 1}}
   end
-  def mint(f), do: GenServer.call(__MODULE__, {:mint, f})
+  def mint(f), do: ask({:mint, f})
   def one_shot(cap),
     do: mint(%{"capability" => cap, "duration" => "once", "uses_remaining" => 1})
-  def list, do: GenServer.call(__MODULE__, :list)
+  def list, do: ask(:list)
   def snapshot do
     Ampd.Core.snapshot_of(list(), Ampd.CapabilityRegistry.all())
   end
-  def set_draft(k, v), do: GenServer.call(__MODULE__, {:draft, k, v})
+  def set_draft(k, v), do: ask({:draft, k, v})
 
   @doc """
   `grant-request@1` — an agent asking for authority it does not have.
@@ -79,15 +104,15 @@ defmodule Ampd.GrantRegistry do
   A request is its own object with its own lifecycle, and only a
   human-control action turns one into a grant.
   """
-  def request_grant(fields), do: GenServer.call(__MODULE__, {:request_grant, fields})
+  def request_grant(fields), do: ask({:request_grant, fields})
 
   @doc "Resolve a request: `\"granted\"` (by a human) or `\"denied\"`."
   def resolve_request(id, status, note \\ nil),
-    do: GenServer.call(__MODULE__, {:resolve_request, id, status, note})
+    do: ask({:resolve_request, id, status, note})
 
-  def requests, do: GenServer.call(__MODULE__, :requests)
-  def set_dur(d), do: GenServer.call(__MODULE__, {:dur, d})
-  def revoke_domain(cap), do: GenServer.call(__MODULE__, {:revoke_domain, cap})
+  def requests, do: ask(:requests)
+  def set_dur(d), do: ask({:dur, d})
+  def revoke_domain(cap), do: ask({:revoke_domain, cap})
 
   @doc """
   Revoke **one grant, by id.**
@@ -100,7 +125,7 @@ defmodule Ampd.GrantRegistry do
   too. Measured on two actors holding the same capability before it was
   split.
   """
-  def revoke_one(id), do: GenServer.call(__MODULE__, {:revoke_one, id})
+  def revoke_one(id), do: ask({:revoke_one, id})
 
   @doc """
   Revoke exactly `expected_ids`, and only if they are still exactly what
@@ -118,7 +143,7 @@ defmodule Ampd.GrantRegistry do
   difference in both directions. Nothing is revoked.
   """
   def revoke_matching(filter, expected_ids) when is_list(expected_ids),
-    do: GenServer.call(__MODULE__, {:revoke_matching, filter, expected_ids})
+    do: ask({:revoke_matching, filter, expected_ids})
 
   @doc "What `revoke_matching/2` *would* revoke. Read-only, for the confirmation the operator sees."
   def matching(filter) do
@@ -127,9 +152,9 @@ defmodule Ampd.GrantRegistry do
         Enum.all?(filter, fn {k, v} -> v == nil or g[k] == v end)
     end)
   end
-  def consume_one_shot(id), do: GenServer.call(__MODULE__, {:consume, id})
-  def commit(surface), do: GenServer.call(__MODULE__, {:commit, surface})
-  def reset, do: GenServer.call(__MODULE__, :reset)
+  def consume_one_shot(id), do: ask({:consume, id})
+  def commit(surface), do: ask({:commit, surface})
+  def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
   @ordered_ops [:mint, :draft, :dur, :revoke_domain, :consume, :commit, :reset, :load_state,

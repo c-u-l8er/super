@@ -3,6 +3,31 @@ defmodule Ampd.Session do
   use GenServer
   @store "session"
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  @participant_mutations ~w(close_store load_state world end_run reset)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
+
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
@@ -20,25 +45,25 @@ defmodule Ampd.Session do
   """
   def sealed_state, do: %{"world" => nil, "run" => nil, "seq" => 0, "retired" => MapSet.new()}
 
-  def sealed, do: GenServer.call(__MODULE__, :sealed)
-  def close_store, do: GenServer.call(__MODULE__, :close_store)
-  def load_state(s), do: GenServer.call(__MODULE__, {:load_state, s})
+  def sealed, do: ask(:sealed)
+  def close_store, do: ask(:close_store)
+  def load_state(s), do: ask({:load_state, s})
   def initial, do: %{"world" => "trvm", "run" => "run-b51", "seq" => 51, "retired" => MapSet.new()}
   def ctx do
-    s = GenServer.call(__MODULE__, :snap)
+    s = ask(:snap)
     %{"actor" => "kestrel", "workspace" => s["world"], "run" => s["run"], "placement" => nil}
   end
-  def run, do: GenServer.call(__MODULE__, :snap)["run"]
-  def retired?(r), do: GenServer.call(__MODULE__, {:retired?, r})
-  def set_world(w), do: GenServer.call(__MODULE__, {:world, w})
-  def end_run, do: GenServer.call(__MODULE__, :end_run)
+  def run, do: ask(:snap)["run"]
+  def retired?(r), do: ask({:retired?, r})
+  def set_world(w), do: ask({:world, w})
+  def end_run, do: ask(:end_run)
   def run_or(default) do
     case Process.whereis(__MODULE__) do
       nil -> default
       _ -> run()
     end
   end
-  def reset, do: GenServer.call(__MODULE__, :reset)
+  def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
   @ordered_ops [:world, :end_run, :reset, :load_state]

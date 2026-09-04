@@ -66,8 +66,91 @@ defmodule Ampd.Embodiment do
 
   use GenServer
 
+  @doc """
+  How long an identity measurement may take, and it is **not 30 seconds**.
+
+  It was, and that number is reachable from inside an ordered transaction:
+
+      Ampd.Carrier.admit_start/2  → transact
+        → Ampd.Locus.profile_digest/0 → profile_facts/0
+          → Ampd.Worktree.Effector.identity/0
+            → Ampd.Embodiment.identity/0        ← 30_000
+
+  `Ampd.AuthorityCoordinator.budget_ms/0` is 15_000, and the chain that
+  module declares is *mechanism wait < enclosing call deadline < transaction
+  budget*. Thirty seconds inverts it: the coordinator's client raises at
+  fifteen while the coordinator is still blocked here, so the fail-closed
+  answer this module is built to give — `unidentified/2` — never arrives.
+  The `catch :exit, _` below cannot help, because it only fires once the
+  thirty seconds have elapsed.
+
+  **Twelve, and the two numbers either side of it are what pin it.** This
+  handler is not a leaf: `safe_probe/1` and `safe_identity/1` both reach
+  `Ampd.Bridge` through `Ampd.Worktree.EffectChannel`, whose own deadline is
+  **10_000**. So the chain that has to hold is
+
+      Ampd.Worktree.EffectChannel.deadline_ms()   10_000
+      this deadline                               12_000   ≥ 2_000 above it
+      AuthorityCoordinator.budget_ms()            15_000   ≥ 2_000 above this
+
+  and ten would have been *equal* to the wait it encloses, which the chain
+  forbids: a chain that fits by a millisecond is one scheduler hiccup away
+  from the defect it exists to close.
+
+  **The handler can still outlive this deadline, and that is not a violation
+  — it is the mechanism.** Two sequential channel waits can sum to 20_000,
+  above the transaction budget itself, so no choice of this number could
+  bound them. What this number does is bound *the coordinator's* wait: at
+  twelve seconds the caller stops waiting, `identity/0` answers
+  `unidentified/2`, and the transaction finishes inside its budget with a
+  fail-closed measurement — which is precisely what this module is built to
+  do and what 30_000 made impossible.
+
+  `Ampd.EffectChannelTest`'s C14 falsifier reads this number off this module,
+  so the chain is asserted rather than maintained by hand. It was **four**
+  numbers and is five; this one was missing from it.
+
+  `refresh/0` takes the same deadline for the same reason — it runs the same
+  measurement, and it is a mutation.
+  """
+  @identity_deadline_ms 12_000
+  def identity_deadline_ms, do: @identity_deadline_ms
+
   @doc false
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
+
+
+  # ------------------------------------------------- participant boundary
+  #
+  # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
+  # that fails EXITS the caller — and the caller there is the total order,
+  # so one participant's fault becomes `seq` back to zero, the projection
+  # epoch re-minted, and every subscriber resnapshotting. The reachability
+  # census (`tools/ordered-reachability.json`) proves this module is reached
+  # while a transaction or an ordered observation is executing.
+  #
+  # The class is not optional and is not inferred: a crossing whose class
+  # the author has not decided is a crossing whose failure cannot be
+  # classified either. Every tag NOT named below is a read.
+  # **`:identity` is a read, and its handler writes state.** That is the one
+  # place in the converted set where the two disagree, and it is deliberate:
+  # what it writes is a memo keyed on the probe, not authority. Re-executing
+  # it is idempotent and observationally identical, so a lost reply means
+  # *the basis could not be established* — `:unavailable`, retryable — and
+  # not *a mutation may have landed*. `:refresh` discards the memo on
+  # purpose, which is a fact about the cache the caller asked for, so that
+  # one is a mutation.
+  @participant_mutations ~w(refresh)a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(tag in @participant_mutations, do: :mutate, else: :read)
 
   @impl true
   def init(:ok), do: {:ok, %{probe: :never_measured, identity: nil}}
@@ -93,8 +176,23 @@ defmodule Ampd.Embodiment do
     # confirm the embodiment — rather than raising.
     case Process.whereis(__MODULE__) do
       nil -> unidentified(Ampd.Worktree.Effector.current(), "the embodiment cache is not running")
-      _ -> GenServer.call(__MODULE__, :identity, 30_000)
+      _ -> ask(:identity, @identity_deadline_ms)
     end
+  rescue
+    # **The boundary raises where a bare call exited, and the answer is the
+    # same one this module has always given.** `Ampd.Participant` converts a
+    # dead or silent participant into a classified exception instead of an
+    # exit; without this clause that exception would leave the coordinator
+    # through `classify/1` and refuse the whole transaction, replacing a
+    # fail-closed measurement with a failed operation. Absent measurement is
+    # already fail-closed by construction — `unidentified/2` digests
+    # differently from every real identity — so the classification is
+    # recorded in the reason and the caller gets a value.
+    e in Ampd.Participant.Failure ->
+      unidentified(
+        Ampd.Worktree.Effector.current(),
+        "the embodiment cache did not answer (#{e.outcome})"
+      )
   catch
     :exit, _ ->
       unidentified(Ampd.Worktree.Effector.current(), "the embodiment cache did not answer")
@@ -108,10 +206,10 @@ defmodule Ampd.Embodiment do
   *the cache was cleared*, which are two different claims and only the
   first is the one this module makes.
   """
-  def refresh, do: GenServer.call(__MODULE__, :refresh, 30_000)
+  def refresh, do: ask(:refresh, @identity_deadline_ms)
 
   @doc "The probe value the cache is currently keyed on. Diagnostics."
-  def probe, do: GenServer.call(__MODULE__, :probe)
+  def probe, do: ask(:probe)
 
   @impl true
   def handle_call(:identity, _from, st) do

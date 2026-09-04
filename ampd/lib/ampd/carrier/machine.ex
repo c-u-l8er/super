@@ -873,10 +873,20 @@ defmodule Ampd.Carrier.Machine.Gate do
     pid
   end
 
-  # A `GenServer.call` to a process that may be mid-restart. Its absence is a
-  # fence, not a crash — the `Ampd.Embodiment` rule again.
+  # A call to a process that may be mid-restart. Its absence is a fence, not
+  # a crash — the `Ampd.Embodiment` rule again.
+  #
+  # **Both clauses, because `Ampd.Peer` is a participant.** Inside the total
+  # order the boundary RAISES where a bare call exited, so a `catch :exit`
+  # alone would stop catching. This function runs in the Gate process rather
+  # than the coordinator, so today only the exit clause can fire — and the
+  # identically-named `Ampd.Carrier.peer_epoch/0` already carries both, and
+  # an unexplained asymmetry between two functions with the same name and the
+  # same job is how the next reader learns the wrong rule.
   defp peer_epoch do
     Ampd.Peer.epoch()
+  rescue
+    _ in Ampd.Participant.Failure -> nil
   catch
     :exit, _ -> nil
   end
