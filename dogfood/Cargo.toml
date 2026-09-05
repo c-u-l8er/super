@@ -1,0 +1,21 @@
+[package]
+name = "super-dogfood"
+version = "0.1.0"
+edition = "2021"
+description = "Super Self-Hosting R0 · the first Carrier payload that speaks for itself. Writes its readiness marker to its own terminal, with no host verb and no test injection standing behind it."
+
+[[bin]]
+name = "super-dogfood"
+path = "src/main.rs"
+
+# Zero dependencies, for `super-carrier-fixture`'s reason and one more of its
+# own: this is the payload the PRODUCTION path runs, so every crate it linked
+# would be a crate inside every Carrier a person ever starts.
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
+strip = true
+codegen-units = 1

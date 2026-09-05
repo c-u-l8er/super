@@ -31,7 +31,16 @@ command -v tauri-driver >/dev/null || { echo "tauri-driver is not installed: car
 pass=0; fail=0
 
 rebuild () {
-  cargo build --release --manifest-path cockpit/Cargo.toml >/dev/null 2>&1
+  # **The payloads too, and R0a is why.** A probe that sabotages
+  # `dogfood/src/main.rs` and rebuilds only the cockpit is a probe that never
+  # runs its own sabotage: the installed payload is a separate artifact with
+  # a separate build rule (`tools/build-payloads.sh` — the `cd` into the
+  # crate is that rule, because `.cargo/config.toml` pins `+crt-static` and
+  # cargo reads it from the working directory). It would score NOT A
+  # FALSIFIER against a fix that was never disabled, which is the one
+  # outcome this file exists to make impossible.
+  bash tools/build-payloads.sh >/dev/null 2>&1 &&
+    cargo build --release --manifest-path cockpit/Cargo.toml >/dev/null 2>&1
 }
 
 # Every probe rebuilds, including the ones that only touch `ui/` or
@@ -64,6 +73,17 @@ rebuild () {
 # hours, and it is worth running before every chain.
 #
 #     SABOTAGE_DRYRUN=1 bash tools/sabotage-cockpit.sh
+#
+# **Four probes were dead and a dry run said so.** `cockpit/ui/cockpit.js`
+# split `const grants = (p.grants ?? []).map` into two statements and
+# `cockpit/capabilities/default.json` reformatted `"webviews": ["main"],`
+# onto three lines. Neither change altered any behaviour and both silently
+# retired a falsifier: one for the frame-rebuild property and three for the
+# webview ACL. They were already missing at `b470a1b` — measured by running
+# `SABOTAGE_DRYRUN=1` against a stashed tree — so this is drift being
+# repaired, not damage being undone. It is also the argument for running the
+# dry run: it costs seconds and it is the only thing that can see a probe
+# that has stopped asking its question.
 #
 # probe <name> <runner> <expected-RED substring>[%%<another>…] <file> <sed-expr>...
 probe () {
@@ -108,6 +128,9 @@ probe () {
     surface)  timeout 240 node tools/check-intent-surface.mjs >"$out_file" 2>&1; rc=$? ;;
     acl)      timeout 60  node tools/check-webview-acl.mjs    >"$out_file" 2>&1; rc=$? ;;
     fixture)  timeout 60  bash tools/check-fixture-guard.sh   >"$out_file" 2>&1; rc=$? ;;
+    # R0a. Slower than `acl` and faster than `battery`: one cockpit, one
+    # click, one eight-second measurement window.
+    join)     timeout 300 node tools/terminal-join-probe.mjs   >"$out_file" 2>&1; rc=$? ;;
   esac
   out=$(cat "$out_file"); rm -f "$out_file"
 
@@ -193,7 +216,7 @@ probe "a submission takes its hold before it is sent" battery \
 probe "the world region is rebuilt from the frame, not remembered" battery \
   "the grant leaves the screen only when a frame says so" \
   cockpit/ui/cockpit.js \
-  's|const grants = (p.grants ?? \[\]).map|const grants = (window.__firstGrants = window.__firstGrants ?? (p.grants ?? [])).map|'
+  's|const grants = liveGrants.map|const grants = (window.__firstGrants = window.__firstGrants ?? liveGrants).map|'
 
 # 5 · A read on the intent surface. The cockpit would then have a second,
 #     uncursored way to learn the world — no incarnation, no epoch, no
@@ -228,7 +251,7 @@ probe "a registered command outside the ACL is caught statically" acl \
 probe "the ACL is what refuses the untrusted pane" battery \
   "an unprivileged webview may not invoke intent at all" \
   cockpit/capabilities/default.json \
-  's|"webviews": \["main"\],|"webviews": ["main", "pane"],|'
+  '/"webviews": \[/{n;s|"main"|"main",\n    "pane"|}'
 
 # 9 · **The W.2 first-frame race, made visible.** If binding a sink does
 #     not clear what the previous page was told, a sink that arrives after
@@ -277,7 +300,7 @@ probe "an interaction hold is keyed, not a shared flag" battery \
 probe "a window-scoped grant reaches every webview inside that window" battery \
   "an unprivileged webview may not invoke intent at all" \
   cockpit/capabilities/default.json \
-  's|"webviews": \["main"\],|"windows": ["main"],|'
+  's|"webviews": \[|"windows": [|'
 
 # 12 · And the static gate that stops it coming back. The runtime probe
 #      above needs a build, a display and four minutes; this one is the
@@ -285,7 +308,7 @@ probe "a window-scoped grant reaches every webview inside that window" battery \
 probe "the word 'windows' is refused before anything is built" acl \
   "the capability names no window" \
   cockpit/capabilities/default.json \
-  's|"webviews": \["main"\],|"windows": ["main"],|'
+  's|"webviews": \[|"windows": [|'
 
 # 13 · **W.2.1's QUEUE, RESTORED — the second finding, measured.** Control
 #      messages go back onto the mutation lane and back to `try_send`,
@@ -576,6 +599,39 @@ probe "a stale completion may not restart the deadline it is not part of" acl \
 
 echo
 # **The dry run must NOT print the line the release chain records.**
+# ------------------------------------------------ R0a · I Speak
+#
+# **The source of the bytes, falsified.** `tools/terminal-join-probe.mjs`
+# asserts `SUPER-DOGFOOD-R0-READY` appears in a real xterm after a real
+# click. That assertion is green for one of two reasons and they are not the
+# same: because the payload wrote the marker to its own terminal, or because
+# some other layer put the string on the screen.
+#
+# So the write is removed and nothing else is. The Carrier still starts, the
+# terminal is still PRESENT, the presentation still opens, the sink still
+# binds and the page still beats — the probe's first six rows stay green,
+# which is the whole point. Only the marker rows go red, and they go red
+# together, because there is no other producer.
+#
+# Deliberately NOT the reverse experiment. Injecting the marker from the
+# host or the page as a positive control would build the very bypass this
+# probe exists to rule out, and it would then live in the tree.
+# **One expectation, and the other fifteen rows staying green is the other
+# half of the evidence.** The identity line below the marker still writes,
+# so the plane still carries a frame and every transport row — contiguity,
+# credit, no fault — stays green. A sabotage that turned the whole probe red
+# would be consistent with having broken the Carrier; this one is only
+# consistent with having removed the marker.
+#
+# `@` as the sed delimiter, not `|`: the line being replaced contains `||`,
+# and `s|…||…|` terminates in the middle of the pattern. The battery would
+# report SABOTAGE MISSED, which is at least honest, but the delimiter is
+# cheaper than the discovery.
+probe "a payload that does not write its own marker is noticed" join \
+  "the marker SUPER-DOGFOOD-R0-READY reached a real xterm" \
+  dogfood/src/main.rs \
+  's@        if writeln!(t, "{MARKER}").is_err() || t.flush().is_err() {@        if false {@'
+
 # `emit-measurements.mjs` extracts `cockpit_falsifiers` with
 # `^cockpit sabotage: (\d+) falsified · (\d+) did not$`. A dry run printing
 # that would file 28 patterns-that-matched under the name of 28

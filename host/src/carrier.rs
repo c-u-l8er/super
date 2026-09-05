@@ -915,11 +915,53 @@ impl Drop for Carrier {
 /// property D.1.3a removed one layer up and would be strange to reintroduce
 /// here.
 pub fn fixture_path() -> Option<PathBuf> {
+    installed("carrier-fixture", "super-carrier-fixture")
+}
+
+/// **The payload the PRODUCTION path runs**, chosen by this host from what
+/// it has installed. R0a.
+///
+/// D.1.2's rule is that no protocol field names an executable — `open_lane`
+/// declines to take a path, `carrier-start-request@1` has no payload field,
+/// and the grammar's own comment says *"a grammar in which a caller could
+/// name one would be a grammar where naming something runs it."* The
+/// selection is therefore the host's, and this function is the whole of it:
+/// an ordered preference over `tools/build-payloads.sh`'s table, resolved
+/// relative to this executable.
+///
+/// **Changing it is not silent.** `bind_carrier_channel` measures whatever
+/// this returns and puts its digest in the attested `execution_basis`;
+/// `Ampd.Carrier` binds that into every ticket and refuses
+/// `carrier-execution-basis-changed` when it moves. So installing a
+/// different payload is an attested, falsifiable event that invalidates
+/// in-flight admissions rather than quietly changing what a Carrier is —
+/// which is exactly the property the basis was built for, arriving at its
+/// first real use.
+///
+/// `super-dogfood` first: it is the payload that speaks, and B5 measured
+/// what a Super whose only payload cannot speak is worth. The fixture stays
+/// installed and stays reachable by name, because
+/// `carrier_confinement`'s thirty-odd direct spawns are a census of what a
+/// deliberately stupid process can reach, and running them against a
+/// payload that does things would be measuring the payload instead of the
+/// floor.
+pub fn payload_path() -> Option<PathBuf> {
+    installed("dogfood", "super-dogfood").or_else(fixture_path)
+}
+
+/// Resolve one installed payload: beside `super-host`, else in the crate's
+/// own `target/release`.
+///
+/// The second location is what makes `cargo build` in a checkout work
+/// without an install step; the first is what a release image has. Both are
+/// canonicalized, because the execute grant names an inode and a symlinked
+/// path would grant the link rather than the file.
+fn installed(crate_dir: &str, bin: &str) -> Option<PathBuf> {
     let exe = std::fs::read_link("/proc/self/exe").ok()?;
     let dir = exe.parent()?;
     for c in [
-        dir.join("super-carrier-fixture"),
-        dir.join("../../../carrier-fixture/target/release/super-carrier-fixture"),
+        dir.join(bin),
+        dir.join(format!("../../../{crate_dir}/target/release/{bin}")),
     ] {
         if c.is_file() {
             return c.canonicalize().ok();

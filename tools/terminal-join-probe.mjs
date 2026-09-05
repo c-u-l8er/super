@@ -178,6 +178,7 @@ async function run() {
   check('the terminal page is live and has bound its sink', !!ready && JSON.parse(ready).bound === true,
         String(ready))
   say(`terminalPane at bind: ${ready}`)
+  const atBind = ready ? JSON.parse(ready) : null
 
   /* ── and now the measurement, which asserts nothing ───────────────── */
   console.log(`\n  waiting ${WAIT_MS} ms for bytes on the joined path…\n`)
@@ -189,19 +190,48 @@ async function run() {
     const text = (el.innerText || '').replace(/[\\s\\u00a0]+$/, '');
     return JSON.stringify({
       frames: p.frames, bytes: p.bytes, applied: p.applied, consumed: p.consumed,
-      acked: p.acked, beats: p.beats, gaps: p.gaps, fault: p.fault, closed: p.closed,
+      acked: p.acked, beats: p.beats, gaps: p.gaps, duplicates: p.duplicates,
+      fault: p.fault, closed: p.closed,
       rendered: text.length, text: text.slice(0, 400),
     });`)
-  const m = JSON.parse(seen)
-  say(`plane frames ${m.frames} · bytes ${m.bytes} · applied ${m.applied} · consumed ${m.consumed} · acked ${m.acked} · beats ${m.beats} · gaps ${m.gaps}`)
+  const m = { ...JSON.parse(seen), atBind }
+  say(`plane frames ${m.frames} · bytes ${m.bytes} · applied ${m.applied} · consumed ${m.consumed} · acked ${m.acked} · beats ${m.beats} · gaps ${m.gaps} · duplicates ${m.duplicates}`)
   say(`fault ${JSON.stringify(m.fault)} · closed ${JSON.stringify(m.closed)} · rendered characters ${m.rendered}`)
   if (m.rendered > 0) say(`screen: ${JSON.stringify(m.text)}`)
-  const marker = m.text.includes('SUPER-DOGFOOD-R0-READY')
   console.log('')
-  check('MEASUREMENT — the marker SUPER-DOGFOOD-R0-READY reached xterm', marker,
-        `the joined path is OPEN and carried ${m.bytes} byte(s) in ${m.frames} frame(s) ` +
-        `while sending ${m.beats} liveness beat(s). Nothing in the product can put a byte ` +
-        'on it — see docs/reviews/D_1_3C_2C_1C_B5.md')
+
+  /* ── the marker, and then everything the marker's arrival implies ──────
+
+     The marker alone would pass over a plane that dropped a frame, acked
+     ahead of the renderer, or faulted after delivering. Each row below is a
+     different way the byte could have arrived while the transport was
+     wrong, and R0a is not closed by the string being on screen. */
+  const MARKER = 'SUPER-DOGFOOD-R0-READY'
+  check(`R0a — the marker ${MARKER} reached a real xterm`, m.text.includes(MARKER),
+        `the joined path carried ${m.bytes} byte(s) in ${m.frames} frame(s) while sending ` +
+        `${m.beats} liveness beat(s); screen was ${JSON.stringify(m.text)}`)
+  check('and it carried at least the marker\u2019s own bytes', m.bytes >= MARKER.length + 1,
+        `${m.bytes} < ${MARKER.length + 1}`)
+  check('at least one OUT frame was delivered', m.frames >= 1, String(m.frames))
+  check('the sequence is contiguous — no frame was skipped', m.gaps === 0, `gaps ${m.gaps}`)
+  check('and none was rendered twice', m.duplicates === 0, `duplicates ${m.duplicates}`)
+  check('the renderer consumed everything it applied', m.consumed >= m.applied,
+        `consumed ${m.consumed} · applied ${m.applied}`)
+  check('and credit was returned for what was consumed — acked reaches the delivered sequence',
+        m.acked >= m.frames && m.acked === m.consumed,
+        `acked ${m.acked} · consumed ${m.consumed} · frames ${m.frames}`)
+  check('the presentation never faulted', m.fault === null, JSON.stringify(m.fault))
+  check('and was never closed under us', m.closed === null, JSON.stringify(m.closed))
+
+  /* **Written before anyone was watching, and still delivered.** The
+     payload writes at startup; the person clicks afterwards. The bytes
+     waited in the kernel's tty buffer, held by the line discipline — Super
+     stores nothing and must not start, and B7's rule is that a reopened
+     presentation gets no server scrollback. Those two facts are compatible
+     and this is where the difference is visible. */
+  check('bytes written before the person clicked were still there when they did — the tty buffered, Super did not',
+        m.atBind && m.atBind.frames >= 1,
+        `terminalPane at bind carried ${m.atBind ? m.atBind.frames : '?'} frame(s)`)
 }
 
 async function main() {

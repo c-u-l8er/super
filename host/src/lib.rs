@@ -498,7 +498,7 @@ fn start_one(
     carrier_ref: &str,
     req: &Value,
 ) -> Result<(carrier::Carrier, Value), String> {
-    let fixture = carrier::fixture_path().ok_or("no carrier fixture is installed")?;
+    let payload = carrier::payload_path().ok_or("no carrier payload is installed")?;
     let dir = root.join(carrier_ref);
     std::fs::create_dir_all(&dir).map_err(|e| format!("carrier workdir: {e}"))?;
     let log = dir.join("carrier.log");
@@ -528,7 +528,7 @@ fn start_one(
     // starts — resolving the slave by pathname instead would trade the
     // slice's entire claim for compatibility.
     let term = crate::pty::Pty::open()?;
-    let mut c = carrier::spawn_on_pty(&fixture, &dir, &log, &epoch, None, term)?;
+    let mut c = carrier::spawn_on_pty(&payload, &dir, &log, &epoch, None, term)?;
     if let Err(e) = c.handshake(5_000) {
         // A Carrier that cannot prove it is this incarnation is not left
         // running. The runtime will see the refusal, but the process is this
@@ -1999,7 +1999,14 @@ impl Runtime {
         // protocol of its own.
         //
         // No raw pathname crosses: the basis carries a digest.
-        let carrier_basis = match carrier::fixture_path() {
+        // **`payload_path`, not `fixture_path`, and they must be the same
+        // function the spawn uses.** The digest bound into every ticket is
+        // a promise about the executable `start_one` will run; measuring one
+        // payload here and running another would refuse every admission
+        // `carrier-execution-basis-changed` and point the reader at the
+        // digest rather than at the mismatch. `super-host verify` holds the
+        // two together.
+        let carrier_basis = match carrier::payload_path() {
             Some(p) => execution_basis(installed_payload_digest(&p)),
             // A host with no fixture installed still binds the channel — it
             // can still serve `stop` — but every admission against this basis

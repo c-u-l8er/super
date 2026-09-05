@@ -171,7 +171,7 @@ cargo build --release --manifest-path host/Cargo.toml
 # — cargo reads `.cargo/config.toml` from the working directory, and the
 # fixture's pins `+crt-static`, without which Landlock refuses the `execve`
 # and nineteen acceptance checks go red saying nothing about why.
-bash tools/build-carrier-fixture.sh
+bash tools/build-payloads.sh
 
 ./host/target/release/super-host verify
 guarded sabotage-host ampd/lib host/src -- bash tools/sabotage-host.sh
@@ -213,6 +213,14 @@ node tools/check-webview-acl.mjs
 node tools/check-intent-surface.mjs
 bash tools/check-fixture-guard.sh
 node tools/cockpit-battery.mjs
+# **R0a · I Speak — and it is mandatory from the commit that turned it
+# green, not before.** This probe shipped RED: the whole joined terminal was
+# open, healthy and beating, and carried zero bytes because no product path
+# could produce one. A permanently-red gate reduces the information content
+# of red, so it was a milestone acceptance probe and said so. Now an
+# installed payload writes its own marker and the probe passes for the
+# reason it was written for, which is what promotes it here.
+node tools/terminal-join-probe.mjs
 # **W.2.3 · the OTHER Tauri Channel transport.** A payload under 8192 bytes
 # goes to the page by `webview.eval`; anything larger is parked and fetched,
 # and the page-side failure of that fetch ends in `.catch(console.error)`.

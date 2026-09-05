@@ -32,3 +32,4 @@ and-super-rev-*.zip
 # is a measurement of one execution, and the bundle summarises every one it
 # finds. Committing them would make the tree grow by ~50 KB per battery.
 .sabotage-runs/
+.suite-runs/

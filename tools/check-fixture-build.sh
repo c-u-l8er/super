@@ -14,27 +14,38 @@
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
-out=carrier-fixture/target/release/super-carrier-fixture
+# **Both installed payloads, because R0a added one and provenance is not a
+# property of whichever file this script happened to be written about.**
+# `carrier::payload_path()` runs `super-dogfood` on the production path and
+# `carrier::fixture_path()` names the confinement fixture; a planted binary
+# at either one is the hole this file exists to close.
+PAYLOADS=(
+  carrier-fixture/target/release/super-carrier-fixture
+  dogfood/target/release/super-dogfood
+)
 fail=0
 ok () { printf '  \033[32mheld\033[0m  %s\n' "$1"; }
 no () { printf '  \033[31mFAIL\033[0m  %s — %s\n' "$1" "$2"; fail=$((fail + 1)); }
 
 printf '\n  D.1.3c·2b·0a · the Carrier payload'"'"'s provenance\n'
 
-bash tools/build-carrier-fixture.sh >/dev/null 2>&1 || { no "the builder runs" "non-zero exit"; exit 1; }
+bash tools/build-payloads.sh >/dev/null 2>&1 || { no "the builder runs" "non-zero exit"; exit 1; }
+
+for out in "${PAYLOADS[@]}"; do
+name=$(basename "$out")
 good=$(sha256sum "$out" | cut -d' ' -f1)
-ok "the canonical builder produces an artifact ($(printf '%.12s' "$good"))"
+ok "$name — the canonical builder produces an artifact ($(printf '%.12s' "$good"))"
 
 # ------------------------------------------------ 1 · a dynamic replacement
 dyn=$(mktemp); printf 'int main(void){return 0;}' > "$dyn.c"
 if cc -o "$dyn" "$dyn.c" 2>/dev/null && file "$dyn" | grep -q 'dynamically linked'; then
   cp "$dyn" "$out"
-  bash tools/build-carrier-fixture.sh >/dev/null 2>&1
+  bash tools/build-payloads.sh >/dev/null 2>&1
   now=$(sha256sum "$out" | cut -d' ' -f1)
   if [ "$now" = "$good" ]; then
-    ok "a planted DYNAMIC binary is replaced by a fresh build"
+    ok "$name — a planted DYNAMIC binary is replaced by a fresh build"
   else
-    no "a planted DYNAMIC binary is replaced by a fresh build" "digest is $now"
+    no "$name — a planted DYNAMIC binary is replaced by a fresh build" "digest is $now"
   fi
 else
   no "a dynamic stand-in could be compiled" "no working cc; this case went untested"
@@ -48,17 +59,18 @@ fi
 stat_bin=$(mktemp)
 if cc -static -o "$stat_bin" "$dyn.c" 2>/dev/null && ! file "$stat_bin" | grep -q 'dynamically linked'; then
   cp "$stat_bin" "$out"
-  bash tools/build-carrier-fixture.sh >/dev/null 2>&1
+  bash tools/build-payloads.sh >/dev/null 2>&1
   now=$(sha256sum "$out" | cut -d' ' -f1)
   if [ "$now" = "$good" ]; then
-    ok "a planted STATIC binary is replaced by a fresh build"
+    ok "$name — a planted STATIC binary is replaced by a fresh build"
   else
-    no "a planted STATIC binary is replaced by a fresh build" "digest is $now — provenance not enforced"
+    no "$name — a planted STATIC binary is replaced by a fresh build" "digest is $now — provenance not enforced"
   fi
 else
   no "a static stand-in could be compiled" "no working static cc; this case went untested"
 fi
 rm -f "$dyn" "$dyn.c" "$stat_bin"
+done
 
 # --------------------------------------------- 3 · and it is the real thing
 #
@@ -74,10 +86,14 @@ if [ -x host/target/release/super-host ]; then
   # harness's own plumbing is a place defects hide.
   vout=$(mktemp)
   timeout 300 ./host/target/release/super-host verify >"$vout" 2>&1
-  if grep -q 'held.*the Carrier payload is STATICALLY linked' "$vout"; then
-    ok "the acceptance battery accepts the installed payload"
+  # Both, because there are two installed payloads and the battery has a
+  # linkage row for each: the fixture's in `carrier_confinement`, the
+  # production payload's in `dogfood_payload`.
+  if grep -q 'held.*the Carrier payload is STATICALLY linked' "$vout" &&
+     grep -q 'held.*it is STATICALLY linked' "$vout"; then
+    ok "the acceptance battery accepts BOTH installed payloads"
   else
-    no "the acceptance battery accepts the installed payload" "the linkage check did not hold"
+    no "the acceptance battery accepts BOTH installed payloads" "a linkage check did not hold"
   fi
   rm -f "$vout"
 else

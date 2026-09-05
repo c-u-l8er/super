@@ -1,0 +1,22 @@
+# **Statically linked, for the same policy reason the fixture is.**
+#
+#     dynamic   the interpreter is /lib64/ld-linux-x86-64.so.2, so Landlock
+#               must grant LANDLOCK_ACCESS_FS_EXECUTE on all of /usr/lib
+#     static    the execute grant names exactly one inode — this file
+#
+# A confinement whose execute right has to cover the entire system library
+# directory is not a confinement, so the linkage is a policy decision and
+# belongs in version control rather than in a shell history. This is the
+# payload the PRODUCTION path runs, which makes the argument stronger here
+# than it is for the fixture, not weaker.
+#
+# `carrier-fixture/.cargo/config.toml` records how this was learned: the flag
+# lived only in a `RUSTFLAGS` environment variable and a review bundle, so a
+# plain `cargo build --release` produced a dynamic binary of the same name at
+# the same path and every Carrier start failed `EACCES`. Cargo reads this
+# file from the **working directory and its ancestors**, never from the
+# package `--manifest-path` names, which is why `tools/build-payloads.sh`
+# `cd`s into the crate and why that `cd` is the build rule rather than a
+# convenience.
+[build]
+rustflags = ["-C", "target-feature=+crt-static"]

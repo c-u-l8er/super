@@ -1758,14 +1758,25 @@ pub fn run(ampd_dir: &Path) -> i32 {
                 // output when run bare), so **nothing but the execution basis
                 // can refuse it**. If the swap made B unrunnable this check
                 // would pass on the handshake failing and prove nothing.
-                let fixture_before = crate::carrier::fixture_path();
-                let baseline_digest = fixture_before.as_ref().map(|p| digest_of(p));
+                //
+                // **`payload_path`, not `fixture_path`, and R0a is why.**
+                // This swapped the fixture, and the production path used to
+                // run the fixture. Once `payload_path()` began preferring
+                // `super-dogfood`, swapping the fixture stopped changing what
+                // `start_carrier` executes: the swap installed a B nobody was
+                // going to run, the start was correctly allowed, and this
+                // check went red — along with three downstream rows that had
+                // assumed it refused. The falsifier was aimed at a file the
+                // production path no longer opens, which is a probe measuring
+                // its own obsolescence rather than a defect in the basis.
+                let payload_before = crate::carrier::payload_path();
+                let baseline_digest = payload_before.as_ref().map(|p| digest_of(p));
 
-                match fixture_before.as_ref().and_then(|p| SwappedFixture::install(p)) {
+                match payload_before.as_ref().and_then(|p| SwappedFixture::install(p)) {
                     None => b.check(
                         "the payload-swap falsifier could run",
                         false,
-                        format!("could not install a B over {fixture_before:?}"),
+                        format!("could not install a B over {payload_before:?}"),
                     ),
                     Some(swap) => {
                         let before = carrier_children();
@@ -1815,7 +1826,7 @@ pub fn run(ampd_dir: &Path) -> i32 {
                 // Restored, and proved restored: a falsifier that mutates the
                 // installed payload has to leave the tree the way it found it,
                 // and "it should have" is not a measurement.
-                let restored = fixture_before.as_ref().map(|p| digest_of(p));
+                let restored = payload_before.as_ref().map(|p| digest_of(p));
                 b.check(
                     "the payload-swap falsifier restored the installed fixture",
                     restored.is_some() && restored == baseline_digest,
@@ -1962,6 +1973,7 @@ pub fn run(ampd_dir: &Path) -> i32 {
     carrier_confinement(&mut b, &scratch, &adopted_inodes);
     carrier_runtime_fence(&mut b, &scratch);
     pty_possession(&mut b, &scratch);
+    dogfood_payload(&mut b, &scratch);
 
     println!("\n  {} held · {} failed", b.pass, b.fail);
     rt.shutdown();
@@ -5093,4 +5105,148 @@ fn pty_ioctl_census(b: &mut Battery, scratch: &Path) {
     );
 
     drop(c);
+}
+
+/// R0a · **I Speak** — the installed production payload writes its own
+/// marker on its own terminal.
+///
+/// # What this is for, and what the join probe is for
+///
+/// `tools/terminal-join-probe.mjs` asserts the marker reaches a real
+/// `xterm.js` through a real click, and that is the product claim. It needs
+/// a display, a WebDriver and about a minute. This is the same byte,
+/// measured at the host, in about a second: it starts the **production
+/// payload** exactly the way `start_one` does — `spawn_on_pty`, then the
+/// handshake — and reads the master.
+///
+/// Two claims that only this can make:
+///
+/// 1. **Nothing asked for the bytes.** The host sends `HELLO` and reads.
+///    `super-dogfood` has no `SAY` verb, so there is no verb this battery
+///    could have sent, and the marker's arrival is attributable to the
+///    payload and to nothing else. `super-carrier-fixture` cannot be
+///    substituted here to make the check pass: it has no unprompted output
+///    at all, which is why B5 measured a live presentation carrying zero
+///    bytes.
+/// 2. **The line discipline is doing its job.** The payload writes `\n` and
+///    a terminal delivers `\r\n`. Asserting on the discipline's output is
+///    how D.1.3c·1 proved this is a terminal rather than a pipe, and the
+///    same assertion holds here for free.
+fn dogfood_payload(b: &mut Battery, scratch: &Path) {
+    use crate::{carrier, pty};
+    use std::io::Read;
+
+    println!("\n  R0a · the payload that speaks");
+
+    // **The selection, and the promise about it.** `bind_carrier_channel`
+    // measures `payload_path()` and puts its digest in the attested
+    // execution basis; `start_one` runs `payload_path()`. If those two ever
+    // named different files, every admission would refuse
+    // `carrier-execution-basis-changed` and point at the digest rather than
+    // at the mismatch.
+    let Some(payload) = carrier::payload_path() else {
+        b.check("a production Carrier payload is installed", false,
+                "payload_path() found neither super-dogfood nor the fixture");
+        return;
+    };
+    let name = payload.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    b.check(
+        "the production payload is the one that speaks, not the fixture",
+        name == "super-dogfood",
+        format!("payload_path() selected {name} — B5 measured what a Super whose payload \
+                 cannot speak is worth"),
+    );
+    b.check(
+        "and it is STATICALLY linked — the execute grant names one inode, not /usr/lib",
+        elf_is_static(&payload) == Some(true),
+        format!("{} has a PT_INTERP — build it with tools/build-payloads.sh", payload.display()),
+    );
+    // The fixture is still installed and still addressable by name. The
+    // confinement census spawns it directly, thirty-odd times, and running
+    // those against a payload that does things would measure the payload
+    // instead of the floor.
+    b.check(
+        "the confinement fixture is STILL installed and is a DIFFERENT file",
+        matches!(carrier::fixture_path(), Some(f) if f != payload),
+        format!("fixture_path()={:?} payload_path()={payload:?}", carrier::fixture_path()),
+    );
+
+    let dir = scratch.join("dogfood");
+    let _ = std::fs::create_dir_all(&dir);
+
+    let Ok(term) = pty::Pty::open() else {
+        b.check("a terminal can be allocated for the production payload", false, "Pty::open failed");
+        return;
+    };
+    let master = term.master();
+    let run = carrier::spawn_on_pty(
+        &payload, &dir, &dir.join("d.log"), &crate::new_epoch(), None, term,
+    );
+    let mut c = match run {
+        Ok(c) => c,
+        Err(e) => {
+            b.check("the production payload starts as a confined Carrier on a terminal", false, e);
+            return;
+        }
+    };
+    b.check("the production payload starts as a confined Carrier on a terminal", true, String::new());
+
+    // Exactly what `start_one` does, and in the same order: the payload
+    // speaks only after the host has told it who it is.
+    let shook = c.handshake(5_000);
+    b.check(
+        "it completes the same control handshake the fixture does — one protocol, two payloads",
+        shook.is_ok(),
+        format!("{shook:?}"),
+    );
+
+    // Read the master until the marker or the budget. Non-blocking with a
+    // bound, for `pty_ioctl_census`'s reason: a terminating condition that
+    // is the thing under test makes a wedge into a dead battery rather than
+    // a short red row.
+    let _ = c.pty().map(|q| q.set_nonblocking());
+    let mut mf = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(master) };
+    let mut all = String::new();
+    let mut buf = [0u8; 4096];
+    for _ in 0..200 {
+        match mf.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => all.push_str(&String::from_utf8_lossy(&buf[..n])),
+            Err(_) => {}
+        }
+        if all.contains("SUPER-DOGFOOD-R0-READY") && all.contains("carrier ") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::mem::forget(mf);
+
+    b.check(
+        "R0a — the marker arrives on the terminal, and NOTHING asked for it",
+        all.contains("SUPER-DOGFOOD-R0-READY"),
+        format!("read {:?} from the master; this payload has no SAY verb, so there is \
+                 nothing this battery could have sent to produce it", all.chars().take(200).collect::<String>()),
+    );
+    b.check(
+        "it arrived through the LINE DISCIPLINE — \\n written, \\r\\n delivered",
+        all.contains("SUPER-DOGFOOD-R0-READY\r\n"),
+        format!("{:?} — a pipe would deliver the \\n unchanged", all.chars().take(200).collect::<String>()),
+    );
+    // The identity line quotes what the HOST said in `HELLO`, not
+    // `SUPER_CARRIER_INCARNATION`. Same fact, better provenance.
+    b.check(
+        "and it names the incarnation the host minted, not the one its environment claims",
+        all.contains(&format!("carrier {}\r\n", c.incarnation)),
+        format!("expected \"carrier {}\", read {:?}", c.incarnation,
+                all.chars().take(200).collect::<String>()),
+    );
+
+    let fds: Vec<i32> = c.observe().fds.keys().copied().collect();
+    b.check(
+        "speaking cost it no descriptor — the set is still exactly {0,1,2,3}",
+        fds == vec![0, 1, 2, 3],
+        format!("{fds:?}"),
+    );
+
+    c.terminate(2_000);
 }
