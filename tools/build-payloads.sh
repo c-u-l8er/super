@@ -50,13 +50,40 @@ root=$(pwd)
 # crate directory : binary name. The binary name is also the basename
 # `carrier::payload_path()` and `carrier::fixture_path()` look for beside
 # `super-host`, so these two strings are the whole installation contract.
+#
+# A third field, when present, names **additional binaries from the same
+# crate that are NOT payloads** and must be installed anyway.
+#
+# **`probe` is the one, and its absence cost E0 a whole phase of confusion.**
+# `carrier-fixture/src/bin/probe.rs` is the *adversarial* binary: the thing
+# `super-host verify` spawns inside a Carrier to attempt each act the floor
+# must refuse — minting a terminal, reaching another home directory, opening
+# TCP, forking. `carrier::payload_path()` never returns it, no protocol field
+# can select it, and no Carrier a person starts ever runs it.
+#
+# Nothing built it. `cargo build --release` inside the crate produces it by
+# `src/bin/` auto-discovery, but this script builds into a **private**
+# CARGO_TARGET_DIR (see below) and then copies out only the binary it was
+# asked for — so `probe` was compiled into a temp directory and deleted, on
+# every run, since the private-target-dir change.
+#
+# The consequence was invisible and large. **81 of `super-host verify`'s 299
+# checks need this binary**, and without it they do not fail — they do not
+# appear. A fresh checkout built by the documented path reports
+# `216 held · 2 failed`; the two that fail are the only ones that say why.
+# The canonical tree's copy was dated 2026-09-02 and had been produced by
+# some earlier session's bare `cargo build`, which is why every freeze
+# measured 299 and no one noticed that no command in the tree produces it.
+#
+# Measured, at `ace5f69`, in a clean worktree: `216 held · 2 failed` before
+# building it, `299 held · 0 failed` after, changing nothing else.
 PAYLOADS=(
-  "carrier-fixture:super-carrier-fixture"
+  "carrier-fixture:super-carrier-fixture:probe"
   "dogfood:super-dogfood"
 )
 
 build_one () {
-  local crate="$1" bin="$2"
+  local crate="$1" bin="$2" extra="${3:-}"
   local out="$crate/target/release/$bin"
 
 # **Built into a fresh target directory, then installed.**
@@ -116,11 +143,31 @@ build_one () {
 
   printf '  \033[32mheld\033[0m  %-24s freshly built and statically linked · %s\n' \
     "$bin" "$(file -b "$root/$out" | cut -d, -f1-2)"
+
+  # The same build already produced these; they are installed under the same
+  # assertions and marked so nobody reads them as payloads.
+  local e
+  for e in ${extra//,/ }; do
+    local efresh="$tmp/release/$e" eout="$crate/target/release/$e"
+    if [ ! -x "$efresh" ]; then
+      printf '\033[31mFAIL\033[0m  %s did not build\n' "$e" >&2
+      return 1
+    fi
+    if file "$efresh" | grep -q 'dynamically linked'; then
+      printf '\033[31mFAIL\033[0m  the freshly built %s is DYNAMICALLY linked.\n' "$e" >&2
+      return 1
+    fi
+    rm -f "$root/$eout"
+    cp "$efresh" "$root/$eout"
+    chmod +x "$root/$eout"
+    printf '  \033[32mheld\033[0m  %-24s freshly built · NOT A PAYLOAD (adversarial probe)\n' "$e"
+  done
 }
 
 EXTRA=("$@")
 rc=0
 for entry in "${PAYLOADS[@]}"; do
-  build_one "${entry%%:*}" "${entry##*:}" || rc=1
+  IFS=: read -r __crate __bin __extra <<<"$entry"
+  build_one "$__crate" "$__bin" "${__extra:-}" || rc=1
 done
 exit $rc

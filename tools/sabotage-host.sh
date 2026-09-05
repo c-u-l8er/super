@@ -39,7 +39,42 @@ echo "# host battery · $__stamp · $__sha"
 HOST=./host/target/release/super-host
 [ -x "$HOST" ] || { echo "build the host first: cargo build --release --manifest-path host/Cargo.toml" >&2; exit 1; }
 
-pass=0; fail=0
+pass=0; fail=0; unreachable=0
+
+# **E0.1 — what a probe is entitled to conclude lives in its own file.**
+# It used to be three lines here, which is to say it was never tested. See
+# `tools/sabotage-scoring.sh` for the defect that extracted it and
+# `tools/check-sabotage-scoring.sh` for the canned-output suite.
+source "$(dirname "$0")/sabotage-scoring.sh"
+
+# **E0.3 — the healthy baseline, taken once, before anything is sabotaged.**
+#
+# Every probe names a check it expects to go RED. Two things could be wrong
+# with that name before a single byte is edited: the check may not exist any
+# more (renamed, respelled, deleted), or it may already be FAILED for an
+# unrelated reason. Both used to be indistinguishable from a real result —
+# a probe whose expected string no longer matched anything simply scored NOT
+# A FALSIFIER, which reads as "the fix is unguarded" and is not what happened.
+#
+# So one unsabotaged `verify` runs first and every probe checks its target
+# against it *before* touching the tree. A stale expectation now fails as a
+# stale expectation, at the top, in seconds of reading rather than after a
+# ninety-minute battery.
+__baseline="$__runs/host-$__stamp-$__sha.baseline"
+echo "# baseline · one unsabotaged verify, so a stale expectation fails as one"
+timeout 240 "$HOST" verify > "$__baseline" 2>&1
+__brc=$?
+if [ ! -s "$__baseline" ]; then
+  echo "REFUSING: the baseline verify produced no output; every probe would be unjudgeable" >&2
+  exit 1
+fi
+printf '# baseline · %s · %s\n' \
+  "$(grep -cE 'held|FAILED' "$__baseline") result lines" \
+  "$(tail -1 "$__baseline" | tr -d '\n')"
+if [ "$__brc" -ne 0 ]; then
+  echo "# NOTE: the baseline verify itself exits $__brc — probes whose target is"
+  echo "#       already FAILED below will refuse rather than score."
+fi
 
 # **Restore the tree on any exit, and this file did not.**
 #
@@ -81,6 +116,34 @@ trap 'exit 143' TERM
 # probe <name> <expected-RED check substring> <file> <sed-expr>...
 probe () {
   local name="$1" expect="$2" f="$3"; shift 3
+
+  # **A subset runner, and it makes itself impossible to mistake for a run.**
+  # E0.2 has to interrogate six named probes without paying ninety minutes
+  # for the other forty-four. `SABOTAGE_ONLY` is a substring of the probe
+  # name; anything else is skipped. The banner at the top and the summary
+  # both say so, and `__subset` makes the final line refuse to look like a
+  # battery result — a partial run that could be quoted as a green battery
+  # is the same class of defect as a probe that could be quoted as evidence
+  # when it never ran.
+  if [ -n "${SABOTAGE_ONLY:-}" ] && [[ ! "$name" =~ $SABOTAGE_ONLY ]]; then
+    return
+  fi
+
+  # E0.3 · the target must be a check that exists and is green right now.
+  # Asked BEFORE the sabotage, so a stale expectation cannot masquerade as
+  # a finding — and so the tree is never edited on behalf of a probe that
+  # could not have judged the result anyway.
+  case "$(score_verdict "$expect" "$__baseline")" in
+    DID_NOT_RUN)
+      echo "  NO SUCH CHECK    $name — '$expect' does not appear in the healthy baseline."
+      echo "                   Nothing was sabotaged. Fix the expected string."
+      fail=$((fail+1)); return ;;
+    FALSIFIED)
+      echo "  ALREADY RED      $name — '$expect' is FAILED before any sabotage, so its"
+      echo "                   going red would prove nothing. Nothing was sabotaged."
+      fail=$((fail+1)); return ;;
+  esac
+
   cp "$f" "$f.orig"
   for e in "$@"; do sed -i "$e" "$f"; done
 
@@ -123,8 +186,12 @@ probe () {
     out_file=$(mktemp)
     timeout 240 "$HOST" verify >"$out_file" 2>&1
     rc=$?
-    out=$(cat "$out_file")
-    rm -f "$out_file"
+    # The scorer reads a FILE, not a string. `out=$(cat …)` was the older
+    # shape and it cost the distinction this phase exists to restore: an
+    # empty capture and a capture with no match are the same empty string,
+    # so the scorer could not tell "no output" from "output without the
+    # check". `score_verdict` refuses an empty file outright.
+    out_keep="$out_file"
 
     # Reap anything the sabotaged host left behind, so the next probe does
     # not start against this one's litter.
@@ -133,6 +200,7 @@ probe () {
     if [ "$rc" -eq 124 ]; then
       echo "  TIMED OUT        $name — the host did not finish in 240s; nothing was proved"
       fail=$((fail+1))
+      rm -f "$out_keep"
       mv "$f.orig" "$f"; touch "$f"
       if [[ "$f" == host/* ]]; then
         cargo build --release --manifest-path host/Cargo.toml >/dev/null 2>&1
@@ -142,14 +210,16 @@ probe () {
       return
     fi
 
-    if grep -q "FAILED.*$expect" <<<"$out"; then
-      echo "  falsified        $name"
-      echo "                   → $(grep -o "FAILED.*$expect[^—]*—[^\"]*" <<<"$out" | head -1 | cut -c1-150)"
-      pass=$((pass+1))
-    else
-      echo "  NOT A FALSIFIER  $name — '$expect' passed with the fix disabled"
-      fail=$((fail+1))
-    fi
+    # E0.1 · three states. `DID_NOT_RUN` is counted apart from both because
+    # a probe that could not reach its question is not evidence either way.
+    verdict=$(score_verdict "$expect" "$out_keep")
+    score_line "$verdict" "$name" "$expect" "$out_keep"
+    case "$verdict" in
+      FALSIFIED)       pass=$((pass+1)) ;;
+      NOT_A_FALSIFIER) fail=$((fail+1)) ;;
+      DID_NOT_RUN)     unreachable=$((unreachable+1)) ;;
+    esac
+    rm -f "$out_keep"
   fi
 
   mv "$f.orig" "$f"; touch "$f"
@@ -161,6 +231,12 @@ probe () {
   fi
 }
 
+if [ -n "${SABOTAGE_ONLY:-}" ]; then
+  echo "###############################################################"
+  echo "# SUBSET RUN — SABOTAGE_ONLY='${SABOTAGE_ONLY}'"
+  echo "# This is NOT a battery result and may not be quoted as one."
+  echo "###############################################################"
+fi
 echo "host sabotage battery — each line stubs one fix and expects a named check RED"
 
 # 1 · The sink itself, on the bind path. This is F.8.1's residue exactly:
@@ -758,5 +834,24 @@ probe "an extra descriptor target that can overwrite the ruleset is noticed" \
 echo
 # Prefixed at W.1.4.2 — see the matching note in `ampd/tools/sabotage.sh`.
 # These two lines were byte-identical, and the log is parsed by regex.
-echo "host sabotage: $pass falsified · $fail did not"
-[ "$fail" -eq 0 ]
+# **The parsed line keeps its shape.** `tools/emit-measurements.mjs` binds
+# `/^host sabotage: (\d+) falsified · (\d+) did not$/` into the receipt, and
+# `did not` has always aggregated several distinct ways of failing to
+# falsify — SABOTAGE MISSED, BROKE THE BUILD, TIMED OUT. E0 adds two more
+# (NO SUCH CHECK, ALREADY RED) and separates out the one that was being
+# *mislabelled* rather than merely aggregated.
+#
+# So the total below is `fail + unreachable`: a probe that could not ask its
+# question did not falsify anything, and the battery must not be green with
+# one outstanding. What E0 fixes is not the aggregate — it is that
+# `DID_NOT_RUN` used to print "passed with the fix disabled", a sentence
+# about a check that never ran. The breakdown line exists so the aggregate
+# can never hide that distinction again.
+if [ -n "${SABOTAGE_ONLY:-}" ]; then
+  echo "SUBSET RUN ('${SABOTAGE_ONLY}') — not a battery result: $pass falsified · $fail did not · $unreachable could not ask"
+  [ "$fail" -eq 0 ] && [ "$unreachable" -eq 0 ]
+  exit $?
+fi
+echo "host sabotage: $pass falsified · $((fail + unreachable)) did not"
+echo "               of which $unreachable could not ask their question (CHECK DID NOT RUN)"
+[ "$fail" -eq 0 ] && [ "$unreachable" -eq 0 ]
