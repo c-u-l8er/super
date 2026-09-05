@@ -387,6 +387,61 @@ probe "the ruleset descriptor colliding with the allowlist is noticed" \
   host/src/confine.rs \
   's|    let rs = relocate_above_allowlist(rs as RawFd)?;|    let rs = rs as RawFd;|'
 
+# --- Phase A · the one read grant ------------------------------------
+#
+# **18 acceptance rows arrived green and green is not evidence.** The
+# SourceBasis matrix asserts that a Carrier may read the snapshot it was
+# granted and may not write it, reach its sibling, or reach anything the
+# floor already refused. Every one of those could pass for a reason
+# unrelated to the mechanism — which is exactly what R0b.0's six confusing
+# NOT A FALSIFIERs turned out to be — so each half stubs the thing it
+# depends on and names the row that must notice.
+
+# A · The grant itself, removed. `minimal_over` is the only producer
+#     `ro_dirs` has ever had; emptying it leaves a policy identical to
+#     `minimal`, so the positive half of the pair must fail and the
+#     negative half must keep passing for the same reason it did before.
+probe "the source-basis read grant is what makes the basis readable" \
+  "a Carrier MAY read a file inside the source basis it was granted" \
+  host/src/confine.rs \
+  's|            ro_dirs: vec!\[source.to_string()\],|            ro_dirs: vec![],|'
+
+# B · The grant widened to read-WRITE, at the one line that decides it.
+#     `prepare` is where a list becomes an access set — `rw` for `rw_dirs`,
+#     `ro` for `ro_dirs` — and handing `ro_dirs` the writable set is the
+#     single most plausible mistake a later change makes. It is invisible
+#     from the grant COUNT, which stays three, so only an attempted write
+#     can see it. That is what the MUST NOT row is for.
+probe "the source grant is READ-only, and a write would be noticed" \
+  "a Carrier MUST NOT write the source basis it may read" \
+  host/src/confine.rs \
+  's|            grant(rs, d, ro)?;|            grant(rs, d, rw)?;|'
+
+# C · Correspondence, disabled. `verify_source_basis` is the whole reason a
+#     host path is not authority: it stands between the string the runtime
+#     sent and the grant the kernel installs. Accepting a dirty
+#     materialization means a job could read bytes nobody admitted.
+probe "a moved materialization is refused, and the dirty check is what refuses it" \
+  "a materialization edited after binding is refused, and says which path" \
+  host/src/effect.rs \
+  's|    if !status.trim().is_empty() {|    if false {|'
+
+# D · The commit comparison, disabled. The other half of correspondence:
+#     a clean worktree at the WRONG revision is a snapshot nobody named.
+probe "a materialization at the wrong revision is refused" \
+  "a materialization at a DIFFERENT commit is refused" \
+  host/src/effect.rs \
+  's|    if head != commit_oid {|    if false {|'
+
+# E · Exactness at the host. The semantic side refuses a symbolic revision
+#     when the basis is bound; this is the second, independent refusal, and
+#     a verifier that trusted its argument to have been checked elsewhere
+#     is one refactor from checking nothing.
+probe "the host refuses a symbolic revision on its own account" \
+  "a symbolic revision is refused as a basis, at the host too" \
+  host/src/effect.rs \
+  's|    if commit_oid.len() != 40 \|\| !commit_oid.bytes().all(\|b\| b.is_ascii_hexdigit()) {|    if false {|'
+
 # --- the negative syscall census -------------------------------------
 #
 # These three answer the review objection directly. Every one of them
