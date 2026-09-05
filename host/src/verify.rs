@@ -2885,10 +2885,21 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
             crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &"b".repeat(40)).is_err(),
             "a basis must not verify against a commit it is not at".to_string(),
         );
+        // **Asserted on the REASON, not merely on the refusal**, and a
+        // targeted sabotage is why. Disabling the exactness guard leaves
+        // `"HEAD"` still refused — by the commit comparison below it, as
+        // `revision-moved` — so an `is_err()` assertion stayed green with
+        // the guard removed and the probe scored NOT A FALSIFIER. The two
+        // refusals are not the same fact: one says this is not an object
+        // name, the other says the worktree is not at it. Only the first is
+        // true of `"HEAD"`, and only naming it makes the guard observable.
         b.check(
-            "a symbolic revision is refused as a basis, at the host too",
-            crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), "HEAD").is_err(),
-            "HEAD is a selection, not an object name".to_string(),
+            "a symbolic revision is refused as a basis, at the host too — as NOT EXACT",
+            matches!(
+                crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), "HEAD"),
+                Err(ref e) if e.contains("source-basis-revision-not-exact")
+            ),
+            format!("{:?}", crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), "HEAD")),
         );
         b.check(
             "an absent materialization is refused",

@@ -438,7 +438,7 @@ probe "a materialization at the wrong revision is refused" \
 #     a verifier that trusted its argument to have been checked elsewhere
 #     is one refactor from checking nothing.
 probe "the host refuses a symbolic revision on its own account" \
-  "a symbolic revision is refused as a basis, at the host too" \
+  "a symbolic revision is refused as a basis, at the host too — as NOT EXACT" \
   host/src/effect.rs \
   's|    if commit_oid.len() != 40 \|\| !commit_oid.bytes().all(\|b\| b.is_ascii_hexdigit()) {|    if false {|'
 
