@@ -23,12 +23,23 @@ trap 'rm -rf "$WORK"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The copy carries `_build` and `host/target` deliberately — a rebuild per
-# case would dominate the runtime, and the Rust host is not what is being
-# sabotaged. `priv/data` is excluded: it is durable state, not source.
+# The copy carries `ampd/_build` (2.8 MB) and `host/target` (24 MB)
+# deliberately — a rebuild per case would dominate the runtime, and the Rust
+# host is not what is being sabotaged.
+#
+# **`cockpit/target` is excluded and that is not an optimisation.** It is
+# 1.1 GB, `$WORK` is under `/tmp`, and `/tmp` on this machine is a 16 GB
+# tmpfs that runs chronically near full. MASTER plus one live copy would be
+# 2.2 GB of it, per case, for a binary no case touches — and a tmpfs that
+# fills does not fail this harness cleanly, it fails everything on the box.
+# The cockpit is not sabotaged here and the ExUnit suite does not need it.
+#
+# `priv/data` goes too: it is a world, not source, and a stale one copied 22
+# times is 22 chances to measure the wrong ledger.
 MASTER="$WORK/master"; mkdir -p "$MASTER"
 tar -cf - --exclude=./ampd/.elixir_ls --exclude='./*.zip' \
-          --exclude=./ampd/erl_crash.dump --exclude=./old_scrap . \
+          --exclude=./ampd/erl_crash.dump --exclude=./old_scrap \
+          --exclude=./cockpit/target --exclude=./ampd/priv/data . \
   | tar -xf - -C "$MASTER"
 
 fresh () { rm -rf "$WORK/t"; cp -a "$MASTER" "$WORK/t"; T="$WORK/t"; }
@@ -142,6 +153,12 @@ case_ 'the outcome takes its subject from the caller' \
       ampd/lib/ampd/validation.ex \
       '          "actor" => start["actor"],' \
       '          "actor" => result["actor"] || start["actor"],'
+
+case_ 'an outcome may be recorded outside the coordinator' \
+      'recording an outcome outside the coordinator is refused' \
+      ampd/lib/ampd/validation.ex \
+      '      not Ampd.Participant.inside?() ->' \
+      '      false ->'
 
 # ------------------------------------------------------------------ R11.2
 case_ 'admissibility ignores whether a start is durable' \

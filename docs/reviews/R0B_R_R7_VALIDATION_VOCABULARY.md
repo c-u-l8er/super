@@ -225,6 +225,25 @@ commit. So the **failure is designed to land on the side that refuses
 execution**. Mint-then-append leaves, on ledger failure, a job nothing may
 execute. Append-then-mint would leave a start naming a job that does not exist.
 
+### the outcome refuses to be recorded out of order, structurally
+
+`Receipts.emit` is deliberately **not** an ordered op — a ledger append is not
+an authority mutation, and making it one would put every receipt through the
+total order for nothing. So nothing about the store stops a direct
+`Validation.record_outcome/2` from racing.
+
+But every check that function makes is a **read of the ledger followed by a
+write to it** — *a start is durable*, *no outcome yet* — and an unordered pair
+of those races a concurrent append of the very record it is looking for. Two
+contradictory terminal outcomes for one `job_ref` is exactly what that race
+produces.
+
+So `record_outcome/2` refuses unless `Ampd.Participant.inside?()` —
+`unordered-validation-outcome`. Requiring it there rather than trusting callers
+to go through `Ampd.Authority` is the difference between a guarantee and a
+habit. `Ampd.Worker.close/1` is the same shape one layer down and does trust
+its callers; it returns `{:ok, <refusal>}` to anyone who does not, which is §9.3.
+
 ---
 
 ## 5 · two pre-existing defects found on the way
@@ -275,13 +294,21 @@ Two further findings came out of building it:
 All figures taken with nothing else running on the machine — see §0.
 
 ```text
-super-host verify        319 held ·  0 failed
-ExUnit (this tree)       666 tests ·  0 failures
-ExUnit (baseline 78b19e8) 630 tests ·  0 failures     +36 is exactly this suite
-static gates               8 held ·  0 failed · 0 could not run
-scope-manifest vectors    12 held ·  0 failed
-sabotage-validation       21 caught · 0 NOT A FALSIFIER · 0 unapplied
+super-host verify         319 held ·  0 failed
+ExUnit (this tree)        667 tests ·  0 failures
+ExUnit (baseline 78b19e8) 630 tests ·  0 failures     the delta is exactly this suite
+ExUnit multi-seed         seeds 0 · 424242 · 909090 — 666/0 each, retained
+static gates                8 held ·  0 failed · 0 could not run
+scope-manifest vectors     12 held ·  0 failed
+sabotage-validation        22 caught · 0 NOT A FALSIFIER · 0 unapplied
+host sabotage (isolated)  baseline 319/0, in a worktree the canonical tree is not
 ```
+
+The seed battery keeps what happened — one directory per run holding commit,
+tree, seed, both timestamps, exit status, summary, full stdout, and an orphan-
+runtime census before and after. Seed `909090` recorded `orphans 0→1`; that is
+a recorded fact about the machine, not a failure, and it is exactly the kind of
+thing D.1.3b·2f lost by piping a run through `grep`.
 
 ### the sabotage column that is new, and why
 
@@ -296,7 +323,7 @@ confidence — which is the same defect it exists to find. The substitution is n
 exact and a miss is `UNAPPLIED`, which is neither a catch nor a verdict about
 the suite.
 
-All 21 mechanisms are load-bearing. Each case removes exactly one and requires a
+All 22 mechanisms are load-bearing. Each case removes exactly one and requires a
 **named** test to fail; a stub that merely reddens the suite somewhere does not
 score, or a stub that broke compilation would count as evidence for every row at
 once.
@@ -363,7 +390,16 @@ remain filed and out of this slice.
    `rm -rf`'d at config load. It cost this round two hours of chasing phantom
    failures and it will cost the next round the same. Not fixed here: changing
    where the suite stores its world is its own slice with its own falsifiers.
-3. **`Ampd.Worker.close/1` returns `{:ok, <refusal>}`** when called outside the
+3. **`ampd/priv/data/` was tracked despite the `*.dets` rule.** `.gitignore` is
+   not consulted for a file git already tracks, and the four dets tables had
+   been tracked since the repo's first commit — so a rule added in `0d7c53a`
+   protected every world except the ones a developer's runtime actually
+   writes. This round's dogfood minted a world into them and committed it.
+   Fixed here: `git rm --cached`, the directory ignored whole, and the
+   runtime proven to boot from nothing rather than assumed to.
+4. **`ampd/priv/ampd_fd_nif.so` is a compiled binary in git.** Noticed while
+   fixing the above; out of scope, not touched.
+5. **`Ampd.Worker.close/1` returns `{:ok, <refusal>}`** when called outside the
    coordinator — `transition/3` wraps whatever `Loci.put_worker/2` returns. No
    production caller reaches it (only `Ampd.Authority.close_worker/1`, inside
    `tx`), so it is filed rather than fixed. A refusal wearing an `:ok` tag is

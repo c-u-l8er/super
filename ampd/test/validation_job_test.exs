@@ -241,7 +241,9 @@ defmodule Ampd.ValidationJobTest do
 
     test "a second start for one job_ref is refused", ctx do
       {job, _} = start!(ctx)
-      assert {:error, "validation-job-already-started", _} = Validation.record_start(job)
+
+      assert {:error, "validation-job-already-started", _} =
+               Ampd.AuthorityCoordinator.transact(fn -> Validation.record_start(job) end, nil)
     end
   end
 
@@ -439,6 +441,19 @@ defmodule Ampd.ValidationJobTest do
       assert r["code"] == "unordered-authority-mutation"
       assert r["operator_detail"]["operation"] == ":open_job"
       assert Worktree.validation_jobs() == %{}
+    end
+
+    test "recording an outcome outside the coordinator is refused", ctx do
+      {job, _} = start!(ctx)
+
+      # `Receipts.emit` is deliberately NOT an ordered op — the ledger append
+      # is not an authority mutation. So nothing about the store would stop a
+      # direct `record_outcome/2` from racing; the refusal has to be here.
+      assert {:error, "unordered-validation-outcome", _} =
+               Validation.record_outcome(job["ref"], pass())
+
+      assert Validation.outcome(job["ref"]) == nil
+      assert {:ok, _} = Authority.record_validation_outcome(job["ref"], pass())
     end
 
     test ":open_job is classified a MUTATION at the participant boundary", ctx do

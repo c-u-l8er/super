@@ -215,6 +215,27 @@ defmodule Ampd.Validation do
     reason = result["reason"]
 
     cond do
+      # **Ordered, structurally, not by convention.** Every check below is a
+      # READ of the ledger followed by a WRITE to it — "a start is durable",
+      # "no outcome yet" — and an unordered pair of those races a concurrent
+      # append of the very record it is looking for. Two contradictory
+      # terminal outcomes for one `job_ref` is what that race produces, and
+      # it is the one thing R7.3 exists to make impossible.
+      #
+      # `Ampd.Authority.record_validation_outcome/2` is the ordered door.
+      # Requiring it HERE rather than trusting callers to use it is the
+      # difference between a guarantee and a habit: `Ampd.Worker.close/1` is
+      # the same shape one layer down and returns `{:ok, <refusal>}` to
+      # anyone who calls it directly, which is filed rather than fixed.
+      not Ampd.Participant.inside?() ->
+        {:error, "unordered-validation-outcome",
+         %{
+           "job_ref" => job_ref,
+           "hint" =>
+             "call Ampd.Authority.record_validation_outcome/2 — recording an " <>
+               "outcome reads the ledger and then writes to it"
+         }}
+
       Worktree.validation_job(job_ref) == nil ->
         {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
 
