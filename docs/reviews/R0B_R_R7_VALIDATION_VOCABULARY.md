@@ -186,6 +186,38 @@ The R1 census established that nothing shipped renders the durable ledger. No
 renderer was built: doing so would invent the consumer whose absence made
 splitting the key safe. The cockpit may ignore the field.
 
+### the third defect — two windows handing out a cursor nothing could redeem
+
+`Ampd.Projection` states a rule in its own docs:
+
+> Every window a projection hands out has a `next_cursor`, and every one of
+> them needs a command that can follow it — a cursor with nothing to give it
+> to is a promise the protocol does not keep.
+
+**R6 broke it in the round that split `receipts` by kind.** It added the
+`worktree_receipts` window and `history_for(:worktree_receipts, …)` and no
+door — in the very round whose finding was that an agent could not see the
+establishment of its own worktree. It could see it in the frame and could not
+page it. R7 would have done exactly the same thing again with `validations`.
+
+So both commands now exist: `list_worktree_receipts` and `list_validations`,
+`channel: :both`, `kind: :read`, `retry: :safe`, the shape `list_receipts`
+already had. The filter is `history_for/2` — reused rather than restated, so
+`worktree_receipts` stays subjected by `locus_actor` and `validations` by
+`actor` without either rule being written twice. **No new authority**: a record
+an agent cannot see in its frame cannot be paged to here either, asserted.
+
+The suite checks the **rule**, not the two cases: it walks the agent projection
+for every key carrying a `next_cursor` and requires a command for each. That is
+what makes the next omission visible rather than found a round later.
+
+And a gate caught the half of this that was got wrong. `cockpit_test.exs`
+derives its expected read list from `CommandSpec.reads/0` and refused both new
+commands as *"declared in command-spec@1 and never exercised here"*. Adding a
+read and forgetting to frame it is caught by that assertion and by nothing
+else, because an unframed reply simply has no cursor and a client cannot tell a
+missing cursor from an unchanged one.
+
 ---
 
 ## 4 · creation authority — R12's alternative, not R12's command
@@ -246,7 +278,9 @@ its callers; it returns `{:ok, <refusal>}` to anyone who does not, which is §9.
 
 ---
 
-## 5 · two pre-existing defects found on the way
+## 5 · three pre-existing defects found on the way
+
+The third is in §3 above, beside the projection work it belongs to.
 
 ### `:bind_basis` was classified a read at the participant boundary
 
@@ -295,12 +329,12 @@ All figures taken with nothing else running on the machine — see §0.
 
 ```text
 super-host verify         319 held ·  0 failed
-ExUnit (this tree)        667 tests ·  0 failures
+ExUnit (this tree)        671 tests ·  0 failures
 ExUnit (baseline 78b19e8) 630 tests ·  0 failures     the delta is exactly this suite
 ExUnit multi-seed         seeds 0 · 424242 · 909090 — 666/0 each, retained
 static gates                8 held ·  0 failed · 0 could not run
 scope-manifest vectors     12 held ·  0 failed
-sabotage-validation        22 caught · 0 NOT A FALSIFIER · 0 unapplied
+sabotage-validation        25 caught · 0 NOT A FALSIFIER · 0 unapplied
 host sabotage (isolated)  baseline 319/0, in a worktree the canonical tree is not
 ```
 
@@ -323,7 +357,7 @@ confidence — which is the same defect it exists to find. The substitution is n
 exact and a miss is `UNAPPLIED`, which is neither a catch nor a verdict about
 the suite.
 
-All 22 mechanisms are load-bearing. Each case removes exactly one and requires a
+All 25 mechanisms are load-bearing. Each case removes exactly one and requires a
 **named** test to fail; a stub that merely reddens the suite somewhere does not
 score, or a stub that broke compilation would count as evidence for every row at
 once.

@@ -217,6 +217,27 @@ case_ 'open_job is served to any caller, not only the coordinator' \
       ':bind_basis, :open_job, :reset' \
       ':bind_basis, :reset'
 
+# ------------------------------------------------------------- the cursors
+case_ 'list_validations pages the world, not the caller'\''s own' \
+      'an actor with no records pages an empty window, not the world'\''s' \
+      ampd/lib/ampd/control.ex \
+      '    do: Projection.page(Projection.history_for(:validations, peer["actor"]), cursor, limit)' \
+      '    do: Projection.page(Projection.history_for(:validations, nil), cursor, limit)'
+
+case_ 'list_worktree_receipts pages validations instead' \
+      'an agent can page the establishment of its own worktree' \
+      ampd/lib/ampd/control.ex \
+      '    do: Projection.page(Projection.history_for(:worktree_receipts, peer["actor"]), cursor, limit)' \
+      '    do: Projection.page(Projection.history_for(:validations, peer["actor"]), cursor, limit)'
+
+case_ 'the list_validations command is removed' \
+      'every window a projection hands out now has a command' \
+      ampd/lib/ampd/command_spec.ex \
+      '    "list_validations" => %{
+      cmd: :list_validations,' \
+      '    "list_validationsX" => %{
+      cmd: :list_validationsX,'
+
 # ------------------------------------------------------------------ R8/R9
 case_ 'the validation surface is the whole ledger' \
       'validation records route ONLY to the validation surface' \
