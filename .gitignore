@@ -33,3 +33,12 @@ and-super-rev-*.zip
 # finds. Committing them would make the tree grow by ~50 KB per battery.
 .sabotage-runs/
 .suite-runs/
+
+# A world's MATERIALIZATIONS, for the same reason as its dets tables and one
+# step worse. `Ampd.Locus.establish/3` runs `git worktree add` under
+# `priv/data/worktrees/`, so every established worktree is a git repository
+# INSIDE this one. A `git add -A` after any run that establishes anything
+# commits it as a GITLINK — a 1-line entry naming a commit, in a directory a
+# clone cannot obtain and a source archive cannot contain. Committed once,
+# 2026-09-05, by the round that first drove the whole chain end to end.
+ampd/priv/data/worktrees/
