@@ -423,6 +423,21 @@ were all still there; the stubs were not landing. That column was added earlier
 this round after eighteen silent no-ops were scored as `NOT A FALSIFIER`, and it
 has now paid for itself twice.
 
+### four instruments caught the author, not the code
+
+Worth naming, because it is the round's most reusable result:
+
+```text
+check-ordered-closure.mjs   refused an opaque `with/else` dispatch
+sabotage-validation         NOT A FALSIFIER — two cases, one expected test
+sabotage-validation         NOT A FALSIFIER — an ambiguous stub anchor
+bash -n                     two broken fragments a staged patch left behind
+```
+
+Every one of those was a defect in the *instrument or the patch*, not in the
+subject. A battery that could not distinguish them would have reported more
+catches and meant fewer.
+
 ### the closure gate caught the first attempt
 
 `record_validation_outcome/2` was written with `with/else`, which the BEAM
@@ -484,14 +499,19 @@ All figures taken with nothing else running on the machine — see §0.
 
 ```text
 super-host verify         319 held ·  0 failed
-ExUnit (this tree)        682 tests ·  0 failures
+ExUnit                    683 tests ·  0 failures
 ExUnit (baseline 78b19e8) 630 tests ·  0 failures     the delta is exactly this suite
-ExUnit multi-seed         seeds 0 · 424242 · 909090 — 666/0 each, retained
+ExUnit multi-seed         seeds 0 · 424242 · 909090 — 683/0 each, retained
 static gates                8 held ·  0 failed · 0 could not run
 scope-manifest vectors     12 held ·  0 failed
-sabotage-validation        33 caught · 0 NOT A FALSIFIER · 0 unapplied
+sabotage-validation        33 caught · 0 NOT A FALSIFIER · 0 unapplied · 0 broke
 host sabotage (isolated)   55 falsified ·  0 did not · 0 could not ask (baseline 319/0)
+                           canonical checkout unchanged
 ```
+
+The three seed runs are at one commit, deliberately: the batteries were held
+until nothing else was going to move the tree, because a seed battery whose
+three runs report three different `sha`s is three measurements of three trees.
 
 ### the host battery, and a rule this session broke
 
