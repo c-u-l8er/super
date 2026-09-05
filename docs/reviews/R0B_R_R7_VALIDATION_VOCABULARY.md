@@ -1,6 +1,7 @@
 # R0b.R · R7–R13 — the durable vocabulary for validation work
 
-**Status: GO proposed.** Super can name one bounded validation job over its own
+**Status: GO proposed, R0b.R·1 included.** GPT returned GO on the vocabulary
+and REVISE on one producer-boundary hole; §4b is that closure. Super can name one bounded validation job over its own
 source and durably record that it started and how it ended, with execution
 outcome, predicate verdict, subject visibility and record kind remaining
 semantically distinct.
@@ -307,6 +308,109 @@ its callers; it returns `{:ok, <refusal>}` to anyone who does not, which is §9.
 
 ---
 
+## 4b · R0b.R·1 — the invariants move to the ledger
+
+GPT's REVISE, and it was right. Everything in §4 held **only if every caller
+chose to enter through `Ampd.Validation`**. `Ampd.Receipts.emit/1` let a caller
+pick the `kind`, and `Ampd.Validation` read validation truth back out of the
+ledger *by kind alone*. So:
+
+```elixir
+Receipts.emit(%{"kind" => "validation_job_started@1", "job_ref" => "vj_fake"})
+```
+
+minted a durable validation START for a job that does not exist — no JobBasis,
+no SourceBasis, no Lane, no Worker — and `admissible?/1`, which asked only *is
+there a start and no outcome*, then answered **true** for it. Reproduced before
+it was fixed:
+
+```text
+forged record minted   rcpt-0007 · validation_job_started@1
+JobBasis for vj_fake   nil
+admissible?(vj_fake)   true   <-- a receipt created executable work
+```
+
+**This round's own suite contained that call.** It arrived as a ported case from
+the other session, was rewritten to fit this vocabulary, passed, and was
+evidence of the defect the whole time. That is the strongest argument available
+for the rule GPT keeps applying: *"the intended caller goes through the boundary"
+is not the same sentence as "the boundary enforces the property"*.
+
+### the shape of the fix
+
+`emit/1` refuses `Ampd.Validation.kinds/0` by name —
+`receipt-kind-requires-typed-admission`. **Refused, not silently re-kinded and
+not dropped**: rewriting the kind files the caller's record somewhere it did not
+ask for, and dropping it loses a write with no explanation.
+
+The protected kinds are reachable only through two store-owned appends:
+
+```text
+Receipts.record_validation_start(job_ref)
+Receipts.record_validation_outcome(job_ref, result)
+```
+
+**Not a flag.** Nothing consults a `producer` field, an `internal: true`, the
+process dictionary, or the calling module — every one of those is something a
+caller can supply or arrange, which makes the guard a convention wearing a
+check's clothes. The protection is structural: the protected kinds are reachable
+only through a *different message*, and `{:emit, m}` refuses them.
+
+**A ref, never a job.** `record_validation_start/1` takes a string and resolves
+the JobBasis in its own body. A caller that could hand in a job map could hand in
+a forged one, and the store would be back to trusting its input. Every semantic
+field on the START — `validation_kind`, `actor`, `worker_ref`,
+`worker_generation`, `source_basis_ref`, `scope_digest` — is the durable job's,
+and there is no parameter through which a different value could arrive. The
+OUTCOME's subject comes off the START the same way. Even
+`Ampd.Authority.start_validation_job/1`, which is holding the freshly-minted job,
+passes only `job["ref"]`.
+
+### atomicity, and why the coordinator is still required
+
+The relationship checks — *a start exists*, *no outcome yet* — moved **inside
+`Ampd.Receipts`' own handler**, against the log it is about to append to. A
+process handles one message at a time, so check and append cannot interleave. A
+caller-side check is two round trips with a window between them, and two
+concurrent outcomes could both observe "none yet".
+
+Both appends are also in `@ordered_ops`, and that is not redundant: **ordering is
+about the world's total order across stores; atomicity here is about this store's
+log.** Neither subsumes the other, and the falsifiers separate them — one asserts
+`unordered-authority-mutation` from outside the coordinator, another drives three
+contradictory outcomes at a decided job and requires exactly one row to exist.
+
+### `admissible?/1` gained its missing clause
+
+It claimed to answer *may this job be handed to an executor* while asking only
+about receipts. Now:
+
+```text
+a JobBasis exists      there is work, over a named SourceBasis,
+                       owned by a Lane, at a Worker generation
+a START is durable     execution was admitted
+no OUTCOME             it has not already been decided
+```
+
+Either lock alone closes the measured hole. Both are here because they answer
+different questions, and an executor deserves to be told about a job whose basis
+is gone rather than about one whose receipt merely looks right. **A ledger row
+may not create executable work by itself.**
+
+R0b.1 extends this with execution-time facts — Worker generation still current,
+SourceBasis resolves, materialization proves itself, scope digest re-derives.
+None is pre-invented here; none has a producer yet.
+
+### the closure gate caught the first attempt
+
+`record_validation_outcome/2` was written with `with/else`, which the BEAM
+compiles to an anonymous function, and `check-ordered-closure.mjs` refused it:
+*the census cannot follow this dispatch and nothing says where it lands.* The
+cheap answer was an exclusion entry. Removing the opaque dispatch is better than
+adjudicating it, so it is a `case`.
+
+---
+
 ## 5 · three pre-existing defects found on the way
 
 The third is in §3 above, beside the projection work it belongs to.
@@ -358,12 +462,12 @@ All figures taken with nothing else running on the machine — see §0.
 
 ```text
 super-host verify         319 held ·  0 failed
-ExUnit (this tree)        673 tests ·  0 failures
+ExUnit (this tree)        682 tests ·  0 failures
 ExUnit (baseline 78b19e8) 630 tests ·  0 failures     the delta is exactly this suite
 ExUnit multi-seed         seeds 0 · 424242 · 909090 — 666/0 each, retained
 static gates                8 held ·  0 failed · 0 could not run
 scope-manifest vectors     12 held ·  0 failed
-sabotage-validation        25 caught · 0 NOT A FALSIFIER · 0 unapplied
+sabotage-validation        33 caught · 0 NOT A FALSIFIER · 0 unapplied
 host sabotage (isolated)   55 falsified ·  0 did not · 0 could not ask (baseline 319/0)
 ```
 
@@ -411,7 +515,7 @@ confidence — which is the same defect it exists to find. The substitution is n
 exact and a miss is `UNAPPLIED`, which is neither a catch nor a verdict about
 the suite.
 
-All 25 mechanisms are load-bearing. Each case removes exactly one and requires a
+All 33 mechanisms are load-bearing. Each case removes exactly one and requires a
 **named** test to fail; a stub that merely reddens the suite somewhere does not
 score, or a stub that broke compilation would count as evidence for every row at
 once.

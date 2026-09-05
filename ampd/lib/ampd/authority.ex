@@ -394,7 +394,11 @@ defmodule Ampd.Authority do
     tx(fn ->
       case Ampd.Worktree.open_validation_job(fields) do
         {:ok, job} ->
-          case Ampd.Validation.record_start(job) do
+          # **The ref, not the job.** R0b.R·1: `Ampd.Receipts` resolves the
+          # JobBasis itself, so even this function — which is holding the
+          # freshly-minted job right here — cannot hand the ledger a shape
+          # the store did not read for itself.
+          case Ampd.Receipts.record_validation_start(job["ref"]) do
             {:ok, receipt} -> {:ok, %{"job" => job, "started" => receipt}}
             {:error, code, detail} -> {:error, code, detail}
           end
@@ -414,11 +418,14 @@ defmodule Ampd.Authority do
   the very record it is checking for. Two contradictory terminal outcomes for
   one `job_ref` is the exact thing that race produces.
 
-  See `Ampd.Validation.record_outcome/2` for the state/verdict/reason shape
-  and why an execution failure is never a predicate verdict.
+  See `Ampd.Validation.validate_result/1` for the state/verdict/reason shape
+  and why an execution failure is never a predicate verdict, and
+  `Ampd.Receipts.record_validation_outcome/2` for where the relationship
+  checks live — inside the store's own handler, so that check and append are
+  one message and two concurrent outcomes cannot both observe "none yet".
   """
   def record_validation_outcome(job_ref, result),
-    do: tx(fn -> Ampd.Validation.record_outcome(job_ref, result) end)
+    do: tx(fn -> Ampd.Receipts.record_validation_outcome(job_ref, result) end)
 
   @doc """
   Interpret every durable crash-cut left by the last shutdown.

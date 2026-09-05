@@ -126,6 +126,21 @@ for {label, w} <- [
 end
 
 IO.puts("")
+IO.puts("  the NEGATIVE case — a forged start, admitted by nobody:")
+
+forged =
+  Ampd.Receipts.emit(%{"kind" => Validation.started_kind(), "job_ref" => "vj_forged"})
+
+case forged do
+  {:error, code, _} -> say.("generic emit         REFUSED · #{code}")
+  other -> say.("generic emit         *** APPENDED *** #{inspect(other)}")
+end
+
+say.("ledger append        #{if Validation.started("vj_forged") == nil, do: "none", else: "*** ONE ***"}")
+say.("admissible?          #{Validation.admissible?("vj_forged")}   ← no JobBasis, so no executable work")
+say.("validation records   #{length(Validation.all())} — still only the real job's two")
+
+IO.puts("")
 IO.puts("  no host path anywhere in the validation records:")
 
 for r <- [job, started, outcome], {k, v} <- r, is_binary(v), String.starts_with?(v, "/") do

@@ -136,116 +136,63 @@ defmodule Ampd.Validation do
   @doc """
   Whether a job may be handed to an executor.
 
-  **A job is admissible only once its start is durable.** R11.2: the append
-  happens before any Carrier is spawned, so a job that ran and left no trace
-  of having begun is not representable. This is the predicate that makes
-  that ordering checkable now, one round before there is an executor to
-  check it against.
+  **Three conditions, and the first one had to be added.** R11.2 is about
+  the second: the start is appended before any Carrier is spawned, so a job
+  that ran and left no trace of having begun is not representable.
+
+      a JobBasis exists      there is work, over a named SourceBasis,
+                             owned by a Lane, at a Worker generation
+      a START is durable     execution was admitted
+      no OUTCOME             it has not already been decided
+
+  The JobBasis clause is R0b.R·1's, and it is here because this function
+  said "may be handed to an executor" while asking only about receipts.
+  A directly-emitted `validation_job_started@1` naming `vj_fake` made this
+  answer **true** for a job that did not exist — no basis, no Lane, no
+  Worker. `Ampd.Receipts` now refuses to mint that record at all, and this
+  is the second lock: **a ledger row may not create executable work by
+  itself.** Either one alone would close the measured hole; both are here
+  because they answer different questions, and the executor deserves to be
+  told about a job whose basis is gone rather than about one whose receipt
+  merely looks right.
+
+  R0b.1 extends this with execution-time facts — that the Worker generation
+  is still current, that the SourceBasis resolves, that the materialization
+  still proves itself, that the scope digest re-derives. Those are not
+  pre-invented here: none of them has a producer yet.
   """
-  def admissible?(job_ref), do: started(job_ref) != nil and outcome(job_ref) == nil
-
-  # ------------------------------------------------------------- writing
-  @doc """
-  Append `validation_job_started@1` for an already-minted JobBasis.
-
-  Called inside the ordered transaction that mints the job. The fields are
-  the job's own semantic identity — nothing is re-derived here, because two
-  places deriving one fact is what R2 and R5 were both about.
-
-  Refuses if a start for this `job_ref` is already durable. A second start
-  would mean one `job_ref` naming two executions, and `Ampd.Worktree` mints
-  a job per execution precisely so that never has to be disambiguated after
-  the fact.
-  """
-  def record_start(job) when is_map(job) do
-    cond do
-      started(job["ref"]) != nil ->
-        {:error, "validation-job-already-started", %{"job_ref" => job["ref"]}}
-
-      true ->
-        {:ok,
-         Receipts.emit(%{
-           "kind" => @started_kind,
-           "job_ref" => job["ref"],
-           "validation_kind" => job["validation_kind"],
-           "actor" => job["actor"],
-           "worker_ref" => job["worker_ref"],
-           "worker_generation" => job["worker_generation"],
-           "source_basis_ref" => job["source_basis_ref"],
-           "scope_digest" => job["scope_digest"]
-         })}
-    end
+  def admissible?(job_ref) do
+    Worktree.validation_job(job_ref) != nil and
+      started(job_ref) != nil and
+      outcome(job_ref) == nil
   end
 
+  # ---------------------------------------------------------- validating
   @doc """
-  Append `validation_job_outcome@1`.
+  Whether an outcome's `result` is well-formed. `:ok` or a named refusal.
 
-  `result` is `%{"state" => "completed", "verdict" => "pass"}` or
-  `%{"state" => "failed", "reason" => <typed>}`. The two shapes do not
-  overlap: a completed outcome carrying a `reason`, or a failed one carrying
-  a `verdict`, is refused rather than stored with the extra field dropped.
+  **Pure, and it stays here while the writing moved to `Ampd.Receipts`.**
+  R0b.R·1 moved the append to the ledger, because invariants a caller can
+  route around are not invariants. What did not move is the vocabulary: this
+  module still says what a state, a verdict and a reason may be, and the
+  store asks it rather than keeping a second copy — two implementations of
+  one fact is the defect R2 and R5 were both about.
+
+  ## The two shapes do not overlap
+
+  A completed outcome carrying a `reason`, or a failed one carrying a
+  `verdict`, is refused rather than stored with the extra field dropped.
   Silently dropping it would make the ledger disagree with its writer about
-  what was recorded.
-
-  ## What is checked, and why each check is not decoration
-
-      the job exists                a job_ref naming nothing is a record
-                                    about no work
-      a start is durable            an outcome for an execution that never
-                                    durably began is a claim with no
-                                    subject — R7.3
-      no outcome yet                one attempt, one terminal fact. A
-                                    second is refused rather than appended,
-                                    because two contradictory outcomes for
-                                    one job_ref cannot both be true and the
-                                    ledger cannot choose
-      state / verdict / reason      closed enums, checked against the sets
-                                    above
-
-  **Single-attempt is stated, not assumed.** `Ampd.Worktree` mints one job
-  per `open_validation_job/1` call, so a retry is a new `vj_` with its own
-  start and its own outcome, and the two attempts stay distinguishable in
-  history. Nothing in this round needs a multi-attempt job, and giving one
-  `job_ref` two executions would be exactly the collapse R7 exists to
-  refuse.
+  what was recorded — and the second direction is the dangerous one: a failed
+  job that also carried `verdict` would let a reader take the verdict and
+  believe the predicate was evaluated.
   """
-  def record_outcome(job_ref, result) when is_binary(job_ref) and is_map(result) do
+  def validate_result(result) when is_map(result) do
     state = result["state"]
     verdict = result["verdict"]
     reason = result["reason"]
 
     cond do
-      # **Ordered, structurally, not by convention.** Every check below is a
-      # READ of the ledger followed by a WRITE to it — "a start is durable",
-      # "no outcome yet" — and an unordered pair of those races a concurrent
-      # append of the very record it is looking for. Two contradictory
-      # terminal outcomes for one `job_ref` is what that race produces, and
-      # it is the one thing R7.3 exists to make impossible.
-      #
-      # `Ampd.Authority.record_validation_outcome/2` is the ordered door.
-      # Requiring it HERE rather than trusting callers to use it is the
-      # difference between a guarantee and a habit: `Ampd.Worker.close/1` is
-      # the same shape one layer down and returns `{:ok, <refusal>}` to
-      # anyone who calls it directly, which is filed rather than fixed.
-      not Ampd.Participant.inside?() ->
-        {:error, "unordered-validation-outcome",
-         %{
-           "job_ref" => job_ref,
-           "hint" =>
-             "call Ampd.Authority.record_validation_outcome/2 — recording an " <>
-               "outcome reads the ledger and then writes to it"
-         }}
-
-      Worktree.validation_job(job_ref) == nil ->
-        {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
-
-      started(job_ref) == nil ->
-        {:error, "validation-job-not-started", %{"job_ref" => job_ref}}
-
-      outcome(job_ref) != nil ->
-        {:error, "validation-job-already-decided",
-         %{"job_ref" => job_ref, "state" => outcome(job_ref)["state"]}}
-
       state not in @states ->
         {:error, "validation-state-unknown", %{"state" => state, "known" => @states}}
 
@@ -253,8 +200,6 @@ defmodule Ampd.Validation do
         {:error, "validation-verdict-unknown", %{"verdict" => verdict, "known" => @verdicts}}
 
       state == "completed" and reason != nil ->
-        # A completed job has no failure reason. Accepting one would let a
-        # basis mismatch ride into the ledger wearing a verdict.
         {:error, "validation-outcome-overspecified",
          %{"state" => state, "reason" => reason, "hint" => "a completed outcome carries a verdict"}}
 
@@ -262,37 +207,11 @@ defmodule Ampd.Validation do
         {:error, "validation-reason-unknown", %{"reason" => reason, "known" => @reasons}}
 
       state == "failed" and verdict != nil ->
-        # The inverse, and the more dangerous direction: a failed job that
-        # also carried `verdict` would let a reader take the verdict and
-        # believe the predicate was evaluated.
         {:error, "validation-outcome-overspecified",
          %{"state" => state, "verdict" => verdict, "hint" => "a failed outcome carries a reason"}}
 
       true ->
-        start = started(job_ref)
-
-        # The subject is copied from the START, not from the caller. A
-        # caller-supplied actor on the outcome would let one job's history
-        # end up in two agents' projections.
-        base = %{
-          "kind" => @outcome_kind,
-          "job_ref" => job_ref,
-          "validation_kind" => start["validation_kind"],
-          "actor" => start["actor"],
-          "worker_ref" => start["worker_ref"],
-          "worker_generation" => start["worker_generation"],
-          "source_basis_ref" => start["source_basis_ref"],
-          "scope_digest" => start["scope_digest"],
-          "state" => state
-        }
-
-        fields =
-          case state do
-            "completed" -> Map.put(base, "verdict", verdict)
-            "failed" -> Map.put(base, "reason", reason)
-          end
-
-        {:ok, Receipts.emit(fields)}
+        :ok
     end
   end
 end

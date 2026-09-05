@@ -116,24 +116,115 @@ defmodule Ampd.ValidationJobTest do
       end
     end
 
-    test "a record naming no actor is visible to no agent", ctx do
-      # Also ported. The agent filter is `record["actor"] == actor`, so a
-      # record with no subject matches nobody — which is the safe direction,
-      # and worth pinning because the unsafe direction (matching everybody)
-      # is one `||` away.
+    test "generic emit cannot mint a validation START", ctx do
       _ = ctx
-      Receipts.emit(%{"kind" => Validation.started_kind(), "job_ref" => "vj_orphan"})
+      # **This test used to be the bug.** Its ancestor emitted a
+      # `validation_job_started@1` through the generic path and then asserted
+      # the record was part of `Validation.all/0` — normalising the very
+      # bypass R0b.R·1 exists to close. A forged start made a job that never
+      # existed report `admissible? == true`.
+      assert {:error, "receipt-kind-requires-typed-admission", d} =
+               Receipts.emit(%{"kind" => Validation.started_kind(), "job_ref" => "vj_fake"})
 
-      assert Enum.any?(Validation.all(), &(&1["job_ref"] == "vj_orphan"))
-      refute Enum.any?(Projection.agent("kestrel")["validations"]["recent"],
-                       &(&1["job_ref"] == "vj_orphan"))
-      refute Enum.any?(Projection.history_for(:validations, "kestrel"),
-                       &(&1["job_ref"] == "vj_orphan"))
+      assert d["kind"] == Validation.started_kind()
+      assert Validation.started_kind() in d["protected"]
 
-      # The operator, who has no actor, still sees it — an unattributed
-      # record is not a hidden record.
-      assert Enum.any?(Projection.history_for(:validations, nil),
-                       &(&1["job_ref"] == "vj_orphan"))
+      # Refused, not silently re-kinded and not dropped: nothing was written.
+      assert Validation.started("vj_fake") == nil
+      refute Enum.any?(Receipts.all(), &(&1["job_ref"] == "vj_fake"))
+    end
+
+    test "generic emit cannot mint a validation OUTCOME", ctx do
+      _ = ctx
+
+      assert {:error, "receipt-kind-requires-typed-admission", _} =
+               Receipts.emit(%{
+                 "kind" => Validation.outcome_kind(),
+                 "job_ref" => "vj_fake",
+                 "state" => "completed",
+                 "verdict" => "pass"
+               })
+
+      assert Validation.outcome("vj_fake") == nil
+    end
+
+    test "a forged start cannot make an unknown job admissible", ctx do
+      _ = ctx
+      # The measured bug, as a falsifier. Two independent locks: the ledger
+      # will not mint the record, and `admissible?/1` requires a JobBasis
+      # even if one somehow existed.
+      Receipts.emit(%{"kind" => Validation.started_kind(), "job_ref" => "vj_fake"})
+      refute Validation.admissible?("vj_fake")
+      assert Worktree.validation_job("vj_fake") == nil
+    end
+
+    test "a durable START whose JobBasis is gone is not admissible", ctx do
+      _ = ctx
+      # **The JobBasis clause, isolated.** With `emit/1` guarded, a forged
+      # START cannot be appended, so the two locks are redundant for the test
+      # above and stubbing either one leaves it green — which the sabotage
+      # battery reported as NOT A FALSIFIER, correctly.
+      #
+      # This is the state that makes the clause load-bearing, and it is not
+      # hypothetical: `Ampd.Worktree` can SEAL, and a sealed worktree store
+      # serves `sealed_state/0` — an empty `jobs` table — while the receipts
+      # ledger still holds every START ever appended. The two stores diverge,
+      # and the executor must be told about the job whose basis is gone
+      # rather than about the receipt that still looks right.
+      #
+      # Injected through `load_state/1`, the same ordered fixture path
+      # `receipts_ledger_test.exs` uses, because a state this round has just
+      # made unreachable through the API is exactly the state worth pinning.
+      probe = Receipts.emit(%{"kind" => "shape@1"})
+      assert probe["id"] == "rcpt-" <> String.pad_leading(to_string(probe["seq"]), 4, "0")
+
+      Ampd.AuthorityCoordinator.transact(fn ->
+        Receipts.load_state(%{
+          "log" => [
+            %{
+              "kind" => Validation.started_kind(),
+              "id" => "rcpt-0000",
+              "seq" => 0,
+              "job_ref" => "vj_orphaned",
+              "actor" => "kestrel"
+            }
+          ],
+          "seq" => 1
+        })
+      end)
+
+      # The START is genuinely durable — this is not the forged-emit case.
+      assert Validation.started("vj_orphaned") != nil
+      assert Validation.outcome("vj_orphaned") == nil
+
+      # And the job is not. So it is not executable work.
+      assert Worktree.validation_job("vj_orphaned") == nil
+      refute Validation.admissible?("vj_orphaned")
+    end
+
+    test "a ledger row alone does not create executable work", ctx do
+      # A real job, a real durable start — and then the JobBasis clause
+      # checked directly, because `admissible?/1` claims to answer whether a
+      # job may be handed to an executor and a receipt is not a job.
+      {job, _} = start!(ctx)
+      assert Validation.admissible?(job["ref"])
+
+      # An unrelated ref with a real-looking shape is not admissible, and
+      # neither is one whose receipts exist but whose basis does not.
+      refute Validation.admissible?("vj_0099")
+      refute Validation.admissible?(job["ref"] <> "x")
+    end
+
+    test "an ordinary receipt is unaffected by the protection", ctx do
+      _ = ctx
+      # The guard is on two kinds, not on the ledger. R2's rule — the kind
+      # stays the producer's — still holds everywhere else.
+      r = Receipts.emit(%{"kind" => "test@1", "actor" => "kestrel"})
+      assert r["kind"] == "test@1"
+      assert String.starts_with?(r["id"], "rcpt-")
+
+      d = Receipts.emit(%{"actor" => "kestrel", "capability" => "github.pr.create"})
+      assert d["kind"] == Receipts.default_kind()
     end
 
     test "carries no host path, and nothing from which one could be built", ctx do
@@ -284,7 +375,10 @@ defmodule Ampd.ValidationJobTest do
       {job, _} = start!(ctx)
 
       assert {:error, "validation-job-already-started", _} =
-               Ampd.AuthorityCoordinator.transact(fn -> Validation.record_start(job) end, nil)
+               Ampd.AuthorityCoordinator.transact(
+                 fn -> Receipts.record_validation_start(job["ref"]) end,
+                 nil
+               )
     end
   end
 
@@ -411,6 +505,27 @@ defmodule Ampd.ValidationJobTest do
                Authority.record_validation_outcome(job["ref"], pass())
     end
 
+    test "a typed START for a JobBasis that does not exist is refused", ctx do
+      _ = ctx
+      # The typed path resolves the ref itself, so this is the store failing
+      # to find a job rather than a caller failing to supply one — which is
+      # the whole point of taking a ref and never a job map.
+      assert {:error, "validation-job-unknown", d} =
+               Ampd.AuthorityCoordinator.transact(
+                 fn -> Receipts.record_validation_start("vj_9999") end,
+                 nil
+               )
+
+      assert d["job_ref"] == "vj_9999"
+      assert Validation.all() == []
+    end
+
+    test "a typed OUTCOME for a JobBasis that does not exist is refused", ctx do
+      _ = ctx
+      assert {:error, "validation-job-unknown", _} =
+               Authority.record_validation_outcome("vj_9999", pass())
+    end
+
     test "an outcome for a job_ref naming nothing is refused", ctx do
       _ = ctx
       assert {:error, "validation-job-unknown", _} =
@@ -432,6 +547,26 @@ defmodule Ampd.ValidationJobTest do
       # And the ledger still holds exactly one outcome, the first.
       assert length(Receipts.of_kind(Validation.outcome_kind())) == 1
       assert Validation.outcome(job["ref"])["verdict"] == "pass"
+    end
+
+    test "the single-outcome rule is decided where the append happens", ctx do
+      {job, _} = start!(ctx)
+      {:ok, first} = Authority.record_validation_outcome(job["ref"], pass())
+
+      # Both checks — a start exists, no outcome yet — are performed inside
+      # `Ampd.Receipts`' own `handle_call`, against the log it is about to
+      # append to. A process handles one message at a time, so check and
+      # append cannot interleave; a caller-side check would be two round
+      # trips with a window between them, and two concurrent outcomes could
+      # both observe "none yet".
+      for attempt <- [pass(), %{"state" => "completed", "verdict" => "fail"},
+                      %{"state" => "failed", "reason" => "source-basis-revision-moved"}] do
+        assert {:error, "validation-job-already-decided", _} =
+                 Authority.record_validation_outcome(job["ref"], attempt)
+      end
+
+      assert length(Receipts.of_kind(Validation.outcome_kind())) == 1
+      assert Validation.outcome(job["ref"])["id"] == first["id"]
     end
 
     test "a retry is a new job with its own identity, not a second attempt", ctx do
@@ -487,14 +622,26 @@ defmodule Ampd.ValidationJobTest do
     test "recording an outcome outside the coordinator is refused", ctx do
       {job, _} = start!(ctx)
 
-      # `Receipts.emit` is deliberately NOT an ordered op — the ledger append
-      # is not an authority mutation. So nothing about the store would stop a
-      # direct `record_outcome/2` from racing; the refusal has to be here.
-      assert {:error, "unordered-validation-outcome", _} =
-               Validation.record_outcome(job["ref"], pass())
+      # `Receipts.emit` is deliberately NOT an ordered op — an ordinary
+      # ledger append is not an authority mutation. The two validation
+      # appends ARE, because they decide whether a job may be handed to an
+      # executor, so the store refuses them by name to a caller that is not
+      # the total order.
+      assert {:refused, r} = Receipts.record_validation_outcome(job["ref"], pass())
+      assert r["code"] == "unordered-authority-mutation"
+      assert r["operator_detail"]["operation"] == ":validation_outcome"
 
       assert Validation.outcome(job["ref"]) == nil
       assert {:ok, _} = Authority.record_validation_outcome(job["ref"], pass())
+    end
+
+    test "recording a start outside the coordinator is refused", ctx do
+      {:ok, job} = mint_only!(ctx)
+
+      assert {:refused, r} = Receipts.record_validation_start(job["ref"])
+      assert r["code"] == "unordered-authority-mutation"
+      assert r["operator_detail"]["operation"] == ":validation_start"
+      assert Validation.started(job["ref"]) == nil
     end
 
     test ":open_job is classified a MUTATION at the participant boundary", ctx do
@@ -507,6 +654,12 @@ defmodule Ampd.ValidationJobTest do
       assert Worktree.class(:open_job) == :mutate
       assert Worktree.class(:bind_basis) == :mutate
       assert Worktree.class(:get) == :read
+
+      # R0b.R·1's two, same argument: both write, so a lost reply must mean
+      # "a human has to look", never "nothing happened, retry".
+      assert Receipts.class(:validation_start) == :mutate
+      assert Receipts.class(:validation_outcome) == :mutate
+      assert Receipts.class(:all) == :read
     end
   end
 
@@ -556,6 +709,16 @@ defmodule Ampd.ValidationJobTest do
       mine = Projection.agent("kestrel")["validations"]
       assert mine["total"] == 2
       assert Enum.all?(mine["recent"], &(&1["actor"] == "kestrel"))
+    end
+
+    test "the agent filter matches nobody rather than everybody on a missing subject", ctx do
+      _ = ctx
+      # What the removed forged-record test was actually reaching for. It
+      # needed a malformed validation row in the real ledger to get at it;
+      # the filter is a pure function and can be asked directly.
+      unattributed = [%{"kind" => Validation.started_kind(), "job_ref" => "vj_x"}]
+      assert Enum.filter(unattributed, &(&1["actor"] == "kestrel")) == []
+      assert Enum.filter(unattributed, &(&1["actor"] == nil)) == unattributed
     end
 
     test "another actor's validations are not in this actor's projection", ctx do

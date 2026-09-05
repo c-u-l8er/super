@@ -104,24 +104,83 @@ echo
 echo "sabotage-validation — R0b.R · one mechanism removed per case"
 echo
 
-# ------------------------------------------------------------------- R7.3
-case_ 'the start-exists check is removed from record_outcome' \
-      'an outcome for a job that never durably started is refused' \
+# ---------------------------------------------------- R0b.R·1 · admission
+case_ 'the protected-kind guard is removed from emit' \
+      'generic emit cannot mint a validation START' \
+      ampd/lib/ampd/receipts.ex \
+      '    if m["kind"] in protected_kinds() do' \
+      '    if false do'
+
+case_ 'emit protects only the START kind, not the OUTCOME' \
+      'generic emit cannot mint a validation OUTCOME' \
+      ampd/lib/ampd/receipts.ex \
+      '  def protected_kinds, do: Ampd.Validation.kinds()' \
+      '  def protected_kinds, do: [Ampd.Validation.started_kind()]'
+
+case_ 'admissibility stops requiring a JobBasis' \
+      'a durable START whose JobBasis is gone is not admissible' \
       ampd/lib/ampd/validation.ex \
-      '      started(job_ref) == nil ->' \
+      '    Worktree.validation_job(job_ref) != nil and
+      started(job_ref) != nil and' \
+      '    started(job_ref) != nil and'
+
+case_ 'the typed START trusts a ref that names no job' \
+      'a typed START for a JobBasis that does not exist is refused' \
+      ampd/lib/ampd/receipts.ex \
+      '    case Ampd.Worktree.validation_job(job_ref) do
+      nil -> {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
+      job -> ask({:validation_start, job})
+    end' \
+      '    ask({:validation_start, Ampd.Worktree.validation_job(job_ref) || %{"ref" => job_ref}})'
+
+case_ 'the handler stops checking for an existing start' \
+      'an outcome for a job that never durably started is refused' \
+      ampd/lib/ampd/receipts.ex \
+      '    start = find(s, Ampd.Validation.started_kind(), job["ref"])' \
+      '    start = find(s, Ampd.Validation.started_kind(), job["ref"]) || %{}'
+
+case_ 'the handler stops checking for an existing outcome' \
+      'the single-outcome rule is decided where the append happens' \
+      ampd/lib/ampd/receipts.ex \
+      '    decided = find(s, Ampd.Validation.outcome_kind(), job["ref"])' \
+      '    decided = nil'
+
+case_ 'the typed appends are classified reads' \
+      ':open_job is classified a MUTATION at the participant boundary' \
+      ampd/lib/ampd/receipts.ex \
+      'emit reset validation_start validation_outcome)a' \
+      'emit reset)a'
+
+case_ 'the typed appends are served to any caller' \
+      'recording a start outside the coordinator is refused' \
+      ampd/lib/ampd/receipts.ex \
+      '@ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]' \
+      '@ordered_ops [:reset, :load_state]'
+
+# ------------------------------------------------------------------- R7.3
+case_ 'the start-exists check is removed from the outcome handler' \
+      'an outcome for a job that never durably started is refused' \
+      ampd/lib/ampd/receipts.ex \
+      '      start == nil ->' \
       '      false ->'
 
-case_ 'the single-outcome check is removed' \
+case_ 'the single-outcome check is removed from the handler' \
       'two contradictory terminal outcomes for one job are refused' \
-      ampd/lib/ampd/validation.ex \
-      '      outcome(job_ref) != nil ->' \
+      ampd/lib/ampd/receipts.ex \
+      '      decided != nil ->' \
       '      false ->'
 
 case_ 'an outcome may name a job that does not exist' \
       'an outcome for a job_ref naming nothing is refused' \
-      ampd/lib/ampd/validation.ex \
-      '      Worktree.validation_job(job_ref) == nil ->' \
-      '      false ->'
+      ampd/lib/ampd/receipts.ex \
+      '      nil ->
+        {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
+
+      job ->' \
+      '      _unused ->
+        {:error, "unreachable", %{}}
+
+      job = Ampd.Worktree.validation_job(job_ref) ->'
 
 # ------------------------------------------------------------------- R7.2
 case_ 'a completed outcome may also carry a failure reason' \
@@ -150,22 +209,23 @@ case_ 'the state enum accepts anything' \
 
 case_ 'the outcome takes its subject from the caller' \
       'the outcome'\''s subject is copied from the start, never from the caller' \
-      ampd/lib/ampd/validation.ex \
+      ampd/lib/ampd/receipts.ex \
       '          "actor" => start["actor"],' \
       '          "actor" => result["actor"] || start["actor"],'
 
 case_ 'an outcome may be recorded outside the coordinator' \
       'recording an outcome outside the coordinator is refused' \
-      ampd/lib/ampd/validation.ex \
-      '      not Ampd.Participant.inside?() ->' \
-      '      false ->'
+      ampd/lib/ampd/receipts.ex \
+      '@ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]' \
+      '@ordered_ops [:reset, :load_state, :validation_start]'
 
 # ------------------------------------------------------------------ R11.2
 case_ 'admissibility ignores whether a start is durable' \
-      'a job is admissible only once its start is durable' \
+      'a durable START whose JobBasis is gone is not admissible' \
       ampd/lib/ampd/validation.ex \
-      '  def admissible?(job_ref), do: started(job_ref) != nil and outcome(job_ref) == nil' \
-      '  def admissible?(_job_ref), do: true'
+      '      started(job_ref) != nil and
+      outcome(job_ref) == nil' \
+      '      outcome(job_ref) == nil'
 
 # -------------------------------------------------------------------- R11
 case_ 'the Lane-ownership check is removed from open_job' \

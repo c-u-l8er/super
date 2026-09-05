@@ -77,10 +77,10 @@
       "bare": 0
     },
     "Ampd.Receipts": {
-      "sends": 6,
-      "mutations": 4,
+      "sends": 8,
+      "mutations": 6,
       "reads": 2,
-      "declared_mutations": 4,
+      "declared_mutations": 6,
       "dead": [],
       "bare": 0
     },
