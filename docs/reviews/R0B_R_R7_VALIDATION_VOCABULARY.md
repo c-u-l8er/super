@@ -30,13 +30,42 @@ Reconciliation is trivial and is stated rather than deferred: `git diff
 branch can be merged to the shared HEAD without interaction.
 
 **A second isolation was needed and git does not provide it.** `config/config.exs`
-sets the test data dir to the fixed absolute path `/tmp/ampd-test-data` and
-`rm -rf`s it at config load. Every checkout on this machine shares it, so two
-suites running at once delete each other's world mid-run — and what that
-produces is ordinary-looking red rows. It was measured here: `locus_test.exs`
-reported **30 failures of 54** while another suite was running, and **0 of 54**
-on the identical tree moments later. Every number in §6 was taken with nothing
-else running.
+set the test data dir to the fixed absolute path `/tmp/ampd-test-data` and
+`rm -rf`'d it at config load. Every checkout on this machine shared it, so two
+suites running at once deleted each other's world mid-run — and what that
+produces is ordinary-looking red rows. Measured here: `locus_test.exs` reported
+**30 failures of 54** while another suite was running, and **0 of 54** on the
+identical tree moments later.
+
+**Fixed, and not by this session.** A parallel R7 session hit the same wall,
+measured it more carefully — *11 failures across four files against the shared
+path, 0 against a private one, same commit, same seed* — and repaired it. That
+fix is merged here verbatim: the directory is now per-run, keyed on the OS pid,
+with `AMPD_TEST_DATA_DIR` for a caller wanting a known location. Their note is
+the one worth carrying: it cost them a wrong diagnosis first, because the spread
+looked exactly like a regression in the change under test. It cost this session
+two hours of the same.
+
+Every number in §6 was still taken with nothing else running, because the
+batteries predate the fix.
+
+### the other session
+
+`main` reached `a43ccfc` with an **independent implementation of this same
+brief** — R7, R8 and R10, `validation-job-started@1` /
+`validation-job-outcome@1`, states `COMPLETED · FAILED · SOURCE_BASIS_MISMATCH`,
+verdicts `HELD · REFUTED`, free-form `detail`, `worker_ref` as the only subject.
+
+Travis ruled for this branch's vocabulary. The reason is narrow and worth
+stating rather than assuming: it is GPT's exact ruling, including the part
+`a43ccfc` departs from — **a source-basis mismatch is not a third value beside
+"it completed" and "it failed"**; it is the reason a failure has. Promoting one
+reason to a state makes the enum's members answer two different questions, which
+is the collapse §2 exists to refuse.
+
+That is a naming ruling and nothing more. The other session's `config.exs` fix
+and two of its falsifiers are merged in and attributed; its test file, whose
+nineteen cases exercise the retired vocabulary, is removed.
 
 ---
 
@@ -329,7 +358,7 @@ All figures taken with nothing else running on the machine — see §0.
 
 ```text
 super-host verify         319 held ·  0 failed
-ExUnit (this tree)        671 tests ·  0 failures
+ExUnit (this tree)        673 tests ·  0 failures
 ExUnit (baseline 78b19e8) 630 tests ·  0 failures     the delta is exactly this suite
 ExUnit multi-seed         seeds 0 · 424242 · 909090 — 666/0 each, retained
 static gates                8 held ·  0 failed · 0 could not run
@@ -420,20 +449,16 @@ remain filed and out of this slice.
 
 1. **May an Actor request a bounded job against its own Worker's basis?**
    Deferred deliberately (§4). It needs an authority argument, not a field audit.
-2. **`/tmp/ampd-test-data` is one fixed path for every checkout on this machine**,
-   `rm -rf`'d at config load. It cost this round two hours of chasing phantom
-   failures and it will cost the next round the same. Not fixed here: changing
-   where the suite stores its world is its own slice with its own falsifiers.
-3. **`ampd/priv/data/` was tracked despite the `*.dets` rule.** `.gitignore` is
+2. **`ampd/priv/data/` was tracked despite the `*.dets` rule.** `.gitignore` is
    not consulted for a file git already tracks, and the four dets tables had
    been tracked since the repo's first commit — so a rule added in `0d7c53a`
    protected every world except the ones a developer's runtime actually
    writes. This round's dogfood minted a world into them and committed it.
    Fixed here: `git rm --cached`, the directory ignored whole, and the
    runtime proven to boot from nothing rather than assumed to.
-4. **`ampd/priv/ampd_fd_nif.so` is a compiled binary in git.** Noticed while
+3. **`ampd/priv/ampd_fd_nif.so` is a compiled binary in git.** Noticed while
    fixing the above; out of scope, not touched.
-5. **`Ampd.Worker.close/1` returns `{:ok, <refusal>}`** when called outside the
+4. **`Ampd.Worker.close/1` returns `{:ok, <refusal>}`** when called outside the
    coordinator — `transition/3` wraps whatever `Loci.put_worker/2` returns. No
    production caller reaches it (only `Ampd.Authority.close_worker/1`, inside
    `tx`), so it is filed rather than fixed. A refusal wearing an `:ok` tag is
