@@ -151,6 +151,17 @@ defmodule Ampd.Projection do
       # ambiguity rather than after.
       "receipts" => window(Receipts.of_kind(Receipts.default_kind())),
       "worktree_receipts" => window(Receipts.of_kind(Ampd.Locus.receipt_kind())),
+      # R7 · **its own surface, and no renderer.** The R1 census established
+      # that nothing shipped renders the durable ledger — the cockpit reads
+      # `grants` and `workers`, the prototype page keeps a client-side log —
+      # so building UI to satisfy this phase would be inventing the consumer
+      # whose absence made splitting the key safe. The field is here; the
+      # cockpit may ignore it.
+      #
+      # BOTH kinds, in one key, ordered by `seq`. A start and an outcome are
+      # one lifecycle read in order, and separating them into two windows
+      # would let a reader page past the outcome of a start it had not seen.
+      "validations" => window(validation_records()),
       "effects_history" => window(Enum.filter(Effects.all(), &Effects.terminal?/1))
     }
   end
@@ -342,6 +353,16 @@ defmodule Ampd.Projection do
         Receipts.of_kind(Ampd.Locus.receipt_kind())
         |> Enum.filter(&(&1["locus_actor"] == actor))
         |> window(),
+
+      # **Validation records ARE subjected by top-level `actor`**, unlike
+      # worktree receipts, and that is a finding about each kind rather than
+      # a convention applied to both. `worktree_created@1` names a Lane's
+      # actor — `locus_actor`, the actor a Lane belongs to. A validation is
+      # work performed by the Actor occupying a Worker, which is what
+      # `actor` has always meant on a capability receipt. Same field name,
+      # earned separately; R6 is the record of what happens when a
+      # projection assumes the answer instead of deriving it.
+      "validations" => validation_records() |> mine.() |> window(),
       # Scoped by actor like everything else here. An agent seeing another
       # actor's assignments would learn that actor's Lane ids, which is the
       # ancestry-closure rule `list_loci` already had to be taught.
@@ -352,6 +373,13 @@ defmodule Ampd.Projection do
       "runtime" => runtime_status()
     }
   end
+
+  @doc false
+  # Both validation kinds, in ledger order. **One pass over the ledger**, so
+  # the surface cannot come to hold one kind and not the other: the set is
+  # `Ampd.Validation.kinds/0`, and adding a third validation record kind
+  # there routes it here without touching this module.
+  def validation_records, do: Ampd.Validation.all()
 
   @doc """
   One actor's history, for the paged commands. `nil` means the operator,
@@ -365,6 +393,11 @@ defmodule Ampd.Projection do
 
   def history_for(:receipts, actor),
     do: Enum.filter(Receipts.of_kind(Receipts.default_kind()), &(&1["actor"] == actor))
+
+  def history_for(:validations, nil), do: validation_records()
+
+  def history_for(:validations, actor),
+    do: Enum.filter(validation_records(), &(&1["actor"] == actor))
 
   def history_for(:worktree_receipts, nil), do: Receipts.of_kind(Ampd.Locus.receipt_kind())
 

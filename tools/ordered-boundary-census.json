@@ -61,10 +61,10 @@
       "bare": 0
     },
     "Ampd.Worktree": {
-      "sends": 11,
-      "mutations": 8,
+      "sends": 13,
+      "mutations": 10,
       "reads": 3,
-      "declared_mutations": 8,
+      "declared_mutations": 10,
       "dead": [],
       "bare": 0
     },

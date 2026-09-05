@@ -98,7 +98,23 @@ defmodule Ampd.Worktree do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state reset register_repo request set_state create recover)a
+  # **`bind_basis` was missing here, and had been since `cbc9b99` introduced
+  # it.** It is in `@ordered_ops` — served only for the coordinator — and it
+  # writes: `put_in(s, ["bases", id], basis)` then `Ampd.Store.save/2`. Every
+  # tag not named on this line is classified a READ, so a `bind_basis` whose
+  # reply was lost was classified `:unavailable` (retryable, nothing was
+  # mutated) when the truth is `:indeterminate` (a basis may be on disk and a
+  # human has to look). That is precisely the second-execution the class
+  # exists to forbid, on the one operation that mints source authority.
+  #
+  # `tools/check-ordered-boundary.mjs` names this exact failure and was RED
+  # on it through all of Phase A and R2–R6 — because nothing runs that gate.
+  # It is in no `verify`, no `release.sh`, no battery. A gate nobody invokes
+  # is not a gate that holds. There was no runner for the static gates at
+  # all — which is how one stayed red — so `tools/gates.sh` is now that
+  # runner, and it invokes this one.
+  @participant_mutations ~w(close_store load_state reset register_repo request set_state create
+                            recover bind_basis open_job)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -127,8 +143,11 @@ defmodule Ampd.Worktree do
   are, and inventing a path would be the one mistake this module cannot
   survive.
   """
-  def sealed_state, do: %{"repos" => %{}, "resources" => %{}, "bases" => %{}, "seq" => 0}
-  def initial, do: %{"repos" => %{}, "resources" => %{}, "bases" => %{}, "seq" => 0}
+  def sealed_state,
+    do: %{"repos" => %{}, "resources" => %{}, "bases" => %{}, "jobs" => %{}, "seq" => 0}
+
+  def initial,
+    do: %{"repos" => %{}, "resources" => %{}, "bases" => %{}, "jobs" => %{}, "seq" => 0}
 
   def sealed, do: ask(:sealed)
   def close_store, do: ask(:close_store)
@@ -162,6 +181,113 @@ defmodule Ampd.Worktree do
   See `handle_ordered({:bind_basis, …})` for what is checked and why.
   """
   def bind_source_basis(fields), do: ask({:bind_basis, fields})
+
+  @doc """
+  Every `validation-job@1`, by ref.
+
+  ## Why jobs live in *this* store and not their own
+
+  R0b.R · R11. A JobBasis names a `sb_`, which names a `wt_`, which names an
+  `rp_`. It is the next link in one chain, and this store owns the rest of
+  it — so co-locating is not filing convenience, it is what makes the chain
+  **seal as one fact**.
+
+  A job in a separate durable store could be served while the basis it names
+  was unreachable, and a reader would see a job over a snapshot that no
+  longer resolves without anything having failed. `Ampd.Worktree.sealed_state/0`
+  serves an empty table for exactly that reason: the runtime that does not
+  know where a resource is must not answer as though it does. A job gets the
+  same treatment for free by living here, and would have needed its own
+  argument for it otherwise.
+
+  It also adds no authority store. `Ampd.World.authority_stores/0`, the
+  seals report and the recovery manifest are unchanged, which means R7 does
+  not silently widen the set of things a boot has to account for.
+  """
+  def validation_jobs, do: ask({:all, "jobs"})
+
+  @doc "One `validation-job@1`, or `nil`."
+  def validation_job(ref), do: ask({:get, "jobs", ref})
+
+  @doc """
+  Mint a `validation-job@1` — **what validation work exists, over what exact
+  semantic input.**
+
+  R0b.R · R11.
+
+  ## What a job says, and the thing it deliberately does not say
+
+  A job says: *this validation kind, over this SourceBasis, at this scope,
+  performed by this Actor at this Worker position.* It does **not** say what
+  to run. No executable, no argv, no environment, no host path — implementation
+  identity is `ExecutionBasis` and the installed payload's business, and it is
+  measured through the running Carrier's own `/proc`, which is a stronger
+  statement than any field here could carry.
+
+  The same rule that keeps a host path off `source-basis@1` keeps it off a
+  job: a record that named a directory would put a path *inside* the object
+  the job is admitted against, and the path is not the authority. The
+  authority is the proof taken immediately before the ruleset is installed.
+
+  ## Who may mint one, and why no command reaches this
+
+  **Ordered, and on the `Ampd.Authority` path with no `Ampd.CommandSpec`
+  entry** — exactly like `bind_source_basis/1`, and for a sharpened version
+  of its reason. The chain is `SourceBasis → one read capability → Carrier`,
+  and the *job* is the link that causes the derivation: R0b.1 will resolve a
+  job's `source_basis_ref` into the `source_basis` object the host verifies
+  and confines over. So whoever mints a job decides what a confined process
+  sees.
+
+  An agent command here would let a Carrier name any bound `sb_` and obtain a
+  read capability over it. The ownership check below narrows that, but a
+  check is not a reason to open a door: this round needs no agent-initiated
+  job, so it adds none, and R12's alternative — *prove the existing Authority
+  path suffices* — is the one taken. Whether an Actor may **request** a
+  bounded job against a basis already granted to its own Worker is a real
+  question and a separate one; it is not answered by these fields being safe.
+
+  ## What is checked
+
+      validation_kind in the closed enum   an open string here would make
+                                           `source-hygiene` a convention
+      the basis exists                     a job over nothing
+      the worker exists and is open        work has a position or it has
+                                           nowhere to happen
+      the Worker's Lane owns the basis     see below
+      scope_digest is digest-SHAPED        a value structurally incapable
+                                           of ever matching is refused at
+                                           the door rather than at execution
+
+  **The ownership check.** A basis binds a `wt_` resource; a `wt_` was
+  established from exactly one Lane's worktree capability; a Worker belongs
+  to one Lane. So the resource reaches back to a Lane, and a job whose Worker
+  sits in a different Lane is a job about someone else's snapshot. Minting it
+  would be coherent only if the two Lanes were interchangeable, and the whole
+  Locus design says they are not.
+
+  ## `worker_generation` is bound, and that is derived rather than added
+
+  `Ampd.Worker.reopen/1` advances `generation`, and its own docs say why:
+  *"a reopened position is grounds for a new attachment, never for reviving
+  an old one."* `Ampd.Worker.still_standing/1` already refuses
+  `attachment-worker-generation-stale` on that basis. A job that recorded
+  only `worker_ref` would name a position that could be closed and reopened
+  between its start and its outcome, and the two records would read as one
+  continuous position having done the work. So the generation is part of the
+  job's identity because the existing Worker semantics already require it to
+  distinguish stale positions — not because more fields are safer.
+  """
+  def open_validation_job(fields), do: ask({:open_job, fields})
+
+  @doc false
+  # A 64-character lowercase hex digest, the shape `tools/scope-manifest.mjs`
+  # emits. Shape only — this store cannot walk a materialization to check the
+  # value, and a digest that is structurally incapable of ever matching is
+  # still worth refusing at the door.
+  def scope_digest?(d),
+    do: is_binary(d) and byte_size(d) == 64 and
+          d |> :binary.bin_to_list() |> Enum.all?(&((&1 in ?0..?9) or (&1 in ?a..?f)))
 
   @doc """
   An exact Git object name, and nothing that has to be *resolved* to become
@@ -370,7 +496,7 @@ defmodule Ampd.Worktree do
   # bootstrap path, and `Ampd.Ordered` is explicit that bootstrap satisfies
   # the rule by running inside the coordinator rather than by being excepted
   # from it. `Ampd.Authority.register_repository/1` is now that path.
-  @ordered_ops [:request, :set_state, :create, :register_repo, :bind_basis, :reset, :load_state]
+  @ordered_ops [:request, :set_state, :create, :register_repo, :bind_basis, :open_job, :reset, :load_state]
 
   @doc """
   Every operation this module refuses outside the coordinator.
@@ -675,6 +801,81 @@ defmodule Ampd.Worktree do
 
         s2 = s |> put_in(["bases", id], basis) |> Map.put("seq", seq)
         {:reply, {:ok, basis}, %{st | s: Ampd.Store.save(tab, s2)}}
+    end
+  end
+
+  # See `open_validation_job/1` for what this checks and why. The doc lives
+  # there because Elixir allows one `@doc` per name/arity and `bind_basis`
+  # already holds it for `handle_ordered/2`.
+  def handle_ordered({:open_job, f}, %{tab: tab, s: s} = st) do
+    kind = f["validation_kind"]
+    basis = f["source_basis_ref"] && get_in(s, ["bases", f["source_basis_ref"]])
+    worker = f["worker_ref"] && Ampd.Loci.worker(f["worker_ref"])
+    lane = worker && Ampd.Loci.lane(worker["locus_ref"])
+
+    owning_lane =
+      basis &&
+        Enum.find_value(Ampd.Loci.caps(), fn {_, c} ->
+          c["resource_ref"] == basis["resource_ref"] && c["locus_ref"]
+        end)
+
+    cond do
+      kind not in Ampd.Validation.validation_kinds() ->
+        {:reply,
+         {:error, "validation-kind-unknown",
+          %{"validation_kind" => kind, "known" => Ampd.Validation.validation_kinds()}}, st}
+
+      basis == nil ->
+        {:reply, {:error, "source-basis-unknown", %{"source_basis_ref" => f["source_basis_ref"]}},
+         st}
+
+      worker == nil ->
+        {:reply, {:error, "worker-unknown", %{"worker_ref" => f["worker_ref"]}}, st}
+
+      worker["status"] != "open" ->
+        {:reply,
+         {:error, "worker-not-open",
+          %{"worker_ref" => worker["id"], "status" => worker["status"]}}, st}
+
+      lane == nil ->
+        {:reply, {:error, "locus-unknown", %{"locus_ref" => worker["locus_ref"]}}, st}
+
+      owning_lane == nil ->
+        # The basis names a resource no worktree capability claims. That is a
+        # broken chain, not an ownership violation, and saying so keeps the
+        # two apart in a refusal log.
+        {:reply,
+         {:error, "source-basis-unowned", %{"source_basis_ref" => basis["ref"]}}, st}
+
+      owning_lane != lane["id"] ->
+        {:reply,
+         {:error, "validation-job-lane-mismatch",
+          %{"source_basis_ref" => basis["ref"], "basis_locus" => owning_lane,
+            "worker_locus" => lane["id"]}}, st}
+
+      not scope_digest?(f["scope_digest"]) ->
+        {:reply,
+         {:error, "scope-digest-malformed", %{"scope_digest" => f["scope_digest"]}}, st}
+
+      true ->
+        seq = s["seq"] + 1
+        id = "vj_" <> String.pad_leading(Integer.to_string(seq), 4, "0")
+
+        job = %{
+          "schema" => "validation-job@1",
+          "ref" => id,
+          "validation_kind" => kind,
+          "source_basis_ref" => basis["ref"],
+          "scope_digest" => f["scope_digest"],
+          # The Actor is the Lane's, not the caller's. A caller-supplied
+          # actor would let a job be filed into any agent's projection.
+          "actor" => lane["actor"],
+          "worker_ref" => worker["id"],
+          "worker_generation" => worker["generation"] || 1
+        }
+
+        s2 = s |> put_in(["jobs", id], job) |> Map.put("seq", seq)
+        {:reply, {:ok, job}, %{st | s: Ampd.Store.save(tab, s2)}}
     end
   end
 

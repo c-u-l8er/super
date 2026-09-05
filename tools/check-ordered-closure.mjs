@@ -31,9 +31,14 @@
  */
 import { readFileSync, existsSync } from 'node:fs'
 import { execFileSync } from 'node:child_process'
+import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 
-const ROOT = '/home/travis/ProjectAmp2/super'
+// **Derived, never hardcoded.** This was the absolute path of one checkout,
+// so running the gate from a detached worktree silently measured the
+// CANONICAL tree instead — a green verdict about source the run never saw.
+// R0b.R needed an isolated parent and would have gated against the wrong one.
+const ROOT = fileURLToPath(new URL('..', import.meta.url)).replace(/\/$/, '')
 const CENSUS = join(ROOT, 'tools/ordered-reachability.json')
 const RULES = join(ROOT, 'tools/ordered-boundary-exclusions.json')
 

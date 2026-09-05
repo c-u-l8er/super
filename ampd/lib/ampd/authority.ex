@@ -348,6 +348,79 @@ defmodule Ampd.Authority do
     do: tx(fn -> Ampd.Worktree.bind_source_basis(fields) end)
 
   @doc """
+  Mint a `validation-job@1` **and durably record that it started**, in one
+  ordered transaction.
+
+  R0b.R · R11.2. Returns `{:ok, %{"job" => job, "started" => receipt}}`.
+
+  ## Why the two appends are one operation
+
+  The ordering is the point: **a durable START must exist before any Carrier
+  is spawned**, so an execution that ran and left no trace of having begun is
+  not representable. If the start could be appended by a later, separate call,
+  then between the two there is a window in which an admissible-looking job
+  has no start — and the executor's precondition would be a convention rather
+  than a fact about the store.
+
+  Minting first and appending second is deliberate and the residue is
+  deliberate too. If the ledger append fails, the job exists and has no start,
+  and `Ampd.Validation.admissible?/1` is false for it — **a job nothing may
+  execute**, which is the safe residue. The reverse order would leave a start
+  naming a job that does not exist, which is a record about no work.
+
+  Nothing rolls back, because nothing here can: these are two durable stores
+  and there is no two-phase commit between them. So the failure is designed to
+  land on the side that refuses execution rather than the side that permits it.
+
+  ## Where the `scope_digest` comes from
+
+  From the caller, and it is the value the job is **admitted against**.
+  Deriving it here is not possible and should not be: it means walking a
+  materialization with `tools/scope-manifest.mjs`, which is an unbounded host
+  round trip, and this runs inside the total order — the same reason
+  `bind_source_basis/1` does not check materialization correspondence.
+
+  That is not a caller-supplied *authority*. R0b.1 re-derives the manifest at
+  execution and compares; a digest that does not match is what makes a moved
+  basis distinguishable from a predicate that came out false. A caller who
+  supplies a wrong digest gets a job that cannot pass, not a job that passes
+  wrongly. The store checks its *shape* so that a value which could never
+  match is refused at the door.
+
+  **Operator/host only.** No `Ampd.CommandSpec` entry reaches this — see
+  `Ampd.Worktree.handle_ordered({:open_job, …})` for the argument.
+  """
+  def start_validation_job(fields) do
+    tx(fn ->
+      case Ampd.Worktree.open_validation_job(fields) do
+        {:ok, job} ->
+          case Ampd.Validation.record_start(job) do
+            {:ok, receipt} -> {:ok, %{"job" => job, "started" => receipt}}
+            {:error, code, detail} -> {:error, code, detail}
+          end
+
+        other ->
+          other
+      end
+    end)
+  end
+
+  @doc """
+  Record how one validation attempt ended.
+
+  Ordered, because it **reads the ledger and then writes to it**: the checks
+  that an outcome has a durable start and is the only outcome for its job are
+  read-then-write, and an unordered pair of those races a concurrent append of
+  the very record it is checking for. Two contradictory terminal outcomes for
+  one `job_ref` is the exact thing that race produces.
+
+  See `Ampd.Validation.record_outcome/2` for the state/verdict/reason shape
+  and why an execution failure is never a predicate verdict.
+  """
+  def record_validation_outcome(job_ref, result),
+    do: tx(fn -> Ampd.Validation.record_outcome(job_ref, result) end)
+
+  @doc """
   Interpret every durable crash-cut left by the last shutdown.
 
   Ordered, because it *writes* — it moves resources into terminal recovery
