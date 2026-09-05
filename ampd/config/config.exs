@@ -1,7 +1,28 @@
 import Config
 
 if config_env() == :test do
-  dir = "/tmp/ampd-test-data"
+  # **Per run, because this box runs many sessions over one checkout.**
+  #
+  # This was the fixed path `/tmp/ampd-test-data`, and two suites running at
+  # once shared it. The symptom is not a clean collision — it is
+  #
+  #     (File.Error) could not remove files and directories recursively
+  #     from "/tmp/ampd-test-data": file already exists
+  #
+  # raised inside `Bootstrap.do_reset_world!/0` under the authority
+  # coordinator, plus timeouts, in tests that have nothing to do with each
+  # other and all pass in isolation. Measured: 11 failures across four files
+  # against the shared path, **0 failures against a private one, same
+  # commit, same seed**. It cost this session a wrong diagnosis first — the
+  # spread looked exactly like a regression in the change under test.
+  #
+  # The directory is `rm_rf`'d and recreated here on every run, so it is
+  # pure per-run scratch and there is no version of sharing it that is
+  # correct. `AMPD_TEST_DATA_DIR` overrides it for a caller that wants a
+  # known location; otherwise the OS pid makes concurrent runs disjoint, and
+  # a run that crashed without cleaning up is cleaned by the next run that
+  # draws its pid.
+  dir = System.get_env("AMPD_TEST_DATA_DIR") || "/tmp/ampd-test-data-#{System.pid()}"
   File.rm_rf!(dir)
   File.mkdir_p!(dir)
   config :ampd, data_dir: dir

@@ -95,6 +95,47 @@ defmodule Ampd.ValidationJobTest do
       end
     end
 
+    test "a caller that supplies a path does not get it stored", ctx do
+      # Ported from the parallel R7 implementation on `main` (`a43ccfc`),
+      # whose vocabulary was retired in favour of GPT's but whose coverage
+      # was not. Its version proved the field was DROPPED by a `Map.take`;
+      # here the records are built field by field, so the same guarantee
+      # holds by construction — and this is what says so out loud, because
+      # "the constructor is explicit" is the kind of property a refactor
+      # removes without noticing.
+      {job, started} = start!(ctx, %{"path" => "/etc/passwd", "materialization" => "/tmp/x"})
+
+      {:ok, out} =
+        Authority.record_validation_outcome(
+          job["ref"],
+          Map.merge(pass(), %{"path" => "/etc/shadow", "detail" => "/var/log"})
+        )
+
+      for r <- [job, started, out], k <- ~w(path materialization detail) do
+        refute Map.has_key?(r, k), "#{k} reached a validation record"
+      end
+    end
+
+    test "a record naming no actor is visible to no agent", ctx do
+      # Also ported. The agent filter is `record["actor"] == actor`, so a
+      # record with no subject matches nobody — which is the safe direction,
+      # and worth pinning because the unsafe direction (matching everybody)
+      # is one `||` away.
+      _ = ctx
+      Receipts.emit(%{"kind" => Validation.started_kind(), "job_ref" => "vj_orphan"})
+
+      assert Enum.any?(Validation.all(), &(&1["job_ref"] == "vj_orphan"))
+      refute Enum.any?(Projection.agent("kestrel")["validations"]["recent"],
+                       &(&1["job_ref"] == "vj_orphan"))
+      refute Enum.any?(Projection.history_for(:validations, "kestrel"),
+                       &(&1["job_ref"] == "vj_orphan"))
+
+      # The operator, who has no actor, still sees it — an unattributed
+      # record is not a hidden record.
+      assert Enum.any?(Projection.history_for(:validations, nil),
+                       &(&1["job_ref"] == "vj_orphan"))
+    end
+
     test "carries no host path, and nothing from which one could be built", ctx do
       {job, started} = start!(ctx)
 
