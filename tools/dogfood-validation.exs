@@ -43,7 +43,19 @@ Authority.mint(%{
   "duration" => "workspace"
 })
 
-est = Control.command(agent, :establish_worktree, [lane["id"], "self-hygiene"])
+# **A unique name per run, and a prune before it.** `Ampd.Locus.establish/3`
+# runs `git worktree add`, which registers the materialization in the SHARED
+# repository — and that registration outlives `priv/data`. So a run after the
+# store has been reset (or after `.gitignore` stopped tracking the directory,
+# which is how this was found) hits `worktree-create-failed` on a name git
+# still remembers and the runtime no longer does.
+#
+# Pruning here is safe: `git worktree prune` removes only registrations whose
+# directory is gone, which is exactly the orphan case and never a live one.
+{_, 0} = System.cmd("git", ["-C", root, "worktree", "prune"], stderr_to_stdout: true)
+name = "self-hygiene-" <> Integer.to_string(System.system_time(:second))
+
+est = Control.command(agent, :establish_worktree, [lane["id"], name])
 
 unless est["allow"] do
   IO.puts("  establishment refused: #{inspect(est["refusal"])}")
