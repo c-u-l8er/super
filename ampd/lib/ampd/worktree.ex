@@ -127,8 +127,8 @@ defmodule Ampd.Worktree do
   are, and inventing a path would be the one mistake this module cannot
   survive.
   """
-  def sealed_state, do: %{"repos" => %{}, "resources" => %{}, "seq" => 0}
-  def initial, do: %{"repos" => %{}, "resources" => %{}, "seq" => 0}
+  def sealed_state, do: %{"repos" => %{}, "resources" => %{}, "bases" => %{}, "seq" => 0}
+  def initial, do: %{"repos" => %{}, "resources" => %{}, "bases" => %{}, "seq" => 0}
 
   def sealed, do: ask(:sealed)
   def close_store, do: ask(:close_store)
@@ -149,6 +149,34 @@ defmodule Ampd.Worktree do
 
   def resource(ref), do: ask({:get, "resources", ref})
   def repo(ref), do: ask({:get, "repos", ref})
+
+  @doc "Every bound `source-basis@1`, by ref."
+  def source_bases, do: ask({:all, "bases"})
+
+  @doc "One `source-basis@1`, or `nil`."
+  def source_basis(ref), do: ask({:get, "bases", ref})
+
+  @doc """
+  Bind a `source-basis@1` over an already-established worktree resource.
+
+  See `handle_ordered({:bind_basis, …})` for what is checked and why.
+  """
+  def bind_source_basis(fields), do: ask({:bind_basis, fields})
+
+  @doc """
+  An exact Git object name, and nothing that has to be *resolved* to become
+  one.
+
+  Phase A's rule is that a basis names an immutable object. `HEAD`, `main`,
+  `HEAD~1` and `origin/main` are all selections — they denote whatever the
+  repository happens to say at the moment somebody asks, which is the one
+  property a basis may not have. The existing establishment path accepts
+  them (`Effector.create` does `revision || "HEAD"`) and that stays true:
+  a Lane may *select* symbolically, and the resolved `head` the effector
+  observed is what a basis may bind.
+  """
+  def exact_oid?(s) when is_binary(s), do: Regex.match?(~r/^[0-9a-f]{40}$/, s)
+  def exact_oid?(_), do: false
 
   @doc """
   The confinement root for this runtime, as an absolute path.
@@ -342,7 +370,7 @@ defmodule Ampd.Worktree do
   # bootstrap path, and `Ampd.Ordered` is explicit that bootstrap satisfies
   # the rule by running inside the coordinator rather than by being excepted
   # from it. `Ampd.Authority.register_repository/1` is now that path.
-  @ordered_ops [:request, :set_state, :create, :register_repo, :reset, :load_state]
+  @ordered_ops [:request, :set_state, :create, :register_repo, :bind_basis, :reset, :load_state]
 
   @doc """
   Every operation this module refuses outside the coordinator.
@@ -544,6 +572,109 @@ defmodule Ampd.Worktree do
             {:reply, {:error, "worktree-create-failed", %{"reason" => why}},
              %{st | s: Ampd.Store.save(tab, put_in(s1, ["resources", ref], bad))}}
         end
+    end
+  end
+
+  @doc """
+  Bind a `source-basis@1` over an established worktree resource.
+
+  ## What a SourceBasis means, and the thing it deliberately does not mean
+
+  **An exact source snapshot that a job is authorized to inspect.** It is
+  *not* "the checkout this running Super was built from". R0b.0 proposed
+  deriving one from `/proc/self/exe` ancestry and that was rejected for a
+  good reason: the host can canonicalize a directory, and it cannot prove
+  that directory produced the binary currently executing. A basis that
+  claimed build provenance would be asserting something nothing here can
+  check.
+
+  ## Why this reuses `wt_` rather than minting a second repository identity
+
+  Everything a snapshot needs already exists. `register_repository!/1` is
+  the one place an operator hands the runtime a host path and it yields an
+  opaque `rp_` ref; establishment materializes an exact revision with
+  `git worktree add --detach`; the resource record carries the host path
+  and `Ampd.Locus.view/1` drops it in one place. So a basis binds a
+  `resource_ref` and adds the *one* thing establishment does not record:
+  which immutable object that materialization is required to be, from now
+  on rather than at the moment it was made.
+
+  ## The fields that are NOT here, and why each is absent
+
+  **`tree_oid`.** Git is content-addressed, so `commit_oid` fixes the tree
+  forever — a commit cannot come to name different content. Recording the
+  tree would be recording a value derivable from one already present. Where
+  content identity is genuinely needed at a granularity a job can act on,
+  it belongs in the scope manifest as a per-file digest, not as one opaque
+  root that says a file changed without saying which.
+
+  **`basis_digest`.** Same argument, one step worse: it would be a second
+  implementation of an identity git already computes, and this round has
+  spent enough on what happens when two implementations of one fact drift.
+
+  **`repository_ref`, `name`, `path`.** Carried by the resource. Copying
+  them here would create two places a repository can be named and one of
+  them would eventually be stale.
+
+  ## What is checked
+
+  The resource must exist, must be `COMMITTED_READY` — a basis over a
+  resource that is still `CREATING`, `QUARANTINED` or `INDETERMINATE` would
+  be a basis over a directory nobody has vouched for — and the commit must
+  be an **exact object name**, not a selection. `commit_oid` defaults to
+  the `head` the effector observed at creation, which is already resolved;
+  a caller may pass one explicitly and it must agree.
+
+  **Correspondence is not checked here and cannot be.** This runs inside
+  the coordinator, where a `git` call is an unbounded host round trip. That
+  the materialization *is still* this commit and is clean is a question
+  asked where its answer is used — immediately before the read capability
+  is derived — because an answer obtained any earlier is a TOCTOU with a
+  gap you cannot bound. See the host-side basis check.
+  """
+  def handle_ordered({:bind_basis, f}, %{tab: tab, s: s} = st) do
+    ref = f["resource_ref"]
+    rec = ref && get_in(s, ["resources", ref])
+
+    cond do
+      rec == nil ->
+        {:reply, {:error, "resource-unknown", %{"resource_ref" => ref}}, st}
+
+      rec["state"] != "COMMITTED_READY" ->
+        {:reply,
+         {:error, "source-basis-resource-not-ready",
+          %{"resource_ref" => ref, "state" => rec["state"]}}, st}
+
+      not exact_oid?(f["commit_oid"] || rec["head"]) ->
+        # The message names the value, because the caller that gets here
+        # passed something like "HEAD" and the useful thing to say is which
+        # string was not an object name.
+        {:reply,
+         {:error, "source-basis-revision-not-exact",
+          %{"resource_ref" => ref, "revision" => f["commit_oid"] || rec["head"]}}, st}
+
+      f["commit_oid"] != nil and f["commit_oid"] != rec["head"] ->
+        # A caller may state the commit it believes it is binding. If it
+        # disagrees with what the effector observed, that is a disagreement
+        # about which snapshot this is, and guessing which side is right is
+        # exactly the thing a basis exists to stop.
+        {:reply,
+         {:error, "source-basis-revision-mismatch",
+          %{"resource_ref" => ref, "stated" => f["commit_oid"], "observed" => rec["head"]}}, st}
+
+      true ->
+        seq = s["seq"] + 1
+        id = "sb_" <> String.pad_leading(Integer.to_string(seq), 4, "0")
+
+        basis = %{
+          "schema" => "source-basis@1",
+          "ref" => id,
+          "resource_ref" => ref,
+          "commit_oid" => rec["head"]
+        }
+
+        s2 = s |> put_in(["bases", id], basis) |> Map.put("seq", seq)
+        {:reply, {:ok, basis}, %{st | s: Ampd.Store.save(tab, s2)}}
     end
   end
 

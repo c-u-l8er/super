@@ -2746,6 +2746,179 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         }
     }
 
+    // ------------------------------------- Phase A · the one read grant
+    //
+    // **A second confined run, and the only difference is one grant.** The
+    // census above measured `Policy::minimal`; this measures
+    // `Policy::minimal_over` with a real materialization, so every row that
+    // differs between them differs because of the grant and nothing else.
+    // A single run with the grant could show that reading works; it could
+    // not show that reading works *because* of it.
+    // **Outside the Carrier workdir, and that placement is the test.**
+    //
+    // The first version of this fixture put the materialization under `dir`,
+    // which is the workdir the Carrier is granted rw over — so the probe
+    // wrote into its own "read-only" basis and read a "forbidden" sibling,
+    // and both rows went red. The policy was correct and the fixture was
+    // measuring the rw grant. A read-only grant can only be shown to be
+    // read-only somewhere the Carrier has no other reason to reach.
+    let sb_dir = scratch.join("phase-a-basis");
+    let sb_sibling = scratch.join("phase-a-basis-sibling");
+    let sb_log = dir.join("sourcebasis.log");
+    let mut sb: std::collections::BTreeMap<String, (bool, i32)> = std::collections::BTreeMap::new();
+    let mut sb_commit = String::new();
+    let mut sb_started = false;
+
+    if make_basis_fixture(&sb_dir, &sb_sibling, &mut sb_commit) {
+        let pol = confine::Policy::minimal_over(
+            &dir.to_string_lossy(),
+            &probe.to_string_lossy(),
+            &sb_dir.to_string_lossy(),
+        );
+        let a = [
+            me.to_string(),
+            "9".to_string(),
+            dir.to_string_lossy().to_string(),
+            "nopty".to_string(),
+            sb_dir.to_string_lossy().to_string(),
+        ];
+        match carrier::spawn_with(
+            &probe, &dir, &sb_log, &crate::new_epoch(), Some(pol),
+            &a.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[], None,
+        ) {
+            Ok(mut p) => {
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                p.terminate(2_000);
+                sb = parse_probe_log(&sb_log);
+                sb_started = true;
+            }
+            Err(e) => {
+                b.check("a Carrier confined over a source basis starts", false, e);
+            }
+        }
+    } else {
+        b.check(
+            "the source-basis fixture repository is built",
+            false,
+            "could not create the fixture materialization".to_string(),
+        );
+    }
+
+    if sb_started {
+        b.check("a Carrier confined over a source basis starts", true, String::new());
+
+        // The grant count is three, and it is asserted rather than assumed.
+        // `Ampd.Carrier.Floor` refuses more than four; the whole R0b.0
+        // argument for refusing the Node route was that it needed six.
+        let pol = confine::Policy::minimal_over(
+            &dir.to_string_lossy(),
+            &probe.to_string_lossy(),
+            &sb_dir.to_string_lossy(),
+        );
+        let n = pol.rw_dirs.len() + pol.ro_dirs.len() + pol.exec_files.len();
+        b.check(
+            "the source basis costs exactly one grant — three, under a cap of four",
+            n == 3 && pol.ro_dirs.len() == 1,
+            format!("rw={} ro={} x={}", pol.rw_dirs.len(), pol.ro_dirs.len(), pol.exec_files.len()),
+        );
+
+        let allowed = |k: &str| matches!(sb.get(k), Some((true, _)));
+        let refused = |k: &str| matches!(sb.get(k), Some((false, _)));
+
+        // MAY.
+        b.check(
+            "a Carrier MAY read a file inside the source basis it was granted",
+            allowed("open_source_basis_file"),
+            format!("{:?}", sb.get("open_source_basis_file")),
+        );
+        b.check(
+            "a Carrier MAY list the source basis it was granted",
+            allowed("list_source_basis"),
+            format!("{:?}", sb.get("list_source_basis")),
+        );
+
+        // MUST NOT — measured in the SAME run, under the SAME ruleset.
+        b.check(
+            "a Carrier MUST NOT write the source basis it may read",
+            refused("write_source_basis"),
+            format!("{:?}", sb.get("write_source_basis")),
+        );
+        b.check(
+            "a Carrier MUST NOT reach a sibling of the source basis it was granted",
+            refused("open_source_basis_sibling"),
+            format!("{:?}", sb.get("open_source_basis_sibling")),
+        );
+
+        // And the D.1.3b floor is not weakened by the addition. These are the
+        // same rows the census above asserts under `minimal`; asserting them
+        // again HERE is the point — the grant must not have loosened them.
+        for (k, what) in [
+            ("open_etc_passwd", "host configuration"),
+            ("open_home_dotfile", "an unrelated home directory"),
+            ("open_super_source", "Super's own source tree"),
+            ("socket_inet_tcp", "TCP"),
+            ("fork", "fork"),
+        ] {
+            b.check(
+                &format!("with a source grant installed, a Carrier still cannot reach {what}"),
+                refused(k),
+                format!("{:?}", sb.get(k)),
+            );
+        }
+
+        // **The pair, stated as a difference.** Without the grant the same
+        // probe binary, in the same workdir, could not read the same file.
+        b.check(
+            "and the identical probe WITHOUT the grant could not read it — so the grant is what did it",
+            !parse_probe_log(&conf_log).contains_key("open_source_basis_file"),
+            "the ungranted run must not even attempt the row".to_string(),
+        );
+
+        // Correspondence: the proof that stands between a path and a grant.
+        b.check(
+            "a clean materialization at the bound commit verifies",
+            crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &sb_commit).is_ok(),
+            format!("{:?}", crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &sb_commit)),
+        );
+        b.check(
+            "a materialization at a DIFFERENT commit is refused",
+            crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &"b".repeat(40)).is_err(),
+            "a basis must not verify against a commit it is not at".to_string(),
+        );
+        b.check(
+            "a symbolic revision is refused as a basis, at the host too",
+            crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), "HEAD").is_err(),
+            "HEAD is a selection, not an object name".to_string(),
+        );
+        b.check(
+            "an absent materialization is refused",
+            crate::effect::verify_source_basis(&dir.join("no-such-basis").to_string_lossy(), &sb_commit).is_err(),
+            "a basis over a directory that is not there grants nothing".to_string(),
+        );
+
+        // A12 · the basis MOVES after it was bound.
+        let dirty = sb_dir.join("README");
+        let _ = std::fs::write(&dirty, b"moved after binding\n");
+        b.check(
+            "a materialization edited after binding is refused, and says which path",
+            match crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &sb_commit) {
+                Err(e) => e.contains("source-basis-materialization-dirty") && e.contains("README"),
+                Ok(_) => false,
+            },
+            "an edited tracked file must invalidate the basis".to_string(),
+        );
+        let _ = std::fs::write(&dirty, b"phase-a\n");
+
+        let extra = sb_dir.join("untracked-addition");
+        let _ = std::fs::write(&extra, b"not in the commit\n");
+        b.check(
+            "an untracked addition also moves the basis — a file not in the commit is not in the snapshot",
+            crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &sb_commit).is_err(),
+            "an added file must invalidate the basis".to_string(),
+        );
+        let _ = std::fs::remove_file(&extra);
+    }
+
     let bare = parse_probe_log(&bare_log);
     let conf = parse_probe_log(&conf_log);
     let row = |k: &str| Attack {
@@ -5264,4 +5437,62 @@ fn dogfood_payload(b: &mut Battery, scratch: &Path) {
     );
 
     c.terminate(2_000);
+}
+
+/// A real repository with one real commit, materialized detached, plus a
+/// sibling directory that must stay unreachable.
+///
+/// The sibling exists because "granted a tree" and "granted the root that
+/// tree sits in" are different grants that a prefix comparison cannot tell
+/// apart, and only a neighbour can show which one was installed.
+fn make_basis_fixture(target: &Path, sibling: &Path, commit: &mut String) -> bool {
+    let repo = target.with_extension("repo");
+    for p in [&repo, &target.to_path_buf(), &sibling.to_path_buf()] {
+        let _ = std::fs::remove_dir_all(p);
+    }
+    if std::fs::create_dir_all(&repo).is_err() {
+        return false;
+    }
+    if std::fs::write(repo.join("README"), b"phase-a\n").is_err() {
+        return false;
+    }
+    let git = |cd: &Path, a: &[&str]| -> bool {
+        std::process::Command::new("git")
+            .arg("-C").arg(cd).args(a)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_SYSTEM", "/dev/null")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    for a in [
+        vec!["init", "-q", "-b", "main"],
+        vec!["config", "user.email", "phasea@example.invalid"],
+        vec!["config", "user.name", "PhaseA"],
+        vec!["config", "commit.gpgsign", "false"],
+        vec!["add", "-A"],
+        vec!["commit", "-q", "-m", "init"],
+    ] {
+        if !git(&repo, &a) {
+            return false;
+        }
+    }
+    if !git(&repo, &["worktree", "add", "--detach", &target.to_string_lossy(), "HEAD"]) {
+        return false;
+    }
+    match std::process::Command::new("git")
+        .arg("-C").arg(target).args(["rev-parse", "HEAD"])
+        .output()
+    {
+        Ok(o) if o.status.success() => {
+            *commit = String::from_utf8_lossy(&o.stdout).trim().to_string();
+        }
+        _ => return false,
+    }
+    // The neighbour, with a readable file in it, so its refusal is about the
+    // grant and not about the file being missing.
+    if std::fs::create_dir_all(sibling).is_err() {
+        return false;
+    }
+    std::fs::write(sibling.join("README"), b"not yours\n").is_ok()
 }

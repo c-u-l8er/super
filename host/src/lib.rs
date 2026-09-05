@@ -527,8 +527,47 @@ fn start_one(
     // `TIOCGPTPEER` this is `pty-peer-descriptor-unavailable` and no Carrier
     // starts — resolving the slave by pathname instead would trade the
     // slice's entire claim for compatibility.
+    // **Phase A · the one read capability, and where it comes from.**
+    //
+    // `source_basis` is present only when the runtime admitted a job that
+    // named one. It carries the exact commit the basis binds and the host
+    // path the runtime resolved from `source_basis_ref` — and the path is
+    // NOT the authority. The authority is the proof below: this directory
+    // really is that commit, and it is clean. A path that fails the proof
+    // grants nothing and refuses the start, because a Carrier confined over
+    // a directory that is not the snapshot the job named would be reading
+    // something nobody authorized.
+    //
+    // The proof is taken here rather than by `ampd`, immediately before the
+    // ruleset is built and installed, so the window between "verified" and
+    // "granted" is as short as this code can make it.
+    let policy = match req["source_basis"].as_object() {
+        None => None,
+        Some(sb) => {
+            let commit = sb
+                .get("commit_oid")
+                .and_then(|v| v.as_str())
+                .ok_or("source basis carries no commit_oid")?;
+            let path = sb
+                .get("materialization")
+                .and_then(|v| v.as_str())
+                .ok_or("source basis carries no materialization")?;
+
+            crate::effect::verify_source_basis(path, commit)?;
+
+            let canonical = std::fs::canonicalize(path)
+                .map_err(|e| format!("source-basis-materialization-unresolvable: {e}"))?;
+
+            Some(confine::Policy::minimal_over(
+                &dir.to_string_lossy(),
+                &payload.to_string_lossy(),
+                &canonical.to_string_lossy(),
+            ))
+        }
+    };
+
     let term = crate::pty::Pty::open()?;
-    let mut c = carrier::spawn_on_pty(&payload, &dir, &log, &epoch, None, term)?;
+    let mut c = carrier::spawn_on_pty(&payload, &dir, &log, &epoch, policy, term)?;
     if let Err(e) = c.handshake(5_000) {
         // A Carrier that cannot prove it is this incarnation is not left
         // running. The runtime will see the refusal, but the process is this

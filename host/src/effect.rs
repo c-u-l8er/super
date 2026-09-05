@@ -423,6 +423,95 @@ pub fn refusal(reason: String) -> Value {
 /// `channel_epoch` belong to whatever carried the request; binding them to
 /// the reply is the transport's job, and letting the mechanism see them
 /// would be letting it decide which request it is answering.
+/// Prove that a materialization **is** the snapshot a `source-basis@1` names.
+///
+/// # Why this exists at all, and why here
+///
+/// A basis binds a commit; a worktree is a *materialization* of one. Those
+/// are different things and conflating them is the mistake Phase A was
+/// warned off making: git object identity is immutable, and a directory on
+/// disk is not — same-uid software can edit it, and this box runs many
+/// sessions over one checkout. `Ampd.Worktree` records the commit the
+/// effector observed **at creation**, which is a fact about the past.
+///
+/// So the question "is this still that snapshot" is asked here, immediately
+/// before the read capability is derived from it, because an answer obtained
+/// any earlier is a TOCTOU whose window you cannot bound. It is deliberately
+/// *not* asked inside `ampd`'s coordinator, where a `git` call would be an
+/// unbounded host round trip inside the total order.
+///
+/// # What is checked, and what each one catches alone
+///
+///   `rev-parse HEAD` == commit_oid    the wrong revision is materialized
+///                                     here, or the worktree was moved to
+///                                     another commit after it was bound
+///
+///   `status --porcelain` is empty     the right revision, edited. Catches a
+///                                     modified tracked file, a deleted one,
+///                                     and an untracked addition — the last
+///                                     because a file that is not in the
+///                                     commit is not in the snapshot the
+///                                     basis names, whatever else it is
+///
+/// Neither implies the other. A clean worktree at the wrong commit passes the
+/// second and fails the first; a dirty worktree at the right commit does the
+/// reverse. Both are required and both are falsified.
+///
+/// # What it deliberately does not do
+///
+/// It does not compute a tree object and compare it. `status --porcelain`
+/// already answers "does the working tree differ from the commit", and
+/// `git write-tree` would additionally *write* into the object database from
+/// a read-only verification — and has a documented failure where it returns
+/// the empty tree without saying so, which would read as agreement.
+///
+/// It reports the mismatch rather than repairing it. Re-binding the basis to
+/// whatever is currently on disk would answer a different question from the
+/// one the admitted job asked.
+pub fn verify_source_basis(target: &str, commit_oid: &str) -> Result<(), String> {
+    // Exact object names only. The semantic side refuses a symbolic revision
+    // when the basis is bound; refusing it again here means this function is
+    // safe to call with a value that did not come through that path — and a
+    // verifier that trusted its argument to have been checked elsewhere is a
+    // verifier one refactor away from checking nothing.
+    if commit_oid.len() != 40 || !commit_oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "source-basis-revision-not-exact: {commit_oid:?} is not a 40-character object name"
+        ));
+    }
+    if commit_oid.bytes().any(|b| b.is_ascii_uppercase()) {
+        return Err(format!(
+            "source-basis-revision-not-exact: {commit_oid:?} is not lowercase"
+        ));
+    }
+
+    if !Path::new(target).is_dir() {
+        return Err(format!("source-basis-materialization-absent: {target}"));
+    }
+
+    let head = git(target, &["rev-parse", "HEAD"])?;
+    let head = head.trim();
+    if head != commit_oid {
+        return Err(format!(
+            "source-basis-revision-moved: materialization is at {head}, the basis names {commit_oid}"
+        ));
+    }
+
+    let status = git(target, &["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
+        // The paths are named. A basis mismatch that said only "dirty" would
+        // send someone to look at the whole tree.
+        let paths: Vec<&str> = status.lines().take(8).map(str::trim).collect();
+        return Err(format!(
+            "source-basis-materialization-dirty: {} path(s) differ from {commit_oid}: {}",
+            status.lines().count(),
+            paths.join(" · ")
+        ));
+    }
+
+    Ok(())
+}
+
 pub fn perform(req: &Value) -> Value {
     if req["schema"] != "worktree-effect-request@1" {
         return refusal(format!(

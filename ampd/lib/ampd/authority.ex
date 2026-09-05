@@ -325,6 +325,29 @@ defmodule Ampd.Authority do
     do: tx(fn -> Ampd.Worktree.register_repository!(path) end)
 
   @doc """
+  Bind a `source-basis@1` — the exact source snapshot a job may inspect.
+
+  **Ordered, and here rather than on the agent channel, because minting
+  source authority is not something a Carrier may do for itself.** The
+  chain Phase A is building runs
+  `SourceBasis → one read capability → Carrier`, so whoever can create a
+  basis decides what a confined process is allowed to see. A terminal page,
+  a presentation, or the payload inside the Carrier reaching that decision
+  would make the capability self-issued.
+
+  It takes no host path and cannot: the materialization is named by the
+  `wt_` resource the establishment flow already produced, and the host path
+  lives on that record where `Ampd.Locus.view/1` drops it.
+
+  Ordered for `register_repository/1`'s reason exactly — it reads a
+  resource's committed state and then writes a durable fact derived from
+  what it read, and an unordered write of that races every future
+  materialization check that reads it.
+  """
+  def bind_source_basis(fields),
+    do: tx(fn -> Ampd.Worktree.bind_source_basis(fields) end)
+
+  @doc """
   Interpret every durable crash-cut left by the last shutdown.
 
   Ordered, because it *writes* — it moves resources into terminal recovery

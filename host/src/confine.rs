@@ -302,6 +302,51 @@ impl Policy {
             network: false,
         }
     }
+
+    /// The floor, plus **one** read-only directory: the materialization of a
+    /// `source-basis@1` the admitted job named.
+    ///
+    /// # Why this is a separate constructor and not a mutable field
+    ///
+    /// `ro_dirs` has existed since D.1.3b with a consumer in `prepare` and
+    /// **no producer** — R0b.0's audit found the only value ever assigned was
+    /// `vec![]`, so a Carrier could read nothing outside its own workdir,
+    /// including its own `/proc`. That was correct while nothing had earned a
+    /// read. Phase A is the thing that earns one, and the shape of the earning
+    /// matters: a `pub fn add_ro(&mut self)` would let any later caller widen
+    /// a policy that had already been reasoned about. A constructor cannot —
+    /// the whole policy is decided in one place, from one argument, before
+    /// anything is prepared.
+    ///
+    /// # What the caller must have done first
+    ///
+    /// `source` is a **verified** materialization path, not a requested one.
+    /// The host resolves it from an admitted job's `source_basis_ref` and then
+    /// proves the directory really is the bound commit and is clean (see
+    /// `crate::effect::verify_source_basis`). A path that arrives without that
+    /// proof is a string somebody sent; a path that survives it is the
+    /// snapshot the basis names. **The grant is derived from the proof, not
+    /// from the path.**
+    ///
+    /// # The count
+    ///
+    /// Three: rw workdir, x payload, ro source. `Ampd.Carrier.Floor`'s
+    /// `landlock_grants_are_bounded` requires `1..4` and is not changed by
+    /// this slice — a fourth remains available and a fifth is still refused,
+    /// which is the property that made R0b.0 rule out running the existing
+    /// Node checker inside a Carrier (it needed six).
+    pub fn minimal_over(workdir: &str, payload: &str, source: &str) -> Policy {
+        Policy {
+            rw_dirs: vec![workdir.to_string()],
+            // Read only. The job reads bytes and asserts a property of them;
+            // nothing about that requires the power to change what it read,
+            // and a job that could write its input could make its own verdict
+            // true.
+            ro_dirs: vec![source.to_string()],
+            exec_files: vec![payload.to_string()],
+            network: false,
+        }
+    }
 }
 
 /// A built, unenforced confinement. Holds the ruleset descriptor and the BPF

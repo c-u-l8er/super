@@ -164,6 +164,11 @@ fn main() {
     // real possessed terminal; see the `pty` section below for why the rows
     // are worthless without one.
     let is_pty_run = args.get(4).map(|s| s == "pty").unwrap_or(false);
+    // Phase A. Passed only on the run that was confined with
+    // `Policy::minimal_over`, so the paired rows below exist only where a
+    // read grant was actually installed. Absent on every other run, which is
+    // what lets the same probe produce the negative half of the pair.
+    let source_dir = args.get(5).cloned();
 
     // 0 · D.1.3c·1 · the four terminal properties, staged.
     //
@@ -225,6 +230,54 @@ fn main() {
     ] {
         let (fd, e) = sysc(2 /* open */, path.as_ptr() as i64, 0, 0);
         r(name, fd >= 0, e);
+        if fd >= 0 {
+            sysc(3, fd, 0, 0);
+        }
+    }
+
+    // 2a · **Phase A · the granted source basis, and its edges.**
+    //
+    // Four rows, and only the first is supposed to be ALLOWED. A grant that
+    // could not be used would be a grant nobody needs; a grant that reached
+    // one inch further than it says would be the thing every other row in
+    // this census exists to refuse. They are measured in the same run, by the
+    // same process, against the same installed ruleset — so "may read it" and
+    // "may not write it" cannot be true of two different confinements.
+    if let Some(sd) = &source_dir {
+        let inside = format!("{sd}/README\0");
+        let (fd, e) = sysc(2, inside.as_ptr() as i64, 0, 0);
+        r("open_source_basis_file", fd >= 0, e);
+        if fd >= 0 {
+            sysc(3, fd, 0, 0);
+        }
+
+        // O_WRONLY|O_CREAT|O_TRUNC = 1|64|512. Read-only means read-only:
+        // a job that could write its own input could make its verdict true.
+        let w = format!("{sd}/r0b-write-probe\0");
+        let (fd, e) = sysc(2, w.as_ptr() as i64, 1 | 64 | 512, 0o600);
+        r("write_source_basis", fd >= 0, e);
+        if fd >= 0 {
+            sysc(3, fd, 0, 0);
+        }
+
+        // The directory itself, opened for listing. Granted read on a tree
+        // includes reading the tree.
+        let d = format!("{sd}\0");
+        let (fd, e) = sysc(2, d.as_ptr() as i64, 0o200000 /* O_DIRECTORY */, 0);
+        r("list_source_basis", fd >= 0, e);
+        if fd >= 0 {
+            sysc(3, fd, 0, 0);
+        }
+
+        // **The sibling.** One directory up from the granted tree and back
+        // down into a name that is not it. This is the row that says the
+        // grant is over *this* materialization and not over the root every
+        // materialization happens to live under — which is exactly the
+        // mistake a prefix comparison would make, and the reason
+        // `Ampd.Worktree.confined?/2` compares path segments.
+        let sib = format!("{sd}-sibling/README\0");
+        let (fd, e) = sysc(2, sib.as_ptr() as i64, 0, 0);
+        r("open_source_basis_sibling", fd >= 0, e);
         if fd >= 0 {
             sysc(3, fd, 0, 0);
         }
