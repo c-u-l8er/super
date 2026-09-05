@@ -401,6 +401,28 @@ R0b.1 extends this with execution-time facts — Worker generation still current
 SourceBasis resolves, materialization proves itself, scope digest re-derives.
 None is pre-invented here; none has a producer yet.
 
+### both sabotage findings this round were about the instrument
+
+Neither was a defect in the code under test, and recording that is the point of
+the columns existing.
+
+**`BROKE`** — a retargeted stub was not valid Elixir. The harness refused to
+score it (*"the stub did not compile, so it proves nothing"*) rather than
+reporting the still-green suite as a catch.
+
+**`NOT A FALSIFIER`** — two cases stub two different clauses of
+`admissible?/1`, and both named the same expected test. Removing the `started`
+clause must red the R11.2 test, a minted job with no durable start; removing the
+JobBasis clause must red the sealed-store test, a durable start whose job is
+gone. **One test cannot falsify both**, and pointing both at one is how a pair of
+checks comes to look like a pair when it is a single check counted twice.
+
+And earlier in the same round, six cases came back `UNAPPLIED` because the code
+they targeted had moved from `validation.ex` to `receipts.ex`. The mechanisms
+were all still there; the stubs were not landing. That column was added earlier
+this round after eighteen silent no-ops were scored as `NOT A FALSIFIER`, and it
+has now paid for itself twice.
+
 ### the closure gate caught the first attempt
 
 `record_validation_outcome/2` was written with `with/else`, which the BEAM

@@ -177,10 +177,10 @@ case_ 'an outcome may name a job that does not exist' \
         {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
 
       job ->' \
-      '      _unused ->
-        {:error, "unreachable", %{}}
+      '      nil ->
+        ask({:validation_outcome, %{"ref" => job_ref}, result})
 
-      job = Ampd.Worktree.validation_job(job_ref) ->'
+      job ->'
 
 # ------------------------------------------------------------------- R7.2
 case_ 'a completed outcome may also carry a failure reason' \
@@ -221,7 +221,7 @@ case_ 'an outcome may be recorded outside the coordinator' \
 
 # ------------------------------------------------------------------ R11.2
 case_ 'admissibility ignores whether a start is durable' \
-      'a durable START whose JobBasis is gone is not admissible' \
+      'a job is admissible only once its start is durable' \
       ampd/lib/ampd/validation.ex \
       '      started(job_ref) != nil and
       outcome(job_ref) == nil' \
