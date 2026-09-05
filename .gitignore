@@ -17,6 +17,13 @@ node_modules/
 # excludes these from a source audit for the reason that applies here too —
 # a dets table is a world, not source — and until now nothing stopped a
 # `git add -A` from committing somebody's Loci and worktrees into history.
+#
+# **This rule did nothing for four of them until 2026-09-05.** `.gitignore`
+# is not consulted for a file git already TRACKS, and the four in
+# `ampd/priv/data/` had been tracked since the repo's first commit — so the
+# rule protected every world but the ones already in. R0b.R's dogfood then
+# wrote a live ledger into `receipts.dets` (5.9 KB → 18.8 KB) and `git add
+# -A` committed it. `git rm --cached` is the other half of adding the rule.
 *.dets
 
 # Packaged revision bundles — regenerable release freight, not history.
@@ -42,3 +49,10 @@ and-super-rev-*.zip
 # clone cannot obtain and a source archive cannot contain. Committed once,
 # 2026-09-05, by the round that first drove the whole chain end to end.
 ampd/priv/data/worktrees/
+
+# And the rest of the world beside them: the manifest that says which stores
+# a boot must account for is as much a world as the stores are. Proven
+# unnecessary rather than assumed — the whole `priv/data` directory was
+# moved aside and `tools/dogfood-validation.exs` drove the full chain from
+# repository to OUTCOME on a runtime that had never had one.
+ampd/priv/data/
