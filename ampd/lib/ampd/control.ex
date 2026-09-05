@@ -422,6 +422,17 @@ defmodule Ampd.Control do
   defp dispatch_read(peer, :list_receipts, [cursor, limit]),
     do: Projection.page(Projection.history_for(:receipts, peer["actor"]), cursor, limit)
 
+  # R0b.R. Both kinds R6 and R7 split out of `receipts` now have the door the
+  # projection's own rule requires. Same filter, same paging, different
+  # subject — and `history_for/2` is where the subject rule lives, so an
+  # agent's `worktree_receipts` filter stays `locus_actor` and its
+  # `validations` filter stays `actor` without either being restated here.
+  defp dispatch_read(peer, :list_worktree_receipts, [cursor, limit]),
+    do: Projection.page(Projection.history_for(:worktree_receipts, peer["actor"]), cursor, limit)
+
+  defp dispatch_read(peer, :list_validations, [cursor, limit]),
+    do: Projection.page(Projection.history_for(:validations, peer["actor"]), cursor, limit)
+
   defp dispatch_read(peer, :list_effect_history, [cursor, limit]),
     do: Projection.page(Projection.history_for(:effects, peer["actor"]), cursor, limit)
 

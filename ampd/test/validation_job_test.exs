@@ -562,6 +562,73 @@ defmodule Ampd.ValidationJobTest do
   defp mint_only!(ctx),
     do: Ampd.AuthorityCoordinator.transact(fn -> Worktree.open_validation_job(fields(ctx)) end, nil)
 
+  # ================================================================= cursors
+  describe "the windows have doors — a cursor with nothing to redeem it" do
+    test "an agent can page its own validations", ctx do
+      {job, _} = start!(ctx)
+      {:ok, _} = Authority.record_validation_outcome(job["ref"], pass())
+
+      page = Control.command(ctx.agent, :list_validations, [nil, 50])
+      assert page["returned"] == 2
+      assert Enum.all?(page["items"], &(&1["kind"] in Validation.kinds()))
+      assert Enum.all?(page["items"], &(&1["actor"] == "kestrel"))
+    end
+
+    test "an agent can page the establishment of its own worktree", ctx do
+      # R6 found this record had been invisible to its own agent, gave the
+      # frame a window, and gave it no command. This is the door.
+      page = Control.command(ctx.agent, :list_worktree_receipts, [nil, 50])
+      assert page["returned"] >= 1
+      assert Enum.all?(page["items"], &(&1["locus_actor"] == "kestrel"))
+      assert Enum.all?(page["items"], &(&1["kind"] == Locus.receipt_kind()))
+    end
+
+    test "an actor with no records pages an empty window, not the world's", ctx do
+      {job, _} = start!(ctx)
+      {:ok, _} = Authority.record_validation_outcome(job["ref"], pass())
+
+      assert Control.command(ctx.control, :list_validations, [nil, 50])["returned"] == 2
+
+      {:ok, mallory} = Ampd.Peer.attach_agent("mallory")
+      theirs = Control.command(mallory, :list_validations, [nil, 50])
+
+      # The filter is `history_for/2`'s, reused rather than restated — a
+      # second copy of a filter is a second thing that can be wrong.
+      assert theirs["items"] == []
+      assert theirs["returned"] == 0
+    end
+
+    test "every window a projection hands out now has a command", ctx do
+      _ = ctx
+      # The rule `Ampd.Projection` states in its own docs, asserted rather
+      # than trusted: a window with a `next_cursor` and no command is a
+      # promise the protocol does not keep. R6 made one and R7 would have
+      # made a second.
+      windowed =
+        Projection.agent("kestrel")
+        |> Enum.filter(fn {_, v} -> is_map(v) and Map.has_key?(v, "next_cursor") end)
+        |> Enum.map(&elem(&1, 0))
+        |> Enum.sort()
+
+      assert "validations" in windowed
+      assert "worktree_receipts" in windowed
+
+      commands = Ampd.CommandSpec.commands()
+
+      for key <- windowed do
+        expected =
+          case key do
+            "grant_requests_history" -> "list_grant_requests"
+            "effects_history" -> "list_effect_history"
+            other -> "list_" <> other
+          end
+
+        assert expected in commands,
+               "the `#{key}` window has a next_cursor and no `#{expected}` command"
+      end
+    end
+  end
+
   defp pass, do: %{"state" => "completed", "verdict" => "pass"}
 
   defp ok!(result, key) do

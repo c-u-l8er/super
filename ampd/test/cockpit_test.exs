@@ -169,6 +169,15 @@ defmodule Ampd.CockpitTest do
       agent_projection: {kestrel, []},
       preflight: {kestrel, ["github.pr.create", "traaviis/trvm", %{"er" => "e", "rev" => 1, "params" => %{}}]},
       list_receipts: {kestrel, [nil, 50]},
+      # R0b.R's two. `Ampd.Projection` says every window it hands out needs a
+      # command that can follow its cursor; R6 split `worktree_receipts` out
+      # of `receipts` and gave it no door, and R7's `validations` would have
+      # been the second. Both are here because this list is CHECKED against
+      # `CommandSpec.reads/0` — adding a read and forgetting to frame it is
+      # caught by that assertion and by nothing else, which is exactly what
+      # happened when these two were added.
+      list_worktree_receipts: {kestrel, [nil, 50]},
+      list_validations: {kestrel, [nil, 50]},
       list_effect_history: {kestrel, [nil, 50]},
       list_grant_requests: {kestrel, [nil, 50]},
       inspect_refusal: {kestrel, [cid]},

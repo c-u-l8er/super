@@ -249,6 +249,39 @@ defmodule Ampd.CommandSpec do
         %{name: "limit", type: {:count, 200}, required: false, default: 50}
       ]
     },
+    # **R0b.R · the two windows that had no command.** `Ampd.Projection` states
+    # the rule in its own docs — *every window a projection hands out has a
+    # `next_cursor`, and every one of them needs a command that can follow it;
+    # a cursor with nothing to give it to is a promise the protocol does not
+    # keep* — and R6 broke it the round it split `receipts` by kind. It added
+    # a `worktree_receipts` window and `history_for(:worktree_receipts, …)`
+    # and no door, so the frame offered a cursor nothing could redeem. R7
+    # would have done it a second time with `validations`.
+    #
+    # Both are READS of data the caller can already see in its own projection
+    # frame, filtered by `history_for/2` — the same filter, reused rather than
+    # restated. No new authority: an agent that could not see a record in its
+    # frame cannot page to it here either.
+    "list_worktree_receipts" => %{
+      cmd: :list_worktree_receipts,
+      channel: :both,
+      kind: :read,
+      retry: :safe,
+      fields: [
+        %{name: "cursor", type: {:id, "rcpt-"}, required: false, default: nil},
+        %{name: "limit", type: {:count, 200}, required: false, default: 50}
+      ]
+    },
+    "list_validations" => %{
+      cmd: :list_validations,
+      channel: :both,
+      kind: :read,
+      retry: :safe,
+      fields: [
+        %{name: "cursor", type: {:id, "rcpt-"}, required: false, default: nil},
+        %{name: "limit", type: {:count, 200}, required: false, default: 50}
+      ]
+    },
     "list_effect_history" => %{
       cmd: :list_effect_history,
       channel: :both,
