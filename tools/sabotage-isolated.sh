@@ -74,6 +74,9 @@ fi
 
 head=$(git rev-parse HEAD)
 short=$(git rev-parse --short=12 HEAD)
+# Recorded so the post-run assertion can say WHICH paths moved, and so a
+# clean tree at the end is a comparison rather than a coincidence.
+canon_before=$(git status --porcelain)
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
 wt="$ROOT/../.super-sabotage-$short-$stamp-$$"
 evidence="$ROOT/.sabotage-runs"
@@ -120,9 +123,25 @@ fi
 # this cannot have changed; a runner that claimed isolation without checking
 # would be the same shape as a probe that claimed a check passed without
 # looking at it.
-if [ -n "$(git -C "$ROOT" status --porcelain)" ]; then
-  echo "ISOLATION FAILED: the canonical checkout changed during an isolated run" >&2
-  git -C "$ROOT" status --short >&2
+canon_after=$(git -C "$ROOT" status --porcelain)
+if [ "$canon_after" != "$canon_before" ]; then
+  # **Two different facts, and this line used to print one sentence for
+  # both** — the same conflation `tools/sabotage-scoring.sh` exists to
+  # repair, one layer up. A battery cannot reach the canonical tree: every
+  # path it edits is inside the worktree, and this runner never passes it
+  # `$ROOT`. So the overwhelmingly likely cause is somebody working in the
+  # checkout while the battery ran, which is ordinary on a box where many
+  # sessions share one tree.
+  #
+  # It is still reported and still fails, because "probably that" is not a
+  # measurement. The diff below is what tells them apart: paths the battery
+  # sabotages are source files under `ampd/lib`, `host/src`, `cockpit/`;
+  # anything else is a person.
+  echo "CANONICAL TREE MOVED during an isolated run" >&2
+  echo "  This is NOT evidence the battery reached it — it edits only inside" >&2
+  echo "  the worktree and is never given the canonical path. Concurrent" >&2
+  echo "  editing is the usual cause on a shared checkout. The paths:" >&2
+  diff <(printf '%s\n' "$canon_before") <(printf '%s\n' "$canon_after") >&2
   exit 1
 fi
 echo "# canonical checkout unchanged · $(git -C "$ROOT" rev-parse --short=12 HEAD)"

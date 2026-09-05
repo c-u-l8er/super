@@ -1624,6 +1624,130 @@ pub struct Runtime {
     released: bool,
 }
 
+/// Remove `$XDG_RUNTIME_DIR/ampd-<pid>-<stamp>` directories whose owning host
+/// is gone.
+///
+/// # What these directories are, which is less than it looks
+///
+/// `Runtime::start` creates one per runtime and `Runtime::release` removes it.
+/// **Nothing else in the tree touches one.** There is no accessor, nothing is
+/// ever written inside, and a grep across `host/`, `ampd/`, `cockpit/` and
+/// `tools/` finds exactly the two lines that make and unmake it. They are
+/// always empty — for a live runtime as much as a dead one — so "is it empty"
+/// carries no information about whether anyone is using it.
+///
+/// The sockets a reader might assume live here are somewhere else entirely:
+/// `Ampd.Transport` puts them in `$TMPDIR/ampd-pair-<rand>/<rand>.sock`, and
+/// those are made and removed on the BEAM side.
+///
+/// So the directory's only real value is diagnostic, and it is the accidental
+/// kind: **one left behind is one runtime that did not release.**
+/// `Runtime::release`'s own note records 368 of them once, alongside three
+/// occasions of orphaned BEAMs pinning 17 to 23 of 24 cores. That is a useful
+/// signal and the reason this sweeps rather than the field being deleted —
+/// but a signal nothing reads and nothing bounds is just accumulation, and
+/// the count was **502** when this was written.
+///
+/// # Why deleting one is safe, stated rather than assumed
+///
+/// The dangerous mistake would be removing a directory a live runtime needs.
+/// It cannot happen, for two independent reasons, and the second is the one
+/// that actually holds:
+///
+///   1. the pid in the name is the host process that owns the `Runtime`, so a
+///      live runtime implies a live pid, and a live pid is skipped;
+///   2. **nothing uses the directory at all** — so even in the case the first
+///      reason misses (a host that died leaving an orphaned BEAM, which is
+///      exactly the case these directories mark) removing it takes nothing
+///      away from anyone.
+///
+/// PID reuse can only make this *more* conservative: a recycled pid looks
+/// alive, and its directory is left alone.
+///
+/// # The predicates
+///
+/// All four must hold, and they are deliberately more than the argument above
+/// needs:
+///
+///   name parses as `ampd-<digits>-<digits>`   not ours otherwise
+///   the directory is empty                    never removes anything's content
+///   `/proc/<pid>` is absent                   the owner is gone
+///   mtime older than the grace period         no just-created directory, ever
+///
+/// The third is the load-bearing one. Removing it, or the fourth, turns
+/// `tools/check-runtime-dir-sweep.sh` red — measured.
+///
+/// **The second is redundant today and is kept deliberately, which is worth
+/// saying because the test cannot see it.** Removing the emptiness check
+/// alone changes nothing: `remove_dir` is not `remove_dir_all` and refuses a
+/// non-empty directory itself, so the falsifier stays green and the predicate
+/// looks dead. It is not dead, it is doubled — remove the check *and* widen
+/// the call to `remove_dir_all` and the same falsifier goes red. So the pair
+/// is load-bearing together and either half alone suffices, which is the
+/// property you want for a deletion and the reason not to "simplify" one of
+/// them away on the evidence of a green suite.
+///
+/// Failures are ignored throughout. A sweep that refused to start a runtime
+/// because it could not tidy up would be trading a real capability for
+/// housekeeping.
+fn sweep_stale_runtime_dirs(base: &Path) {
+    // **Long, because this is many concurrent sessions on one machine.** A
+    // parallel session's directory is already protected by its live pid; the
+    // grace period is the belt to that braces, and an hour of accumulation is
+    // nothing against a count that reached 502.
+    const GRACE: Duration = Duration::from_secs(3600);
+
+    let Ok(entries) = std::fs::read_dir(base) else { return };
+    let now = SystemTime::now();
+
+    for e in entries.flatten() {
+        let name = e.file_name();
+        let Some(name) = name.to_str() else { continue };
+
+        // `ampd-<pid>-<stamp>`, both numeric. `ampd-pair-*` fails this on the
+        // first field, which is the point — those belong to the BEAM and hold
+        // real sockets.
+        let Some(rest) = name.strip_prefix("ampd-") else { continue };
+        let Some((pid, stampf)) = rest.split_once('-') else { continue };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        if stampf.is_empty() || !stampf.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+
+        let p = e.path();
+        if !p.is_dir() {
+            continue;
+        }
+
+        // Empty, or leave it alone.
+        match std::fs::read_dir(&p) {
+            Ok(mut it) => {
+                if it.next().is_some() {
+                    continue;
+                }
+            }
+            Err(_) => continue,
+        }
+
+        // The owner is still here.
+        if Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+
+        // Younger than the grace period.
+        let recent = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .map(|m| now.duration_since(m).map(|d| d < GRACE).unwrap_or(true))
+            .unwrap_or(true);
+        if recent {
+            continue;
+        }
+
+        let _ = std::fs::remove_dir(&p);
+    }
+}
+
 impl Runtime {
     /// Spawn `ampd` holding one end of a sequenced-packet pair.
     ///
@@ -1637,6 +1761,10 @@ impl Runtime {
             .unwrap_or(0);
 
         let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+
+        // Before this run adds one of its own. See `sweep_stale_runtime_dirs`.
+        sweep_stale_runtime_dirs(Path::new(&base));
+
         let dir = PathBuf::from(base).join(format!("ampd-{}-{}", std::process::id(), stamp));
         std::fs::create_dir_all(&dir).map_err(|e| format!("runtime dir: {e}"))?;
 
@@ -2378,6 +2506,32 @@ pub fn cli() -> i32 {
     // Before the `ampd/` check for the same reason `effect` is: it starts no
     // runtime and reads no world. +1 subcommand on the host's surface,
     // counted; it creates no authority and adopts no channel.
+    // Diagnostic, and the only way `sweep_stale_runtime_dirs` can be
+    // falsified: it is called from `Runtime::start` against the real
+    // `$XDG_RUNTIME_DIR`, where a test may not plant fixtures. This arm runs
+    // it against a base directory the caller owns and prints what survived,
+    // so `tools/check-runtime-dir-sweep.sh` can assert exactly which entries
+    // it may and may not remove. Same shape as `carrier-orphan-fixture`.
+    if args.get(1).map(String::as_str) == Some("sweep-runtime-dirs") {
+        let Some(base) = args.get(2) else {
+            eprintln!("usage: super-host sweep-runtime-dirs <base-dir>");
+            return 2;
+        };
+        sweep_stale_runtime_dirs(Path::new(base));
+        let mut left: Vec<String> = std::fs::read_dir(base)
+            .map(|d| {
+                d.flatten()
+                    .map(|e| e.file_name().to_string_lossy().to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        left.sort();
+        for n in left {
+            println!("{n}");
+        }
+        return 0;
+    }
+
     if args.get(1).map(String::as_str) == Some("carrier-orphan-fixture") {
         let dir = std::env::temp_dir().join("super-orphan-fixture");
         let _ = std::fs::create_dir_all(&dir);

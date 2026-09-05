@@ -3540,8 +3540,23 @@ fn child_fds(fd: std::os::unix::io::RawFd) -> Vec<String> {
     }
 }
 
-/// Walk the directories a same-user process would search, and try to open
+/// Walk the directories a same-user process would search, looking for
 /// anything that looks like this runtime's.
+///
+/// **The doc used to say "and try to open".** It does not — it collects paths
+/// and returns them, and nothing in this file connects to a unix socket at
+/// all. Finding a path and being able to open it are different facts, and the
+/// stronger one is what the property wants; raising the code to meet the old
+/// comment is filed rather than done here, because it changes what a frozen
+/// assertion claims.
+///
+/// **This is O(entries in `$XDG_RUNTIME_DIR` and `/tmp`) on every call**, and
+/// it reads the contents of every `*ampd*` directory it finds. That made it
+/// quietly linear in a leak: `Runtime::start`'s per-runtime directory is
+/// removed only by `Runtime::release`, so every unclean exit left one behind
+/// and the count reached **502** before `sweep_stale_runtime_dirs` was added
+/// to bound it. Nothing here was wrong; it was doing 502 directory reads to
+/// answer a question about none of them.
 fn scan_for_sockets() -> Vec<String> {
     let mut found = Vec::new();
     let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
