@@ -130,13 +130,13 @@ defmodule Ampd.ConformanceTest do
     # A receipt attests to the authority that authorized the effect, not to
     # whatever the world looked like once the effect had spent it.
     if Map.has_key?(expect, "receipt_at_entry") do
-      r = List.last(Receipts.all())
+      r = Receipts.last_of_kind("capability-effect-receipt@1")
       want = acc.snaps[expect["receipt_at_entry"]]
       assert(r != nil and r["authority_snapshot_at_entry"] == want,
         "#{name}: receipt at_entry #{inspect(r && r["authority_snapshot_at_entry"])} want #{inspect(want)}")
     end
     if Map.has_key?(expect, "receipt_after") do
-      r = List.last(Receipts.all())
+      r = Receipts.last_of_kind("capability-effect-receipt@1")
       want = acc.snaps[expect["receipt_after"]]
       assert(r != nil and r["authority_snapshot_after"] == want,
         "#{name}: receipt after #{inspect(r && r["authority_snapshot_after"])} want #{inspect(want)}")
@@ -148,7 +148,7 @@ defmodule Ampd.ConformanceTest do
         "#{name}: effect key changed when authority did — external dedup would break")
     end
     if Map.has_key?(expect, "receipt_key_is_effect_key") do
-      r = List.last(Receipts.all())
+      r = Receipts.last_of_kind("capability-effect-receipt@1")
       assert(r != nil and r["idempotency_key"] != nil and
                r["idempotency_key"] == r["effect_key"],
         "#{name}: the receipt's idempotency key is not the effect key")

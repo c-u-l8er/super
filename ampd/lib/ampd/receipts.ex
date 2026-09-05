@@ -67,8 +67,43 @@ defmodule Ampd.Receipts do
   def load_state(s), do: ask({:load_state, s})
   def initial, do: %{"log" => [], "seq" => 7}
   def emit(m), do: ask({:emit, m})
+  @doc """
+  **Every record of every kind, in append order.**
+
+  Kept, and the name is now doing work it was not before: this is the whole
+  ledger, and after R0b.R that means more than one semantics. A caller whose
+  subject is capability effects wants `of_kind/1`; a caller measuring the
+  world's total footprint wants this.
+
+  The distinction is not academic. Six readers took
+  `List.last(Receipts.all())` and immediately read `effect_ref` or
+  `capability` off it, which is only correct while one kind exists.
+  """
   def all, do: ask(:all)
+
+  @doc "Every record of one kind, in append order."
+  def of_kind(kind), do: Enum.filter(all(), &(&1["kind"] == kind))
+
+  @doc """
+  How many records the ledger holds, of every kind.
+
+  Left alone deliberately where a caller means the world's footprint. Where
+  a caller meant "how many capability effects", it now says `count/1`.
+  """
   def count, do: length(all())
+
+  @doc "How many records of one kind."
+  def count(kind), do: length(of_kind(kind))
+
+  @doc """
+  The newest record of one kind.
+
+  Exists because `List.last(Receipts.all())` is the shape of a bug that
+  cannot happen yet: it means "the newest record is mine", which is true
+  only while one producer exists. A reader that says which kind it wants
+  keeps working when another kind is appended after it.
+  """
+  def last_of_kind(kind), do: kind |> of_kind() |> List.last()
   def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.

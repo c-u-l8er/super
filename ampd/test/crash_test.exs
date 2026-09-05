@@ -50,7 +50,7 @@ defmodule Ampd.CrashTest do
     assert Receipts.count() == 1
     kill_and_wait(Receipts, fn -> Receipts.count() end)
     assert Receipts.count() == 1, "a committed receipt vanished on restart"
-    assert hd(Receipts.all())["capability"] == "github.pr.draft"
+    assert hd(Receipts.of_kind("capability-effect-receipt@1"))["capability"] == "github.pr.draft"
   end
 
   test "pending consent is neither invented nor lost by a crash" do

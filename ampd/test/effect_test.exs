@@ -48,7 +48,7 @@ defmodule Ampd.EffectTest do
 
     assert e["state"] == "COMMITTED"
     assert Receipts.count() == 1
-    assert List.last(Receipts.all())["effect_ref"] == e["id"]
+    assert Receipts.last_of_kind("capability-effect-receipt@1")["effect_ref"] == e["id"]
   end
 
   test "the attempt record is durable before the adapter, and carries the idempotency key" do
@@ -67,7 +67,7 @@ defmodule Ampd.EffectTest do
 
     # The key an external adapter would deduplicate on is the same digest
     # consent was bound to — that is the only reason UNKNOWN is recoverable.
-    assert attempt["idempotency_key"] == List.last(Receipts.all())["idempotency_key"]
+    assert attempt["idempotency_key"] == Receipts.last_of_kind("capability-effect-receipt@1")["idempotency_key"]
   end
 
   test "an effect in flight at crash time recovers as UNKNOWN, never as committed or absent" do

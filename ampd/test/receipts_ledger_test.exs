@@ -66,6 +66,51 @@ defmodule Ampd.ReceiptsLedgerTest do
     end
   end
 
+  describe "R3/R4 · one kind cannot be mistaken for another" do
+    test "a reader of capability receipts is not fooled by a later foreign record" do
+      cap = Receipts.emit(%{"kind" => "capability-effect-receipt@1", "capability" => "github.pr.draft"})
+
+      # The shape of the whole slice, in one line: a different kind, appended
+      # afterwards. Every migrated reader used to take `List.last(all())` and
+      # would now be holding this instead.
+      _later = Receipts.emit(%{"kind" => "validation-result@1", "verdict" => "PASS"})
+
+      assert Receipts.last_of_kind("capability-effect-receipt@1")["id"] == cap["id"]
+      assert List.last(Receipts.all())["kind"] == "validation-result@1"
+    end
+
+    test "and symmetrically, a validation reader is not fooled by a later capability effect" do
+      job = Receipts.emit(%{"kind" => "validation-result@1", "verdict" => "PASS"})
+      _later = Receipts.emit(%{"kind" => "capability-effect-receipt@1", "capability" => "x"})
+
+      assert Receipts.last_of_kind("validation-result@1")["id"] == job["id"]
+    end
+
+    test "of_kind selects, and does not merely filter the newest" do
+      a = Receipts.emit(%{"kind" => "worktree_created@1"})
+      _b = Receipts.emit(%{"kind" => "capability-effect-receipt@1"})
+      c = Receipts.emit(%{"kind" => "worktree_created@1"})
+
+      assert Enum.map(Receipts.of_kind("worktree_created@1"), & &1["id"]) == [a["id"], c["id"]]
+    end
+
+    test "count/1 counts one kind and count/0 counts the ledger" do
+      Receipts.emit(%{"kind" => "capability-effect-receipt@1"})
+      Receipts.emit(%{"kind" => "validation-result@1"})
+      Receipts.emit(%{"kind" => "validation-result@1"})
+
+      assert Receipts.count("validation-result@1") == 2
+      assert Receipts.count("capability-effect-receipt@1") == 1
+      assert Receipts.count() == 3
+    end
+
+    test "an absent kind is empty, not an error" do
+      assert Receipts.of_kind("never-emitted@1") == []
+      assert Receipts.count("never-emitted@1") == 0
+      assert Receipts.last_of_kind("never-emitted@1") == nil
+    end
+  end
+
   describe "R5 · ordering survives the 10 000th record" do
     setup do
       # **Injected, not emitted, and the shape is verified against a real
