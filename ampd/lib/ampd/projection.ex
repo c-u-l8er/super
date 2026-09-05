@@ -151,6 +151,7 @@ defmodule Ampd.Projection do
       # ambiguity rather than after.
       "receipts" => window(Receipts.of_kind(Receipts.default_kind())),
       "worktree_receipts" => window(Receipts.of_kind(Ampd.Locus.receipt_kind())),
+      "validations" => window(validation_records()),
       "effects_history" => window(Enum.filter(Effects.all(), &Effects.terminal?/1))
     }
   end
@@ -342,6 +343,27 @@ defmodule Ampd.Projection do
         Receipts.of_kind(Ampd.Locus.receipt_kind())
         |> Enum.filter(&(&1["locus_actor"] == actor))
         |> window(),
+
+      # **R8 · the subject is the Worker, resolved — not a principal copied
+      # onto the record.**
+      #
+      # A validation record names `worker_ref`. Whether an agent may see it
+      # is decided by asking who that Worker belongs to, rather than by the
+      # record carrying a second copy of the actor. Two reasons, and the
+      # first is this slice's own lesson: `worktree_created@1` carries
+      # `locus_actor` and `capability-effect-receipt@1` carries `actor`, and
+      # projecting one through the other's field is what hid an agent's own
+      # worktree from it. A third denormalized principal would be inventing
+      # that divergence deliberately.
+      #
+      # The second is that a Worker can be closed and reopened, and its
+      # actor is a fact about the Worker rather than about the job. Reading
+      # it live means a job's visibility follows the position it was done
+      # at, which is where the authority to do it came from.
+      "validations" =>
+        validation_records()
+        |> Enum.filter(&(worker_actor(&1["worker_ref"]) == actor))
+        |> window(),
       # Scoped by actor like everything else here. An agent seeing another
       # actor's assignments would learn that actor's Lane ids, which is the
       # ancestry-closure rule `list_loci` already had to be taught.
@@ -366,6 +388,11 @@ defmodule Ampd.Projection do
   def history_for(:receipts, actor),
     do: Enum.filter(Receipts.of_kind(Receipts.default_kind()), &(&1["actor"] == actor))
 
+  def history_for(:validations, nil), do: validation_records()
+
+  def history_for(:validations, actor),
+    do: Enum.filter(validation_records(), &(worker_actor(&1["worker_ref"]) == actor))
+
   def history_for(:worktree_receipts, nil), do: Receipts.of_kind(Ampd.Locus.receipt_kind())
 
   def history_for(:worktree_receipts, actor),
@@ -384,6 +411,29 @@ defmodule Ampd.Projection do
       GrantRegistry.requests()
       |> Enum.reject(&(&1["status"] == "pending"))
       |> Enum.filter(&(&1["actor"] == actor))
+
+  @doc false
+  # Both validation kinds, in append order. A started record and its outcome
+  # are one story and are windowed together; splitting them would let a
+  # surface show an outcome whose start is off the end of the page.
+  def validation_records do
+    Enum.filter(
+      Receipts.all(),
+      &(&1["kind"] in [Ampd.Validation.started_kind(), Ampd.Validation.outcome_kind()])
+    )
+  end
+
+  # `nil` for a Worker that no longer exists, which therefore matches no
+  # actor — a job whose Worker is gone is not visible to somebody who
+  # happens to have no actor either.
+  defp worker_actor(nil), do: nil
+
+  defp worker_actor(ref) do
+    case Ampd.Loci.workers()[ref] do
+      %{"actor" => a} -> a
+      _ -> nil
+    end
+  end
 
   @doc """
   The **four** fields that say which world, and how current.
