@@ -34,9 +34,37 @@
 //!
 //! and nothing else. Not "roughly four descriptors": [`observe`] returns the
 //! resolved target of every open descriptor and `verify` asserts the set.
-//! Everything the host holds is `SOCK_CLOEXEC` or `O_CLOEXEC` by
-//! construction, so the allowlist is enforced by the kernel at `exec` rather
-//! than by a loop that must remember to run.
+//!
+//! **The set is established here and does not depend on the host's
+//! descriptor hygiene.** This paragraph used to read *"everything the host
+//! holds is `SOCK_CLOEXEC` or `O_CLOEXEC` by construction"* — a claim about
+//! `super-host`, which opens almost nothing, dressed as a claim about the
+//! host *role*. It is false for any process that links `super_host`
+//! alongside something else, and the first one that did — the cockpit, a
+//! Tauri/GTK/WebKit process holding eight non-`CLOEXEC` descriptors above
+//! fd 3 — could not start a Carrier at all: the floor refused
+//! `observed:descriptor_set_exact`, correctly, and the sentence above is
+//! what had made the defect invisible until a host that was not
+//! `super-host` existed to expose it. D.1.3b·2f.
+//!
+//! What `pre_exec` now does instead, in order:
+//!
+//! ```text
+//! ensure_std_fds()          0/1/2 exist
+//! seal_inheritance(4)       every fd >= 4 marked close-on-exec
+//! setsid / TIOCSCTTY        the terminal relationship, if there is one
+//! dup_onto(slave, 0/1/2)    ─┐
+//! dup_onto(control, 3)       ├ the Carrier's possessions, rescued by name
+//! dup_onto(extra…)          ─┘  (`dup_onto` clears CLOEXEC on its target)
+//! prepared.install()        Landlock + seccomp, the ruleset still live
+//! execve                    the kernel closes everything unrescued
+//! ```
+//!
+//! A descriptor is inherited **because it was explicitly placed**, not
+//! because a parent forgot a flag. The kernel still enforces the allowlist
+//! at `exec` rather than a loop that must remember to run — but what it
+//! enforces is now a decision this file made, rather than an accident of
+//! whichever executable is running.
 
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
@@ -314,6 +342,35 @@ pub fn spawn_with(
     extra_fds: &[(RawFd, RawFd)],
     mut pty: Option<crate::pty::Pty>,
 ) -> Result<Carrier, String> {
+    // **Refused before anything is placed, because after placement the
+    // damage is already done.** D.1.3b·2f·E.
+    //
+    // `confine::RULESET_FD_FLOOR` says the Landlock ruleset lives above
+    // every number the Carrier's allowlist can name. Nothing enforced the
+    // second half of that: `extra_fds` names its own target, and
+    // `dup_onto(src, 64)` would land on top of the ruleset — after which
+    // `prepared.install` hands `landlock_restrict_self` a socket and the
+    // confinement fails from inside `pre_exec`, which this tree has already
+    // been bitten by once (see that constant's own docs).
+    //
+    // The refusal is narrow on purpose. Every extra_fd that exists today is
+    // adversarial-by-design and low-numbered — fd 9 for the inherited
+    // pre-open falsifier, fd 0 for the split-stdio falsifier — and all of
+    // them stay legal. Relocating the ruleset dynamically above whatever a
+    // caller asked for would be more mechanism defending a vocabulary
+    // nothing uses.
+    for (_, to) in extra_fds.iter() {
+        if *to < 0 || *to >= confine::RULESET_FD_FLOOR {
+            return Err(format!(
+                "carrier extra descriptor target {to} is outside the allowlist range \
+                 0..{} — the confinement's own ruleset lives at or above {}, and a \
+                 placement there would overwrite the thing enforcing the policy",
+                confine::RULESET_FD_FLOOR,
+                confine::RULESET_FD_FLOOR,
+            ));
+        }
+    }
+
     let payload_s = payload
         .canonicalize()
         .map_err(|e| format!("carrier payload {}: {e}", payload.display()))?;
@@ -377,6 +434,20 @@ pub fn spawn_with(
                 // 3. `install` last of all, so nothing between it and `exec`
                 //    needs an authority the policy denies.
                 fdpass::ensure_std_fds()?;
+
+                // **Everything above the base dies at `exec` unless it is
+                // rescued below.** D.1.3b·2f, and the reason it is *here*
+                // rather than after the placements: the placements are the
+                // rescue, and a seal that ran after them would re-mark the
+                // descriptors they just made inheritable.
+                //
+                // 4 and not 3: 0/1/2 were set by `Command`'s own stdio
+                // handling before this closure ran and by `ensure_std_fds`
+                // above, and 3 is overwritten unconditionally by the
+                // control-channel `dup_onto` a few lines down — `dup2`
+                // closes its target atomically, so whatever a careless host
+                // left at 3 is replaced rather than inherited.
+                fdpass::seal_inheritance(4)?;
 
                 // **The host establishes the terminal relationship; the
                 // payload is then denied the means to.** D.1.3c·1.

@@ -853,6 +853,116 @@ fn seed_fixture(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
     Ok((kestrel, request_id))
 }
 
+/// D.1.3b·2f — **the product witness: this process, holding whatever GTK
+/// and WebKit opened, starts a real Carrier.**
+///
+/// `super-host verify` has driven this same chain since D.1.3a and it
+/// proved nothing about the host *role*, because `super-host` is a tiny
+/// executable that opens almost nothing. The cockpit is the first host that
+/// is not, and the first Carrier it ever tried to start was refused
+/// `observed:descriptor_set_exact` — eight non-`CLOEXEC` descriptors on
+/// `/dev/urandom`, `/proc/meminfo`, `/proc/zoneinfo` and this process's own
+/// cgroup limits, inherited straight through `exec` into a process the
+/// floor confines to four.
+///
+/// **The chain that found that was not committed, so the finding could not
+/// be re-run.** This is it, committed and behind its own flag. It makes no
+/// measurement: the census is taken from outside, by whoever is watching
+/// `/proc`, exactly as `carrier.rs` requires of every other Carrier
+/// observation. All this does is reach the state worth measuring.
+///
+/// Gated on `SUPER_COCKPIT_CARRIER=1` and on the fixture's own world rule,
+/// because it registers a repository and opens a Workspace — real world
+/// content, which must never land in the world a person uses.
+fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
+    if !fixture_allowed(&rt.world()) {
+        return Err("the carrier fixture is refused against a world it did not create".into());
+    }
+
+    let repo = rt.world().path().join("d13b2f-repo");
+    std::fs::create_dir_all(&repo).map_err(|e| format!("repo dir: {e}"))?;
+    for args in [
+        &["init", "-q", "-b", "main"][..],
+        &["config", "user.email", "d13b2f@example.invalid"][..],
+        &["config", "user.name", "D13b2f"][..],
+        &["config", "commit.gpgsign", "false"][..],
+        &["add", "-A"][..],
+        &["commit", "-q", "--allow-empty", "-m", "init"][..],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C").arg(&repo).args(args)
+            .output().map(|o| o.status.success()).unwrap_or(false);
+        if !ok {
+            return Err(format!("git {args:?} failed in {}", repo.display()));
+        }
+    }
+
+    // The capability pack and the repository are BRIDGE calls, not channel
+    // commands — `Ampd.Transport` says why: registering a path to trust is
+    // a host-level decision, and the bridge is reachable only by the
+    // process the runtime was born holding a descriptor to.
+    let packed = rt.bridge_call(&json!({
+        "schema": "bridge-command@1", "command": "install_pack", "pack": "worktree"
+    })).map_err(|e| format!("install_pack: {e}"))?;
+    if packed["ok"] != true {
+        return Err(format!("install_pack refused: {packed}"));
+    }
+    let reg = rt.bridge_call(&json!({
+        "schema": "bridge-command@1", "command": "register_repository",
+        "path": repo.to_string_lossy()
+    })).map_err(|e| format!("register_repository: {e}"))?;
+    let repo_ref = reg["repository"]["ref"].as_str().unwrap_or("").to_string();
+    if repo_ref.is_empty() {
+        return Err(format!("no repository ref in {reg}"));
+    }
+
+    // The human opens the position; the agent occupies it. Two channels,
+    // and the split is the authority argument rather than a convention.
+    let ctl = rt.control_channel().map_err(|e| format!("control channel: {e}"))?;
+    let id = |v: &Value, k: &str| v["result"][k]["id"].as_str().unwrap_or("").to_string();
+
+    let ws = ctl.call("open_workspace", json!({"name": "d13b2f"}))
+        .map_err(|e| format!("open_workspace: {e}"))?;
+    let goal = ctl.call("open_goal", json!({
+        "workspace_ref": id(&ws, "workspace"), "title": "the carrier descriptor witness"
+    })).map_err(|e| format!("open_goal: {e}"))?;
+    let lane = ctl.call("open_lane", json!({
+        "goal_ref": id(&goal, "goal"), "actor": "kestrel",
+        "repository_ref": repo_ref, "base_revision": Value::Null
+    })).map_err(|e| format!("open_lane: {e}"))?;
+    let lane_id = id(&lane, "lane");
+    let worker = ctl.call("open_worker", json!({
+        "locus_ref": lane_id, "purpose": "carry"
+    })).map_err(|e| format!("open_worker: {e}"))?;
+    let worker_id = id(&worker, "worker");
+    if lane_id.is_empty() || worker_id.is_empty() {
+        return Err(format!("lane={lane} worker={worker}"));
+    }
+
+    let agent = rt.agent_channel("kestrel").map_err(|e| format!("agent channel: {e}"))?;
+    let _ = agent.call("attach_worker", json!({"worker_ref": worker_id}))
+        .map_err(|e| format!("attach_worker: {e}"))?;
+    let started = agent.call("start_carrier", json!({"locus_ref": lane_id}))
+        .map_err(|e| format!("start_carrier: {e}"))?;
+
+    let inc = &started["result"]["carrier"];
+    if started["result"]["allow"] == true && inc["status"] == "RUNNING" {
+        // **The channel is handed back, not dropped** — the same rule
+        // `seed_fixture` states above it. A Carrier is bound to the Peer
+        // that started it, so closing this connection here would have the
+        // runtime reap the Carrier out from under whoever came to measure
+        // it, and the witness would report a process that was already gone.
+        Ok((agent, inc["carrier_ref"].as_str().unwrap_or("").to_string()))
+    } else {
+        Err(format!("start_carrier refused: {started}"))
+    }
+}
+
+/// Whether the D.1.3b·2f product witness runs at startup.
+pub fn carrier_witness() -> bool {
+    std::env::var("SUPER_COCKPIT_CARRIER").as_deref() == Ok("1")
+}
+
 /// Extra pending grant requests, so a frame can be measured on the far side
 /// of Tauri's Channel size threshold.
 ///
@@ -1120,6 +1230,21 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
         }
         Err(e) => eprintln!("cockpit: carrier channel UNAVAILABLE: {e}"),
     }
+
+    let _witness = if carrier_witness() {
+        match seed_carrier(&rt) {
+            Ok((chan, cr)) => {
+                eprintln!("cockpit: D.1.3b·2f witness — carrier {cr} is RUNNING");
+                Some(chan)
+            }
+            Err(e) => {
+                eprintln!("cockpit: D.1.3b·2f witness FAILED — {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
 
     let seeded = if cfg.fixture { seed_fixture(&rt).ok() } else { None };
     let (_kestrel, fixture_request) = match seeded {

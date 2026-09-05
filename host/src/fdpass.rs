@@ -22,6 +22,12 @@ extern "C" {
     fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
     fn dup2(old: i32, new: i32) -> i32;
     fn shutdown(fd: i32, how: i32) -> i32;
+    /// Variadic, exactly as `confine.rs` declares it and for the same
+    /// reason: `close_range(2)` is reached as a raw syscall rather than
+    /// through glibc's wrapper, so the failure this floor must not survive
+    /// — the kernel not having it — arrives as `ENOSYS` from the kernel
+    /// instead of as whatever a libc chose to do about it.
+    fn syscall(num: i64, ...) -> i64;
 }
 
 const SHUT_RDWR: i32 = 2;
@@ -53,6 +59,12 @@ const SCM_RIGHTS: i32 = 1;
 const F_SETFD: i32 = 2;
 const F_GETFD: i32 = 1;
 const FD_CLOEXEC: i32 = 1;
+
+/// `close_range(2)` — x86-64 syscall 436, Linux 5.9.
+const SYS_CLOSE_RANGE: i64 = 436;
+/// `CLOSE_RANGE_CLOEXEC` — Linux 5.11. **Marks the range close-on-exec; it
+/// does not close it.** That distinction is the whole of `seal_inheritance`.
+const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
 
 #[repr(C)]
 struct IoVec {
@@ -143,6 +155,66 @@ pub fn is_cloexec(fd: RawFd) -> bool {
 /// Everything else is close-on-exec from the moment it exists.
 pub fn make_inheritable(fd: RawFd) -> io::Result<()> {
     if unsafe { fcntl(fd, F_SETFD, 0) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Mark **every** descriptor at or above `first` close-on-exec, in the
+/// child, before anything is placed.
+///
+/// # The invariant this establishes, and the one it replaces
+///
+/// The old claim was about a binary: *everything the host holds is
+/// `SOCK_CLOEXEC` or `O_CLOEXEC` by construction*. That is true of
+/// `super-host`, which opens almost nothing, and **false of the host role**.
+/// A process that links `super_host` alongside GTK/WebKit gets descriptors
+/// it never asked for — measured on the cockpit: 56 open, 11 without
+/// `O_CLOEXEC`, eight of them above fd 3, on `/dev/urandom`, `/proc/meminfo`,
+/// `/proc/zoneinfo` and the host's own cgroup limits. Every one of those
+/// would have been inherited into a process the floor confines to four, and
+/// Landlock cannot reach an already-open descriptor.
+///
+/// The new claim is about the spawn path:
+///
+/// > A Carrier's inherited descriptor set is established by this code, not
+/// > by the descriptor hygiene of whatever executable happens to be the
+/// > host. Everything above the base is marked for death; the Carrier's
+/// > possessions are then rescued, one `dup_onto` at a time.
+///
+/// # Why the flag and not a close
+///
+/// `CLOSE_RANGE_CLOEXEC` sets `FD_CLOEXEC` across the range and closes
+/// nothing, which is load-bearing three times over:
+///
+/// 1. `Prepared`'s Landlock ruleset lives above the allowlist and must
+///    still be a live descriptor when `install` runs, *after* this.
+/// 2. The PTY slave, the control channel and every `extra_fds` source are
+///    read by `dup_onto` after this line; closing them would make the
+///    Carrier's own possessions unreachable.
+/// 3. `std::process::Command` keeps a `CLOEXEC` pipe open across the fork
+///    and detects a successful `exec` by that pipe closing — a blind sweep
+///    closes it, and a `pre_exec` that then fails reports **nothing** to
+///    the parent. The sweep would break the reporting of its own breakage.
+///
+/// # Failure is a refusal, not a warning
+///
+/// A Carrier whose descriptor table cannot be bounded must not start. There
+/// is no "sealing unavailable, continue anyway" path: the error propagates
+/// out of `pre_exec` and the spawn fails, which is the same shape the floor
+/// would have refused it in — one step earlier and by a better name.
+///
+/// Runs after `fork`, before `exec`: one syscall, no allocation.
+pub fn seal_inheritance(first: RawFd) -> io::Result<()> {
+    let rc = unsafe {
+        syscall(
+            SYS_CLOSE_RANGE,
+            first as u32 as i64,
+            u32::MAX as i64,
+            CLOSE_RANGE_CLOEXEC as i64,
+        )
+    };
+    if rc != 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())

@@ -668,6 +668,56 @@ probe "an attachment ref minted narrower than its source is noticed" \
   host/src/attach.rs \
   's|format!("ta_{}", crate::new_epoch())|format!("ta_{}", \&crate::new_epoch()[..12])|'
 
+# ------------------------------------------------ D.1.3b·2f · the seal
+#
+# 46-49 · The Carrier descriptor floor stopped depending on which executable
+#         is the host. The four probes below are the four ways to undo that,
+#         and each names a different check, because they are four different
+#         properties wearing one repair.
+#
+# 46 · The seal itself. This is the pre-2f tree exactly: no `close_range`,
+#      and the child's descriptor table is whatever the parent's hygiene
+#      left it. `super-host` passes anyway — it opens almost nothing — so
+#      the probe has to be the *harness's own* deliberately-leaked
+#      descriptor, which is why the ambient check runs after the leak
+#      instead of before it. The comment this replaces in `verify.rs` called
+#      that ordering a harness bug and moved the control earlier.
+probe "a Carrier spawned without the inheritance seal is noticed" \
+  "does NOT reach the Carrier" \
+  host/src/carrier.rs \
+  's|                fdpass::seal_inheritance(4)?;|                let _: i32 = 4;|'
+
+# 47 · `CLOSE_RANGE_CLOEXEC` → a blind close. The flag is the whole
+#      distinction: the ruleset must still be a live descriptor when
+#      `install` runs. A blind sweep closes it, `landlock_restrict_self`
+#      gets `EBADF`, and the Carrier is either refused at spawn or runs
+#      unconfined — the differential catches both, because a probe that
+#      never started writes no row to compare.
+probe "a seal that CLOSES instead of marking is noticed" \
+  "still REFUSED a path the bare control reached" \
+  host/src/fdpass.rs \
+  's|            CLOSE_RANGE_CLOEXEC as i64,|            0i64,|'
+
+# 48 · `dup_onto` reduced to a bare `dup2`. Correct for every target the
+#      tree has ever used, and wrong for exactly one: `dup2(n, n)` is a
+#      documented no-op, so a possession placed on its own number keeps the
+#      `FD_CLOEXEC` the seal gave it and dies at `exec`. The seal is what
+#      turned this line from redundancy into mechanism.
+probe "a dup_onto that trusts dup2 to clear CLOEXEC is noticed" \
+  "placed on its OWN number survives" \
+  host/src/fdpass.rs \
+  's|^    make_inheritable(target)$|    Ok(())|'
+
+# 49 · The extra-target guard. `RULESET_FD_FLOOR`'s own doc says the ruleset
+#      "sits above every number the Carrier's descriptor allowlist can
+#      name", and until 2f that was a description of the falsifiers'
+#      habits — they use fd 9 — rather than a rule. Removing the refusal
+#      lets a caller place a descriptor on top of the live ruleset.
+probe "an extra descriptor target that can overwrite the ruleset is noticed" \
+  "refused before placement" \
+  host/src/carrier.rs \
+  's|        if \*to < 0 \|\| \*to >= confine::RULESET_FD_FLOOR {|        if false {|'
+
 # NOT probed, and not counted — recorded rather than left as a silence.
 #
 #   `Carrier::terminate`'s call to `Attachment::settle`. **This probe was

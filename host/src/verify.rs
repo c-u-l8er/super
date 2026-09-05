@@ -2803,6 +2803,201 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         format!("the production path inherited {clean_fds:?} with CLOEXEC intact"),
     );
 
+    // ------------------------------------- D.1.3b·2f · the seal, measured
+    //
+    // **The comment above this pair records the defect and calls it a
+    // harness bug.** *"the first version of this check ran AFTER the leak
+    // was set up and went red, because the harness's own leaked descriptor
+    // reached the Carrier. The check was correct; the thing it caught was
+    // the test."* It was not the test. `leak_fd` is a non-`CLOEXEC`
+    // descriptor at its own natural number, and it reached the Carrier
+    // because nothing in the spawn path stopped it — which is exactly what
+    // the cockpit later hit with eight of them at once. The control was
+    // moved earlier and the floor kept its false claim for a revision.
+    //
+    // These four checks are that finding turned into instruments. They run
+    // HERE, deliberately after the leak exists, because the whole property
+    // is that the order no longer matters.
+    let ambient = leak_fd;
+    let ambient_state = crate::fdpass::fd_state(ambient);
+    b.check(
+        "the ambient-descriptor probe really is ambient — open, above 3, and NOT close-on-exec",
+        ambient_state == crate::fdpass::FdState::Inheritable && ambient > 3,
+        format!("fd {ambient} is {ambient_state:?}; without this the two checks below prove nothing"),
+    );
+
+    // 1 · it must die. An ordinary Carrier, spawned with NO extra_fds,
+    //     while the host holds an inheritable descriptor it never mentioned.
+    let ambient_fds: Vec<i32> = {
+        let r = carrier::spawn(&fixture, &dir, &dir.join("f4.log"), &crate::new_epoch(), None);
+        match r {
+            Ok(mut r) => {
+                let f = r.observe().fds.keys().copied().collect();
+                r.terminate(2_000);
+                f
+            }
+            Err(e) => {
+                b.check("the ambient-inheritance falsifier could spawn a Carrier", false, e);
+                vec![-1]
+            }
+        }
+    };
+    b.check(
+        "an ambient inheritable descriptor the host never named does NOT reach the Carrier",
+        ambient_fds == vec![0, 1, 2, 3],
+        format!(
+            "the Carrier observed {ambient_fds:?} while fd {ambient} was inheritable in the host              — the descriptor set is following the host's hygiene, not the spawn path's seal"
+        ),
+    );
+
+    // 2 · the explicit one must live, and ONLY at the number it was placed
+    //     on. A repair that sanitised indiscriminately would make check 1
+    //     green by destroying the inherited-pre-open falsifier, and that
+    //     falsifier is the only thing that proves Landlock does not reach an
+    //     already-open descriptor.
+    let placed_fds: std::collections::BTreeMap<i32, String> = {
+        let r = carrier::spawn_with(
+            &fixture, &dir, &dir.join("f5.log"), &crate::new_epoch(), None, &[],
+            &[(ambient, 9)], None,
+        );
+        match r {
+            Ok(mut r) => {
+                let f = r.observe().fds;
+                r.terminate(2_000);
+                f
+            }
+            Err(_) => Default::default(),
+        }
+    };
+    let placed: Vec<i32> = placed_fds.keys().copied().collect();
+    b.check(
+        "an explicitly placed descriptor survives, at its target and nowhere else",
+        placed == vec![0, 1, 2, 3, 9],
+        format!(
+            "expected [0, 1, 2, 3, 9], observed {placed:?} — either the placement was              sanitised away or the source number {ambient} came along with it"
+        ),
+    );
+
+    // 2b · **and the seal makes `dup_onto`'s `make_inheritable` load-bearing
+    //      for the first time.** `dup2(2)` clears `FD_CLOEXEC` on its target
+    //      — except in the one case Linux defines as a no-op, `oldfd ==
+    //      newfd`. Before the seal that did not matter: a caller reached
+    //      `extra_fds` only by having already cleared the flag itself, so a
+    //      same-number placement was inheritable before `dup_onto` touched
+    //      it and the trailing `make_inheritable` was belt-and-braces. After
+    //      the seal it is the only thing standing between an in-place
+    //      possession and the kernel closing it, and a reader simplifying
+    //      `dup_onto` down to a bare `dup2` would take it out.
+    //
+    //      The number is chosen rather than inherited: `ambient` is wherever
+    //      the OS put it, and a check that quietly skips when that number
+    //      lands above the reserved floor is a check reporting green for not
+    //      having run.
+    let inplace: Option<i32> = (4..confine::RULESET_FD_FLOOR)
+        .find(|n| crate::fdpass::fd_state(*n) == crate::fdpass::FdState::Closed)
+        .filter(|n| crate::fdpass::dup_onto(ambient, *n).is_ok());
+    let inplace_fds: Vec<i32> = match inplace {
+        Some(n) => {
+            let r = carrier::spawn_with(
+                &fixture, &dir, &dir.join("f8.log"), &crate::new_epoch(), None, &[],
+                &[(n, n)], None,
+            );
+            match r {
+                Ok(mut r) => {
+                    let f = r.observe().fds.keys().copied().collect();
+                    r.terminate(2_000);
+                    f
+                }
+                Err(_) => vec![-1],
+            }
+        }
+        None => vec![-2],
+    };
+    b.check(
+        "a possession placed on its OWN number survives — dup2(n, n) is a no-op and the seal has already marked it",
+        matches!(inplace, Some(n) if inplace_fds == vec![0, 1, 2, 3, n]),
+        format!("placed at {inplace:?}, the Carrier observed {inplace_fds:?}"),
+    );
+
+    // 3 · the seal marks the Landlock ruleset close-on-exec and does not
+    //     close it — measured by the domain BITING, not by a status field.
+    //
+    //     **The first version of this check asked `/proc/<pid>/status` for a
+    //     `Landlock:` line and went red on a Carrier that was correctly
+    //     confined.** This kernel does not publish that field — there is no
+    //     such line in `/proc/self/status` on 7.2.2 with
+    //     `CONFIG_SECURITY_LANDLOCK=y` and ABI 10 — so `observe`'s
+    //     `landlock_domain` is `false` for every process on this host and
+    //     always has been. That is why nothing else in this file reads it,
+    //     and `carrier.rs` says why in its own words beside where the field
+    //     is computed: Landlock is **host-attested**, and this battery is
+    //     the out-of-band proof that the attestation corresponds to
+    //     something. A check that believed the attestation's own field
+    //     would have been the error the module header already names.
+    //
+    //     So this is a differential, run through the seal: the confined
+    //     probe must be REFUSED a path the bare control reached. If the
+    //     seal closed the ruleset, `landlock_restrict_self` gets `EBADF`,
+    //     `install` fails inside `pre_exec`, and the spawn does not happen
+    //     at all — which this also catches, because a probe that never ran
+    //     leaves no row.
+    let sealed_probe = {
+        let sdir = dir.join("sealed");
+        let _ = std::fs::create_dir_all(&sdir);
+        let slog = sdir.join("sealed.log");
+        let sargs = [me.to_string(), "-1".to_string(), sdir.to_string_lossy().to_string()];
+        let pol = confine::Policy::minimal(&sdir.to_string_lossy(), &probe.to_string_lossy());
+        match carrier::spawn_with(
+            &probe, &sdir, &slog, &crate::new_epoch(), Some(pol),
+            &sargs.iter().map(|s| s.to_string()).collect::<Vec<_>>(), &[], None,
+        ) {
+            Ok(mut c) => {
+                std::thread::sleep(std::time::Duration::from_millis(900));
+                c.terminate(2_000);
+                parse_probe_log(&slog)
+            }
+            Err(e) => {
+                b.check(
+                    "the sealed-Landlock differential could spawn its probe at all",
+                    false,
+                    format!("{e} — if `install` refused, the seal closed the ruleset"),
+                );
+                Default::default()
+            }
+        }
+    };
+    let sealed_fs = sealed_probe.get("open_etc_passwd").copied();
+    let bare_fs = bare.get("open_etc_passwd").copied();
+    b.check(
+        "the ruleset survives the seal — a Carrier spawned through it is still REFUSED a path the bare control reached",
+        matches!(sealed_fs, Some((false, _))) && matches!(bare_fs, Some((true, _))),
+        format!("sealed={sealed_fs:?} bare={bare_fs:?} — the seal marks the ruleset close-on-exec and must not close it; `install` needs it live"),
+    );
+
+    // 4 · the vocabulary cannot name the ruleset's own number. Refused
+    //     before placement, so the failure is a typed message rather than a
+    //     Carrier that ran unconfined.
+    let collide_why = match carrier::spawn_with(
+        &fixture, &dir, &dir.join("f7.log"), &crate::new_epoch(), None, &[],
+        &[(ambient, confine::RULESET_FD_FLOOR)], None,
+    ) {
+        Err(e) => e,
+        Ok(mut c) => {
+            let pid = c.pid;
+            c.terminate(2_000);
+            format!("ACCEPTED — it spawned pid {pid}")
+        }
+    };
+    b.check(
+        "an extra descriptor target at the reserved ruleset floor is refused before placement",
+        collide_why.contains("outside the allowlist range"),
+        format!(
+            "target {} — `dup_onto` would have overwritten the live ruleset and `install` \
+             would have restricted against whatever landed there. Said: {collide_why}",
+            confine::RULESET_FD_FLOOR,
+        ),
+    );
+
     // Same-UID theft: attributable by errno, NOT by differential, and the
     // difference is the check.
     for name in ["ptrace_attach_host", "pidfd_getfd_host_fd3"] {

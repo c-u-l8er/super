@@ -96,7 +96,18 @@ const F_DUPFD_CLOEXEC: i32 = 1030;
 /// descriptor is subject to the descriptor policy it is installing.** Any
 /// host-side descriptor that must survive into `pre_exec` has to live above
 /// the allowlist, or the allowlist will overwrite the thing enforcing it.
-const RULESET_FD_FLOOR: i32 = 64;
+///
+/// **`pub` because the rule has to be checkable from the side that could
+/// break it.** D.1.3b·2f: the sentence above — *"moved above every number
+/// the Carrier's descriptor allowlist can name"* — was a description of a
+/// habit, not a mechanism. `spawn_with`'s `extra_fds` takes an arbitrary
+/// target number, so a caller naming 64 would have had `dup_onto` overwrite
+/// the live ruleset and `install` would then hand `landlock_restrict_self`
+/// whatever that descriptor had become. Exporting the floor is what lets
+/// [`crate::carrier::spawn_with`] refuse such a target *before* any
+/// placement happens, which makes the sentence true structurally instead of
+/// true by the falsifiers happening to use fd 9.
+pub const RULESET_FD_FLOOR: i32 = 64;
 
 fn relocate_above_allowlist(fd: i32) -> Result<i32, String> {
     let hi = unsafe { fcntl(fd, F_DUPFD_CLOEXEC, RULESET_FD_FLOOR) };
