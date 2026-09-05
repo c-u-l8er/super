@@ -364,8 +364,33 @@ ExUnit multi-seed         seeds 0 · 424242 · 909090 — 666/0 each, retained
 static gates                8 held ·  0 failed · 0 could not run
 scope-manifest vectors     12 held ·  0 failed
 sabotage-validation        25 caught · 0 NOT A FALSIFIER · 0 unapplied
-host sabotage (isolated)  baseline 319/0, in a worktree the canonical tree is not
+host sabotage (isolated)   55 falsified ·  0 did not · 0 could not ask (baseline 319/0)
 ```
+
+### the host battery, and a rule this session broke
+
+`tools/sabotage-isolated.sh tools/sabotage-host.sh` ran at `0efaa4a` and
+reported **55 falsified · 0 did not · 0 could not ask their question**, on a
+`319 held · 0 failed` unsabotaged baseline — the same figures Phase A was
+FINAL-FROZEN at. It measured **this** host: `git diff 0efaa4a..HEAD -- host/`
+is empty, which is the check the bundle generator makes rather than trusting
+the commits to be equal.
+
+It also ended with:
+
+```text
+CANONICAL TREE MOVED during an isolated run
+  This is NOT evidence the battery reached it — it edits only inside
+  the worktree and is never given the canonical path. Concurrent
+  editing is the usual cause on a shared checkout.
+```
+
+The concurrent editor was this session, committing while the battery ran —
+against a rule it had already written down. The harness is right about what it
+means: it works in `../.super-sabotage-<sha>-<stamp>` and is never handed the
+canonical path, so the verdict stands. Recording the warning rather than
+suppressing it is the point of it existing, and the honest version of this
+section says who moved the tree.
 
 The seed battery keeps what happened — one directory per run holding commit,
 tree, seed, both timestamps, exit status, summary, full stdout, and an orphan-
