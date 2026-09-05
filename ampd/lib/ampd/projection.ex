@@ -136,7 +136,21 @@ defmodule Ampd.Projection do
       "runtime" => runtime_status(),
 
       # --- history: a window, and the size of what it looks onto --------
-      "receipts" => window(Receipts.all()),
+      #
+      # **One key per record kind, because one key per ledger is how a kind
+      # comes to be read as another.** This was `window(Receipts.all())`,
+      # and it was already wrong before any validation record existed: the
+      # ledger holds `capability-effect-receipt@1` AND `worktree_created@1`,
+      # and they share almost no fields. Anything rendering this key as
+      # capability history was rendering worktree establishments as
+      # capability effects with every one of those fields missing.
+      #
+      # Nothing renders it today — the cockpit reads only `grants` and
+      # `workers`, and the prototype page keeps its own client-side log — so
+      # this is the moment to split it, before a renderer inherits the
+      # ambiguity rather than after.
+      "receipts" => window(Receipts.of_kind(Receipts.default_kind())),
+      "worktree_receipts" => window(Receipts.of_kind(Ampd.Locus.receipt_kind())),
       "effects_history" => window(Enum.filter(Effects.all(), &Effects.terminal?/1))
     }
   end
@@ -308,7 +322,26 @@ defmodule Ampd.Projection do
       # receipts also only ever grow.
       "effects" => Effects.all() |> mine.() |> Enum.reject(&Effects.terminal?/1),
       "effects_history" => Effects.all() |> mine.() |> Enum.filter(&Effects.terminal?/1) |> window(),
-      "receipts" => Receipts.all() |> mine.() |> window(),
+      # Capability receipts carry a top-level `actor`; this is the filter
+      # they were designed for.
+      "receipts" => Receipts.of_kind(Receipts.default_kind()) |> mine.() |> window(),
+
+      # **Worktree receipts name their principal `locus_actor`, not
+      # `actor`.** So `mine.()` never matched one, and an agent has been
+      # unable to see the establishment of its own worktree for as long as
+      # both kinds have shared this key — silently, because the filter
+      # returning nothing looks exactly like there being nothing.
+      #
+      # Fixed by projecting the kind through its OWN subject rather than by
+      # copying `locus_actor` into `actor` to make the existing filter
+      # match. The two fields mean different things — one is the principal
+      # who caused an effect, the other is the actor a Lane belongs to — and
+      # collapsing them to fix a projection would lose that distinction
+      # everywhere else it is read.
+      "worktree_receipts" =>
+        Receipts.of_kind(Ampd.Locus.receipt_kind())
+        |> Enum.filter(&(&1["locus_actor"] == actor))
+        |> window(),
       # Scoped by actor like everything else here. An agent seeing another
       # actor's assignments would learn that actor's Lane ids, which is the
       # ancestry-closure rule `list_loci` already had to be taught.
@@ -328,8 +361,15 @@ defmodule Ampd.Projection do
   them needs a command that can follow it — a cursor with nothing to give
   it to is a promise the protocol does not keep.
   """
-  def history_for(:receipts, nil), do: Receipts.all()
-  def history_for(:receipts, actor), do: Enum.filter(Receipts.all(), &(&1["actor"] == actor))
+  def history_for(:receipts, nil), do: Receipts.of_kind(Receipts.default_kind())
+
+  def history_for(:receipts, actor),
+    do: Enum.filter(Receipts.of_kind(Receipts.default_kind()), &(&1["actor"] == actor))
+
+  def history_for(:worktree_receipts, nil), do: Receipts.of_kind(Ampd.Locus.receipt_kind())
+
+  def history_for(:worktree_receipts, actor),
+    do: Enum.filter(Receipts.of_kind(Ampd.Locus.receipt_kind()), &(&1["locus_actor"] == actor))
 
   def history_for(:effects, nil), do: Enum.filter(Effects.all(), &Effects.terminal?/1)
 

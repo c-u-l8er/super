@@ -111,6 +111,66 @@ defmodule Ampd.ReceiptsLedgerTest do
     end
   end
 
+  describe "R6 · one key per kind" do
+    test "the operator's receipts key holds capability effects only" do
+      Receipts.emit(%{"kind" => "capability-effect-receipt@1", "capability" => "x"})
+      Receipts.emit(%{"kind" => "worktree_created@1", "locus_actor" => "kestrel"})
+      Receipts.emit(%{"kind" => "validation-result@1"})
+
+      p = Projection.operator()
+      kinds = p["receipts"]["recent"] |> Enum.map(& &1["kind"]) |> Enum.uniq()
+
+      assert kinds == ["capability-effect-receipt@1"]
+      assert p["receipts"]["total"] == 1
+    end
+
+    test "worktree receipts get their own key rather than being rendered as effects" do
+      Receipts.emit(%{"kind" => "worktree_created@1", "locus_actor" => "kestrel"})
+      p = Projection.operator()
+
+      assert p["worktree_receipts"]["total"] == 1
+      assert hd(p["worktree_receipts"]["recent"])["kind"] == "worktree_created@1"
+    end
+
+    test "an agent sees its OWN worktree receipt — it never could before", %{} do
+      # `worktree_created@1` names its principal `locus_actor`, and the
+      # agent filter matched on `actor`. The filter returning nothing looks
+      # identical to there being nothing, which is why this went unnoticed.
+      Receipts.emit(%{"kind" => "worktree_created@1", "locus_actor" => "kestrel"})
+      Receipts.emit(%{"kind" => "worktree_created@1", "locus_actor" => "someone-else"})
+
+      p = Projection.agent("kestrel")
+
+      assert p["worktree_receipts"]["total"] == 1
+      assert hd(p["worktree_receipts"]["recent"])["locus_actor"] == "kestrel"
+    end
+
+    test "and still cannot see another actor's" do
+      Receipts.emit(%{"kind" => "worktree_created@1", "locus_actor" => "someone-else"})
+      assert Projection.agent("kestrel")["worktree_receipts"]["total"] == 0
+    end
+
+    test "a validation record appears in NEITHER existing surface" do
+      # R7 gives it its own. Until then it must not leak into a surface a
+      # renderer would read as capability or worktree history.
+      Receipts.emit(%{"kind" => "validation-result@1", "verdict" => "PASS"})
+
+      op = Projection.operator()
+      assert op["receipts"]["total"] == 0
+      assert op["worktree_receipts"]["total"] == 0
+    end
+
+    test "history_for is typed the same way" do
+      Receipts.emit(%{"kind" => "capability-effect-receipt@1", "actor" => "kestrel"})
+      Receipts.emit(%{"kind" => "worktree_created@1", "locus_actor" => "kestrel"})
+
+      assert length(Projection.history_for(:receipts, nil)) == 1
+      assert length(Projection.history_for(:worktree_receipts, nil)) == 1
+      assert length(Projection.history_for(:worktree_receipts, "kestrel")) == 1
+      assert Projection.history_for(:worktree_receipts, "nobody") == []
+    end
+  end
+
   describe "R5 · ordering survives the 10 000th record" do
     setup do
       # **Injected, not emitted, and the shape is verified against a real
