@@ -946,19 +946,55 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
         .map_err(|e| format!("start_carrier: {e}"))?;
 
     let inc = &started["result"]["carrier"];
-    if started["result"]["allow"] == true && inc["status"] == "RUNNING" {
+    if started["result"]["allow"] != true || inc["status"] != "RUNNING" {
+        return Err(format!("start_carrier refused: {started}"));
+    }
+
+    // **D.1.3c·2c·1c · B4 — the possession, through the wire.**
+    //
+    // The host allocates the pty unconditionally when a Carrier starts, so
+    // the terminal is a physical fact before anyone asks for it. This is the
+    // runtime's SEMANTIC record of it — the thing a presentation is
+    // authorised against, and the thing `Presentation.status_of/1` reads to
+    // answer `"PRESENT"`. Until this call existed in a product, no Peer had
+    // ever held one, and the cockpit's *Watch terminal* action was offered
+    // on a condition that could not become true.
+    //
+    // No field. The Peer whose terminal is acquired is the Peer on this
+    // connection, so there is nothing here to name someone else's Carrier
+    // with.
+    let acq = agent.call("acquire_terminal", json!({}))
+        .map_err(|e| format!("acquire_terminal: {e}"))?;
+    if acq["result"]["allow"] != true {
+        return Err(format!("acquire_terminal refused: {acq}"));
+    }
+    let status = acq["result"]["terminal"]["status"].as_str().unwrap_or("");
+
+    // And the projection the person sees, read back through the same
+    // machinery rather than out of the runtime's memory. `PRESENT` here is
+    // the condition *Watch terminal* is offered on.
+    let seen = agent.call("list_workers", json!({}))
+        .map_err(|e| format!("list_workers: {e}"))?;
+    // `Ampd.Worker.projected/1` returns a MAP KEYED BY WORKER ID, not a list
+    // — indexing it as an array reads three nulls and prints them, which is
+    // what the first run of this witness did.
+    let mine = seen["result"]["workers"][&worker_id].clone();
+    eprintln!(
+        "cockpit: witness — terminal {status} · projection occupancy={} carrier={} terminal={}",
+        mine["occupancy"], mine["carrier"], mine["terminal"],
+    );
+
+    {
         // **The channel is handed back, not dropped** — the same rule
         // `seed_fixture` states above it. A Carrier is bound to the Peer
         // that started it, so closing this connection here would have the
         // runtime reap the Carrier out from under whoever came to measure
         // it, and the witness would report a process that was already gone.
         Ok((agent, inc["carrier_ref"].as_str().unwrap_or("").to_string()))
-    } else {
-        Err(format!("start_carrier refused: {started}"))
     }
 }
 
-/// Whether the D.1.3b·2f product witness runs at startup.
+/// Whether the production-chain witness runs at startup.
 pub fn carrier_witness() -> bool {
     std::env::var("SUPER_COCKPIT_CARRIER").as_deref() == Ok("1")
 }
@@ -1234,11 +1270,11 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
     let _witness = if carrier_witness() {
         match seed_carrier(&rt) {
             Ok((chan, cr)) => {
-                eprintln!("cockpit: D.1.3b·2f witness — carrier {cr} is RUNNING");
+                eprintln!("cockpit: witness — carrier {cr} is RUNNING");
                 Some(chan)
             }
             Err(e) => {
-                eprintln!("cockpit: D.1.3b·2f witness FAILED — {e}");
+                eprintln!("cockpit: witness FAILED — {e}");
                 None
             }
         }
