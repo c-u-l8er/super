@@ -437,10 +437,19 @@ probe "a materialization at the wrong revision is refused" \
 #     when the basis is bound; this is the second, independent refusal, and
 #     a verifier that trusted its argument to have been checked elsewhere
 #     is one refactor from checking nothing.
-probe "the host refuses a symbolic revision on its own account" \
-  "a symbolic revision is refused as a basis, at the host too — as NOT EXACT" \
+probe "the host's hex/length exactness guard is load-bearing on its own" \
+  "a lowercase non-hex revision is refused — the hex/length guard, alone" \
   host/src/effect.rs \
   's|    if commit_oid.len() != 40 \|\| !commit_oid.bytes().all(\|b\| b.is_ascii_hexdigit()) {|    if false {|'
+
+# F · The other exactness guard, alone. `"HEAD"` could not distinguish these
+#     two — it is uppercase AND not hex, so each covered the other and
+#     neither was observable. A 40-character uppercase oid is hex and the
+#     right length, so only this one can refuse it.
+probe "the host's lowercase exactness guard is load-bearing on its own" \
+  "an UPPERCASE object name is refused — the lowercase guard, alone" \
+  host/src/effect.rs \
+  's|    if commit_oid.bytes().any(\|b\| b.is_ascii_uppercase()) {|    if false {|'
 
 # --- the negative syscall census -------------------------------------
 #

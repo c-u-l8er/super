@@ -2893,6 +2893,32 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         // refusals are not the same fact: one says this is not an object
         // name, the other says the worktree is not at it. Only the first is
         // true of `"HEAD"`, and only naming it makes the guard observable.
+        // **Two exactness guards, and `"HEAD"` cannot tell them apart.**
+        // A second targeted probe found this: disabling the hex/length
+        // check leaves `"HEAD"` refused by the LOWERCASE check, because
+        // `"HEAD"` is uppercase. Each guard was covering the other for the
+        // one input the row used, so neither was independently observable.
+        //
+        // `"main"` is lowercase and not hex, so only the first guard can
+        // refuse it; a 40-character uppercase oid is hex and the right
+        // length, so only the second can. One row each, and each one goes
+        // red when its own guard is stubbed.
+        b.check(
+            "a lowercase non-hex revision is refused — the hex/length guard, alone",
+            matches!(
+                crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), "main"),
+                Err(ref e) if e.contains("source-basis-revision-not-exact")
+            ),
+            format!("{:?}", crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), "main")),
+        );
+        b.check(
+            "an UPPERCASE object name is refused — the lowercase guard, alone",
+            matches!(
+                crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &sb_commit.to_uppercase()),
+                Err(ref e) if e.contains("source-basis-revision-not-exact")
+            ),
+            format!("{:?}", crate::effect::verify_source_basis(&sb_dir.to_string_lossy(), &sb_commit.to_uppercase())),
+        );
         b.check(
             "a symbolic revision is refused as a basis, at the host too — as NOT EXACT",
             matches!(
