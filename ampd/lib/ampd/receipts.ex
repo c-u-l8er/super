@@ -2,6 +2,23 @@ defmodule Ampd.Receipts do
   @moduledoc "The durable effect ledger — feeds Evidence; never a second audit system."
   use GenServer
   @store "receipts"
+
+  @doc """
+  The kind a producer gets when it does not say. `Ampd.Gateway` relies on
+  it; `Ampd.Locus` passes `worktree_created@1` explicitly.
+  """
+  @default_kind "capability-effect-receipt@1"
+  def default_kind, do: @default_kind
+
+  @doc """
+  Fields the store mints and a caller may never supply.
+
+  Declared rather than implied, so that "the caller cannot forge ledger
+  identity" is a list something can be tested against instead of a property
+  of one `Map.merge/2` argument order.
+  """
+  @reserved ~w(id seq)
+  def reserved_fields, do: @reserved
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   # ------------------------------------------------- participant boundary
@@ -81,10 +98,70 @@ defmodule Ampd.Receipts do
     if st.tab, do: :dets.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
+  @doc """
+  Append a record. **The store's identity is minted here and cannot be
+  supplied.**
+
+  ## The merge order was backwards, and that is a forgery surface
+
+  It was one call:
+
+      Map.merge(%{"kind" => …, "id" => id, "committed" => true}, m)
+
+  `Map.merge/2` lets the *second* map win, so every one of those was a
+  **default the caller could overwrite** — including `id`, the ledger's own
+  identity. Both current producers happen not to, which is exactly why
+  nothing noticed. A ledger whose entries can name themselves is a ledger
+  where two records can claim one identity, and no reader downstream can
+  tell which is which.
+
+  So the construction is now three layers with the reserved one last, and
+  the ordering is the guarantee rather than a convention a test watches:
+
+      %{"kind" => default}     a default the caller MAY override
+      |> Map.merge(m)          the caller's semantic fields
+      |> Map.merge(reserved)   the store's identity — always wins
+
+  `kind` stays caller-supplied on purpose: it is the record's *semantics*,
+  and R0b.R exists precisely so more than one kind can live here honestly.
+  `id` and `seq` are the store's, and no argument makes them otherwise.
+
+  ## `seq`, and why an integer had to be added
+
+  Ordering and paging sorted **lexically on the id string**, and ids are
+  `pad_leading(…, 4, "0")`. That is correct until the ten-thousandth record
+  and then silently wrong:
+
+      append order    rcpt-9998 rcpt-9999 rcpt-10000 rcpt-10001
+      lexical :desc   rcpt-9999 rcpt-9998 rcpt-10001 rcpt-10000
+
+  `rcpt-9999` reports as the newest record while three newer ones sort
+  beneath a thousand older ones, and `total` stays correct throughout — so
+  a count-only check goes green over it. The store already had the integer;
+  it simply was not written down. Now it is, and `Ampd.Projection` orders on
+  it.
+
+  ## `committed` is gone
+
+  It was store-defaulted to `true` on every record and **read by nothing** —
+  audited across `ampd/lib`, `ampd/test`, `host/src`, `cockpit/`,
+  `conformance/` and `site/`; the only textual match is
+  `Ampd.Worktree.committed/1`, an unrelated state transition. Keeping an
+  ambiguous universal boolean would have made it a lie the moment a
+  validation result arrives: there is no honest value of `committed` for a
+  job that ran correctly and found a NUL byte. Each typed kind says what
+  happened in its own vocabulary instead.
+  """
   def handle_call({:emit, m}, _f, %{tab: tab, s: s} = st) do
-    id = "rcpt-" <> String.pad_leading(Integer.to_string(s["seq"]), 4, "0")
-    m = Map.merge(%{"kind" => "capability-effect-receipt@1", "id" => id, "committed" => true}, m)
-    {:reply, m, %{st | s: Ampd.Store.save(tab, %{s | "log" => s["log"] ++ [m], "seq" => s["seq"] + 1})}}
+    seq = s["seq"]
+    id = "rcpt-" <> String.pad_leading(Integer.to_string(seq), 4, "0")
+
+    m =
+      %{"kind" => @default_kind}
+      |> Map.merge(m)
+      |> Map.merge(%{"id" => id, "seq" => seq})
+
+    {:reply, m, %{st | s: Ampd.Store.save(tab, %{s | "log" => s["log"] ++ [m], "seq" => seq + 1})}}
   end
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["log"], st}
 

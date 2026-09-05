@@ -141,6 +141,57 @@ defmodule Ampd.Projection do
     }
   end
 
+  @doc false
+  # **Order by the store's integer, never by the id string.**
+  #
+  # Every id in this runtime is `<prefix> <> pad_leading(seq, 4, "0")`, and a
+  # lexical sort over that is correct for exactly 9 999 records:
+  #
+  #     append          rcpt-9998  rcpt-9999  rcpt-10000  rcpt-10001
+  #     lexical :desc   rcpt-9999  rcpt-9998  rcpt-10001  rcpt-10000
+  #
+  # The newest record sorts beneath a thousand older ones, `next_cursor`
+  # names the wrong record, and `total` stays right the whole time — so the
+  # count assertions that guard this file would all have passed.
+  #
+  # `Ampd.Receipts` now writes its `seq`, so receipts order on the integer.
+  # Records that do not carry one keep the previous behaviour rather than
+  # having an order invented for them: the fallback parses the id's numeric
+  # tail, which is the same value for every id this runtime mints, and falls
+  # back again to 0 for anything shaped differently. **The remaining paged
+  # kinds — `ef_`, `gr_`, `gq_`, `ap_` — have the same 10 000 boundary and
+  # are NOT fixed here**; that is filed rather than done, because each has
+  # its own producer and its own persisted cursors.
+  #
+  # The tie-break on the id keeps the sort total, so two records that
+  # resolve to one order value still have a stable position.
+  defp order_key(r) do
+    case r["seq"] do
+      n when is_integer(n) -> {n, r["id"]}
+      _ -> {numeric_tail(r["id"]), r["id"]}
+    end
+  end
+
+  defp numeric_tail(id) when is_binary(id) do
+    case Regex.run(~r/(\d+)$/, id) do
+      [_, d] -> String.to_integer(d)
+      _ -> 0
+    end
+  end
+
+  defp numeric_tail(_), do: 0
+
+  # The cursor stays the opaque public id. It is resolved to an order value
+  # against the list being paged, so a caller never has to know the integer
+  # exists — and a cursor naming a record that is no longer present still
+  # resolves, through the same numeric tail the sort uses.
+  defp cursor_key(list, c) do
+    case Enum.find(list, &(&1["id"] == c)) do
+      nil -> {numeric_tail(c), c}
+      r -> order_key(r)
+    end
+  end
+
   @doc """
   A page of history, newest first.
 
@@ -177,12 +228,16 @@ defmodule Ampd.Projection do
   """
   def page(list, cursor, limit) do
     limit = limit |> min(200) |> max(1)
-    sorted = Enum.sort_by(list, & &1["id"], :desc)
+    sorted = Enum.sort_by(list, &order_key/1, :desc)
 
     from =
       case cursor do
-        nil -> sorted
-        c -> Enum.drop_while(sorted, &(&1["id"] >= c))
+        nil ->
+          sorted
+
+        c ->
+          k = cursor_key(sorted, c)
+          Enum.drop_while(sorted, &(order_key(&1) >= k))
       end
 
     items = Enum.take(from, limit)
@@ -206,7 +261,7 @@ defmodule Ampd.Projection do
   # is always "what you have already seen", never "what comes next". The
   # two disagreeing is what lost a record per page.
   defp window(list) do
-    sorted = Enum.sort_by(list, & &1["id"], :desc)
+    sorted = Enum.sort_by(list, &order_key/1, :desc)
     recent = Enum.take(sorted, @history_window)
     more? = length(sorted) > @history_window
 
