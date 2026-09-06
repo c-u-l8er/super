@@ -1,0 +1,255 @@
+[
+  {
+    "label": "the START handler stops resolving the JobBasis",
+    "want": "the RECEIVING handler establishes the JobBasis, not the interface",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "    job = Ampd.Worktree.validation_job(job_ref)\n\n    cond do",
+    "new": "    job = Ampd.Worktree.validation_job(job_ref) || %{\"ref\" => job_ref}\n\n    cond do"
+  },
+  {
+    "label": "the OUTCOME handler stops shape-checking the result",
+    "want": "the RECEIVING handler shape-checks the outcome, not the interface",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "      shape != :ok ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "the OUTCOME handler stops resolving the JobBasis",
+    "want": "a typed OUTCOME for a JobBasis that does not exist is refused",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "    job = Ampd.Worktree.validation_job(job_ref)\n    start = find(s, Ampd.Validation.started_kind(), job_ref)",
+    "new": "    job = %{\"ref\" => job_ref}\n    start = find(s, Ampd.Validation.started_kind(), job_ref)"
+  },
+  {
+    "label": "the protected-kind guard is removed from emit",
+    "want": "generic emit cannot mint a validation START",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "    if m[\"kind\"] in protected_kinds() do",
+    "new": "    if false do",
+    "section": "R0b.R·1 · admission"
+  },
+  {
+    "label": "emit protects only the START kind, not the OUTCOME",
+    "want": "generic emit cannot mint a validation OUTCOME",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "  def protected_kinds, do: Ampd.Validation.kinds()",
+    "new": "  def protected_kinds, do: [Ampd.Validation.started_kind()]"
+  },
+  {
+    "label": "admissibility stops requiring a JobBasis",
+    "want": "a durable START whose JobBasis is gone is not admissible",
+    "file": "ampd/lib/ampd/validation.ex",
+    "old": "    Worktree.validation_job(job_ref) != nil and\n      started(job_ref) != nil and",
+    "new": "    started(job_ref) != nil and"
+  },
+  {
+    "label": "the handler stops checking for an existing start",
+    "want": "an outcome for a job that never durably started is refused",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "      start == nil ->\n        {:reply, {:error, \"validation-job-not-started\"",
+    "new": "      false ->\n        {:reply, {:error, \"validation-job-not-started\""
+  },
+  {
+    "label": "the handler stops checking for an existing outcome",
+    "want": "the single-outcome rule is decided where the append happens",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "    decided = find(s, Ampd.Validation.outcome_kind(), job_ref)",
+    "new": "    decided = nil"
+  },
+  {
+    "label": "the typed appends are classified reads",
+    "want": ":open_job is classified a MUTATION at the participant boundary",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "emit reset validation_start validation_outcome)a",
+    "new": "emit reset)a"
+  },
+  {
+    "label": "the typed appends are served to any caller",
+    "want": "recording a start outside the coordinator is refused",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "@ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]",
+    "new": "@ordered_ops [:reset, :load_state]"
+  },
+  {
+    "label": "the start-exists check is removed from the outcome handler",
+    "want": "an outcome for a job that never durably started is refused",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "      start == nil ->",
+    "new": "      false ->",
+    "section": "R7.3"
+  },
+  {
+    "label": "the single-outcome check is removed from the handler",
+    "want": "two contradictory terminal outcomes for one job are refused",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "      decided != nil ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "an outcome may name a job that does not exist",
+    "want": "a typed OUTCOME for a JobBasis that does not exist is refused",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "      job == nil ->\n        {:reply, {:error, \"validation-job-unknown\", %{\"job_ref\" => job_ref}}, st}\n\n      start == nil ->",
+    "new": "      false ->\n        {:reply, {:error, \"validation-job-unknown\", %{\"job_ref\" => job_ref}}, st}\n\n      start == nil ->"
+  },
+  {
+    "label": "a completed outcome may also carry a failure reason",
+    "want": "a source-basis mismatch cannot be recorded as a predicate fail",
+    "file": "ampd/lib/ampd/validation.ex",
+    "old": "      state == \"completed\" and reason != nil ->",
+    "new": "      false ->",
+    "section": "R7.2"
+  },
+  {
+    "label": "a failed outcome may also carry a verdict",
+    "want": "a source-basis mismatch cannot be recorded as a predicate fail",
+    "file": "ampd/lib/ampd/validation.ex",
+    "old": "      state == \"failed\" and verdict != nil ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "the failure-reason enum accepts anything",
+    "want": "every failure reason is one a line of code can actually produce",
+    "file": "ampd/lib/ampd/validation.ex",
+    "old": "      state == \"failed\" and reason not in @reasons ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "the state enum accepts anything",
+    "want": "there is no INDETERMINATE",
+    "file": "ampd/lib/ampd/validation.ex",
+    "old": "      state not in @states ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "the outcome takes its subject from the caller",
+    "want": "the outcome's subject is copied from the start, never from the caller",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "          \"actor\" => start[\"actor\"],",
+    "new": "          \"actor\" => result[\"actor\"] || start[\"actor\"],"
+  },
+  {
+    "label": "an outcome may be recorded outside the coordinator",
+    "want": "recording an outcome outside the coordinator is refused",
+    "file": "ampd/lib/ampd/receipts.ex",
+    "old": "@ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]",
+    "new": "@ordered_ops [:reset, :load_state, :validation_start]"
+  },
+  {
+    "label": "admissibility ignores whether a start is durable",
+    "want": "a job is admissible only once its start is durable",
+    "file": "ampd/lib/ampd/validation.ex",
+    "old": "      started(job_ref) != nil and\n      outcome(job_ref) == nil",
+    "new": "      outcome(job_ref) == nil",
+    "section": "R11.2"
+  },
+  {
+    "label": "the Lane-ownership check is removed from open_job",
+    "want": "refuses a Worker whose Lane does not own the basis",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": "      owning_lane != lane[\"id\"] ->",
+    "new": "      false ->",
+    "section": "R11"
+  },
+  {
+    "label": "the validation-kind enum accepts anything",
+    "want": "refuses a validation kind outside the closed enum",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": "      kind not in Ampd.Validation.validation_kinds() ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "the scope digest is not shape-checked",
+    "want": "refuses a scope digest that could never match",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": "      not scope_digest?(f[\"scope_digest\"]) ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "the job takes its actor from the caller, not the Lane",
+    "want": "the Actor is the Lane's, never the caller's",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": "          \"actor\" => lane[\"actor\"],",
+    "new": "          \"actor\" => f[\"actor\"] || lane[\"actor\"],"
+  },
+  {
+    "label": "the Worker generation is not bound to the job",
+    "want": "binds the Worker's generation, not only its ref",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": "          \"worker_generation\" => worker[\"generation\"] || 1",
+    "new": "          \"worker_generation\" => nil"
+  },
+  {
+    "label": "a closed Worker may still be given work",
+    "want": "refuses a closed worker",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": "      worker[\"status\"] != \"open\" ->",
+    "new": "      false ->"
+  },
+  {
+    "label": "open_job is classified a read at the participant boundary",
+    "want": ":open_job is classified a MUTATION at the participant boundary",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": "recover bind_basis open_job)a",
+    "new": "recover bind_basis)a",
+    "section": "R12"
+  },
+  {
+    "label": "open_job is served to any caller, not only the coordinator",
+    "want": "minting a job outside the coordinator is refused, not served",
+    "file": "ampd/lib/ampd/worktree.ex",
+    "old": ":bind_basis, :open_job, :reset",
+    "new": ":bind_basis, :reset"
+  },
+  {
+    "label": "list_validations pages the world, not the caller's own",
+    "want": "an actor with no records pages an empty window, not the world's",
+    "file": "ampd/lib/ampd/control.ex",
+    "old": "    do: Projection.page(Projection.history_for(:validations, peer[\"actor\"]), cursor, limit)",
+    "new": "    do: Projection.page(Projection.history_for(:validations, nil), cursor, limit)",
+    "section": "the cursors"
+  },
+  {
+    "label": "list_worktree_receipts pages validations instead",
+    "want": "an agent can page the establishment of its own worktree",
+    "file": "ampd/lib/ampd/control.ex",
+    "old": "    do: Projection.page(Projection.history_for(:worktree_receipts, peer[\"actor\"]), cursor, limit)",
+    "new": "    do: Projection.page(Projection.history_for(:validations, peer[\"actor\"]), cursor, limit)"
+  },
+  {
+    "label": "the list_validations command is removed",
+    "want": "every window a projection hands out now has a command",
+    "file": "ampd/lib/ampd/command_spec.ex",
+    "old": "    \"list_validations\" => %{\n      cmd: :list_validations,",
+    "new": "    \"list_validationsX\" => %{\n      cmd: :list_validationsX,"
+  },
+  {
+    "label": "the validation surface is the whole ledger",
+    "want": "validation records route ONLY to the validation surface",
+    "file": "ampd/lib/ampd/projection.ex",
+    "old": "  def validation_records, do: Ampd.Validation.all()",
+    "new": "  def validation_records, do: Ampd.Receipts.all()",
+    "section": "R8/R9"
+  },
+  {
+    "label": "an agent's validations are not filtered by actor",
+    "want": "another actor's validations are not in this actor's projection",
+    "file": "ampd/lib/ampd/projection.ex",
+    "old": "      \"validations\" => validation_records() |> mine.() |> window(),",
+    "new": "      \"validations\" => validation_records() |> window(),"
+  },
+  {
+    "label": "history_for(:validations) ignores the actor",
+    "want": "history_for is typed the same way the frame is",
+    "file": "ampd/lib/ampd/projection.ex",
+    "old": "    do: Enum.filter(validation_records(), &(&1[\"actor\"] == actor))",
+    "new": "    do: validation_records()"
+  },
+  {
+    "label": "worktree receipts are re-subjected by actor like validations",
+    "want": "worktree receipts are still routed by locus_actor",
+    "file": "ampd/lib/ampd/projection.ex",
+    "old": "        |> Enum.filter(&(&1[\"locus_actor\"] == actor))",
+    "new": "        |> Enum.filter(&(&1[\"actor\"] == actor))"
+  }
+]

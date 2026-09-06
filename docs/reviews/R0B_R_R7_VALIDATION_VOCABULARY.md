@@ -382,10 +382,14 @@ document was making, that the receiving admission point establishes them: the
 handler took the job's existence on faith from its own message, and the outcome
 handler assumed a validation that had happened elsewhere.
 
-No bypass was executed — the ordered guard means only the coordinator can put a
-message there — but the claim was wider than the code. So the messages now carry
-`job_ref`, and for an outcome the caller's raw `result`, and **the handlers
-resolve and check for themselves**:
+**No external Carrier bypass was demonstrated** — and that is deliberately
+weaker than "no bypass was executable", which is what an earlier draft said.
+Coordinator ordering establishes *who may put a message on that boundary*; it
+does not by itself establish that nothing else can, and asserting the stronger
+sentence would be the same class of overclaim one layer down. What is true is
+that the claim was wider than the code. So the messages now carry `job_ref`, and
+for an outcome the caller's raw `result`, and **the handlers resolve and check
+for themselves**:
 
 ```text
 validation-job-unknown            the handler resolves the ref
@@ -406,15 +410,21 @@ it is holding the freshly-minted job.
 lookup with no I/O and no onward call — so a handler-side resolution cannot
 deadlock on a process waiting for this one.
 
-**And one thing is still trusted, named rather than hidden.** `load_state/1`
-installs a whole log and is **not** an admission point: it is the restore path, a
-boot reading `dets` back, and it can install records these appends would refuse.
-That is deliberate — a runtime that could not reload a world it had already
-written would not survive a restart — and what bounds it is that it is
-`@ordered_ops`, coordinator-only, and takes a *world* rather than a record.
-**"The ledger admits nothing invalid" is a claim about `emit/1` and the two typed
-appends, not about restore**, and the suite asserts that separation rather than
-leaving it implied.
+**And one path is an explicit trusted exception, named rather than hidden.**
+`load_state/1` installs a whole log and is **not** an admission point: it is the
+restore path, a boot reading `dets` back, and it can install records these
+appends would refuse. That is deliberate — a runtime that could not reload a
+world it had already written would not survive a restart.
+
+What bounds it is authority, not validity: it is `@ordered_ops` and
+coordinator-only. **Taking a whole world rather than one record establishes
+nothing about that world's validity**, and an earlier draft implied it did by
+listing "takes a world rather than a record" among the things that bound it.
+It is not a check; it is a description of the argument.
+
+So the admission guarantee is **scoped, and the scope is stated**: `emit/1` and
+the two typed appends admit nothing invalid. Restore is outside that scope by
+design. The suite asserts the separation rather than leaving it implied.
 
 ### atomicity, and why the coordinator is still required
 

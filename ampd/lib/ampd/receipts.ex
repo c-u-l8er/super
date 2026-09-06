@@ -147,16 +147,21 @@ defmodule Ampd.Receipts do
   # So the messages carry `job_ref` and, for an outcome, the caller's raw
   # `result`. Everything else the handlers derive or check for themselves.
   #
-  # ## The one thing that is still trusted, named rather than hidden
+  # ## Restore is an EXPLICIT TRUSTED EXCEPTION, and its bound is authority
   #
   # `load_state/1` installs a whole log and is **not** an admission point. It
   # is the restore path — a boot reading `dets` back, or a fixture standing a
   # world up — and it can install records these appends would refuse. That is
-  # deliberate and it is not a hole in the guard: it is `@ordered_ops` and
-  # coordinator-only, its argument is a world rather than a record, and a
-  # runtime that could not restore a world it had already written would not
-  # survive a restart. **"The ledger admits nothing invalid" is a claim about
-  # `emit/1` and the two typed appends, not about restore.**
+  # deliberate: a runtime that could not restore a world it had already
+  # written would not survive a restart.
+  #
+  # What bounds it is that it is `@ordered_ops` and coordinator-only. **That
+  # its argument is a world rather than a record is a description, not a
+  # check** — accepting a whole world establishes nothing about that world's
+  # validity, and an earlier comment here listed it as though it did.
+  #
+  # So the guarantee is scoped and the scope is stated: **`emit/1` and the two
+  # typed appends admit nothing invalid. Restore is outside that scope.**
 
   @doc """
   Every kind `emit/1` refuses. These carry semantic invariants the ledger

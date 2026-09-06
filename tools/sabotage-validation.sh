@@ -105,249 +105,57 @@ echo "sabotage-validation — R0b.R · one mechanism removed per case"
 echo
 
 # ------------------------------- R0b.R·1 · the RECEIVING admission point
-case_ 'the START handler stops resolving the JobBasis' \
-      'the RECEIVING handler establishes the JobBasis, not the interface' \
-      ampd/lib/ampd/receipts.ex \
-      '    job = Ampd.Worktree.validation_job(job_ref)
+# **The cases are DATA, not shell.** They were 36 inline `case_` invocations
+# whose arguments are multi-line Elixir fragments, quoted for `sh`. Editing
+# that by pattern cost this round four separate self-inflicted breakages —
+# every one a deletion whose bound ("the line does not end in a backslash")
+# cannot describe a block containing multi-line strings, each leaving a
+# syntactically broken fragment behind. `bash -n` caught all four, which is
+# the only reason none shipped.
+#
+# A failure mode that recurs is a failure mode to remove, not to patch again.
+# The cases now live in `sabotage-validation.cases.json`, where a fragment is
+# a JSON string and there is no quoting to get wrong, and this loop runs them.
+CASES="$(dirname "$0")/sabotage-validation.cases.json"
+[ -f "$CASES" ] || { echo "REFUSING: no $CASES" >&2; exit 2; }
 
-    cond do' \
-      '    job = Ampd.Worktree.validation_job(job_ref) || %{"ref" => job_ref}
+# **Pre-flight: every anchor must occur EXACTLY ONCE in its file.**
+# Zero means the stub will not land and the case scores UNAPPLIED — which is
+# honest but costs a full run to learn. More than one is worse: the stub
+# silently edits whichever came first, and a case that names the OUTCOME path
+# while stubbing the START path reports NOT A FALSIFIER about a function it
+# never touched. Both happened this round. Checked in seconds, up front.
+python3 - "$CASES" <<'PREFLIGHT' || exit 2
+import json, sys
+bad = 0
+for c in json.load(open(sys.argv[1])):
+    n = open(c['file']).read().count(c['old'])
+    if n != 1:
+        first = c['old'].strip().splitlines()[0][:56]
+        print(f"  REFUSING  {c['label']}\n            anchor occurs {n}x in {c['file']} — {first}")
+        bad += 1
+if bad:
+    print(f"\n  {bad} anchor(s) not exactly-once; a stub that does not land proves nothing")
+sys.exit(1 if bad else 0)
+PREFLIGHT
 
-    cond do'
+count=$(python3 -c 'import json,sys; print(len(json.load(open(sys.argv[1]))))' "$CASES")
+i=0
+while [ "$i" -lt "$count" ]; do
+  # One field per read, so a fragment containing newlines, quotes or
+  # backslashes never has to survive a shell word split.
+  field () { python3 -c '
+import json, sys
+c = json.load(open(sys.argv[1]))[int(sys.argv[2])]
+sys.stdout.write(c.get(sys.argv[3], ""))
+' "$CASES" "$i" "$1"; }
 
-case_ 'the OUTCOME handler stops shape-checking the result' \
-      'the RECEIVING handler shape-checks the outcome, not the interface' \
-      ampd/lib/ampd/receipts.ex \
-      '      shape != :ok ->' \
-      '      false ->'
+  section=$(field section)
+  [ -n "$section" ] && printf '\n  \033[2m%s\033[0m\n' "$section"
 
-case_ 'the OUTCOME handler stops resolving the JobBasis' \
-      'a typed OUTCOME for a JobBasis that does not exist is refused' \
-      ampd/lib/ampd/receipts.ex \
-      '    job = Ampd.Worktree.validation_job(job_ref)
-    start = find(s, Ampd.Validation.started_kind(), job_ref)' \
-      '    job = %{"ref" => job_ref}
-    start = find(s, Ampd.Validation.started_kind(), job_ref)'
-
-# ---------------------------------------------------- R0b.R·1 · admission
-case_ 'the protected-kind guard is removed from emit' \
-      'generic emit cannot mint a validation START' \
-      ampd/lib/ampd/receipts.ex \
-      '    if m["kind"] in protected_kinds() do' \
-      '    if false do'
-
-case_ 'emit protects only the START kind, not the OUTCOME' \
-      'generic emit cannot mint a validation OUTCOME' \
-      ampd/lib/ampd/receipts.ex \
-      '  def protected_kinds, do: Ampd.Validation.kinds()' \
-      '  def protected_kinds, do: [Ampd.Validation.started_kind()]'
-
-case_ 'admissibility stops requiring a JobBasis' \
-      'a durable START whose JobBasis is gone is not admissible' \
-      ampd/lib/ampd/validation.ex \
-      '    Worktree.validation_job(job_ref) != nil and
-      started(job_ref) != nil and' \
-      '    started(job_ref) != nil and'
-
-case_ 'the typed START trusts a ref that names no job' \
-      'a typed START for a JobBasis that does not exist is refused' \
-      ampd/lib/ampd/receipts.ex \
-      '    case Ampd.Worktree.validation_job(job_ref) do
-      nil -> {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
-      job -> ask({:validation_start, job})
-    end' \
-      '    ask({:validation_start, Ampd.Worktree.validation_job(job_ref) || %{"ref" => job_ref}})'
-
-case_ 'the handler stops checking for an existing start' \
-      'an outcome for a job that never durably started is refused' \
-      ampd/lib/ampd/receipts.ex \
-      '    start = find(s, Ampd.Validation.started_kind(), job["ref"])' \
-      '    start = find(s, Ampd.Validation.started_kind(), job["ref"]) || %{}'
-
-case_ 'the handler stops checking for an existing outcome' \
-      'the single-outcome rule is decided where the append happens' \
-      ampd/lib/ampd/receipts.ex \
-      '    decided = find(s, Ampd.Validation.outcome_kind(), job["ref"])' \
-      '    decided = nil'
-
-case_ 'the typed appends are classified reads' \
-      ':open_job is classified a MUTATION at the participant boundary' \
-      ampd/lib/ampd/receipts.ex \
-      'emit reset validation_start validation_outcome)a' \
-      'emit reset)a'
-
-case_ 'the typed appends are served to any caller' \
-      'recording a start outside the coordinator is refused' \
-      ampd/lib/ampd/receipts.ex \
-      '@ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]' \
-      '@ordered_ops [:reset, :load_state]'
-
-# ------------------------------------------------------------------- R7.3
-case_ 'the start-exists check is removed from the outcome handler' \
-      'an outcome for a job that never durably started is refused' \
-      ampd/lib/ampd/receipts.ex \
-      '      start == nil ->' \
-      '      false ->'
-
-case_ 'the single-outcome check is removed from the handler' \
-      'two contradictory terminal outcomes for one job are refused' \
-      ampd/lib/ampd/receipts.ex \
-      '      decided != nil ->' \
-      '      false ->'
-
-case_ 'an outcome may name a job that does not exist' \
-      'an outcome for a job_ref naming nothing is refused' \
-      ampd/lib/ampd/receipts.ex \
-      '      nil ->
-        {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
-
-      job ->' \
-      '      nil ->
-        ask({:validation_outcome, %{"ref" => job_ref}, result})
-
-      job ->'
-
-# ------------------------------------------------------------------- R7.2
-case_ 'a completed outcome may also carry a failure reason' \
-      'a source-basis mismatch cannot be recorded as a predicate fail' \
-      ampd/lib/ampd/validation.ex \
-      '      state == "completed" and reason != nil ->' \
-      '      false ->'
-
-case_ 'a failed outcome may also carry a verdict' \
-      'a source-basis mismatch cannot be recorded as a predicate fail' \
-      ampd/lib/ampd/validation.ex \
-      '      state == "failed" and verdict != nil ->' \
-      '      false ->'
-
-case_ 'the failure-reason enum accepts anything' \
-      'every failure reason is one a line of code can actually produce' \
-      ampd/lib/ampd/validation.ex \
-      '      state == "failed" and reason not in @reasons ->' \
-      '      false ->'
-
-case_ 'the state enum accepts anything' \
-      'there is no INDETERMINATE' \
-      ampd/lib/ampd/validation.ex \
-      '      state not in @states ->' \
-      '      false ->'
-
-case_ 'the outcome takes its subject from the caller' \
-      'the outcome'\''s subject is copied from the start, never from the caller' \
-      ampd/lib/ampd/receipts.ex \
-      '          "actor" => start["actor"],' \
-      '          "actor" => result["actor"] || start["actor"],'
-
-case_ 'an outcome may be recorded outside the coordinator' \
-      'recording an outcome outside the coordinator is refused' \
-      ampd/lib/ampd/receipts.ex \
-      '@ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]' \
-      '@ordered_ops [:reset, :load_state, :validation_start]'
-
-# ------------------------------------------------------------------ R11.2
-case_ 'admissibility ignores whether a start is durable' \
-      'a job is admissible only once its start is durable' \
-      ampd/lib/ampd/validation.ex \
-      '      started(job_ref) != nil and
-      outcome(job_ref) == nil' \
-      '      outcome(job_ref) == nil'
-
-# -------------------------------------------------------------------- R11
-case_ 'the Lane-ownership check is removed from open_job' \
-      'refuses a Worker whose Lane does not own the basis' \
-      ampd/lib/ampd/worktree.ex \
-      '      owning_lane != lane["id"] ->' \
-      '      false ->'
-
-case_ 'the validation-kind enum accepts anything' \
-      'refuses a validation kind outside the closed enum' \
-      ampd/lib/ampd/worktree.ex \
-      '      kind not in Ampd.Validation.validation_kinds() ->' \
-      '      false ->'
-
-case_ 'the scope digest is not shape-checked' \
-      'refuses a scope digest that could never match' \
-      ampd/lib/ampd/worktree.ex \
-      '      not scope_digest?(f["scope_digest"]) ->' \
-      '      false ->'
-
-case_ 'the job takes its actor from the caller, not the Lane' \
-      'the Actor is the Lane'\''s, never the caller'\''s' \
-      ampd/lib/ampd/worktree.ex \
-      '          "actor" => lane["actor"],' \
-      '          "actor" => f["actor"] || lane["actor"],'
-
-case_ 'the Worker generation is not bound to the job' \
-      'binds the Worker'\''s generation, not only its ref' \
-      ampd/lib/ampd/worktree.ex \
-      '          "worker_generation" => worker["generation"] || 1' \
-      '          "worker_generation" => nil'
-
-case_ 'a closed Worker may still be given work' \
-      'refuses a closed worker' \
-      ampd/lib/ampd/worktree.ex \
-      '      worker["status"] != "open" ->' \
-      '      false ->'
-
-# -------------------------------------------------------------------- R12
-case_ 'open_job is classified a read at the participant boundary' \
-      ':open_job is classified a MUTATION at the participant boundary' \
-      ampd/lib/ampd/worktree.ex \
-      'recover bind_basis open_job)a' \
-      'recover bind_basis)a'
-
-case_ 'open_job is served to any caller, not only the coordinator' \
-      'minting a job outside the coordinator is refused, not served' \
-      ampd/lib/ampd/worktree.ex \
-      ':bind_basis, :open_job, :reset' \
-      ':bind_basis, :reset'
-
-# ------------------------------------------------------------- the cursors
-case_ 'list_validations pages the world, not the caller'\''s own' \
-      'an actor with no records pages an empty window, not the world'\''s' \
-      ampd/lib/ampd/control.ex \
-      '    do: Projection.page(Projection.history_for(:validations, peer["actor"]), cursor, limit)' \
-      '    do: Projection.page(Projection.history_for(:validations, nil), cursor, limit)'
-
-case_ 'list_worktree_receipts pages validations instead' \
-      'an agent can page the establishment of its own worktree' \
-      ampd/lib/ampd/control.ex \
-      '    do: Projection.page(Projection.history_for(:worktree_receipts, peer["actor"]), cursor, limit)' \
-      '    do: Projection.page(Projection.history_for(:validations, peer["actor"]), cursor, limit)'
-
-case_ 'the list_validations command is removed' \
-      'every window a projection hands out now has a command' \
-      ampd/lib/ampd/command_spec.ex \
-      '    "list_validations" => %{
-      cmd: :list_validations,' \
-      '    "list_validationsX" => %{
-      cmd: :list_validationsX,'
-
-# ------------------------------------------------------------------ R8/R9
-case_ 'the validation surface is the whole ledger' \
-      'validation records route ONLY to the validation surface' \
-      ampd/lib/ampd/projection.ex \
-      '  def validation_records, do: Ampd.Validation.all()' \
-      '  def validation_records, do: Ampd.Receipts.all()'
-
-case_ 'an agent'\''s validations are not filtered by actor' \
-      'another actor'\''s validations are not in this actor'\''s projection' \
-      ampd/lib/ampd/projection.ex \
-      '      "validations" => validation_records() |> mine.() |> window(),' \
-      '      "validations" => validation_records() |> window(),'
-
-case_ 'history_for(:validations) ignores the actor' \
-      'history_for is typed the same way the frame is' \
-      ampd/lib/ampd/projection.ex \
-      '    do: Enum.filter(validation_records(), &(&1["actor"] == actor))' \
-      '    do: validation_records()'
-
-case_ 'worktree receipts are re-subjected by actor like validations' \
-      'worktree receipts are still routed by locus_actor' \
-      ampd/lib/ampd/projection.ex \
-      '        |> Enum.filter(&(&1["locus_actor"] == actor))' \
-      '        |> Enum.filter(&(&1["actor"] == actor))'
-
+  case_ "$(field label)" "$(field want)" "$(field file)" "$(field old)" "$(field new)"
+  i=$((i + 1))
+done
 
 echo
 printf 'sabotage-validation: %d caught · %d NOT A FALSIFIER · %d did not compile · %d unapplied\n' \
