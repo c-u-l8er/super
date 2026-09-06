@@ -62,6 +62,19 @@ dirty=$(git status --short | tr '\n' ';')
 # says the orphans are not sufficient, which is worth knowing either way.
 beams () { pgrep -af 'beam.smp' 2>/dev/null | grep -c 'mix run --no-halt' || true; }
 
+# **And WHERE they are, because a count alone is not attributable.** A run at
+# `6e5a54e` recorded `orphans 0→1` while two other batteries were running, and
+# the honest reading needed a second measurement: the counted runtime's cwd was
+# `.super-sabotage-<sha>-<stamp>/ampd`, the host battery's own isolated
+# worktree. It was not an orphan this suite left; it was another battery's live
+# process, and this census greps the whole machine. Recording the directories
+# turns a number a reader has to guess about into one they can attribute.
+beam_where () {
+  for pid in $(pgrep -f 'mix run --no-halt' 2>/dev/null); do
+    readlink "/proc/$pid/cwd" 2>/dev/null
+  done | sort -u | tr '\n' ';'
+}
+
 json_escape () { python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))'; }
 
 overall=0
@@ -110,6 +123,7 @@ for seed in "${SEEDS[@]}"; do
     printf '  "timed_out":   %s,\n'   "$([ "$rc" -eq 124 ] && echo true || echo false)"
     printf '  "summary":     %s,\n'   "$(printf '%s' "$summary" | json_escape)"
     printf '  "orphan_runtimes_before": %s,\n' "$before"
+    printf '  "runtime_cwds_after": %s,\n' "$(printf '%s' "$(beam_where)" | json_escape)"
     printf '  "orphan_runtimes_after":  %s,\n' "$after"
     printf '  "stdout_bytes": %s,\n'  "$(wc -c <"$dir/stdout.log")"
     printf '  "stderr_bytes": %s\n'   "$(wc -c <"$dir/stderr.log")"

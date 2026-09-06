@@ -160,8 +160,16 @@ defmodule Ampd.Receipts do
   # check** — accepting a whole world establishes nothing about that world's
   # validity, and an earlier comment here listed it as though it did.
   #
-  # So the guarantee is scoped and the scope is stated: **`emit/1` and the two
-  # typed appends admit nothing invalid. Restore is outside that scope.**
+  # So the guarantee is scoped, and the scope is one sentence:
+  #
+  #     Generic emission refuses protected validation kinds; typed admission
+  #     enforces their declared JobBasis, lifecycle, and result-shape
+  #     invariants. Trusted restore is outside that guarantee.
+  #
+  # Deliberate on both sides: it does not claim `emit/1` validates every
+  # record's semantics — it refuses two kinds and is otherwise the
+  # general-purpose append R2 made it — and it does not fold restore in by
+  # omission.
 
   @doc """
   Every kind `emit/1` refuses. These carry semantic invariants the ledger

@@ -422,9 +422,16 @@ nothing about that world's validity**, and an earlier draft implied it did by
 listing "takes a world rather than a record" among the things that bound it.
 It is not a check; it is a description of the argument.
 
-So the admission guarantee is **scoped, and the scope is stated**: `emit/1` and
-the two typed appends admit nothing invalid. Restore is outside that scope by
-design. The suite asserts the separation rather than leaving it implied.
+So the guarantee is scoped, and the scope is stated in one sentence:
+
+> Generic emission refuses protected validation kinds; typed admission enforces
+> their declared JobBasis, lifecycle, and result-shape invariants. Trusted
+> restore is outside that guarantee.
+
+That wording is deliberate on both sides. It does not say the ledger validates
+every record's semantics — `emit/1` refuses the two protected kinds and is
+otherwise the general-purpose append R2 made it. And it does not fold restore in
+by omission. The suite asserts the separation rather than leaving it implied.
 
 ### atomicity, and why the coordinator is still required
 
@@ -559,12 +566,12 @@ All figures taken with nothing else running on the machine — see §0.
 
 ```text
 super-host verify         319 held ·  0 failed
-ExUnit                    683 tests ·  0 failures
+ExUnit                    686 tests ·  0 failures
 ExUnit (baseline 78b19e8) 630 tests ·  0 failures     the delta is exactly this suite
-ExUnit multi-seed         seeds 0 · 424242 · 909090 — 683/0 each, retained
+ExUnit multi-seed         seeds 0 · 424242 · 909090 — 686/0 each, retained
 static gates                8 held ·  0 failed · 0 could not run
 scope-manifest vectors     12 held ·  0 failed
-sabotage-validation        33 caught · 0 NOT A FALSIFIER · 0 unapplied · 0 broke
+sabotage-validation        35 caught · 0 NOT A FALSIFIER · 0 unapplied · 0 broke
 host sabotage (isolated)   55 falsified ·  0 did not · 0 could not ask (baseline 319/0)
                            canonical checkout unchanged
 ```
@@ -598,6 +605,29 @@ canonical path, so the verdict stands. Recording the warning rather than
 suppressing it is the point of it existing, and the honest version of this
 section says who moved the tree.
 
+### the orphan count, attributed rather than explained away
+
+Seed 0 at `6e5a54e` recorded `orphans 0→1`, and a count that cannot be
+attributed is a number a reader has to guess about. Measured rather than
+hypothesised: the counted runtime's working directory was
+`.super-sabotage-6e5a54ef73fe-…/ampd` — **the host sabotage battery's own
+isolated worktree.** It was not an orphan this suite left; it was another
+battery's live process, and this census greps the whole machine for
+`mix run --no-halt`.
+
+The trace across the three runs says the same thing on its own:
+
+```text
+seed 0        orphans 0→1     the host battery starts a runtime
+seed 424242   orphans 1→1     it is still working
+seed 909090   orphans 1→0     its own `pkill` reaps it between cases
+```
+
+That is another battery's lifecycle, not this suite's cleanup. The census now
+records `runtime_cwds_after` so the next such number is attributable without a
+second investigation — and the confound was self-inflicted: three batteries
+were started at once.
+
 The seed battery keeps what happened — one directory per run holding commit,
 tree, seed, both timestamps, exit status, summary, full stdout, and an orphan-
 runtime census before and after. Seed `909090` recorded `orphans 0→1`; that is
@@ -617,7 +647,7 @@ confidence — which is the same defect it exists to find. The substitution is n
 exact and a miss is `UNAPPLIED`, which is neither a catch nor a verdict about
 the suite.
 
-All 33 mechanisms are load-bearing. Each case removes exactly one and requires a
+All 35 mechanisms are load-bearing. Each case removes exactly one and requires a
 **named** test to fail; a stub that merely reddens the suite somewhere does not
 score, or a stub that broke compilation would count as evidence for every row at
 once.
