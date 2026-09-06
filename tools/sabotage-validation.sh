@@ -104,6 +104,31 @@ echo
 echo "sabotage-validation — R0b.R · one mechanism removed per case"
 echo
 
+# ------------------------------- R0b.R·1 · the RECEIVING admission point
+case_ 'the START handler stops resolving the JobBasis' \
+      'the RECEIVING handler establishes the JobBasis, not the interface' \
+      ampd/lib/ampd/receipts.ex \
+      '    job = Ampd.Worktree.validation_job(job_ref)
+
+    cond do' \
+      '    job = Ampd.Worktree.validation_job(job_ref) || %{"ref" => job_ref}
+
+    cond do'
+
+case_ 'the OUTCOME handler stops shape-checking the result' \
+      'the RECEIVING handler shape-checks the outcome, not the interface' \
+      ampd/lib/ampd/receipts.ex \
+      '      shape != :ok ->' \
+      '      false ->'
+
+case_ 'the OUTCOME handler stops resolving the JobBasis' \
+      'a typed OUTCOME for a JobBasis that does not exist is refused' \
+      ampd/lib/ampd/receipts.ex \
+      '    job = Ampd.Worktree.validation_job(job_ref)
+    start = find(s, Ampd.Validation.started_kind(), job_ref)' \
+      '    job = %{"ref" => job_ref}
+    start = find(s, Ampd.Validation.started_kind(), job_ref)'
+
 # ---------------------------------------------------- R0b.R·1 · admission
 case_ 'the protected-kind guard is removed from emit' \
       'generic emit cannot mint a validation START' \

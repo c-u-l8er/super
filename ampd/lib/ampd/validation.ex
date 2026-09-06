@@ -28,13 +28,27 @@ defmodule Ampd.Validation do
   ## Two records, never one mutated record
 
   A start and an outcome are separate appends sharing a `job_ref`. Nothing
-  turns STARTED into COMPLETED, because the ledger is append-only and
-  because **a start with no outcome is itself a true statement**: execution
-  began and this ledger does not know how it ended. That is the honest
-  representation of a Carrier that died mid-job, and it is strictly more
-  informative than an `INDETERMINATE` outcome invented to fill the row —
-  which would additionally be a *claim*, made by a process that was not
-  there, about a moment nothing observed.
+  turns STARTED into COMPLETED, because the ledger is append-only.
+
+  ## What each record actually claims, stated narrowly
+
+  **A START is durable ATTEMPT ADMISSION, and nothing more.** It is written
+  *before* a Carrier is launched — that ordering is R11.2 and is the whole
+  point — so it cannot itself be evidence that a predicate ever began
+  evaluating. It says: this job was admitted for execution, at this Worker
+  generation, over this basis and scope.
+
+  **An absent OUTCOME establishes no durable terminal result.** That is the
+  full claim. It does *not* diagnose a Carrier death: the same absence
+  covers a job still running, one whose Carrier never launched, one that
+  finished and lost its reply, and one whose runtime stopped between the two
+  appends. Reading it as "the Carrier died" would be a diagnosis the ledger
+  cannot support, and an earlier draft of this doc did exactly that.
+
+  Which is also why there is no `INDETERMINATE` value: writing one would be
+  a *claim*, made by a process that was not there, about a moment nothing
+  observed. The absence is the honest record, and it is honest precisely
+  because it distinguishes nothing it cannot distinguish.
 
   So there is no `INDETERMINATE` in this vocabulary. If a later round finds
   an execution cut where a durable outcome is genuinely required despite the

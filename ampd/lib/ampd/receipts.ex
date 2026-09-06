@@ -133,11 +133,30 @@ defmodule Ampd.Receipts do
   # instead: the protected kinds are reachable only through a **different
   # message**, and `{:emit, m}` refuses them by name.
   #
-  # ## Why the caller passes a ref and never a job
+  # ## Why only a REFERENCE crosses the message boundary
   #
-  # `record_validation_start/1` takes `job_ref`, a string, and resolves the
-  # JobBasis **in its own body**. A caller that could hand in a job map could
-  # hand in a forged one, and the store would be back to trusting its input.
+  # The first cut of this closure resolved the JobBasis and validated the
+  # result shape in the *interface functions*, then sent the resolved map
+  # across. GPT's review named what that actually bought, and the distinction
+  # is worth keeping: **an interface function and its receiving callback are
+  # two different validation locations.** Resolving in the caller made the
+  # generic path protected and the typed *interface* invariant-preserving; it
+  # did not make the receiving admission point establish anything, because
+  # the handler took the job's existence on faith from its own message.
+  #
+  # So the messages carry `job_ref` and, for an outcome, the caller's raw
+  # `result`. Everything else the handlers derive or check for themselves.
+  #
+  # ## The one thing that is still trusted, named rather than hidden
+  #
+  # `load_state/1` installs a whole log and is **not** an admission point. It
+  # is the restore path — a boot reading `dets` back, or a fixture standing a
+  # world up — and it can install records these appends would refuse. That is
+  # deliberate and it is not a hole in the guard: it is `@ordered_ops` and
+  # coordinator-only, its argument is a world rather than a record, and a
+  # runtime that could not restore a world it had already written would not
+  # survive a restart. **"The ledger admits nothing invalid" is a claim about
+  # `emit/1` and the two typed appends, not about restore.**
 
   @doc """
   Every kind `emit/1` refuses. These carry semantic invariants the ledger
@@ -148,55 +167,37 @@ defmodule Ampd.Receipts do
   @doc """
   Append `validation_job_started@1` for an existing JobBasis.
 
-  Every semantic field is taken **from the durable job**, never from a
-  caller: `validation_kind`, `actor`, `worker_ref`, `worker_generation`,
-  `source_basis_ref` and `scope_digest` are the JobBasis's own. There is no
-  parameter through which a different value could arrive.
+  Takes a **reference**. The handler resolves the JobBasis itself and takes
+  every semantic field from it — `validation_kind`, `actor`, `worker_ref`,
+  `worker_generation`, `source_basis_ref`, `scope_digest`. There is no
+  parameter through which a different value could arrive, and no resolved
+  map crosses the message boundary for the handler to trust.
 
-  Refuses `validation-job-unknown` if the ref names nothing, and
-  `validation-job-already-started` if a start is already durable — the
-  second checked **inside the handler**, against the log it is about to
-  append to, so the check and the append cannot be interleaved.
+  Refuses `validation-job-unknown` if the ref names nothing and
+  `validation-job-already-started` if a start is already durable. **Both are
+  established at the receiving admission point**, against the same store
+  state the append is about to extend, so neither can be interleaved with
+  it.
   """
-  def record_validation_start(job_ref) when is_binary(job_ref) do
-    case Ampd.Worktree.validation_job(job_ref) do
-      nil -> {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
-      job -> ask({:validation_start, job})
-    end
-  end
+  def record_validation_start(job_ref) when is_binary(job_ref),
+    do: ask({:validation_start, job_ref})
 
   @doc """
   Append `validation_job_outcome@1`.
 
-  `result` carries only `state` and either `verdict` or `reason`; it is
-  shape-checked by `Ampd.Validation.validate_result/1` before it reaches the
-  store. Everything else — the subject, the basis, the scope — is copied
-  from the durable START, so an outcome cannot be filed against a different
-  actor or a different snapshot than the start it belongs to.
+  Takes a **reference** and the caller's raw `result`. The handler resolves
+  the job, checks that a START is durable and that no OUTCOME is, and
+  shape-checks `result` with `Ampd.Validation.validate_result/1` — the pure
+  vocabulary check, reused rather than reimplemented. Everything else — the
+  subject, the basis, the scope — is copied from the durable START, so an
+  outcome cannot be filed against a different actor or a different snapshot
+  than the start it belongs to.
 
-  The relationship checks (*a start exists*, *no outcome yet*) happen in the
-  handler for the same reason the start's does: two concurrent outcomes must
-  not both observe "none yet".
+  All four checks happen at the receiving admission point, alongside the
+  append, so two concurrent outcomes cannot both observe "none yet".
   """
-  # **`case`, not `with`.** The first version used `with/else`, which the
-  # BEAM compiles to an anonymous function, and
-  # `tools/check-ordered-closure.mjs` refused it: *the census cannot follow
-  # this dispatch and nothing says where it lands.* That gate is right —
-  # an unfollowable crossing inside the ordered boundary is exactly what it
-  # exists to name — and the cheap answer would have been an exclusion
-  # entry. Removing the opaque dispatch is better than adjudicating it.
-  def record_validation_outcome(job_ref, result) when is_binary(job_ref) and is_map(result) do
-    case Ampd.Worktree.validation_job(job_ref) do
-      nil ->
-        {:error, "validation-job-unknown", %{"job_ref" => job_ref}}
-
-      job ->
-        case Ampd.Validation.validate_result(result) do
-          :ok -> ask({:validation_outcome, job, result})
-          refusal -> refusal
-        end
-    end
-  end
+  def record_validation_outcome(job_ref, result) when is_binary(job_ref) and is_map(result),
+    do: ask({:validation_outcome, job_ref, result})
 
   def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
@@ -207,6 +208,16 @@ defmodule Ampd.Receipts do
   # an authority mutation, and routing every receipt through the total order
   # would buy nothing.
   @ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]
+
+  @doc """
+  Operations served only when the caller IS the total order.
+
+  Public so a falsifier reads the classification rather than restating it —
+  the same reason `Ampd.Worktree.ordered_ops/0` is. Note that `load_state`
+  is here beside the two typed appends and is **not** an admission point:
+  see the typed-admission section above for why restore is a separate claim.
+  """
+  def ordered_ops, do: @ordered_ops
   @impl true
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
@@ -348,38 +359,70 @@ defmodule Ampd.Receipts do
   # `@ordered_ops`) and that is not redundant: ordering is about the world's
   # total order across stores, atomicity here is about this store's log.
   # Neither subsumes the other.
-  def handle_ordered({:validation_start, job}, %{s: s} = st) do
-    if find(s, Ampd.Validation.started_kind(), job["ref"]) do
-      {:reply, {:error, "validation-job-already-started", %{"job_ref" => job["ref"]}}, st}
-    else
-      {record, st} =
-        append(st, %{
-          "kind" => Ampd.Validation.started_kind(),
-          "job_ref" => job["ref"],
-          "validation_kind" => job["validation_kind"],
-          "actor" => job["actor"],
-          "worker_ref" => job["worker_ref"],
-          "worker_generation" => job["worker_generation"],
-          "source_basis_ref" => job["source_basis_ref"],
-          "scope_digest" => job["scope_digest"]
-        })
+  def handle_ordered({:validation_start, job_ref}, %{s: s} = st) do
+    # **Resolved HERE, from a reference.** R0b.R·1's first cut resolved the
+    # JobBasis in the interface function and sent the resolved map across, so
+    # this handler took the job's existence on faith from whatever arrived in
+    # the message. That supported a narrower claim than the one being made:
+    # the generic path was protected and the typed *interface* preserved the
+    # invariants. It did not make the receiving admission point establish
+    # them. A reference is the only thing that crosses now.
+    #
+    # `Ampd.Worktree.validation_job/1` is safe to call from inside this
+    # handler: `Ampd.Worktree` never calls `Ampd.Receipts` — checked, not
+    # assumed — and its `{:get, …}` clause is a map lookup with no I/O and no
+    # onward call, so there is no callback cycle to deadlock on.
+    job = Ampd.Worktree.validation_job(job_ref)
 
-      {:reply, {:ok, record}, st}
+    cond do
+      job == nil ->
+        {:reply, {:error, "validation-job-unknown", %{"job_ref" => job_ref}}, st}
+
+      find(s, Ampd.Validation.started_kind(), job_ref) != nil ->
+        {:reply, {:error, "validation-job-already-started", %{"job_ref" => job_ref}}, st}
+
+      true ->
+        {record, st} =
+          append(st, %{
+            "kind" => Ampd.Validation.started_kind(),
+            "job_ref" => job["ref"],
+            "validation_kind" => job["validation_kind"],
+            "actor" => job["actor"],
+            "worker_ref" => job["worker_ref"],
+            "worker_generation" => job["worker_generation"],
+            "source_basis_ref" => job["source_basis_ref"],
+            "scope_digest" => job["scope_digest"]
+          })
+
+        {:reply, {:ok, record}, st}
     end
   end
 
-  def handle_ordered({:validation_outcome, job, result}, %{s: s} = st) do
-    start = find(s, Ampd.Validation.started_kind(), job["ref"])
-    decided = find(s, Ampd.Validation.outcome_kind(), job["ref"])
+  def handle_ordered({:validation_outcome, job_ref, result}, %{s: s} = st) do
+    # Same correction, and one more: the SHAPE of `result` is validated here
+    # too. It was checked in the interface function, which meant this handler
+    # appended whatever arrived. `Ampd.Validation.validate_result/1` is the
+    # pure vocabulary check and is reused rather than reimplemented — two
+    # implementations of one fact is the defect R2 and R5 were both about.
+    job = Ampd.Worktree.validation_job(job_ref)
+    start = find(s, Ampd.Validation.started_kind(), job_ref)
+    decided = find(s, Ampd.Validation.outcome_kind(), job_ref)
+    shape = Ampd.Validation.validate_result(result)
 
     cond do
+      job == nil ->
+        {:reply, {:error, "validation-job-unknown", %{"job_ref" => job_ref}}, st}
+
       start == nil ->
-        {:reply, {:error, "validation-job-not-started", %{"job_ref" => job["ref"]}}, st}
+        {:reply, {:error, "validation-job-not-started", %{"job_ref" => job_ref}}, st}
 
       decided != nil ->
         {:reply,
          {:error, "validation-job-already-decided",
-          %{"job_ref" => job["ref"], "state" => decided["state"]}}, st}
+          %{"job_ref" => job_ref, "state" => decided["state"]}}, st}
+
+      shape != :ok ->
+        {:reply, shape, st}
 
       true ->
         # The subject comes off the START, never off `result`. A
@@ -387,7 +430,7 @@ defmodule Ampd.Receipts do
         # another agent's projection.
         base = %{
           "kind" => Ampd.Validation.outcome_kind(),
-          "job_ref" => job["ref"],
+          "job_ref" => job_ref,
           "validation_kind" => start["validation_kind"],
           "actor" => start["actor"],
           "worker_ref" => start["worker_ref"],

@@ -75,15 +75,27 @@ nineteen cases exercise the retired vocabulary, is removed.
 Two append-only kinds:
 
 ```text
-validation_job_started@1     execution began
+validation_job_started@1     the attempt was ADMITTED for execution
 validation_job_outcome@1     how that attempt ended
 ```
 
-Nothing mutates the first into the second. A START with no OUTCOME is a
-truthful historical state — the honest representation of a Carrier that died
-mid-job — and it is strictly more informative than an `INDETERMINATE` invented
-to fill the row, which would additionally be a *claim*, made by a process that
-was not there, about a moment nothing observed.
+Nothing mutates the first into the second.
+
+**A START is durable attempt admission, and nothing more.** It is written
+*before* a Carrier is launched — that ordering is R11.2 — so it cannot itself
+be evidence that a predicate ever began evaluating.
+
+**An absent OUTCOME establishes no durable terminal result.** That is the full
+claim, and an earlier draft of this document overstated it as "the honest
+representation of a Carrier that died mid-job". The same absence covers a job
+still running, one whose Carrier never launched, one that finished and lost its
+reply, and one whose runtime stopped between the two appends. Reading it as a
+death is a diagnosis the ledger cannot support.
+
+Which is why there is no `INDETERMINATE` value: writing one would be a *claim*,
+made by a process that was not there, about a moment nothing observed. The
+absence is honest precisely because it distinguishes nothing it cannot
+distinguish. **No new record kind is needed to fix this — only the wording.**
 
 There is no `INDETERMINATE` in this vocabulary. If a later round finds an
 execution cut where a durable outcome is genuinely required despite the truth
@@ -356,15 +368,53 @@ caller can supply or arrange, which makes the guard a convention wearing a
 check's clothes. The protection is structural: the protected kinds are reachable
 only through a *different message*, and `{:emit, m}` refuses them.
 
-**A ref, never a job.** `record_validation_start/1` takes a string and resolves
-the JobBasis in its own body. A caller that could hand in a job map could hand in
-a forged one, and the store would be back to trusting its input. Every semantic
-field on the START — `validation_kind`, `actor`, `worker_ref`,
-`worker_generation`, `source_basis_ref`, `scope_digest` — is the durable job's,
-and there is no parameter through which a different value could arrive. The
-OUTCOME's subject comes off the START the same way. Even
-`Ampd.Authority.start_validation_job/1`, which is holding the freshly-minted job,
-passes only `job["ref"]`.
+**Only a reference crosses the message boundary — and the first cut of this
+closure got that wrong.**
+
+GPT's review of it named the distinction precisely, and it is worth carrying:
+*an interface function and its receiving callback are two different validation
+locations.* The first version resolved the JobBasis and shape-checked the result
+in `record_validation_start/1` and `record_validation_outcome/2` — the public
+interface — and then sent the **resolved job map** across to the handler. That
+supported the narrower claim *the generic path is protected and the typed
+interface preserves these invariants*. It did **not** support the claim this
+document was making, that the receiving admission point establishes them: the
+handler took the job's existence on faith from its own message, and the outcome
+handler assumed a validation that had happened elsewhere.
+
+No bypass was executed — the ordered guard means only the coordinator can put a
+message there — but the claim was wider than the code. So the messages now carry
+`job_ref`, and for an outcome the caller's raw `result`, and **the handlers
+resolve and check for themselves**:
+
+```text
+validation-job-unknown            the handler resolves the ref
+validation-job-already-started    the handler scans its own log
+validation-job-not-started        the handler scans its own log
+validation-job-already-decided    the handler scans its own log
+validation-state/verdict/reason   the handler calls the pure validator
+```
+
+Every semantic field on the START — `validation_kind`, `actor`, `worker_ref`,
+`worker_generation`, `source_basis_ref`, `scope_digest` — is read off the job the
+*handler* resolved. The OUTCOME's subject comes off the durable START the same
+way. `Ampd.Authority.start_validation_job/1` passes only `job["ref"]` even though
+it is holding the freshly-minted job.
+
+**The call is safe from a callback cycle, checked rather than assumed.**
+`Ampd.Worktree` never calls `Ampd.Receipts`, and its `{:get, …}` clause is a map
+lookup with no I/O and no onward call — so a handler-side resolution cannot
+deadlock on a process waiting for this one.
+
+**And one thing is still trusted, named rather than hidden.** `load_state/1`
+installs a whole log and is **not** an admission point: it is the restore path, a
+boot reading `dets` back, and it can install records these appends would refuse.
+That is deliberate — a runtime that could not reload a world it had already
+written would not survive a restart — and what bounds it is that it is
+`@ordered_ops`, coordinator-only, and takes a *world* rather than a record.
+**"The ledger admits nothing invalid" is a claim about `emit/1` and the two typed
+appends, not about restore**, and the suite asserts that separation rather than
+leaving it implied.
 
 ### atomicity, and why the coordinator is still required
 

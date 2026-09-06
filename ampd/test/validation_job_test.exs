@@ -644,6 +644,68 @@ defmodule Ampd.ValidationJobTest do
       assert Validation.started(job["ref"]) == nil
     end
 
+    test "the RECEIVING handler establishes the JobBasis, not the interface", ctx do
+      _ = ctx
+      # **GPT's R0b.R·1 finding, as a falsifier.** The first cut resolved the
+      # job in the interface function and sent the resolved map across, so
+      # the handler took its existence on faith. This drives the message
+      # boundary directly — the only thing a caller may put on it is a
+      # reference — and requires the refusal to come from the handler.
+      assert {:error, "validation-job-unknown", d} =
+               Ampd.AuthorityCoordinator.transact(
+                 fn -> GenServer.call(Receipts, {:validation_start, "vj_forged"}) end,
+                 nil
+               )
+
+      assert d["job_ref"] == "vj_forged"
+      assert Validation.all() == []
+    end
+
+    test "the RECEIVING handler shape-checks the outcome, not the interface", ctx do
+      {job, _} = start!(ctx)
+
+      # Same boundary, the other append. A malformed result put straight on
+      # the message must be refused where the append happens.
+      assert {:error, "validation-state-unknown", _} =
+               Ampd.AuthorityCoordinator.transact(
+                 fn ->
+                   GenServer.call(Receipts, {:validation_outcome, job["ref"], %{"state" => "SHIPPED"}})
+                 end,
+                 nil
+               )
+
+      assert {:error, "validation-outcome-overspecified", _} =
+               Ampd.AuthorityCoordinator.transact(
+                 fn ->
+                   GenServer.call(
+                     Receipts,
+                     {:validation_outcome, job["ref"],
+                      %{"state" => "completed", "verdict" => "pass", "reason" => "source-basis-unknown"}}
+                   )
+                 end,
+                 nil
+               )
+
+      assert Validation.outcome(job["ref"]) == nil
+    end
+
+    test "restore is a separate claim from admission, and says so", ctx do
+      _ = ctx
+      # `load_state/1` CAN install what the appends would refuse. That is the
+      # restore path — a boot reading dets back — and pretending otherwise
+      # would mean a runtime that cannot reload a world it already wrote.
+      # What makes it safe is that it is ordered, coordinator-only, and takes
+      # a WORLD rather than a record.
+      assert :validation_start in Receipts.ordered_ops()
+      assert :validation_outcome in Receipts.ordered_ops()
+      assert :load_state in Receipts.ordered_ops()
+
+      assert {:refused, r} =
+               Receipts.load_state(%{"log" => [], "seq" => 0})
+
+      assert r["code"] == "unordered-authority-mutation"
+    end
+
     test ":open_job is classified a MUTATION at the participant boundary", ctx do
       _ = ctx
       # The classification is what decides whether a lost reply means
