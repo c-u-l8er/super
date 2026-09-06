@@ -12,7 +12,14 @@
 # over the materialization Super itself established — not a fixture, not a
 # constant. That is the difference between a demonstration and a shape.
 #
-#     cd ampd && mix run ../tools/dogfood-validation.exs
+# **Give it its own data dir.** This calls `Ampd.reset/0`, which wipes the
+# world it runs against — and `priv/data` is the world a live cockpit is
+# holding. Running the two over one directory destroys a running session's
+# state underneath it. `AMPD_DATA_DIR` is read before the configured default,
+# so a scratch path isolates the ledger while the SOURCE under validation is
+# still this checkout, which is the whole point of the demonstration.
+#
+#     cd ampd && AMPD_DATA_DIR=$(mktemp -d) mix run ../tools/dogfood-validation.exs
 alias Ampd.{Authority, Control, Locus, Projection, Validation, Worktree}
 
 root = Path.expand("..", File.cwd!())
