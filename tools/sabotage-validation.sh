@@ -102,6 +102,15 @@ open(p, "w").write(s.replace(old, new, 1))
 
 echo
 echo "sabotage-validation — R0b.R · one mechanism removed per case"
+# **Name the tree.** The log carried no commit, so a bundle quoting its
+# verdict could not say which source the 35 catches were about — and the
+# whole discipline of this round is that a measurement names the identity it
+# measured. The host battery's harness has always done this; this one did not.
+printf '# HEAD %s · %s\n' \
+  "$(git rev-parse --short=12 HEAD 2>/dev/null || echo nogit)" \
+  "$(date -u +%Y%m%dT%H%M%SZ)"
+[ -n "$(git status --porcelain 2>/dev/null)" ] && printf '# DIRTY: %s\n' \
+  "$(git status --porcelain | tr '\n' ';')"
 echo
 
 # ------------------------------- R0b.R·1 · the RECEIVING admission point
