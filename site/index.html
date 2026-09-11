@@ -1425,6 +1425,12 @@ void main(){
   hero.addEventListener('pointerleave', function(){ mtx = 0; mty = 0; }, {passive:true});
 
   var start = performance.now(), prev = 0, flowT = 0, fogT = 0, fade = 0, lastBr = '';
+  var scrollUntil = 0;
+  function yieldToScroll(){ scrollUntil = performance.now() + 220; }
+  // Keep the last decorative frame while the user scrolls; page input wins.
+  addEventListener("wheel", yieldToScroll, {passive:true});
+  addEventListener("touchmove", yieldToScroll, {passive:true});
+  addEventListener("scroll", yieldToScroll, {passive:true});
   var running = true, seen = !('IntersectionObserver' in window), paused = false;
   if ('IntersectionObserver' in window){
     new IntersectionObserver(function(es){ es.forEach(function(e){
@@ -1482,12 +1488,12 @@ void main(){
 
   function frame(now){
     requestAnimationFrame(frame);
-    if (paused || !running || !seen) return;
     var t = (now - start) / 1000;
+    if (paused || !running || !seen || now < scrollUntil){ prev = t; samples.length = 0; lastFps = now; return; }
     var dtMs = (t - prev) * 1000;
-    /* only count sane deltas — a return from a hidden tab or a one-off stall
-       shouldn't read as "3 fps" and shove the DPR governor around */
-    if (dtMs > 0 && dtMs < 250){ ema = ema * .9 + dtMs * .1; samples.push(1000 / Math.max(1, ema)); }
+    /* Pauses reset the clock above. Include slow active frames so software
+       rendering can actually reduce its resolution instead of staying stuck. */
+    if (dtMs > 0){ ema = ema * .9 + dtMs * .1; samples.push(1000 / Math.max(1, ema)); }
     render(t);
     governDpr(now);
   }

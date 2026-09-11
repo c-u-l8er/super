@@ -1,9 +1,7 @@
 # Vendored, and this is a dependency decision
 
-`super/` carries **no npm dependency and no bundler**. `tauri.conf.json` sets
-`"frontendDist": "ui"` — a static directory — and `cockpit.js` is hand-written
-plain ES with no imports. That is deliberate, and these two files are the
-first exception to it.
+Super ships a static frontend from `cockpit/ui`. The code editor is bundled
+locally at development time; no package server or CDN is needed at runtime.
 
 They are here rather than on a CDN because they have to be: the cockpit's CSP
 is `default-src 'self'`, so a remote script would not load, and loosening the
@@ -47,3 +45,17 @@ that names `Terminal`; replacing it with any renderer that can tell you when
 it has *consumed* bytes preserves every property. Delete this directory, drop
 the two `<link>`/`<script>` tags in `terminal.html`, and write to a `<pre>`.
 The plane, its ordering, its window and its falsifiers are unaffected.
+
+## Tabbed development surfaces (2026-09-07)
+
+`code-editor.js` bundles CodeMirror 6 and its language packages with esbuild.
+Exact versions and integrity hashes are in `tools/editor/package-lock.json`.
+Rebuild with `npm ci && npm run build` in `tools/editor`. The entry module
+selects JavaScript/TypeScript, Rust, Python, HTML, CSS, JSON and Markdown modes
+with the One Dark theme; other files use plain text. Licenses are included
+in `CODE_EDITOR_LICENSES.txt`. This is a build-time dependency decision.
+
+`development.js` also uses the existing xterm 5.5.0 renderer for interactive
+local PTYs. Those shells have their own bounded output buffers and input path;
+the runtime worker observation pane retains its read-only acknowledgement
+protocol. Local terminal sizing uses the pinned renderer's measured cell size.

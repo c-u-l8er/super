@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-development-request"
+description = "Enables the development_request command without any pre-configured scope."
+commands.allow = ["development_request"]
+
+[[permission]]
+identifier = "deny-development-request"
+description = "Denies the development_request command without any pre-configured scope."
+commands.deny = ["development_request"]

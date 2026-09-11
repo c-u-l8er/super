@@ -92,7 +92,20 @@
 //! comes back, because the substitution is one word and reopens the class
 //! silently.
 
+mod accepted_builds;
+mod accepted_preview;
+mod attachments;
+mod bots;
+mod claude_connection;
+mod codex_connection;
+mod keychain;
+mod mobile_gateway;
+mod preview;
+mod repository;
+mod review_tests;
+mod surface_sessions;
 mod terminal;
+mod workbench;
 mod worker;
 
 /// The terminal surface's label and page. **Constants, not parameters.**
@@ -137,7 +150,14 @@ async fn bind_frame_stream(
     channel: Channel<Value>,
     queue: State<'_, Queues>,
 ) -> Result<(), String> {
-    control(&queue, Msg::Bind { stream, sink: channel }).await
+    control(
+        &queue,
+        Msg::Bind {
+            stream,
+            sink: channel,
+        },
+    )
+    .await
 }
 
 /// **W.2.3.2 · the page says it has stopped listening, so the host stops
@@ -206,11 +226,7 @@ async fn control(queue: &State<'_, Queues>, m: Msg) -> Result<(), String> {
 /// inside `spawn_blocking` too — W.2.1 did it in the async body, so a full
 /// lane parked a Tauri async worker rather than a blocking-pool thread.
 #[tauri::command]
-async fn intent(
-    name: String,
-    args: Value,
-    queue: State<'_, Queues>,
-) -> Result<Value, String> {
+async fn intent(name: String, args: Value, queue: State<'_, Queues>) -> Result<Value, String> {
     if !worker::INTENT_SURFACE.contains(&name.as_str()) {
         return Err(format!("not an intent this cockpit can submit: {name}"));
     }
@@ -223,10 +239,361 @@ async fn intent(
     // rather than a second one invented here.
     tauri::async_runtime::spawn_blocking(move || {
         q.intent(Msg::Intent { name, args, reply })?;
-        wait.recv().unwrap_or_else(|_| Err("no reply from the cockpit worker".into()))
+        wait.recv()
+            .unwrap_or_else(|_| Err("no reply from the cockpit worker".into()))
     })
     .await
     .map_err(|e| format!("intent join: {e}"))?
+}
+
+#[tauri::command]
+async fn choose_workbench(
+    window: tauri::Window,
+    state: State<'_, workbench::Workbench>,
+) -> Result<Value, String> {
+    let guard = repository::ChooserGuard::acquire()?;
+    let (send, recv) = sync_channel(1);
+    let parent = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let _ = send.send(repository::choose_development(&parent));
+        })
+        .map_err(|_| "The repository chooser could not open.")?;
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        match recv.recv().map_err(|_| "The chooser closed.")?? {
+            Some(path) => state.choose(path),
+            None => Ok(json!({"cancelled":true})),
+        }
+    })
+    .await
+    .map_err(|_| "Repository selection could not finish.")?
+}
+#[tauri::command]
+async fn development_request(
+    request: workbench::Request,
+    state: State<'_, workbench::Workbench>,
+    queue: State<'_, Queues>,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    if let workbench::Request::MatchPlan {
+        generation,
+        task_ref,
+        revision,
+        world,
+    } = request
+    {
+        let q = queue.inner().clone();
+        return tauri::async_runtime::spawn_blocking(move || {
+            let path = state.matching_root(generation)?;
+            let (reply, wait) = sync_channel(1);
+            q.intent(Msg::MatchPlanRepository {
+                path: path.clone(),
+                task_ref,
+                revision,
+                world,
+                reply,
+            })?;
+            let result = wait
+                .recv()
+                .map_err(|_| "Repository matching was interrupted.")??;
+            if state.matching_root(generation)? != path {
+                return Err("The selected repository changed.".into());
+            }
+            Ok(result)
+        })
+        .await
+        .map_err(|_| "Repository matching could not finish.")?;
+    }
+    tauri::async_runtime::spawn_blocking(move || state.request(request))
+        .await
+        .map_err(|_| "The local operation could not finish.")?
+}
+#[tauri::command]
+async fn review_tests(
+    request: review_tests::Request,
+    app: tauri::AppHandle,
+    state: State<'_, review_tests::Runs>,
+    work: State<'_, workbench::Workbench>,
+    queue: State<'_, Queues>,
+) -> Result<Value, String> {
+    use tauri::Manager;
+    let runs = state.inner().clone();
+    let work = work.inner().clone();
+    let q = queue.inner().clone();
+    let builds = app.state::<accepted_builds::Builds>().inner().clone();
+    let previews = app.state::<accepted_preview::Previews>().inner().clone();
+    let data = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Local test history is unavailable.")?;
+    tauri::async_runtime::spawn_blocking(move||{
+        let reporting=q.clone();
+        let report:review_tests::Report=std::sync::Arc::new(move |operation:&str,fields:Value| {
+            let (reply,wait)=sync_channel(1);reporting.intent(Msg::RecordReviewTest{operation:operation.into(),fields,reply})?;
+            wait.recv().map_err(|_|"Test recording was interrupted.".to_owned())?
+        });
+        if let review_tests::Request::LaunchBuild{generation,attempt_ref,revision,world,build_id}=request {
+            let path=work.matching_root(generation)?;let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref,revision,world:world.clone(),reply})?;
+            let attempt=wait.recv().map_err(|_|"Review lookup was interrupted.")??;
+            if work.matching_root(generation)?!=path{return Err("The selected repository changed. Try again.".into());}
+            previews.start(&data,world,build_id,attempt)
+        }else if let review_tests::Request::PreviewStatus{world}=request {previews.status(world)
+        }else if let review_tests::Request::StopPreview{world,build_id}=request {previews.stop(world,build_id)
+        }else if let review_tests::Request::BuildAccepted{generation,attempt_ref,revision,world}=request {
+            let path=work.matching_root(generation)?;let resolve=||->Result<Value,String>{let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref:attempt_ref.clone(),revision,world:world.clone(),reply})?;wait.recv().map_err(|_|"Review lookup was interrupted.")?};
+            let attempt=resolve()?;review_tests::verify_accepted_result(&data,&path,&attempt)?;
+            if work.matching_root(generation)?!=path||resolve()?!=attempt{return Err("The review or repository changed before the build. Try again.".into());}
+            builds.start(&data,world,path,attempt)
+        }else if let review_tests::Request::ListBuilds{world,attempt_ref}=request {builds.list(&data,world,attempt_ref)
+        }else if let review_tests::Request::CancelBuild{world,build_id}=request {builds.cancel(&data,world,build_id)
+        }else if let review_tests::Request::VerifyAccepted{generation,attempt_ref,revision,world}=request {
+            let path=work.matching_root(generation)?;
+            let resolve=||->Result<Value,String>{let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref:attempt_ref.clone(),revision,world:world.clone(),reply})?;wait.recv().map_err(|_|"Review lookup was interrupted.")?};
+            let attempt=resolve()?;
+            let checked=review_tests::verify_accepted_result(&data,&path,&attempt)?;
+            if work.matching_root(generation)?!=path||resolve()?!=attempt{return Err("The review or selected repository changed during the check. Try again.".into());}
+            let checked_at=std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_err(|_|"The check time is unavailable.")?.as_millis() as u64;
+            Ok(json!({"matched":true,"attempt_ref":attempt_ref,"snapshot_sha256":checked["snapshot_sha256"],"checked_at":checked_at}))
+        }else if let review_tests::Request::Accept{generation,attempt_ref,revision,world,run_id,note}=request {
+            if note.trim().is_empty()||note.len()>1000{return Err("Explain why this tested result meets the criteria.".into());}
+            let path=work.matching_root(generation)?;let (reply,wait)=sync_channel(1);
+            q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref:attempt_ref.clone(),revision,world:world.clone(),reply})?;
+            let attempt=wait.recv().map_err(|_|"Review lookup was interrupted.")??;
+            let checked=review_tests::verify_acceptance(&data,&path,&attempt,&run_id)?;
+            if work.matching_root(generation)?!=path{return Err("The selected repository changed.".into());}
+            let proof=report("prepare_development_acceptance",json!({"attempt_ref":attempt_ref,"fields":{"revision":revision,"run_id":run_id,"world":world,"path":path,"snapshot_sha256":checked["snapshot_sha256"],"result_sha256":checked["result_sha256"],"head":checked["head"]}}))?;
+            let (reply,wait)=sync_channel(1);q.intent(Msg::Intent{name:"accept_development_attempt".into(),args:json!({"attempt_ref":attempt_ref,"revision":revision,"token":proof["token"],"note":note}),reply})?;
+            let result=wait.recv().map_err(|_|"Acceptance was interrupted. Reopen the review to check its decision.")??;
+            if result["allow"]!=true{return Err("The runtime refused acceptance. Reopen the review and check its latest state.".into());}
+            Ok(json!({"accepted":true}))
+        }else if let review_tests::Request::Start{generation,attempt_ref,revision,world,profile}=request {
+            let path=work.matching_root(generation)?;let (reply,wait)=sync_channel(1);
+            q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref,revision,world:world.clone(),reply})?;
+            let attempt=wait.recv().map_err(|_|"Review lookup was interrupted.")??;
+            if work.matching_root(generation)?!=path{return Err("The repository changed.".into());}
+
+            runs.start(&data,world,path,attempt,report,profile)
+        }else{runs.request(&data,request,report)}
+    }).await.map_err(|_|"The local test operation could not finish.")?
+}
+#[tauri::command]
+async fn surface_sessions(
+    request: surface_sessions::Request,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    surface_sessions::request(request, app)
+}
+
+#[tauri::command]
+async fn browser_surface(
+    action: String,
+    url: Option<String>,
+    rect: Option<preview::Rect>,
+    tab: Option<u8>,
+    app: tauri::AppHandle,
+) -> Result<Value, String> {
+    preview::surface(action, url, rect, tab.unwrap_or(0), app)
+}
+
+#[tauri::command]
+async fn bot_configure(
+    settings: bots::Settings,
+    state: State<'_, bots::Bots>,
+) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.configure(settings))
+        .await
+        .map_err(|_| "Provider setup could not finish.")?
+}
+#[tauri::command]
+async fn bot_forget_key(provider: String, state: State<'_, bots::Bots>) -> Result<Value, String> {
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || state.forget_key(&provider))
+        .await
+        .map_err(|_| "Key removal could not finish.")?
+}
+#[tauri::command]
+async fn bot_models(provider: String, state: State<'_, bots::Bots>) -> Result<Value, String> {
+    let state = state.inner().clone();
+    state.models(provider).await
+}
+#[tauri::command]
+async fn bot_local_models(endpoint: String) -> Result<Value, String> {
+    bots::local_models(endpoint).await
+}
+
+#[tauri::command]
+async fn bot_connection(
+    operation: String,
+    request_id: Option<String>,
+    app: tauri::AppHandle,
+    state: State<'_, codex_connection::Connection>,
+) -> Result<Value, String> {
+    let home = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Connection storage is unavailable.")?
+        .join("codex");
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || match operation.as_str() {
+        "reply_status" => {
+            state.reply_status(request_id.as_deref().ok_or("Reply identity required.")?)
+        }
+        "cancel_reply" => {
+            state.cancel_reply(request_id.as_deref().ok_or("Reply identity required.")?)
+        }
+        "connect" => state.connect(home),
+        "status" => state.status(home),
+        "disconnect" => state.disconnect(home),
+        "models" => state.models(home),
+        _ => Err("Unknown connection operation.".into()),
+    })
+    .await
+    .map_err(|_| "Connection operation could not finish.")?
+}
+#[tauri::command]
+async fn bot_claude_connection(
+    operation: String,
+    app: tauri::AppHandle,
+    state: State<'_, claude_connection::Connection>,
+) -> Result<Value, String> {
+    let home = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Connection storage is unavailable.")?
+        .join("claude");
+    let state = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || match operation.as_str() {
+        "connect" => state.connect(home),
+        "status" => state.status(home),
+        "disconnect" => state.disconnect(home),
+        "models" => state.models(home),
+        _ => Err("Unknown connection operation.".into()),
+    })
+    .await
+    .map_err(|_| "Claude connection could not finish.")?
+}
+#[tauri::command]
+async fn bot_chat(
+    turn: bots::Turn,
+    app: tauri::AppHandle,
+    state: State<'_, bots::Bots>,
+    codex: State<'_, codex_connection::Connection>,
+    claude: State<'_, claude_connection::Connection>,
+) -> Result<Value, String> {
+    let home = app
+        .path()
+        .app_data_dir()
+        .map_err(|_| "Connection storage is unavailable.")?
+        .join("codex");
+    bots::chat(
+        state.inner(),
+        turn,
+        codex.inner().clone(),
+        claude.inner().clone(),
+        home,
+    )
+    .await
+}
+
+/// The page can open a native chooser, but cannot name a path to register.
+/// Whether a phone can read this runtime, and the code that would let one.
+///
+/// Read-only in both directions: this reports the companion's state and never
+/// starts, stops or pairs anything. The companion itself is given a selected
+/// projection and no control channel, so nothing here widens what a paired
+/// phone can do.
+#[tauri::command]
+fn mobile_status() -> Value {
+    crate::mobile_gateway::status()
+}
+
+/// Issue a fresh pairing code without restarting.
+///
+/// It widens nothing a paired phone can do: the companion still has a selected
+/// projection and no control channel. What it removes is the collateral in the
+/// only route that existed — a code came once per launch, so a second device,
+/// an expired code, or a phone that disconnected itself all meant restarting
+/// the host, which revokes every session to issue one code. Existing sessions
+/// are untouched here, and the code is generated in the companion and written
+/// to its 0600 file; it does not pass through this process.
+#[tauri::command]
+fn mobile_new_code() -> Value {
+    crate::mobile_gateway::renew()
+}
+
+/// The dialog is modal; its GTK loop continues dispatching desktop events.
+#[tauri::command]
+fn desktop_window(action: String, window: tauri::Window) -> Result<(), String> {
+    if let Some(direction) = action.strip_prefix("resize-") {
+        let direction =
+            serde_json::from_value(json!(direction)).map_err(|_| "Unknown resize direction.")?;
+        return window
+            .start_resize_dragging(direction)
+            .map_err(|e| e.to_string());
+    }
+    match action.as_str() {
+        "drag" => window.start_dragging(),
+        "minimize" => window.minimize(),
+        "maximize" => {
+            if window.is_maximized().map_err(|e| e.to_string())? {
+                window.unmaximize()
+            } else {
+                window.maximize()
+            }
+        }
+        "close" => window.close(),
+        _ => return Err("Unknown window action.".into()),
+    }
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn choose_attachments(window: tauri::Window) -> Result<Value, String> {
+    let guard = repository::ChooserGuard::acquire()?;
+    let (send, recv) = sync_channel(1);
+    let parent = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let _ = send.send(attachments::choose(&parent));
+        })
+        .map_err(|_| "The attachment chooser could not open.")?;
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = guard;
+        attachments::read_selected(
+            recv.recv()
+                .map_err(|_| "The chooser closed without a reply.")??,
+        )
+    })
+    .await
+    .map_err(|_| "Attachment selection could not finish.")?
+}
+
+#[tauri::command]
+async fn choose_repository(
+    window: tauri::Window,
+    queue: State<'_, Queues>,
+) -> Result<Value, String> {
+    let chooser_guard = repository::ChooserGuard::acquire()?;
+    let (selected, selection) = sync_channel(1);
+    let parent = window.clone();
+    window
+        .run_on_main_thread(move || {
+            let _ = selected.send(repository::choose(&parent));
+        })
+        .map_err(|_| "The repository chooser could not open")?;
+    let q = queue.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let _chooser_guard = chooser_guard;
+        let Some(path) = selection.recv().map_err(|_| "The repository chooser closed without a reply")?? else {
+            return Ok(json!({"status": "cancelled"}));
+        };
+        let (reply, wait) = sync_channel(1);
+        q.intent(Msg::RegisterRepository { path, reply })?;
+        wait.recv().unwrap_or_else(|_| Err("Repository registration was not confirmed. Check the repository list before trying again.".into()))
+    }).await.map_err(|e| format!("repository chooser join: {e}"))?
 }
 
 /// The WebView has painted frame `seq`. Until this arrives no newer frame
@@ -238,7 +605,15 @@ async fn intent(
 /// does not await it, so the rejection had nowhere to be seen either.
 #[tauri::command]
 async fn frame_ack(seq: u64, queue: State<'_, Queues>) -> Result<(), String> {
-    control(&queue, Msg::Ack { seq }).await
+    control(&queue, Msg::Ack { seq }).await?;
+    static PREVIEW_PAINTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if std::env::var("SUPER_BUILD_PREVIEW").as_deref() == Ok("1")
+        && !PREVIEW_PAINTED.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        eprintln!("[super-preview-frame-painted@1]");
+    }
+    Ok(())
 }
 
 /// An interaction has begun; hold the surface still until it ends.
@@ -330,7 +705,9 @@ async fn terminal_surface(
     }
 
     if app.get_webview(TERMINAL_LABEL).is_none() {
-        let main = app.get_window("main").ok_or("no main window to host the terminal")?;
+        let main = app
+            .get_window("main")
+            .ok_or("no main window to host the terminal")?;
         // Sized from the window rather than pinned, so the surface is a
         // product pane and not a fixed rectangle chosen for a battery.
         let (w, h) = match main.inner_size() {
@@ -380,9 +757,13 @@ async fn terminal_close(queue: State<'_, Queues>) -> Result<(), String> {
 /// the same resolution `super-host` uses, because two answers to "which
 /// runtime" is two products.
 fn ampd_dir() -> PathBuf {
-    std::env::var("AMPD_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join("ampd")
-    })
+    std::env::var("AMPD_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::env::current_dir()
+                .unwrap_or_else(|_| PathBuf::from("."))
+                .join("ampd")
+        })
 }
 
 fn main() {
@@ -390,7 +771,10 @@ fn main() {
     // `Ampd.CommandSpec` instead of with a comment. It does not start a
     // runtime and does not open a window.
     if std::env::args().any(|a| a == "--intents") {
-        println!("{}", json!({"schema": "intent-surface@1", "intents": worker::INTENT_SURFACE}));
+        println!(
+            "{}",
+            json!({"schema": "intent-surface@1", "intents": worker::INTENT_SURFACE})
+        );
         return;
     }
 
@@ -434,11 +818,39 @@ fn main() {
     let (tx, rx) = sync_channel::<worker::Msg>(depth);
 
     tauri::Builder::default()
-        .manage(Queues { intents: tx, control: ctl_tx })
+        .manage(Queues {
+            intents: tx,
+            control: ctl_tx,
+        })
+        .manage(review_tests::Runs::default())
+        .manage(accepted_builds::Builds::default())
+        .manage(accepted_preview::Previews::default())
+        .manage(workbench::Workbench::default())
+        .manage(surface_sessions::Sessions::default())
+        .manage(bots::Bots::default())
+        .manage(codex_connection::Connection::default())
+        .manage(claude_connection::Connection::default())
         .invoke_handler(tauri::generate_handler![
             bind_frame_stream,
             unbind_frame_stream,
             intent,
+            choose_repository,
+            choose_workbench,
+            development_request,
+            review_tests,
+            browser_surface,
+            surface_sessions,
+            choose_attachments,
+            desktop_window,
+            mobile_status,
+            mobile_new_code,
+            bot_configure,
+            bot_forget_key,
+            bot_chat,
+            bot_connection,
+            bot_claude_connection,
+            bot_local_models,
+            bot_models,
             frame_ack,
             hold_begin,
             hold_end,
@@ -447,8 +859,138 @@ fn main() {
             terminal_close,
             terminal_surface
         ])
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window
+                    .app_handle()
+                    .state::<accepted_preview::Previews>()
+                    .shutdown();
+                window
+                    .app_handle()
+                    .state::<workbench::Workbench>()
+                    .shutdown();
+            }
+        })
         .setup(move |app| {
-            let cfg = worker::Config { ampd_dir: dir.clone(), fixture };
+            if std::env::var("SUPER_BUILD_PREVIEW").as_deref() == Ok("1") {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.set_title("Super — build preview (temporary session)");
+                }
+            }
+            // Handle undecorated Linux borders at the native widget. Some
+            // compositors ignore begin_resize_drag from an embedded WebView.
+            // The original pointer grab carries motion/release outside the edge.
+            #[cfg(target_os = "linux")]
+            if let Some(view) = app.get_webview("main") {
+                view.with_webview(move |platform| {
+                    use gtk::prelude::*;
+                    type Drag = (f64, f64, i32, i32, i32, i32, bool, bool, bool, bool);
+                    let drag = std::rc::Rc::new(std::cell::RefCell::new(None::<Drag>));
+                    let state = drag.clone();
+                    platform
+                        .inner()
+                        .connect_button_press_event(move |view, event| {
+                            if event.button() != 1 {
+                                return gtk::glib::Propagation::Proceed;
+                            }
+                            let (x, y) = event.position();
+                            let (w, h) = (
+                                view.allocated_width() as f64,
+                                view.allocated_height() as f64,
+                            );
+                            let corner = (x < 12. || x > w - 12.) && (y < 12. || y > h - 12.);
+                            let (left, right, top, bottom) = (
+                                x < 5. || (corner && x < 12.),
+                                x > w - 6. || (corner && x > w - 12.),
+                                y < 5. || (corner && y < 12.),
+                                y > h - 6. || (corner && y > h - 12.),
+                            );
+                            if !(left || right || top || bottom) {
+                                return gtk::glib::Propagation::Proceed;
+                            }
+                            if let Some(window) = view
+                                .toplevel()
+                                .and_then(|w| w.downcast::<gtk::Window>().ok())
+                            {
+                                if window.is_maximized() {
+                                    return gtk::glib::Propagation::Stop;
+                                }
+                                let (rx, ry) = event.root();
+                                let (wx, wy) = window.position();
+                                let (ww, wh) = window.size();
+                                *state.borrow_mut() =
+                                    Some((rx, ry, wx, wy, ww, wh, left, right, top, bottom));
+                                view.grab_add();
+                                return gtk::glib::Propagation::Stop;
+                            }
+                            gtk::glib::Propagation::Proceed
+                        });
+                    let state = drag.clone();
+                    platform
+                        .inner()
+                        .connect_motion_notify_event(move |view, event| {
+                            if let Some((sx, sy, wx, wy, ww, wh, left, right, top, bottom)) =
+                                *state.borrow()
+                            {
+                                if let Some(window) = view
+                                    .toplevel()
+                                    .and_then(|w| w.downcast::<gtk::Window>().ok())
+                                {
+                                    let (x, y) = event.root();
+                                    let dx = (x - sx).round() as i32;
+                                    let dy = (y - sy).round() as i32;
+                                    let width = (ww
+                                        + if right {
+                                            dx
+                                        } else if left {
+                                            -dx
+                                        } else {
+                                            0
+                                        })
+                                    .max(620);
+                                    let height = (wh
+                                        + if bottom {
+                                            dy
+                                        } else if top {
+                                            -dy
+                                        } else {
+                                            0
+                                        })
+                                    .max(420);
+                                    if left || top {
+                                        window.move_(
+                                            wx + if left { ww - width } else { 0 },
+                                            wy + if top { wh - height } else { 0 },
+                                        );
+                                    }
+                                    window.resize(width, height);
+                                }
+                                return gtk::glib::Propagation::Stop;
+                            }
+                            gtk::glib::Propagation::Proceed
+                        });
+                    let state = drag.clone();
+                    platform
+                        .inner()
+                        .connect_button_release_event(move |view, event| {
+                            if event.button() == 1 && state.borrow_mut().take().is_some() {
+                                view.grab_remove();
+                                return gtk::glib::Propagation::Stop;
+                            }
+                            gtk::glib::Propagation::Proceed
+                        });
+                    platform.inner().connect_grab_broken_event(move |view, _| {
+                        if drag.borrow_mut().take().is_some() {
+                            view.grab_remove();
+                        }
+                        gtk::glib::Propagation::Proceed
+                    });
+                })?;
+            }
+            let cfg = worker::Config {
+                ampd_dir: dir.clone(),
+                fixture,
+            };
             std::thread::spawn(move || worker::run(ctl_rx, rx, cfg));
 
             // **The untrusted-pane boundary, opened INSIDE the trusted

@@ -453,6 +453,9 @@ async function run() {
     JSON.stringify(live.world),
   );
 
+  // Grants now live on the Capabilities page of the desktop shell.
+  await script("document.querySelector('#app-navigation [data-nav=capabilities]').click()");
+
   /* ── the DOM shows the grant ───────────────────────────────────────── */
 
   const grantId = await waitFor('a grant row',

@@ -1,3 +1,15 @@
+import { initDevelopmentTasks } from './development-tasks.js';
+import { initDevelopment } from './development.js';
+import { guidance, updateNavCounts } from './work-guidance.js';
+import { runtimeAssignments } from './runtime-assignments.js';
+import { mobileDevice, initMobileDevice } from './mobile-device.js';
+import { creationDestination, confirmedDestination } from './creation-navigation.js';
+import { initDesktopChrome } from './desktop-chrome.js';
+import { setReferenceFrame, referenceText, readable, referenceWorld } from './references.js';
+import { presentFrame } from './frame-dom.js';
+import { initBots } from './bots.js';
+import { openRecord, navigationToken, initShell, panel, node, card, detail, history, recordPage, beginFrameLayout, expectedHeadings, screens, selectedWorkspace, syncWorkspacePicker, clearWorkspacePicker } from './app-shell.js';
+
 /* The cockpit's renderer.
  *
  * ────────────────────────────────────────────────────────────────────────
@@ -23,7 +35,7 @@
  *
  * So `submit()` resolves into the receipt rail and joins nothing. Every
  * grant row on screen was put there by `render()`, and `render()` is called
- * from exactly one place: a frame arriving.
+ * on frame arrival, or to change the workspace view of that same held frame.
  *
  * ── the stream is a sink this page hands over ───────────────────────────
  *
@@ -150,11 +162,11 @@ function rowNode({ id, cap, who, actions = [] }) {
 
   const c = document.createElement('span');
   c.className = 'cap';
-  c.textContent = cap;
+  referenceText(c,cap);
 
   const w = document.createElement('span');
   w.className = 'who';
-  w.textContent = who;
+  referenceText(w,who);
 
   const spacer = document.createElement('span');
   spacer.className = 'spacer';
@@ -186,14 +198,11 @@ function rowNode({ id, cap, who, actions = [] }) {
  * `INTENT_SURFACE` would have turned it green while a person still could
  * not open anything. This is what makes its proposition true.
  *
- * **The draft is module state, and it has to be.** `render` rebuilds the
- * whole world region on every frame — deliberately, because a diff is a
- * second model of the screen and a second thing that can be wrong. A form
- * inside a region that is rebuilt would have its half-typed value
- * destroyed by any frame that arrived while the person was thinking. So
- * the typed value lives here, outside the region, and the inputs are
- * repopulated from it. It is not a model of the world; it is a model of
- * what the person has said so far, which no frame is entitled to move. */
+ * Drafts remain module state, separate from runtime facts. Each frame builds
+ * a complete planned view; reconciliation updates facts while retaining the
+ * same controls so a mouse press can finish across arriving frames. Inputs
+ * are populated from the person's draft, including after stream withdrawal.
+ * A runtime frame is never entitled to overwrite unfinished user input. */
 const draft = { workspace_name: '', goal_title: '', goal_ws: '', lane_goal: '', lane_actor: '', lane_repo: '', lane_base: '',
                 worker_lane: '', worker_purpose: '', worker_close: '', worker_reopen: '' };
 
@@ -227,7 +236,7 @@ function selectNode(key, label, options, empty) {
     for (const { value, text } of options) {
       const o = document.createElement('option');
       o.value = value;
-      o.textContent = text;
+      o.textContent = readable(text);
       o.selected = draft[key] === value;
       s.append(o);
     }
@@ -284,8 +293,7 @@ function argsFor(intent) {
 }
 
 function section(title, items, empty) {
-  const h = document.createElement('h2');
-  h.textContent = title;
+  const h = node('h2', title);
   const frag = document.createDocumentFragment();
   frag.append(h);
   if (!items.length) {
@@ -299,10 +307,12 @@ function section(title, items, empty) {
   return frag;
 }
 
-/* The whole of the world region, rebuilt. Not diffed: a diff is a second
-   model of what is on screen, and a second model is a second thing that
-   can be wrong about the frame. */
+/* Construct the complete view from one frame, then retain matching DOM
+   controls while applying that view. Removing pressed controls on every frame
+   prevents real pointer gestures from ever becoming clicks. */
 export function render(frame) {
+  setReferenceFrame(frame);
+  beginFrameLayout();
   el.state.textContent = frame.state;
   el.state.dataset.state = frame.state;
 
@@ -310,10 +320,16 @@ export function render(frame) {
   el.world.textContent = `world ${short(w.world_incarnation)} · gen ${w.world_generation ?? '—'} · epoch ${short(w.projection_epoch)}`;
   el.rev.textContent = `authority ${w.authority_revision ?? '—'} · view ${w.view_revision ?? '—'} · frame ${frame.seq}`;
 
-  el.main.textContent = '';
-
+  // A fresh projection may arrive while the person is typing. Preserve
+  // input focus and caret as presentation state, alongside the draft.
+  const active = document.activeElement;
+  const focusedDraft = active?.dataset?.draft;
+  const focusedDetail = active?.matches('.record-trigger') ? active.parentElement.dataset.detail : null;
+  const caret = active?.tagName === 'INPUT' ? [active.selectionStart, active.selectionEnd] : null;
   const p = frame.projection;
   if (!p) {
+    el.main.textContent = '';
+    clearWorkspacePicker();
     const note = document.createElement('p');
     note.className = 'empty';
     note.textContent = frame.note ?? 'No projection is held. Nothing is claimed about the world.';
@@ -402,84 +418,23 @@ export function render(frame) {
      the person. The agent's own `list_loci` is ancestry-closed; these are
      two different projections on purpose and the difference is the point
      of F14. */
-  const wsList = Object.values(p.workspaces ?? {});
-  const goalList = Object.values(p.goals ?? {});
+  const allWorkspaces = Object.values(p.workspaces ?? {});
+  syncWorkspacePicker(allWorkspaces);
+  const workspaceId = selectedWorkspace();
+  updateNavCounts(p,workspaceId);
+  const wsList = allWorkspaces.filter(w => !workspaceId || w.id === workspaceId);
+  const goalList = Object.values(p.goals ?? {}).filter(g => !workspaceId || g.workspace_ref === workspaceId);
+  const goalIds = new Set(goalList.map(g => g.id));
+  const laneList = Object.values(p.lanes ?? {}).filter(l => !workspaceId || goalIds.has(l.goal_ref));
+  const laneIds = new Set(laneList.map(l => l.id));
   const repoList = Object.values(p.repositories ?? {});
   const caps = Object.values(p.worktree_caps ?? {});
 
-  const workerList = Object.values(p.workers ?? {});
-
-  /* ── Workspace → Goal → Lane → Worker ─────────────────────────────────
-     The fourth rung, D.1.2. A Lane says who *may* stand at a position; a
-     Worker is somebody actually assigned to it, and its `occupancy` says
-     whether a live Carrier is fulfilling that assignment right now.
-
-     **`occupancy` is derived by the runtime, not by this page.**
-     `Ampd.Worker.status_of/1` re-runs the same `occupancy/2` the runtime
-     would refuse on, so `OCCUPIED` here and "a command issued from here
-     would be honoured" are the same proposition. Counting attachment rows
-     in JavaScript would have been easy and would have gone green for an
-     attachment the runtime had already stopped honouring — a status line
-     that disagrees with what the runtime does is worse than none.
-
-     Rendered under its Lane rather than in a list of its own, because a
-     Worker with no Lane above it is not a position and the hierarchy is
-     the thing being shown. */
-  const lanes = Object.values(p.lanes ?? {}).flatMap((l) => {
-    const held = caps.filter((c) => c.locus_ref === l.id && c.status === 'active').length;
-    const mine = workerList.filter((w) => w.locus_ref === l.id);
-
-    const laneRow = rowNode({
-      id: l.id,
-      cap: l.id,
-      who: `${l.actor} · ${short(l.goal_ref)} · ${held} capabilit${held === 1 ? 'y' : 'ies'}`,
-    });
-
-    /* ── D.1.3c·2c·1b · watching a Worker's terminal ──────────────────
-       The action is offered when the projection says a terminal is
-       PRESENT, which is a HINT and not a decision: `terminal_bind` runs
-       the whole chain including the stream owner and may still refuse
-       `terminal-stream-not-active`. A badge and an authority decision
-       must not cost the same — D.1.3c·2c·1a's A2 repair is exactly that
-       separation, and offering the button on the hint is what makes the
-       hint worth deriving.
-
-       Two arguments and no third. `endpoint_ref` is the socket this
-       cockpit process parks over the bridge, and `worker.rs` fills it in;
-       a page cannot be given a descriptor and is not given a name for
-       one. `w.generation` is the incarnation this row was rendered from,
-       so clicking a row the world has since replaced is refused
-       `worker-generation-stale` rather than silently followed to whoever
-       stands there now. */
-    const workerRows = mine.map((w) =>
-      rowNode({
-        id: w.id,
-        cap: `└ ${w.id}`,
-        who: `Worker · ${w.occupancy ?? 'OFFLINE'}${w.status === 'closed' ? ' · closed' : ''}${
-          w.terminal === 'PRESENT' ? ' · terminal' : ''
-        } · ${w.purpose ?? ''}`,
-        actions:
-          w.terminal === 'PRESENT' && w.status === 'open'
-            ? [
-                {
-                  label: 'Watch terminal',
-                  intent: 'terminal_bind',
-                  args: { worker_ref: w.id, expected_worker_generation: w.generation ?? 1 },
-                },
-                ...(surface.present
-                  ? [{ label: 'Stop watching', surface: 'close' }]
-                  : []),
-              ]
-            : [],
-      }),
-    );
-
-    return [laneRow, ...workerRows];
-  });
+  const workerList = Object.values(p.workers ?? {}).filter(w => !workspaceId || laneIds.has(w.locus_ref));
 
   const openWorkers = workerList.filter((w) => w.status === 'open');
   const closedWorkers = workerList.filter((w) => w.status !== 'open');
-  const laneOptions = Object.values(p.lanes ?? {}).map((l) => ({ value: l.id, text: `${l.id} · ${l.actor}` }));
+  const laneOptions = laneList.map((l) => ({ value: l.id, text: `${l.id} · ${l.actor}` }));
   const openWorkerOptions = openWorkers.map((w) => ({ value: w.id, text: `${w.id} · ${w.occupancy ?? ''}` }));
   const closedWorkerOptions = closedWorkers.map((w) => ({ value: w.id, text: `${w.id} · closed` }));
   /* Unresolved Carrier starts. The projection sends only these — a committed
@@ -492,24 +447,28 @@ export function render(frame) {
   const goalOptions = goalList.map((g) => ({ value: g.id, text: `${g.title ?? g.id}` }));
   const repoOptions = repoList.map((r) => ({ value: r.ref, text: r.ref }));
 
+  const newWorkspace = panel('new-workspace');
+  const backToWorkspaces = node('button', '← Workspaces', 'record-back'); backToWorkspaces.dataset.nav='positions';
+  newWorkspace.insertBefore(backToWorkspaces,newWorkspace.firstChild);
+  newWorkspace.append(formNode('open-workspace', 'open_workspace',
+    [fieldNode('workspace_name', 'Workspace name', 'e.g. Product development')], 'Create workspace'));
+  const cancelWorkspace = node('button', 'Cancel', 'subtle'); cancelWorkspace.dataset.nav='positions'; newWorkspace.append(cancelWorkspace);
   const openers = [
-    formNode('open-workspace', 'open_workspace',
-      [fieldNode('workspace_name', 'Workspace', 'name')], 'open'),
 
     formNode('open-goal', 'open_goal',
-      [selectNode('goal_ws', 'in', wsOptions, 'no workspace yet'),
-       fieldNode('goal_title', 'Goal', 'what it is for')],
-      'open', wsOptions.length === 0),
+      [selectNode('goal_ws', 'Workspace', wsOptions, 'no workspace yet'),
+       fieldNode('goal_title', 'Goal title', 'What do you want to accomplish?')],
+      'Create goal', wsOptions.length === 0),
 
     /* `open_lane` names the actor that may occupy the Lane. That is the
        person deciding who stands where, and it is the reason this whole
        section is an authority surface rather than a convenience. */
     formNode('open-lane', 'open_lane',
-      [selectNode('lane_goal', 'toward', goalOptions, 'no goal yet'),
-       fieldNode('lane_actor', 'Lane for', 'actor'),
-       selectNode('lane_repo', 'in', repoOptions, 'no repository registered'),
-       fieldNode('lane_base', 'from', 'revision (optional)')],
-      'open', goalOptions.length === 0 || repoOptions.length === 0),
+      [selectNode('lane_goal', 'Goal', goalOptions, 'no goal yet'),
+       fieldNode('lane_actor', 'Actor', 'Actor identity'),
+       selectNode('lane_repo', 'Repository', repoOptions, 'no repository registered'),
+       fieldNode('lane_base', 'Base revision', 'Optional')],
+      'Create lane', goalOptions.length === 0 || repoOptions.length === 0),
 
     /* D.1.2. Three forms, because a person needs all three verbs: assign
        somebody to a position, end that assignment, and — since ending it
@@ -519,17 +478,17 @@ export function render(frame) {
        thing issued from there without anyone having to ask the Carrier
        to cooperate. */
     formNode('open-worker', 'open_worker',
-      [selectNode('worker_lane', 'at', laneOptions, 'no lane yet'),
-       fieldNode('worker_purpose', 'Worker', 'what it is assigned to do')],
-      'assign', laneOptions.length === 0),
+      [selectNode('worker_lane', 'Lane', laneOptions, 'no lane yet'),
+       fieldNode('worker_purpose', 'Worker purpose', 'What should this worker do?')],
+      'Assign worker', laneOptions.length === 0),
 
     formNode('close-worker', 'close_worker',
-      [selectNode('worker_close', 'end', openWorkerOptions, 'no open worker')],
-      'close', openWorkerOptions.length === 0),
+      [selectNode('worker_close', 'Open worker', openWorkerOptions, 'no open worker')],
+      'Close worker', openWorkerOptions.length === 0),
 
     formNode('reopen-worker', 'reopen_worker',
-      [selectNode('worker_reopen', 'restore', closedWorkerOptions, 'no closed worker')],
-      'reopen', closedWorkerOptions.length === 0),
+      [selectNode('worker_reopen', 'Closed worker', closedWorkerOptions, 'no closed worker')],
+      'Reopen worker', closedWorkerOptions.length === 0),
 
     /* An ambiguous Carrier start blocks every later start for that Worker.
        This is how a person ends that, and it is the only way: nothing clears
@@ -538,36 +497,101 @@ export function render(frame) {
        says "nothing is stuck" rather than offering an action with no
        subject. */
     formNode('reconcile-carrier', 'reconcile_carrier_attempt',
-      [selectNode('attempt_reconcile', 'resolve', unresolvedAttemptOptions,
+      [selectNode('attempt_reconcile', 'Unresolved start', unresolvedAttemptOptions,
                   'no unresolved carrier start')],
-      'reconcile', unresolvedAttemptOptions.length === 0),
+      'Reconcile start', unresolvedAttemptOptions.length === 0),
   ];
 
-  const sections = [
-    section('Waiting on you', requests, 'Nothing is waiting.'),
-    section('Consent for one effect', approvals, 'Nothing is held for consent.'),
-    section('Active grants', grants, 'No authority is granted.'),
+  const mission = panel('mission');
+  const stats = node('div', undefined, 'stats-grid');
+  stats.append(card('Workspaces', wsList.length), card('Open workers', openWorkers.length),
+    card('Permission decisions', requests.length + approvals.length), card('Active grants', liveGrants.length));
+  mission.append(stats);
+  mission.append(guidance({node,card,detail,p,workspace:workspaceId}));
+  const overview = node('div', undefined, 'overview-card');
+  overview.append(node('h2', wsList.length ? 'Your workspaces' : 'Make room for your first goal'),
+    node('p', wsList.length ? 'Open a workspace to see its goals and assigned lanes.'
+      : 'Create a workspace, give it a goal, then assign work through lanes and workers.', 'screen-description'));
+  for (const ws of wsList) overview.append(detail(ws, `workspace:${ws.id}`, ws.name ?? ws.id));
+  const go = node('button', wsList.length ? 'View workspaces →' : 'Create your first workspace →', 'primary');
+  go.dataset.nav = wsList.length ? 'positions' : 'new-workspace'; overview.append(go); mission.append(overview);
+  mission.append(section('Permission requests', requests, 'No requests need your attention.'),
+    section('Consent for one effect', approvals, 'No effects are waiting for consent.'));
+
+  const positions = panel('positions'),goalsPage=panel('goals'),lanesPage=panel('lanes');
+  const createWorkspace=node('button','New workspace','primary');createWorkspace.dataset.nav='new-workspace';positions.append(createWorkspace);
+  for(const [page,values] of [[positions,[['Workspaces',wsList.length],['Goals',goalList.length]]],[goalsPage,[['Goals',goalList.length],['Without lanes',goalList.filter(g=>!laneList.some(l=>l.goal_ref===g.id)).length]]],[lanesPage,[['Lanes',laneList.length],['Open workers',openWorkers.length]]]]){const summary=node('div',undefined,'stats-grid');for(const [title,value] of values)summary.append(card(title,value));page.append(summary);}
+  const manageWork=panel('manage-work');const backToList=node('button','← Workspaces','record-back');backToList.dataset.nav='positions';manageWork.insertBefore(backToList,manageWork.firstChild);manageWork.append(...openers);
+  function setupButton(page,label,target){const b=node('button',label,'primary');b.dataset.setupForm=target;page.append(b);}
+  setupButton(goalsPage,'New goal','open-goal');setupButton(lanesPage,'New lane','open-lane');
+  const manageWorkers=node('button','Manage workers','subtle');manageWorkers.dataset.setupForm='open-worker';lanesPage.append(manageWorkers);
+  function directoryCard(record,key,label,notes){const row=detail(record,key,label);for(const note of notes)row.append(node('p',note,'directory-note'));return row;}
+  const workspaceCards=wsList.map(w=>{const mine=goalList.filter(g=>g.workspace_ref===w.id),ids=new Set(mine.map(g=>g.id));return directoryCard(w,`position-workspace:${w.id}`,w.name||w.id,[`${mine.length} goals · ${laneList.filter(l=>ids.has(l.goal_ref)).length} lanes`]);});
+  positions.append(section('Your workspaces',workspaceCards,'No workspaces yet. Create a workspace to organize your first goal.'));
+  goalsPage.append(section('Your goals',goalList.map(g=>directoryCard(g,`goal:${g.id}`,g.title||g.id,[`Workspace: ${g.workspace_ref??'Not set'}`,`${laneList.filter(l=>l.goal_ref===g.id).length} assigned lanes`])),'No goals in this view. Add a goal to describe the outcome you want.'));
+  lanesPage.append(section('Your lanes',laneList.map(l=>directoryCard(l,`lane:${l.id}`,l.id,[`Goal: ${l.goal_ref??'Not set'}`,`Actor: ${l.actor||'Not assigned'} · Repository: ${l.repository_ref??'Not set'}`,`${workerList.filter(w=>w.locus_ref===l.id).length} assigned workers`])),'No lanes in this view. A lane connects a goal, an actor, and a repository.'));
+  const assignments=runtimeAssignments({frame,node,panel,card,detail});
+  const mobile=mobileDevice({node,panel,card});
+  const repositories = panel('repositories');
+  repositories.append(node('p', 'Choose the top-level folder of a Git repository. Registered repositories are shared across workspaces; choosing one does not grant a worker access.', 'screen-description'));
+  const choose = node('button', 'Add local repository…', 'primary'); choose.dataset.hostAction = 'choose-repository'; choose.disabled = repositoryPickerPending;
+  repositories.append(choose);
+  for (const repo of repoList) repositories.append(detail(repo, `repository:${repo.ref}`, repo.ref));
+  if(!repoList.length)repositories.append(node('p','No repositories connected yet. Add a local Git repository to make it available when creating a lane.','empty'));
+  repositories.append(node('p','Shared across all workspaces.','scope-note'));
+  const repositoryLink=node('button','Manage local repositories →','subtle');repositoryLink.dataset.nav='repositories';manageWork.append(repositoryLink);
+
+  const capabilities = panel('capabilities');
+  capabilities.append(section('Active grants', grants, 'No authority is currently granted.'),
     section('Whole capability domains', domains, 'No capability has a grant.'),
-    section('Positions', lanes, 'No Lane is open.'),
-    section('Open a position', openers, ''),
-    section('Attached', peers, 'Nobody is attached.'),
-  ];
+    node('p', 'New requests and effect approvals appear in Mission Control. The prototype’s capability marketplace is not connected.', 'availability-note'));
 
-  el.main.append(...sections);
+  const evidence = panel('evidence');
+  evidence.append(history('Validations', p.validations, 'validations'),
+    history('Worktree establishments', p.worktree_receipts, 'worktree'),
+    history('Capability effects', p.receipts, 'receipts'));
 
-  /* **What this render intended, published so a checker need not hardcode
-     it.** `cockpit-battery.mjs` asserted `#world h2 === 3` — the section
-     count on the day it was written — so adding a section to this file
-     failed a check about *recovery*, in a different language, for a reason
-     that had nothing to do with recovery. That is the number-in-two-places
-     failure the release scope exists to prevent, and it was sitting in the
-     battery.
+  const runtime = panel('runtime');
+  runtime.append(section('Registered bot identities',Object.values(p.bots??{}).map(b=>detail(b,`bot:${b.id}`,b.name)),'No bot identities registered. Open a bot page to register it in a workspace.'));
+  const health = node('div', undefined, 'stats-grid');
+  health.append(card('Runtime', p.runtime?.status ?? 'Not reported'), card('Version', p.runtime?.version ?? 'Not reported'),
+    card('World loaded', p.runtime?.world_loaded === true ? 'Yes' : p.runtime?.world_loaded === false ? 'No' : 'Not reported'));
+  runtime.append(health, section('Connected peers', peers, 'No peers are connected.'),
+    section('Channels', (p.channels ?? []).map((c, i) => detail(c, `channel:${c.channel_id ?? c.id ?? i}`, c.channel_id ?? c.id ?? `Channel ${i + 1}`)), 'No channels reported.'),
+    section('Unresolved carrier starts', Object.values(p.carrier_attempts ?? {}).map(a => detail(a, `attempt:${a.ticket_id}`, `${a.worker_ref} · ${a.state}`)), 'No unresolved starts.'),
+    section('Store seals', (p.seals ?? []).map((s, i) => detail(s, `seal:${i}`, s.registry ?? 'Sealed store')), 'No stores are sealed.'),
+    section('Recent refusals', (p.recent_refusals ?? []).map((r, i) => detail(r, `refusal:${r.id ?? i}`, r.code ?? r.refusal?.code ?? 'Refusal')), 'No recent refusals.'),
+    detail({ world: frame.world, runtime: p.runtime, manifest: p.world }, 'runtime-identity', 'World & frame identity'));
 
-     Publishing the intended count makes the assertion a real cross-check:
-     the DOM heading count and the number of sections `render` believes it
-     appended must agree, which catches a half-built region — where a
-     hardcoded literal only ever caught this file changing. */
-  window.cockpit.rendered = { sections: sections.length };
+  const extra = screens.filter(([id]) => !['mission','positions','capabilities','evidence','runtime','bots','new-bot','edit-bot','new-workspace','manage-work','repositories','goals','lanes','runtime-assignments','editor','terminal','browser','development-tasks','mobile'].includes(id)).map(([id]) => {
+    const page = panel(id);
+    if (id === 'agents') page.append(section('Connected peers', (p.peers ?? []).map(peer => detail(peer, `agent:${peer.peer_id ?? peer.actor}`, peer.actor ?? peer.peer_id ?? 'Peer')), 'No peers are connected.'));
+    else if (id === 'authority') page.append(section('Current grants', liveGrants.map(g => detail(g, `authority:${g.id}`, `${g.capability} · ${g.actor}`)), 'No authority is currently granted.'));
+    else if (id === 'settings') page.append(node('p', 'Super runs on your machine. Use the workspace switcher to focus the work shown in Mission Control and lanes. Authority and history views cover the whole runtime.', 'overview-card'), detail({state: frame.state, runtime: p.runtime}, 'settings-runtime', 'Connection information'));
+    else page.append(node('div', 'NOT CONNECTED · This prototype page needs runtime data and actions that are not available in the desktop app yet.', 'availability-note'));
+    return page;
+  });
+  const scopeName = workspaceId ? wsList[0]?.name ?? workspaceId : 'All workspaces';
+  for (const page of [mission, positions, goalsPage, lanesPage]) page.insertBefore(node('p', `Workspace view: ${scopeName}`, 'scope-note'), page.children[3] ?? null);
+  for (const page of [capabilities, evidence, runtime, ...extra]) page.append(node('p', 'Scope: whole runtime', 'scope-note'));
+  mission.append(node('p', 'Requests, approvals, and active grant totals cover the whole runtime.', 'availability-note'));
+  presentFrame(el.main, [mission, positions, goalsPage, lanesPage, assignments, newWorkspace, manageWork, repositories, capabilities, evidence, runtime, mobile, ...extra, recordPage(frame)]);
+  if (focusedDraft) {
+    const replacement = [...el.main.querySelectorAll('[data-draft]')].find(n => n.dataset.draft === focusedDraft);
+    if (replacement && !replacement.disabled) {
+      replacement.focus({ preventScroll: true });
+      if (caret && replacement.tagName === 'INPUT') replacement.setSelectionRange(...caret);
+    }
+  }
+  if (focusedDetail) {
+    const replacement = [...el.main.querySelectorAll('[data-detail]')].find(n => n.dataset.detail === focusedDetail);
+    replacement?.querySelector('.record-trigger')?.focus({ preventScroll: true });
+  }
+  // Compare the headings planned during construction with the actual DOM.
+  // Reading the DOM here would make the existing completeness check circular.
+  window.cockpit.rendered = { sections: expectedHeadings() };
+  document.dispatchEvent(new Event('runtime-view-rendered'));
+
 }
 
 /* A submission, resolved. This writes to the receipt rail — which is
@@ -577,7 +601,8 @@ function receipt(name, outcome, detail) {
   const li = document.createElement('li');
   li.dataset.outcome = outcome;
   li.dataset.intent = name;
-  li.textContent = `${name} · ${outcome}${detail ? ' · ' + detail : ''}`;
+  const label = name.replaceAll('_', ' ');
+  referenceText(li,`${label.charAt(0).toUpperCase() + label.slice(1)} · ${outcome}${detail ? ' · ' + detail : ''}`);
   el.receipts.prepend(li);
 }
 
@@ -609,6 +634,7 @@ const ack = (seq) =>
     el.state.textContent = 'stalled';
     el.state.dataset.state = 'reacquire';
     el.main.textContent = '';
+  clearWorkspacePicker();
     const p = document.createElement('p');
     p.className = 'empty';
     p.textContent =
@@ -652,7 +678,16 @@ async function terminalSurface(open) {
   }
 }
 
-async function submit(name, args) {
+let pendingCreation=null;
+function followCreatedRecord(){
+  const c=window.cockpit;if(c.withdrawn||c.unavailable||c.stalled)return;
+  const next=confirmedDestination(pendingCreation,c.frame,referenceWorld(),navigationToken());pendingCreation=next.pending;
+  if(next.key)openRecord(next.key);
+}
+document.addEventListener('runtime-view-rendered',()=>queueMicrotask(followCreatedRecord));
+async function submit(name, args, followCreation=false) {
+  const creationOrigin={world:referenceWorld(),route:navigationToken(),seq:window.cockpit.frame?.seq??0};
+  if(followCreation)pendingCreation=null;
   /* One token per submission, never a shared flag. */
   const id = `hold-${++holds}`;
 
@@ -661,6 +696,7 @@ async function submit(name, args) {
      the hold is in force before the world can move. */
   await window.cockpit.holdBegin(id);
   receipt(name, 'submitted', '');
+  let accepted = false;
   try {
     /* The one intent that needs a surface before it can be honoured. It
        is done inside the hold so the screen stays still across both, and
@@ -669,6 +705,8 @@ async function submit(name, args) {
     if (name === 'terminal_bind') await terminalSurface(true);
     const result = await invoke('intent', { name, args });
     const refusal = result?.refusal?.code;
+    accepted = !refusal;
+    if(followCreation)pendingCreation=creationDestination(name,result,creationOrigin);
     receipt(name, refusal ? 'refused' : 'accepted', refusal ?? '');
   } catch (e) {
     receipt(name, 'refused', String(e));
@@ -677,9 +715,30 @@ async function submit(name, args) {
      frame arrives — if the world agrees, and once every other interaction
      has released its own hold too. */
   await window.cockpit.holdEnd(id);
+  if(followCreation)queueMicrotask(followCreatedRecord);
+  return accepted;
 }
 
+let repositoryPickerPending = false;
+document.addEventListener('record-route-change',()=>{const c=window.cockpit;if(c.frame?.projection&&!c.withdrawn&&!c.unavailable&&!c.stalled)render(c.frame);});
+document.addEventListener('workspace-view-change', () => {
+  const c = window.cockpit;
+  if (c.frame?.projection && !c.withdrawn && !c.unavailable && !c.stalled && el.main.querySelector('[data-screen]')) render(c.frame);
+});
 document.addEventListener('click', (ev) => {
+  const hostAction = ev.target.closest('button[data-host-action="choose-repository"]');
+  if (hostAction) {
+    if (repositoryPickerPending) return;
+    repositoryPickerPending = true; hostAction.disabled = true;
+    invoke('choose_repository').then(result => {
+      receipt('register_repository', result.status === 'cancelled' ? 'cancelled' : 'accepted', result.repository_ref);
+    }).catch(error => receipt('register_repository', 'refused', String(error))).finally(() => {
+      repositoryPickerPending = false;
+      document.querySelectorAll('[data-host-action="choose-repository"]').forEach(b => { b.disabled = b.dataset.deletionBlocked==='true'; });
+    });
+    return;
+  }
+
   const s = ev.target.closest('button[data-surface]');
   if (s) {
     /* No hold. A hold exists to keep the world still across a mutation,
@@ -692,7 +751,13 @@ document.addEventListener('click', (ev) => {
   }
 
   const b = ev.target.closest('button[data-intent]');
-  if (b) { submit(b.dataset.intent, JSON.parse(b.dataset.args)); return; }
+  if (b) { if(b.disabled||b.dataset.deletionBlocked==='true')return;if(b.dataset.confirm){
+      const dialog=document.createElement('dialog');dialog.id='delete-workspace-dialog';
+      const origin=referenceWorld(),args=JSON.parse(b.dataset.args);dialog.append(node('h2','Delete workspace?'),node('p',b.dataset.confirm));
+      const cancel=node('button','Cancel'),accept=node('button','Delete workspace','primary');cancel.type=accept.type='button';accept.dataset.confirmWorkspaceDelete='true';
+      cancel.onclick=()=>dialog.close();accept.onclick=()=>{if(origin!==referenceWorld()){dialog.close();receipt('delete_workspace','refused','The runtime world changed. Review the workspace again.');return;}dialog.close();submit('delete_workspace',args);};
+      dialog.addEventListener('close',()=>dialog.remove());dialog.append(cancel,accept);document.body.append(dialog);dialog.showModal();cancel.focus();return;
+    }submit(b.dataset.intent, JSON.parse(b.dataset.args)); return; }
 
   /* The form path. Arguments are read from the draft now rather than
      having been serialized at render time, so what is submitted is what
@@ -700,18 +765,27 @@ document.addEventListener('click', (ev) => {
   const f = ev.target.closest('button[data-intent-form]');
   if (!f) return;
   const intent = f.dataset.intentForm;
-  submit(intent, argsFor(intent)).then(() => {
+  const submittedDraft = { ...draft };
+  const clearSubmitted = key => {
+    if (draft[key] !== submittedDraft[key]) return;
+    draft[key] = '';
+    document.querySelectorAll('[data-draft]').forEach(input => {
+      if (input.dataset.draft === key && input.value === submittedDraft[key]) input.value = '';
+    });
+  };
+  submit(intent, argsFor(intent), true).then((accepted) => {
+    if (!accepted) return;
     /* Cleared only for the fields this intent consumed, and only after it
        resolved. Clearing on click would discard what the person typed if
        the runtime refused it, and they would have to type it again to
        find out why. */
-    if (intent === 'open_workspace') draft.workspace_name = '';
-    if (intent === 'open_goal') draft.goal_title = '';
-    if (intent === 'open_lane') { draft.lane_actor = ''; draft.lane_base = ''; }
+    if (intent === 'open_workspace') clearSubmitted('workspace_name');
+    if (intent === 'open_goal') clearSubmitted('goal_title');
+    if (intent === 'open_lane') { clearSubmitted('lane_actor'); clearSubmitted('lane_base'); }
     /* Only `purpose` — the Lane selection is a choice among things that
        still exist and `selectNode` already re-resolves a stale one. Close
        and reopen consume nothing typed. */
-    if (intent === 'open_worker') draft.worker_purpose = '';
+    if (intent === 'open_worker') clearSubmitted('worker_purpose');
   });
 });
 
@@ -990,6 +1064,7 @@ function withdraw(reason) {
   el.state.textContent = 'stream lost';
   el.state.dataset.state = 'reacquire';
   el.main.textContent = '';
+  clearWorkspacePicker();
   const p = document.createElement('p');
   p.className = 'empty';
   p.textContent = SAID[reason] ?? SAID.silence;
@@ -1098,6 +1173,7 @@ function unavailable() {
   el.state.textContent = 'stream unavailable';
   el.state.dataset.state = 'reacquire';
   el.main.textContent = '';
+  clearWorkspacePicker();
   const p = document.createElement('p');
   p.className = 'empty';
   p.textContent =
@@ -1134,7 +1210,7 @@ function restore() {
   c.withdrawn = false;
   c.withdraw_reason = null;
   c.candidates = 0;
-  document.querySelectorAll('button[data-intent]').forEach((b) => { b.disabled = false; });
+  document.querySelectorAll('button[data-intent]').forEach((b) => { b.disabled = b.dataset.deletionBlocked==='true'; });
 }
 
 function leaseTick() {
@@ -1267,6 +1343,7 @@ function bind() {
          untrusted pane sees, and saying so is better than an empty window
          that looks like a dead runtime. */
       el.main.textContent = '';
+  clearWorkspacePicker();
       const p = document.createElement('p');
       p.className = 'empty';
       p.textContent = `This webview may not bind the frame stream: ${e}`;
@@ -1294,5 +1371,17 @@ function current(generation) {
 window.cockpit.deliver = deliver;
 window.cockpit.bind = bind;
 
+initBots({ invoke, apply: submit, current: () => window.cockpit, runtimeBotActions:{
+  register:args=>submit('register_bot',args),
+  update:args=>submit('update_bot',args),
+  remove:args=>submit('remove_bot',args)
+} });
+initDevelopment({invoke,apply:submit,recordAttempt:args=>submit('record_development_attempt',args),recordSet:args=>submit('record_development_change_set',args),current:()=>window.cockpit});
+const nativeReviewActions={'accept_development_attempt':args=>invoke('review_tests',{request:{operation:'accept',...args}})};
+initDevelopmentTasks({invoke,actions:{accept:nativeReviewActions['accept_development_attempt'],create:args=>submit('create_development_task',args),update:args=>submit('update_development_task',args),updateAttempt:args=>submit('update_development_attempt',args),checkAttempt:args=>submit('check_development_attempt_text',args)},current:()=>window.cockpit});
+initShell();
+// Polls only while the Mobile page is on screen; see mobile-device.js.
+initMobileDevice(invoke, node);
+initDesktopChrome(invoke);
 bind();
 setInterval(leaseTick, 500);

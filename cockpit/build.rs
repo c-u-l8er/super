@@ -16,21 +16,36 @@
 //! outside the ACL again, so the two lists are checked against each other by
 //! `tools/check-webview-acl.mjs` rather than by whoever remembers.
 fn main() {
-    tauri_build::try_build(
-        tauri_build::Attributes::new().app_manifest(
-            tauri_build::AppManifest::new().commands(&[
-                "bind_frame_stream",
-                "unbind_frame_stream",
-                "intent",
-                "frame_ack",
-                "hold_begin",
-                "hold_end",
-                "terminal_stream",
-                "terminal_ack",
-                "terminal_close",
-                "terminal_surface",
-            ]),
-        ),
-    )
+    tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
+        tauri_build::AppManifest::new().commands(&[
+            "bind_frame_stream",
+            "unbind_frame_stream",
+            "intent",
+            "choose_repository",
+            "choose_workbench",
+            "development_request",
+            "review_tests",
+            "browser_surface",
+            "surface_sessions",
+            "choose_attachments",
+            "desktop_window",
+            "mobile_status",
+            "mobile_new_code",
+            "bot_configure",
+            "bot_forget_key",
+            "bot_chat",
+            "bot_connection",
+            "bot_claude_connection",
+            "bot_local_models",
+            "bot_models",
+            "frame_ack",
+            "hold_begin",
+            "hold_end",
+            "terminal_stream",
+            "terminal_ack",
+            "terminal_close",
+            "terminal_surface",
+        ]),
+    ))
     .expect("failed to run tauri-build");
 }

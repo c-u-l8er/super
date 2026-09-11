@@ -243,7 +243,7 @@ if (term) {
   );
 
   check(
-    'and no command for input or resize exists anywhere in this process',
+    'and the runtime byte plane exposes no input or resize command',
     !/terminal_input|terminal_resize|terminal_write/.test(main + build),
     'SHAPE or DRIVE has an entry point — read-only is meant to be structural, '
       + 'not a stage the code is passing through',
@@ -322,15 +322,14 @@ if (term) {
     'the terminal webview is built from something other than the two constants',
   );
 
-  /* Every webview this process can construct, by the string it is built
-     from. Two, and both are literals in this file. */
-  const built = [...main.matchAll(/WebviewUrl::App\(([\s\S]*?)\.into\(\)\)/g)]
-    .map((m) => m[1].trim());
-  check(
-    'this process can construct exactly two webviews, both named in source',
-    built.length === 2 && built.includes('"pane.html"') && built.includes('TERMINAL_URL'),
-    `WebviewUrl::App call sites: ${JSON.stringify(built)}`,
-  );
+  const sourceDir = `${ROOT}/cockpit/src`;
+  const allRust = readdirSync(sourceDir).filter(f=>f.endsWith('.rs')).map(f=>readFileSync(`${sourceDir}/${f}`,'utf8')).join('\n');
+  const preview = readFileSync(`${sourceDir}/preview.rs`,'utf8');
+  const builders = [...allRust.matchAll(/WebviewBuilder::new\(/g)];
+  check('all native child constructors are accounted for across Rust modules', builders.length===3, `constructors: ${builders.length}`);
+  check('all bounded browser tab labels remain untrusted', /const LABEL: &str = "development-preview";/.test(preview) && /tab > 7/.test(preview) && !caps.some(c=>(c.json.webviews??[]).some(label=>label.startsWith('development-preview'))));
+  check('preview navigation is filtered and popup creation is refused', /\.on_navigation\(allowed\)/.test(preview) && /NewWindowResponse::Deny/.test(preview));
+  check('development tools are granted only to the trusted main webview', ['allow-choose-workbench','allow-development-request','allow-browser-surface'].every(p=>caps.filter(c=>(c.json.permissions??[]).includes(p)).every(c=>c.json.webviews?.length===1&&c.json.webviews[0]==='main')));
 
   /* The `if pane {` block, isolated, so what it still governs is checked
      rather than described. */

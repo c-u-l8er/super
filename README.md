@@ -671,3 +671,43 @@ for the cost of one hash.
   og:image for shares.
 - Figures the artifact doesn't establish are hidden, not invented.
 
+
+
+## Desktop app connection — 2026-09-06
+
+The cockpit now presents Mission Control, Workspaces & lanes, Capabilities,
+Evidence and Runtime as navigable pages over its existing live frame stream.
+Bots offers browser sign-in for ChatGPT / Codex, a local Claude CLI connection, automatic local Ollama connection,
+and advanced OpenAI / Anthropic API-key management for a session
+conversation and reviewed workspace setup proposals. See [Bots](docs/app/BOTS.md)
+for setup, context sharing and limits. A page
+finder supports Ctrl/Cmd+K; existing ordered actions and terminal watching remain
+on their original bridge. The website prototype remains simulated.
+
+See [the prototype/runtime gap map](docs/app/PROTOTYPE_RUNTIME_MAP.md) for the
+field-level support and limits. The prototype's Bots / Nav / Runtime rail and
+five navigation groups are present. The workspace switcher scopes workspaces,
+goals, lanes and workers; authority and evidence remain runtime-wide.
+A native Linux folder chooser registers a Git repository through the host;
+the page receives only its reference, and the list updates from runtime frames.
+Local conversation history and runtime bot registration are connected. Older-history
+paging and autonomous multi-bot execution remain open.
+
+Build with `cargo build --release --offline --manifest-path cockpit/Cargo.toml`.
+Run `node tools/cockpit-app-smoke.mjs` for the isolated product-flow check.
+Launch the daily desktop with `tools/start-desktop.sh`. It prefers native Wayland
+and falls back to X11, overriding an inherited test-runner `GDK_BACKEND` setting.
+For deliberate backend troubleshooting, use `SUPER_DESKTOP_BACKEND=x11` or
+`SUPER_DESKTOP_BACKEND=wayland`. The mobile observer launcher uses the same entry point.
+The isolated `tools/native-ui-test.sh` wrapper still explicitly selects X11 for
+WebDriver capture; that test setting should not choose the daily desktop backend.
+There is still no installer.
+
+## Local development tools — 2026-09-07
+
+The Nav rail includes Editor, Terminal, and Browser in that order. Choose a local
+Git checkout with the native folder picker, browse/edit/save its text files, run a
+non-interactive command with live output and a Stop control, and preview a local
+HTTP/HTTPS server inside the app. These are human-operated machine tools, separate
+from runtime actor grants and evidence. Bot worktree execution and reviewed diffs
+remain open. See [usage and boundaries](docs/app/LOCAL_DEVELOPMENT.md).

@@ -3,33 +3,63 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Super (CD) — cockpit</title>
+  <title>Super (CD)</title>
   <link rel="stylesheet" href="cockpit.css">
+  <link rel="stylesheet" href="vendor/xterm.css">
+  <script src="vendor/xterm.js"></script>
 </head>
 <body>
-
-  <!-- Everything inside a data-source="frame" region is written by
-       render() and by nothing else. The receipt rail is the one place a
-       submission may show, and it says so in its own attribute. -->
-
-  <header id="badge" data-source="frame">
-    <span id="badge-state" class="state">connecting</span>
-    <span id="badge-world" class="mono"></span>
-    <span id="badge-rev" class="mono"></span>
+  <header id="desktop-chrome" aria-label="Application controls">
+    <button id="toggle-sidebar" aria-label="Toggle sidebar" title="Toggle sidebar (Ctrl B)">◧</button>
+    <button id="history-back" aria-label="Back" disabled>←</button><button id="history-forward" aria-label="Forward" disabled>→</button>
+    <nav id="desktop-menus" aria-label="Application menu"></nav>
+    <div id="window-drag">Super <span>(CD)</span></div>
+    <button data-window-action="minimize" aria-label="Minimize">−</button><button data-window-action="maximize" aria-label="Maximize or restore">□</button><button data-window-action="close" aria-label="Close window">×</button>
   </header>
-
-  <main>
-    <section id="world" data-source="frame">
-      <p class="empty">Waiting for the first frame.</p>
-    </section>
-
-    <aside id="receipts" data-source="submission">
-      <h2>Submissions</h2>
-      <p class="empty">Nothing submitted yet.</p>
-      <ol id="receipt-list"></ol>
+  <div id="app">
+    <header id="topbar">
+      <a class="wordmark" href="#" aria-label="Super home" data-nav="mission">Super <b>(CD)</b></a>
+      <label class="workspace-label">workspace: <select id="workspace-picker" data-source="frame" aria-label="Workspace" disabled><option>Connecting…</option></select></label>
+      <div id="badge" data-source="frame">
+        <span id="badge-state" class="state">connecting</span>
+        <span id="badge-world" class="mono"></span>
+        <span id="badge-rev" class="mono"></span>
+      </div>
+      <button id="open-navigation" aria-label="Find a page">Find a page <kbd>Ctrl K</kbd></button>
+    </header>
+    <aside id="app-rail">
+      <div class="rail-modes" role="tablist" aria-label="Sidebar mode">
+        <button id="mode-bots" data-rail-mode="bots" role="tab" aria-controls="rail-bots">Bots</button>
+        <button id="mode-nav" data-rail-mode="nav" role="tab" aria-controls="app-navigation">Nav</button>
+        <button id="mode-runtime" data-rail-mode="runtime" role="tab" aria-controls="rail-runtime">Runtime</button>
+      </div>
+      <div id="rail-bots" data-rail-panel="bots" role="tabpanel" aria-labelledby="mode-bots" hidden></div>
+      <nav id="app-navigation" data-rail-panel="nav" role="tabpanel" aria-labelledby="mode-nav"></nav>
+      <div id="rail-runtime" data-rail-panel="runtime" role="tabpanel" aria-labelledby="mode-runtime" hidden></div>
+      <div class="rail-footer"><span class="brand-dot"></span> On your machine<br><span>One runtime. Your work.</span></div>
     </aside>
-  </main>
-
+    <div id="rail-resizer" class="sidebar-resizer" role="separator" tabindex="0" aria-label="Resize navigation sidebar" aria-orientation="vertical"></div>
+    <div id="activity-resizer" class="sidebar-resizer" role="separator" tabindex="0" aria-label="Resize activity sidebar" aria-orientation="vertical"></div>
+    <main id="workspace-canvas">
+      <section id="world" data-source="frame" aria-label="Runtime projection">
+        <p class="empty">Connecting to your local runtime…</p>
+      </section>
+      <section id="bot-surface" class="app-screen" data-screen="bots" data-source="conversation" aria-label="Bot conversation" hidden></section>
+    </main>
+    <aside id="receipts" data-source="submission" aria-label="Session activity">
+      <p class="eyebrow">THIS SESSION</p>
+      <h2>Activity</h2>
+      <p class="activity-description">Requests sent from this app. World changes appear when the runtime confirms them in a new frame.</p>
+      <p class="empty">Your actions will appear here.</p>
+      <ol id="receipt-list" aria-live="polite" aria-relevant="additions"></ol>
+    </aside>
+  </div>
+  <dialog id="navigation-dialog" aria-labelledby="navigation-title">
+    <div class="dialog-heading"><h2 id="navigation-title">Go to a page</h2><button id="close-navigation" aria-label="Close navigation">Esc</button></div>
+    <label for="navigation-search" class="sr-only">Find a page</label>
+    <input id="navigation-search" placeholder="Find a page…" autocomplete="off">
+    <div id="navigation-results"></div>
+  </dialog>
   <script type="module" src="cockpit.js"></script>
 </body>
 </html>

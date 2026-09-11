@@ -11,14 +11,15 @@
     "windows": [
       {
         "label": "main",
-        "title": "Super (CD) — cockpit",
+        "title": "Super (CD) \u2014 cockpit",
         "width": 1180,
         "height": 820,
-        "resizable": true
+        "resizable": true,
+        "decorations": false
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; img-src 'self' data:"
+      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; connect-src ipc: http://ipc.localhost; img-src 'self' data:"
     }
   },
   "bundle": {

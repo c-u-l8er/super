@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-bot-connection"
+description = "Enables the bot_connection command without any pre-configured scope."
+commands.allow = ["bot_connection"]
+
+[[permission]]
+identifier = "deny-bot-connection"
+description = "Denies the bot_connection command without any pre-configured scope."
+commands.deny = ["bot_connection"]

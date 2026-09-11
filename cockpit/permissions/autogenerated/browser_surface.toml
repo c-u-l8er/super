@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-browser-surface"
+description = "Enables the browser_surface command without any pre-configured scope."
+commands.allow = ["browser_surface"]
+
+[[permission]]
+identifier = "deny-browser-surface"
+description = "Denies the browser_surface command without any pre-configured scope."
+commands.deny = ["browser_surface"]

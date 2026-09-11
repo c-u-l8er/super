@@ -1,0 +1,9 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {checkAcceptedResult} from '../cockpit/ui/accepted-result-check.js';
+const attempt={id:'a',revision:2,acceptance:{snapshot_sha256:'s'}};
+function fixture(){let state={world:'["w",1,"e"]',revision:2,status:'accepted'};const calls=[];return {attempt,scope:()=>state,change:v=>state={...state,...v},calls,invoke:async(name,args)=>{calls.push([name,args]);return name==='development_request'?{generation:7}:{matched:true,attempt_ref:'a',snapshot_sha256:'s',checked_at:1};}};}
+test('accepted file check sends identity only and validates the native snapshot',async()=>{const f=fixture();assert.equal((await checkAcceptedResult(f)).matched,true);assert.deepEqual(f.calls[1],['review_tests',{request:{operation:'verify_accepted',attempt_ref:'a',revision:2,generation:7,world:['w',1,'e']}}]);});
+test('nonaccepted or stale review cannot start a check',async()=>{for(const change of [{status:'recorded'},{revision:3}]){const f=fixture();f.change(change);await assert.rejects(checkAcceptedResult(f),/review changed/);assert.equal(f.calls.length,0);}});
+test('runtime changes during either await cannot report success',async()=>{for(const stage of [1,2]){const f=fixture(),invoke=f.invoke;let n=0;f.invoke=async(...args)=>{const result=await invoke(...args);if(++n===stage)f.change({world:'["other",1,"e"]'});return result;};await assert.rejects(checkAcceptedResult(f),/runtime or review changed/);assert.equal(f.calls.length,stage);}});
+test('native refusal or mismatched response cannot turn into a matched result',async()=>{for(const response of [{matched:false},{matched:true,attempt_ref:'wrong',snapshot_sha256:'s',checked_at:1},{matched:true,attempt_ref:'a',snapshot_sha256:'wrong',checked_at:1}]){const f=fixture(),invoke=f.invoke;f.invoke=async(...args)=>args[0]==='review_tests'?response:invoke(...args);await assert.rejects(checkAcceptedResult(f),/did not confirm/);}});

@@ -217,7 +217,18 @@ pub const INTENT_SURFACE: &[&str] = &[
     // anything. What makes the gate's proposition true is the form in
     // `ui/cockpit.js` and the loci block in `operator-projection@2` that
     // gives the form something to choose from.
+    "record_development_change_set",
+    "record_development_attempt",
+    "update_development_attempt",
+    "check_development_attempt_text",
+    "accept_development_attempt",
+    "create_development_task",
+    "update_development_task",
+    "register_bot",
+    "update_bot",
+    "remove_bot",
     "open_workspace",
+    "delete_workspace",
     "open_goal",
     "open_lane",
     // D.1.2. Opening an assignment is the same kind of decision one rung
@@ -309,11 +320,35 @@ pub enum Msg {
     Unbind(StreamId),
     /// Submit one mutation. The reply is the runtime's own reply frame,
     /// which is a *receipt of what was decided*, never a view. **The one
-    /// variant on the mutation lane**, and the only one whose refusal under
+    /// general intent variant on the mutation lane**, and the only one whose refusal under
     /// load is honest rather than destructive.
     Intent {
         name: String,
         args: Value,
+        reply: SyncSender<Result<Value, String>>,
+    },
+    /// A folder explicitly selected in the native chooser. Mutation lane.
+    RegisterRepository {
+        path: PathBuf,
+        reply: SyncSender<Result<Value, String>>,
+    },
+    RecordReviewTest {
+        operation: String,
+        fields: Value,
+        reply: SyncSender<Result<Value, String>>,
+    },
+    ResolveReviewTest {
+        path: PathBuf,
+        attempt_ref: String,
+        revision: u64,
+        world: [Value; 3],
+        reply: SyncSender<Result<Value, String>>,
+    },
+    MatchPlanRepository {
+        path: PathBuf,
+        task_ref: String,
+        revision: u64,
+        world: [Value; 3],
         reply: SyncSender<Result<Value, String>>,
     },
     /// The WebView has rendered frame `seq`. Releases `in_flight`.
@@ -339,7 +374,9 @@ pub enum Msg {
     /// sink instead of racing `terminal_bind` against a loading webview.
     /// It carries its own reply channel for the same reason `Intent` does:
     /// the control lane is one-way, and a question needs an answer.
-    TerminalBound { reply: std::sync::mpsc::SyncSender<bool> },
+    TerminalBound {
+        reply: std::sync::mpsc::SyncSender<bool>,
+    },
     /// The pane is done. Control lane.
     TerminalClose,
 }
@@ -379,13 +416,17 @@ impl Queues {
     /// receiver is already parked. So a full lane means a busy worker, and
     /// a busy worker always comes back to [`drain`].
     pub fn control(&self, m: Msg) -> Result<(), String> {
-        self.control.send(m).map_err(|_| "the cockpit worker has stopped".to_string())
+        self.control
+            .send(m)
+            .map_err(|_| "the cockpit worker has stopped".to_string())
     }
 
     /// Enqueue a mutation. **This is the lane that may make a person wait**,
     /// and the bound is what stops a wedged runtime becoming a memory leak.
     pub fn intent(&self, m: Msg) -> Result<(), String> {
-        self.intents.send(m).map_err(|_| "the cockpit worker has stopped".to_string())
+        self.intents
+            .send(m)
+            .map_err(|_| "the cockpit worker has stopped".to_string())
     }
 }
 
@@ -795,9 +836,7 @@ fn frame_json(seq: u64, frame: &CockpitFrame, reacquisitions: u64, coalesced: u6
 pub fn world_for(dir: &PathBuf) -> WorldDir {
     match std::env::var("SUPER_WORLD_MODE").as_deref() {
         Ok("ephemeral") => WorldDir::ephemeral(dir),
-        _ => WorldDir::product(
-            &std::env::var("SUPER_WORLD").unwrap_or_else(|_| "default".into()),
-        ),
+        _ => WorldDir::product(&std::env::var("SUPER_WORLD").unwrap_or_else(|_| "default".into())),
     }
 }
 
@@ -890,8 +929,12 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
     ] {
         let ok = std::process::Command::new("git")
-            .arg("-C").arg(&repo).args(args)
-            .output().map(|o| o.status.success()).unwrap_or(false);
+            .arg("-C")
+            .arg(&repo)
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
         if !ok {
             return Err(format!("git {args:?} failed in {}", repo.display()));
         }
@@ -901,16 +944,20 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
     // commands — `Ampd.Transport` says why: registering a path to trust is
     // a host-level decision, and the bridge is reachable only by the
     // process the runtime was born holding a descriptor to.
-    let packed = rt.bridge_call(&json!({
-        "schema": "bridge-command@1", "command": "install_pack", "pack": "worktree"
-    })).map_err(|e| format!("install_pack: {e}"))?;
+    let packed = rt
+        .bridge_call(&json!({
+            "schema": "bridge-command@1", "command": "install_pack", "pack": "worktree"
+        }))
+        .map_err(|e| format!("install_pack: {e}"))?;
     if packed["ok"] != true {
         return Err(format!("install_pack refused: {packed}"));
     }
-    let reg = rt.bridge_call(&json!({
-        "schema": "bridge-command@1", "command": "register_repository",
-        "path": repo.to_string_lossy()
-    })).map_err(|e| format!("register_repository: {e}"))?;
+    let reg = rt
+        .bridge_call(&json!({
+            "schema": "bridge-command@1", "command": "register_repository",
+            "path": repo.to_string_lossy()
+        }))
+        .map_err(|e| format!("register_repository: {e}"))?;
     let repo_ref = reg["repository"]["ref"].as_str().unwrap_or("").to_string();
     if repo_ref.is_empty() {
         return Err(format!("no repository ref in {reg}"));
@@ -918,31 +965,53 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
 
     // The human opens the position; the agent occupies it. Two channels,
     // and the split is the authority argument rather than a convention.
-    let ctl = rt.control_channel().map_err(|e| format!("control channel: {e}"))?;
+    let ctl = rt
+        .control_channel()
+        .map_err(|e| format!("control channel: {e}"))?;
     let id = |v: &Value, k: &str| v["result"][k]["id"].as_str().unwrap_or("").to_string();
 
-    let ws = ctl.call("open_workspace", json!({"name": "d13b2f"}))
+    let ws = ctl
+        .call("open_workspace", json!({"name": "d13b2f"}))
         .map_err(|e| format!("open_workspace: {e}"))?;
-    let goal = ctl.call("open_goal", json!({
-        "workspace_ref": id(&ws, "workspace"), "title": "the carrier descriptor witness"
-    })).map_err(|e| format!("open_goal: {e}"))?;
-    let lane = ctl.call("open_lane", json!({
-        "goal_ref": id(&goal, "goal"), "actor": "kestrel",
-        "repository_ref": repo_ref, "base_revision": Value::Null
-    })).map_err(|e| format!("open_lane: {e}"))?;
+    let goal = ctl
+        .call(
+            "open_goal",
+            json!({
+                "workspace_ref": id(&ws, "workspace"), "title": "the carrier descriptor witness"
+            }),
+        )
+        .map_err(|e| format!("open_goal: {e}"))?;
+    let lane = ctl
+        .call(
+            "open_lane",
+            json!({
+                "goal_ref": id(&goal, "goal"), "actor": "kestrel",
+                "repository_ref": repo_ref, "base_revision": Value::Null
+            }),
+        )
+        .map_err(|e| format!("open_lane: {e}"))?;
     let lane_id = id(&lane, "lane");
-    let worker = ctl.call("open_worker", json!({
-        "locus_ref": lane_id, "purpose": "carry"
-    })).map_err(|e| format!("open_worker: {e}"))?;
+    let worker = ctl
+        .call(
+            "open_worker",
+            json!({
+                "locus_ref": lane_id, "purpose": "carry"
+            }),
+        )
+        .map_err(|e| format!("open_worker: {e}"))?;
     let worker_id = id(&worker, "worker");
     if lane_id.is_empty() || worker_id.is_empty() {
         return Err(format!("lane={lane} worker={worker}"));
     }
 
-    let agent = rt.agent_channel("kestrel").map_err(|e| format!("agent channel: {e}"))?;
-    let _ = agent.call("attach_worker", json!({"worker_ref": worker_id}))
+    let agent = rt
+        .agent_channel("kestrel")
+        .map_err(|e| format!("agent channel: {e}"))?;
+    let _ = agent
+        .call("attach_worker", json!({"worker_ref": worker_id}))
         .map_err(|e| format!("attach_worker: {e}"))?;
-    let started = agent.call("start_carrier", json!({"locus_ref": lane_id}))
+    let started = agent
+        .call("start_carrier", json!({"locus_ref": lane_id}))
         .map_err(|e| format!("start_carrier: {e}"))?;
 
     let inc = &started["result"]["carrier"];
@@ -963,7 +1032,8 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
     // No field. The Peer whose terminal is acquired is the Peer on this
     // connection, so there is nothing here to name someone else's Carrier
     // with.
-    let acq = agent.call("acquire_terminal", json!({}))
+    let acq = agent
+        .call("acquire_terminal", json!({}))
         .map_err(|e| format!("acquire_terminal: {e}"))?;
     if acq["result"]["allow"] != true {
         return Err(format!("acquire_terminal refused: {acq}"));
@@ -973,7 +1043,8 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
     // And the projection the person sees, read back through the same
     // machinery rather than out of the runtime's memory. `PRESENT` here is
     // the condition *Watch terminal* is offered on.
-    let seen = agent.call("list_workers", json!({}))
+    let seen = agent
+        .call("list_workers", json!({}))
         .map_err(|e| format!("list_workers: {e}"))?;
     // `Ampd.Worker.projected/1` returns a MAP KEYED BY WORKER ID, not a list
     // — indexing it as an array reads three nulls and prints them, which is
@@ -1088,7 +1159,7 @@ fn drain(
     }
 }
 
-/// One message, applied. Blocking is confined to the `Intent` arm — which
+/// One message, applied. Runtime mutations may block on their reply — which
 /// is why draining control to empty *first* costs nothing and waiting
 /// behind mutations costs a full round trip each.
 fn apply(
@@ -1121,6 +1192,56 @@ fn apply(
             let _ = reply.send(term.bound());
         }
         Msg::TerminalClose => term.close(),
+        Msg::RecordReviewTest {
+            operation,
+            fields,
+            reply,
+        } => {
+            let out = match (chan, rt) {
+                (Some(_), Some(rt)) => {
+                    crate::repository::record_review_test(rt, &operation, fields)
+                }
+                _ => Err("The runtime could not record this test event.".into()),
+            };
+            let _ = reply.send(out);
+        }
+        Msg::ResolveReviewTest {
+            path,
+            attempt_ref,
+            revision,
+            world,
+            reply,
+        } => {
+            let out = match (chan, rt) {
+                (Some(_), Some(rt)) => {
+                    crate::repository::resolve_review_test(rt, &path, &attempt_ref, revision, world)
+                }
+                _ => Err("The runtime is unavailable. Reopen the review when connected.".into()),
+            };
+            let _ = reply.send(out);
+        }
+        Msg::MatchPlanRepository {
+            path,
+            task_ref,
+            revision,
+            world,
+            reply,
+        } => {
+            let out = match (chan, rt) {
+                (Some(_), Some(rt)) => {
+                    crate::repository::match_plan(rt, &path, &task_ref, revision, world)
+                }
+                _ => Err("The runtime is unavailable. Reopen the plan when connected.".into()),
+            };
+            let _ = reply.send(out);
+        }
+        Msg::RegisterRepository { path, reply } => {
+            let out = match (chan, rt) {
+                (Some(_), Some(rt)) => crate::repository::register(rt, &path),
+                _ => Err("The runtime is not ready to register a repository.".into()),
+            };
+            let _ = reply.send(out);
+        }
         Msg::Intent { name, args, reply } => {
             let out = match chan {
                 None => Err("no control channel — the cockpit is not live".to_string()),
@@ -1154,7 +1275,10 @@ fn submit(
     args: Value,
 ) -> Result<Value, String> {
     if name != "terminal_bind" {
-        return c.call(name, args).map(|v| v["result"].clone()).map_err(|e| e.to_string());
+        return c
+            .call(name, args)
+            .map(|v| v["result"].clone())
+            .map_err(|e| e.to_string());
     }
 
     let endpoint = term.park(rt.ok_or("the cockpit is not live")?)?;
@@ -1193,6 +1317,7 @@ fn submit(
 /// Run until the process ends. Errors are frames, not panics — a cockpit
 /// that dies silently is worse than one that says `acquiring`.
 pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
+    crate::mobile_gateway::start();
     let dir = std::env::temp_dir().join(format!("super-cockpit-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
 
@@ -1221,11 +1346,14 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
                     delivery.seq += 1;
                     let seq = delivery.seq;
                     delivery.sent = Some((Cockpit::Acquiring, ProjectionCursor::default()));
-                    delivery.deliver(seq, json!({
-                        "schema": "cockpit-frame@1", "seq": seq, "state": "acquiring",
-                        "world": Value::Null, "reacquisitions": 0, "coalesced": 0,
-                        "projection": Value::Null, "note": note,
-                    }));
+                    delivery.deliver(
+                        seq,
+                        json!({
+                            "schema": "cockpit-frame@1", "seq": seq, "state": "acquiring",
+                            "world": Value::Null, "reacquisitions": 0, "coalesced": 0,
+                            "projection": Value::Null, "note": note,
+                        }),
+                    );
                 }
                 // A dead runtime is still a live link, and the page is
                 // entitled to know which of the two it is looking at.
@@ -1282,7 +1410,11 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
         None
     };
 
-    let seeded = if cfg.fixture { seed_fixture(&rt).ok() } else { None };
+    let seeded = if cfg.fixture {
+        seed_fixture(&rt).ok()
+    } else {
+        None
+    };
     let (_kestrel, fixture_request) = match seeded {
         Some((c, id)) => (Some(c), Some(id)),
         None => (None, None),
@@ -1320,6 +1452,7 @@ pub fn run(ctl: Receiver<Msg>, rx: Receiver<Msg>, cfg: Config) {
         lp.turn(Duration::from_millis(80));
 
         let frame = lp.frame();
+        crate::mobile_gateway::publish(|| frame_json(0, &frame, lp.reacquisitions, 0));
         if delivery.differs(&frame) {
             let now = (frame.state.clone(), frame.world.clone());
             if !delivery.open() {

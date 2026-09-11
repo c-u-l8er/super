@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "The trusted cockpit WEBVIEW, and only it, may bind the frame stream, submit human-control intents, acknowledge frames, take interaction holds, and open or dismiss the terminal surface. D.1.3c·2c·1b·1 added allow-terminal-surface here rather than to terminal.json: the pane that RENDERS a terminal must not be the thing that decides one exists, and the command takes a boolean — no label, no URL — so it cannot be aimed at a webview of the caller's choosing. It is granted no core permission at all: the frame stream is a Channel the frontend constructs and hands over, so nothing here needs the event system — and core:default, which W.2 granted, carries core:event:default, whose emit and emit-to are the ability to inject into the application's own event bus. W.2.1 said `windows` here, which grants every webview inside that window: tauri's resolver is an OR over the two lists (`ipc/authority.rs`, resolve_access), so a pane hosted INSIDE the cockpit window would have inherited all of this. A browser or application pane is going to be exactly that, so the grant is to the webview label and the window list is empty.",
+  "description": "The trusted cockpit WEBVIEW, and only it, may bind the frame stream, submit human-control intents, acknowledge frames, take interaction holds, and open or dismiss the terminal surface. D.1.3c\u00b72c\u00b71b\u00b71 added allow-terminal-surface here rather than to terminal.json: the pane that RENDERS a terminal must not be the thing that decides one exists, and the command takes a boolean \u2014 no label, no URL \u2014 so it cannot be aimed at a webview of the caller's choosing. It is granted no core permission at all: the frame stream is a Channel the frontend constructs and hands over, so nothing here needs the event system \u2014 and core:default, which W.2 granted, carries core:event:default, whose emit and emit-to are the ability to inject into the application's own event bus. W.2.1 said `windows` here, which grants every webview inside that window: tauri's resolver is an OR over the two lists (`ipc/authority.rs`, resolve_access), so a pane hosted INSIDE the cockpit window would have inherited all of this. A browser or application pane is going to be exactly that, so the grant is to the webview label and the window list is empty. The native repository chooser is also restricted to this trusted webview; the page supplies no filesystem path.",
   "webviews": [
     "main"
   ],
@@ -11,6 +11,23 @@
     "allow-frame-ack",
     "allow-hold-begin",
     "allow-hold-end",
-    "allow-terminal-surface"
+    "allow-terminal-surface",
+    "allow-choose-repository",
+    "allow-bot-configure",
+    "allow-bot-chat",
+    "allow-bot-connection",
+    "allow-bot-claude-connection",
+    "allow-bot-local-models",
+    "allow-bot-forget-key",
+    "allow-bot-models",
+    "allow-choose-attachments",
+    "allow-desktop-window",
+    "allow-mobile-status",
+    "allow-mobile-new-code",
+    "allow-choose-workbench",
+    "allow-development-request",
+    "allow-browser-surface",
+    "allow-surface-sessions",
+    "allow-review-tests"
   ]
 }

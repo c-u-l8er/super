@@ -13,10 +13,10 @@
       "bare": 0
     },
     "Ampd.Loci": {
-      "sends": 9,
-      "mutations": 6,
+      "sends": 10,
+      "mutations": 7,
       "reads": 3,
-      "declared_mutations": 6,
+      "declared_mutations": 7,
       "dead": [],
       "bare": 0
     },

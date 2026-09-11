@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mobile-new-code"
+description = "Enables the mobile_new_code command without any pre-configured scope."
+commands.allow = ["mobile_new_code"]
+
+[[permission]]
+identifier = "deny-mobile-new-code"
+description = "Denies the mobile_new_code command without any pre-configured scope."
+commands.deny = ["mobile_new_code"]

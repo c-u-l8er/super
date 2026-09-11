@@ -183,6 +183,84 @@
           "markdownDescription": "Enables the bind_frame_stream command without any pre-configured scope."
         },
         {
+          "description": "Enables the bot_chat command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bot-chat",
+          "markdownDescription": "Enables the bot_chat command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bot_claude_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bot-claude-connection",
+          "markdownDescription": "Enables the bot_claude_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bot_configure command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bot-configure",
+          "markdownDescription": "Enables the bot_configure command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bot_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bot-connection",
+          "markdownDescription": "Enables the bot_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bot_forget_key command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bot-forget-key",
+          "markdownDescription": "Enables the bot_forget_key command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bot_local_models command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bot-local-models",
+          "markdownDescription": "Enables the bot_local_models command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the bot_models command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-bot-models",
+          "markdownDescription": "Enables the bot_models command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the browser_surface command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-browser-surface",
+          "markdownDescription": "Enables the browser_surface command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the choose_attachments command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-choose-attachments",
+          "markdownDescription": "Enables the choose_attachments command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the choose_repository command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-choose-repository",
+          "markdownDescription": "Enables the choose_repository command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the choose_workbench command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-choose-workbench",
+          "markdownDescription": "Enables the choose_workbench command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the desktop_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-desktop-window",
+          "markdownDescription": "Enables the desktop_window command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the development_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-development-request",
+          "markdownDescription": "Enables the development_request command without any pre-configured scope."
+        },
+        {
           "description": "Enables the frame_ack command without any pre-configured scope.",
           "type": "string",
           "const": "allow-frame-ack",
@@ -205,6 +283,30 @@
           "type": "string",
           "const": "allow-intent",
           "markdownDescription": "Enables the intent command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mobile_new_code command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mobile-new-code",
+          "markdownDescription": "Enables the mobile_new_code command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the mobile_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-mobile-status",
+          "markdownDescription": "Enables the mobile_status command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the review_tests command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-review-tests",
+          "markdownDescription": "Enables the review_tests command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the surface_sessions command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-surface-sessions",
+          "markdownDescription": "Enables the surface_sessions command without any pre-configured scope."
         },
         {
           "description": "Enables the terminal_ack command without any pre-configured scope.",
@@ -243,6 +345,84 @@
           "markdownDescription": "Denies the bind_frame_stream command without any pre-configured scope."
         },
         {
+          "description": "Denies the bot_chat command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bot-chat",
+          "markdownDescription": "Denies the bot_chat command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bot_claude_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bot-claude-connection",
+          "markdownDescription": "Denies the bot_claude_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bot_configure command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bot-configure",
+          "markdownDescription": "Denies the bot_configure command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bot_connection command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bot-connection",
+          "markdownDescription": "Denies the bot_connection command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bot_forget_key command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bot-forget-key",
+          "markdownDescription": "Denies the bot_forget_key command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bot_local_models command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bot-local-models",
+          "markdownDescription": "Denies the bot_local_models command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the bot_models command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-bot-models",
+          "markdownDescription": "Denies the bot_models command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the browser_surface command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-browser-surface",
+          "markdownDescription": "Denies the browser_surface command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the choose_attachments command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-choose-attachments",
+          "markdownDescription": "Denies the choose_attachments command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the choose_repository command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-choose-repository",
+          "markdownDescription": "Denies the choose_repository command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the choose_workbench command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-choose-workbench",
+          "markdownDescription": "Denies the choose_workbench command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the desktop_window command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-desktop-window",
+          "markdownDescription": "Denies the desktop_window command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the development_request command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-development-request",
+          "markdownDescription": "Denies the development_request command without any pre-configured scope."
+        },
+        {
           "description": "Denies the frame_ack command without any pre-configured scope.",
           "type": "string",
           "const": "deny-frame-ack",
@@ -265,6 +445,30 @@
           "type": "string",
           "const": "deny-intent",
           "markdownDescription": "Denies the intent command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mobile_new_code command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mobile-new-code",
+          "markdownDescription": "Denies the mobile_new_code command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the mobile_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-mobile-status",
+          "markdownDescription": "Denies the mobile_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the review_tests command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-review-tests",
+          "markdownDescription": "Denies the review_tests command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the surface_sessions command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-surface-sessions",
+          "markdownDescription": "Denies the surface_sessions command without any pre-configured scope."
         },
         {
           "description": "Denies the terminal_ack command without any pre-configured scope.",

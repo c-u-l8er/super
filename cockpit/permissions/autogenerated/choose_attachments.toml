@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-choose-attachments"
+description = "Enables the choose_attachments command without any pre-configured scope."
+commands.allow = ["choose_attachments"]
+
+[[permission]]
+identifier = "deny-choose-attachments"
+description = "Denies the choose_attachments command without any pre-configured scope."
+commands.deny = ["choose_attachments"]

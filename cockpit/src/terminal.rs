@@ -88,8 +88,16 @@ fn b64(bytes: &[u8]) -> String {
         let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
         out.push(T[(n >> 18) as usize & 63] as char);
         out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if c.len() > 1 { T[(n >> 6) as usize & 63] as char } else { '=' });
-        out.push(if c.len() > 2 { T[n as usize & 63] as char } else { '=' });
+        out.push(if c.len() > 1 {
+            T[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if c.len() > 2 {
+            T[n as usize & 63] as char
+        } else {
+            '='
+        });
     }
     out
 }
@@ -200,7 +208,8 @@ impl Terminal {
         // **The read wakes even when there is nothing to read.** Without
         // this the thread parks in `read` forever and the two liveness
         // questions below are asked only when the Carrier happens to speak.
-        r.set_read_timeout(Some(WATCH_TICK)).map_err(|e| format!("terminal timeout: {e}"))?;
+        r.set_read_timeout(Some(WATCH_TICK))
+            .map_err(|e| format!("terminal timeout: {e}"))?;
 
         // Captured, not shared: this reader belongs to the renderer that was
         // bound when it started, and to no later one.
@@ -239,8 +248,8 @@ impl Terminal {
                     return;
                 }
                 if now_ms().saturating_sub(last_heard.load(Ordering::SeqCst)) > silence {
-                    let _ = sink
-                        .send(json!({"schema":"terminal-close@1","code":"renderer-silent"}));
+                    let _ =
+                        sink.send(json!({"schema":"terminal-close@1","code":"renderer-silent"}));
                     let _ = r.shutdown(std::net::Shutdown::Both);
                     return;
                 }
@@ -258,7 +267,8 @@ impl Terminal {
                         continue
                     }
                     Ok(0) | Err(_) => {
-                        let _ = sink.send(json!({"schema":"terminal-close@1","code":"stream-ended"}));
+                        let _ =
+                            sink.send(json!({"schema":"terminal-close@1","code":"stream-ended"}));
                         return;
                     }
                     Ok(n) => buf.extend_from_slice(&chunk[..n]),
