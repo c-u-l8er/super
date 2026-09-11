@@ -166,6 +166,59 @@ pub fn publish(frame: impl FnOnce() -> Value) {
         }
     }
 }
+/// The fields of an asking record a phone may see.
+///
+/// Every other collection in this snapshot is published as the runtime wrote
+/// it, because a workspace or a lane is an inventory record: a name, a status,
+/// a reference to another record. The two collections that mean *a person is
+/// being asked* are not like that. A pending approval carries the request
+/// envelope and the caller's whole held context; a grant request merges its
+/// caller's fields wholesale into the stored record. Publishing either as
+/// written would put the arguments of a held effect on a phone.
+///
+/// So these two are the one place in this file where the allowlist is over
+/// **fields** rather than over collections, and a field the runtime adds later
+/// does not reach a phone until someone names it here. A record that is not a
+/// record contributes nothing; a collection that is not a list is withheld
+/// entirely as `null`, which the companion reads as unavailable rather than
+/// as none — the same rule the other collections already follow.
+const APPROVAL_FIELDS: [&str; 6] = [
+    "id",
+    "status",
+    "capability",
+    "actor",
+    "resource",
+    "placement",
+];
+const GRANT_REQUEST_FIELDS: [&str; 8] = [
+    "id",
+    "status",
+    "capability",
+    "actor",
+    "resource",
+    "requested_duration",
+    "created_at",
+    "reason",
+];
+fn asking(value: &Value, fields: &[&str]) -> Value {
+    let Some(items) = value.as_array() else {
+        return Value::Null;
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| {
+                let mut out = serde_json::Map::new();
+                for field in fields {
+                    if let Some(held) = item.get(*field) {
+                        out.insert((*field).to_string(), held.clone());
+                    }
+                }
+                Value::Object(out)
+            })
+            .collect(),
+    )
+}
 pub fn snapshot(held: &Option<(Instant, Value)>) -> Value {
     let Some((at, frame)) = held else {
         return json!({"available":false});
@@ -185,6 +238,14 @@ pub fn snapshot(held: &Option<(Instant, Value)>) -> Value {
     ] {
         projection.insert(name.into(), frame["projection"][name].clone());
     }
+    projection.insert(
+        "pending_approvals".into(),
+        asking(&frame["projection"]["pending_approvals"], &APPROVAL_FIELDS),
+    );
+    projection.insert(
+        "grant_requests".into(),
+        asking(&frame["projection"]["grant_requests"], &GRANT_REQUEST_FIELDS),
+    );
     json!({"available":true,"world":frame["world"],"projection":projection})
 }
 /// Ask the companion for a fresh pairing code.
@@ -312,5 +373,68 @@ mod tests {
         )));
         assert_eq!(s["available"], true);
         assert!(s["projection"].get("private").is_none());
+    }
+    #[test]
+    fn an_asking_record_reaches_the_phone_as_named_fields_and_nothing_else() {
+        let s = snapshot(&Some((
+            Instant::now(),
+            json!({"state":"live-local","projection":{"pending_approvals":[{
+                "id":"ap_0001","status":"pending","capability":"github.repo.write",
+                "actor":"bot_0a","resource":"traaviis/trvm","placement":"local",
+                "envelope":{"argv":["rm","-rf","/home/travis"]},
+                "held_ctx":{"token":"a-credential"},
+                "snapshot":{"grants":["everything"]},
+                "request_hash":"deadbeef"
+            }]}}),
+        )));
+        let asked = &s["projection"]["pending_approvals"][0];
+        assert_eq!(asked["capability"], "github.repo.write");
+        assert_eq!(asked["actor"], "bot_0a");
+        assert_eq!(asked["resource"], "traaviis/trvm");
+        for withheld in ["envelope", "held_ctx", "snapshot", "request_hash"] {
+            assert!(asked.get(withheld).is_none(), "{withheld} reached the phone");
+        }
+        let whole = serde_json::to_string(&s).unwrap();
+        for secret in ["a-credential", "rm", "deadbeef"] {
+            assert!(!whole.contains(secret), "{secret} reached the phone");
+        }
+    }
+    #[test]
+    fn a_grant_request_is_narrowed_by_the_same_rule() {
+        let s = snapshot(&Some((
+            Instant::now(),
+            json!({"state":"live-local","projection":{"grant_requests":[{
+                "id":"gq_0001","status":"pending","capability":"fs.read",
+                "actor":"bot_0a","resource":"traaviis/trvm","reason":null,
+                "requested_duration":"workspace","created_at":"2026-09-11T00:00:00Z",
+                "pack_ref":"pk_1","caller_supplied":"anything at all"
+            }]}}),
+        )));
+        let asked = &s["projection"]["grant_requests"][0];
+        assert_eq!(asked["requested_duration"], "workspace");
+        assert_eq!(asked["created_at"], "2026-09-11T00:00:00Z");
+        assert!(asked.get("caller_supplied").is_none());
+        assert!(asked.get("pack_ref").is_none());
+    }
+    #[test]
+    fn a_collection_that_is_not_a_list_is_withheld_rather_than_emptied() {
+        let s = snapshot(&Some((
+            Instant::now(),
+            json!({"state":"live-local","projection":{"pending_approvals":{"ap_0001":{"id":"ap_0001"}}}}),
+        )));
+        // Null is the companion's word for "the host could not publish this",
+        // and an empty list would say "nobody is asking you" — which is the
+        // one wrong answer a screen about being asked can give.
+        assert!(s["projection"]["pending_approvals"].is_null());
+        assert!(s["projection"]["grant_requests"].is_null());
+    }
+    #[test]
+    fn nobody_asking_is_an_empty_list_and_not_a_withheld_one() {
+        let s = snapshot(&Some((
+            Instant::now(),
+            json!({"state":"live-local","projection":{"pending_approvals":[],"grant_requests":[]}}),
+        )));
+        assert_eq!(s["projection"]["pending_approvals"], json!([]));
+        assert_eq!(s["projection"]["grant_requests"], json!([]));
     }
 }
