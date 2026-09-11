@@ -1,0 +1,13 @@
+# Saved checks of retained proposed text — 2026-09-08
+
+The development plan's review attempt now offers **Check proposed text**. The ordered runtime reads the attempt's immutable proposed bytes and stores deterministic findings, their scope, timestamp, SHA-256, byte length, path and check schema. No client-supplied outcome is accepted. This is `proposed-text-check@1`, explicitly separate from Carrier validation jobs and receipts.
+
+The fixed checks flag standard seven-character conflict markers and trailing spaces/tabs, with at most 20 line locations per check and a full finding count. For `.json` paths, the runtime also parses the entire proposal as JSON. Other paths explicitly report JSON syntax as not applicable. This does not test JavaScript, HTML semantics, app behavior, acceptance criteria or the working checkout. A pass only means these applicable text checks found no issues. Marker findings are heuristic and can include literal examples.
+
+A human-only `check_development_attempt_text` command takes an attempt id and expected review revision. It uses the existing ordered Loci patch boundary, increments the review revision once, appends a history event, and leaves the review status, plan, grants, workers, worktrees and Carrier validation receipts alone. The check is stored once for these immutable bytes; retries reuse it, including the original request revision. Unknown/stale requests, new checks on dismissed reviews, exhausted histories and aggregate size overflow refuse. No new execution permission or command runner exists.
+
+The plan displays pass/issues, per-check findings, timestamp and exact result identity. Checks cannot replace unsaved review notes; the UI asks the user to save their existing note first. Reopening preserves findings and does not offer redundant checks. A new proposal has no inherited check. Later editor and disk changes are explicitly outside the saved check's scope; no current-checkout readiness indicator or acceptance action is provided.
+
+Verification: runtime tests cover valid/invalid JSON, bounded conflict/whitespace findings, non-JSON scope, changed result separation, retries, human-only admission, dismissed/full histories, and store restart. Native fixture flows exercise both clean and whitespace-issue proposals, note preservation, exact result identity, independent Save, reload and dismissal, with screenshots and receipts. See the task's `Super_Proposed_Text_Checks_Implementation.md` for derived totals and evidence links.
+
+Next: controlled app-test execution against a defined isolated result snapshot; result-bound Accept/Reject; then a real-model Super-on-Super cycle. These text checks do not close those gaps.

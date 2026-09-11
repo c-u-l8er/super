@@ -1,0 +1,11 @@
+# Related-file context sharing — 10 September 2026
+
+Editor now offers Share related files. A modal lists open file tabs with their current draft sizes and unsaved status, initially selecting only the active file. The person selects one to four files and explicitly attaches them. Sending remains a separate bot-composer action. No folder traversal or automatic source upload was added.
+
+Every selected draft must be complete UTF-8 text without NUL and at most 24 KB. Plan-linked files get their individual native repository match and selected-file source basis, with the existing 32 KB attachment bound including plan/context text. The code captures all selected file objects/drafts and the repository generation/plan before asynchronous checks and rejects changed context before attaching. The bot validates the entire batch and the existing four-attachment limit before adding any item. A failed selection adds no partial set.
+
+Each attachment retains its own page-session Editor reference and backlink. Multiple returned file proposals use those separate references and existing source/draft guards. Reviews, saved attempts, staging and Save remain individual per file. This is multi-file context sharing, not a collective multi-file review, combined test overlay, atomic multi-file write or shared acceptance receipt. Restored conversation attachments retain existing read-only history behavior; live edit authority is not recreated across reloads.
+
+The Editor toolbar wraps its controls so the additional action does not make existing controls unreachable. The first native run caught overflow at 1280×850 and stopped before sharing; its incomplete evidence is retained. The corrected full native run passed 24 assertions with 16 screenshots, covering the toolbar, default selection, five-file refusal, Cancel, two attachments without automatic send, complete provider context, correct individual proposals, separate review identities and Saves. The provider was a local deterministic fixture and the repository disposable. No new real-provider upload occurred.
+
+Validation: 60 JavaScript tests, release build, 6 intent-surface checks covering 24 mutations, and 35 WebView ACL checks passed. No runtime authority or file-write command changed.

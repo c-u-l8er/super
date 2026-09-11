@@ -1,0 +1,15 @@
+# Recoverable change-set application — 2026-09-10
+
+The combined proposal workflow now offers Apply staged change set for two to four reviewed drafts. The host checks every member, writes a synced private Git-metadata journal, applies the set under a repository lock, and removes the journal only after result and directory-sync checks. Individual Super saves hold the same lock and refuse an unresolved journal. This is recoverable multi-file writing, not atomic filesystem transaction or runtime acceptance.
+
+Reopening a repository after interruption exposes Finish applying and Restore originals, with a file-list confirmation and Cancel. Recovery refuses unrelated disk edits and preserves open Editor drafts. Missing originals can be restored by removing an unchanged newly created file. Recovery is repository-open driven; startup-wide scanning, deletion/rename proposals, malformed-journal recovery and abandoned journal-temp cleanup remain open. This does not prevent another editor from writing concurrently; observed conflicts refuse rather than certifying an unknown result.
+
+Validation on the rebuilt binary: 24 native workbench unit tests (five new); 37 focused JavaScript checks; 31 new native workflow assertions with 14 screenshots; 51 existing workbench assertions with 15 screenshots. Intent surface 6 held/0 failed, covering 25/25 mutations; WebView ACL 35 held/0 failed. Release build and whitespace check passed. Compositor pointer resize remains explicitly skipped on the isolated X11 display.
+
+Screenshot inspection caught an extra grid column squeezing the Editor and disabled recovery controls after repository loading. Both were corrected and the full new workflow rerun. Recovery confirmation is an in-app dialog, with cancellation tested. Existing Save smoke timing was corrected to wait for exact disk bytes instead of the button becoming disabled during an active save. The new workflow uses a controlled provider and explicitly reconstructed interrupted journal, followed by a real app restart; it is not timed-kill, power-loss or real-provider dogfood evidence.
+
+A separate initial general-app baseline failed a workspace menu assertion once, then passed all 97 assertions unchanged in a diagnostic rerun; it is not claimed fixed or counted as the final workbench regression. Earlier incomplete native runs remain recorded.
+
+Repeat via tools/native-ui-test.sh with DEVELOPMENT_TEST_ROOT, SUPER_XVFB_BIN_DIR where needed, and SUPER_VISUAL_EVIDENCE_DIR: node tools/change-set-apply-smoke.mjs and node tools/development-smoke.mjs. Give concurrent suites separate driver ports. Screenshot hashes and executable identity were checked, all final captures inspected as contact sheets and key stages at full size.
+
+The current Codex task outputs contain Super_Change_Set_Gallery.html, Super_Recoverable_Change_Sets.md and Super_Change_Set_Source_Manifest.json. No external provider request, commit, push, or running-user-app restart was performed in this increment. The release executable has been rebuilt for the next normal launch.

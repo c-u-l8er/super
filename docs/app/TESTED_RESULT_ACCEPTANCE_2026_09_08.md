@@ -1,0 +1,13 @@
+# Human acceptance of an exact tested result
+
+Implemented 8 September 2026. The review panel exposes Check files and accept result for its latest passing test run. The operator provides a reason. Native code resolves the current review and selected registered repository, checks that the saved proposal bytes, HEAD, and bounded Git-listed snapshot match the passing run, then obtains a short-lived runtime confirmation. It submits acceptance through the human-control channel, not through the host bridge.
+
+The read-only preflight executes no repository code. It captures the source twice and requires the same normalized file modes and content hashes used by the test runner. It does not overlay the proposal: the operator must explicitly save it first. Untracked non-ignored files are included; ignored files and installed dependencies remain outside this profile.
+
+The runtime binds its 15-second confirmation to review revision, test run, world/epoch, source/result identities and snapshot. Missing, expired, foreign or superseded confirmations refuse. Acceptance rechecks plan/review readiness and the latest passing run, with no unfinished tests. Accepted review material becomes read-only. The durable decision includes the reason, result/snapshot identities, test run and review/plan revisions. Identical repeated human submissions are idempotent. The plan is not automatically marked completed.
+
+The native file observations and runtime decision are not an atomic filesystem transaction. The confirmation time is when the runtime admits the native report; files can change after observation. Acceptance covers the retained tested snapshot, never an ongoing claim that the live checkout remains unchanged. Later edits require a new review. This initial profile is host-reported JavaScript behavior evidence, not independent attestation or whole-application certification.
+
+Validation uses runtime tests for missing/foreign/expired confirmations, stale plans, newer failed or unfinished runs, agent-channel refusal, immutable accepted history, duplicate submission and store restart. Runner tests verify saved bytes and all captured source against an actual test snapshot. The native saved-world fixture exercises unsaved-file, changed-source and changed-HEAD refusal, human acceptance, later edits, and actual app restart. Provider replies remain deterministic fixtures.
+
+A real-provider Super-on-Super development cycle remains to be proven. The existing needs-changes and dismissal controls remain available before acceptance; this increment does not add a separate rejected-result receipt or automatically complete the larger plan.

@@ -1,0 +1,13 @@
+# Rust review and reply test profile — 9 September 2026
+
+Saved reviews now offer `super-rust-review@1`, labeled Rust review and reply tests. JavaScript remains the default. The optional fourth argument to the existing proposal-test-runner CLI selects this profile.
+
+The focused Cargo target at tools/native-review compiles the native app's actual review_tests.rs and codex_connection.rs, including their existing tests. It has its own checked-in lockfile. It does not compile Tauri, the repository/editor modules, or the full native app. Its passing outcome is deliberately limited to review recovery and reply controls.
+
+The runner discovers the local rustup compiler, copies and fingerprints its bin/lib trees and the local Cargo registry cache/index. Copied trees are compared with the originals before execution. Cargo configuration and credentials are not mounted. Cargo runs offline and locked, with two build jobs, in private scratch. The source snapshot and toolchain remain read-only; host home, network and live app world are unavailable. `/usr` supplies the system linker/libraries and those system files are not independently pinned. The combined toolchain hash includes the compiler installation and copied registry inputs, including cached packages that the target may not use. Copies are removed after completion; exact source manifests and bounded results are retained.
+
+Existing source limits remain: 1024 Git-listed files, 2 MiB per file, 32 MiB total, one reviewed proposal and no source symlinks. Each of four copied Rust/cache input trees allows at most 30000 entries, 1 GiB total and 512 MiB per file. Toolchain preparation precedes the 120-second execution timeout. Output is bounded to 128 KiB. A compiler failure or missing test summary has no passing/failing assertion verdict. This profile requires Linux user namespaces, rustup, and already cached locked dependencies; it never downloads missing packages.
+
+Runtime admission retains the profile. Completion must match the admitted profile, source and proposal and must carry a toolchain hash. Existing JavaScript and Elixir results remain compatible. These are host-reported results, not independent attestations. Testing does not save, accept or complete the plan.
+
+Validation: 40 runtime tests, 14 isolated-runner tests, 53 JavaScript tests; native release build and intent/boundary/closure checks passed. The production runner compiled a copied current Super target offline and passed all 11 existing native review/reply tests. A disposable native UI flow passed 22 assertions, with 14 real screenshots, and restored the exact Rust result after restart. The UI fixture used two Rust assertions and a local deterministic provider; no new real-provider request occurred.
