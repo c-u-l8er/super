@@ -621,6 +621,70 @@ defmodule Ampd.Control do
   # Opening a Lane names the actor that may occupy it. That is a person
   # deciding who stands where, and it is the only place the association is
   # made — an agent cannot open a Lane and cannot name itself into one.
+  defp dispatch_mutation(_peer, :record_development_change_set, [client, task, revision, material]) do
+    Authority.record_development_attempt(%{
+      "schema" => "development-change-set-request@1",
+      "client_ref" => client,
+      "task_ref" => task,
+      "task_revision" => revision,
+      "material" => material
+    })
+    |> settled(fn attempt -> %{"allow" => true, "development_attempt" => attempt} end)
+  end
+
+  defp dispatch_mutation(_peer, :record_development_attempt, values) do
+    Authority.record_development_attempt(
+      Map.new(Enum.zip(Ampd.DevelopmentAttempt.fields(), values))
+    )
+    |> settled(fn attempt -> %{"allow" => true, "development_attempt" => attempt} end)
+  end
+
+  defp dispatch_mutation(_peer, :check_development_attempt_text, [id, revision]) do
+    Authority.check_development_attempt_text(id, revision)
+    |> settled(fn attempt -> %{"allow" => true, "development_attempt" => attempt} end)
+  end
+
+  defp dispatch_mutation(_peer, :accept_development_attempt, [id, revision, token, note]) do
+    frame = Ampd.Projection.continuity()
+    world = Enum.map(~w(world_incarnation world_generation projection_epoch), &frame[&1])
+
+    Authority.accept_development_attempt(id, revision, token, note, world)
+    |> settled(fn attempt -> %{"allow" => true, "development_attempt" => attempt} end)
+  end
+
+  defp dispatch_mutation(_peer, :update_development_attempt, [id, revision, status, note]) do
+    Authority.update_development_attempt(id, revision, status, note)
+    |> settled(fn attempt -> %{"allow" => true, "development_attempt" => attempt} end)
+  end
+
+  defp dispatch_mutation(_peer, :create_development_task, values) do
+    Authority.create_development_task(Map.new(Enum.zip(Ampd.DevelopmentTask.fields(), values)))
+    |> settled(fn task -> %{"allow" => true, "development_task" => task} end)
+  end
+
+  defp dispatch_mutation(_peer, :update_development_task, [id, revision, status, note]) do
+    Authority.update_development_task(id, revision, status, note)
+    |> settled(fn task -> %{"allow" => true, "development_task" => task} end)
+  end
+
+  defp dispatch_mutation(_peer, :register_bot, values) do
+    Authority.register_bot(Map.new(Enum.zip(Ampd.BotIdentity.fields(), values)))
+    |> settled(fn bot -> %{"allow" => true, "bot" => bot} end)
+  end
+
+  defp dispatch_mutation(_peer, :update_bot, [ref, revision | values]) do
+    Authority.update_bot(ref, Map.new(Enum.zip(Ampd.BotIdentity.fields(), values)), revision)
+    |> settled(fn bot -> %{"allow" => true, "bot" => bot} end)
+  end
+
+  defp dispatch_mutation(_peer, :remove_bot, [ref]) do
+    Authority.remove_bot(ref) |> settled(fn result -> Map.put(result, "allow", true) end)
+  end
+
+  defp dispatch_mutation(_peer, :delete_workspace, [ref]) do
+    Authority.delete_workspace(ref) |> settled(fn result -> Map.put(result, "allow", true) end)
+  end
+
   defp dispatch_mutation(_peer, :open_workspace, [name]) do
     Authority.open_workspace(%{"name" => name, "world_ref" => Ampd.World.lineage()})
     |> settled(fn w -> %{"allow" => true, "workspace" => w} end)

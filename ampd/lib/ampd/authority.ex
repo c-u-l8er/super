@@ -11,8 +11,16 @@ defmodule Ampd.Authority do
   commands (`request_grant`, `revoke_grant`, `approve_effect`,
   `deny_effect`) enter here.
   """
-  alias Ampd.{AuthorityCoordinator, GrantRegistry, Session, CapabilityRegistry,
-              Approvals, Effects, Gateway, Core}
+  alias Ampd.{
+    AuthorityCoordinator,
+    GrantRegistry,
+    Session,
+    CapabilityRegistry,
+    Approvals,
+    Effects,
+    Gateway,
+    Core
+  }
 
   # **Every authority operation executes only in the world incarnation to
   # which its authority-bearing channel was bound.**
@@ -118,12 +126,16 @@ defmodule Ampd.Authority do
 
       cond do
         q == nil ->
-          {:refused, refuse("grant-request-unknown", "No such pending grant request.", %{"id" => id})}
+          {:refused,
+           refuse("grant-request-unknown", "No such pending grant request.", %{"id" => id})}
 
         not Core.duration?(dur) ->
           {:refused,
-           refuse("invalid-grant-duration", "That is not a grant duration this system can enforce.",
-             %{"given" => inspect(dur), "allowed" => Core.durations()})}
+           refuse(
+             "invalid-grant-duration",
+             "That is not a grant duration this system can enforce.",
+             %{"given" => inspect(dur), "allowed" => Core.durations()}
+           )}
 
         # **The request's own duration must be rankable before it is
         # ranked.** `Core.duration_rank/1` returns `nil` for anything
@@ -135,35 +147,53 @@ defmodule Ampd.Authority do
         # ones already on disk in a store written before that rule existed.
         not Core.duration?(q["requested_duration"] || "workspace") ->
           {:refused,
-           refuse("invalid-grant-duration",
+           refuse(
+             "invalid-grant-duration",
              "That request asks for a duration this system cannot enforce.",
-             %{"requested" => inspect(q["requested_duration"]), "allowed" => Core.durations(),
+             %{
+               "requested" => inspect(q["requested_duration"]),
+               "allowed" => Core.durations(),
                "hint" =>
                  "the request predates the rule that refuses these at creation — deny it and " <>
-                   "let the agent ask again"})}
+                   "let the agent ask again"
+             }
+           )}
 
         Core.duration_rank(dur) > Core.duration_rank(q["requested_duration"] || "workspace") ->
           {:refused,
-           refuse("grant-widening-refused",
+           refuse(
+             "grant-widening-refused",
              "Approving a request may narrow it, never widen it.",
-             %{"requested" => q["requested_duration"], "attempted" => dur,
-               "hint" => "a broader grant is a new grant the person authors, not an approval"})}
+             %{
+               "requested" => q["requested_duration"],
+               "attempted" => dur,
+               "hint" => "a broader grant is a new grant the person authors, not an approval"
+             }
+           )}
 
         stale_pack(q) != nil ->
           {:refused, stale_pack(q)}
 
         not declared_and_installed?(q["capability"]) ->
           {:refused,
-           refuse("capability-undeclared",
+           refuse(
+             "capability-undeclared",
              "No installed pack declares that capability.",
-             %{"capability" => q["capability"],
+             %{
+               "capability" => q["capability"],
                "hint" =>
                  "minting it now would lie dormant until the pack is installed, and then " <>
-                   "installation would activate authority nobody granted afterwards"})}
+                   "installation would activate authority nobody granted afterwards"
+             }
+           )}
 
         true ->
-          fields = %{"capability" => q["capability"], "resource" => q["resource"],
-                     "actor" => q["actor"], "duration" => dur}
+          fields = %{
+            "capability" => q["capability"],
+            "resource" => q["resource"],
+            "actor" => q["actor"],
+            "duration" => dur
+          }
 
           fields = if dur == "once", do: Map.put(fields, "uses_remaining", 1), else: fields
 
@@ -212,20 +242,30 @@ defmodule Ampd.Authority do
     pk = q["pack"] && CapabilityRegistry.get(q["pack"])
 
     cond do
-      was == nil -> nil
-      pk == nil -> nil
-      Core.pack_digest(pk) == was -> nil
+      was == nil ->
+        nil
+
+      pk == nil ->
+        nil
+
+      Core.pack_digest(pk) == was ->
+        nil
+
       true ->
-        refuse("grant-request-stale",
+        refuse(
+          "grant-request-stale",
           "The pack that declares this capability changed after the request was made.",
-          %{"pack" => q["pack"],
+          %{
+            "pack" => q["pack"],
             "requested_under_version" => q["pack_version"],
             "installed_version" => pk["version"],
             "requested_under_digest" => was,
             "installed_digest" => Core.pack_digest(pk),
             "hint" =>
               "approving would grant a capability whose contract is not the one that was asked " <>
-                "about — deny this request and let the agent ask again"})
+                "about — deny this request and let the agent ask again"
+          }
+        )
     end
   end
 
@@ -248,15 +288,20 @@ defmodule Ampd.Authority do
       operator_detail: detail
     )
   end
+
   def set_dur(d) do
     if Core.duration?(d) do
       tx(fn -> GrantRegistry.set_dur(d) end)
     else
       {:refused,
-       refuse("invalid-grant-duration", "That is not a grant duration this system can enforce.",
-         %{"given" => inspect(d), "allowed" => Core.durations()})}
+       refuse(
+         "invalid-grant-duration",
+         "That is not a grant duration this system can enforce.",
+         %{"given" => inspect(d), "allowed" => Core.durations()}
+       )}
     end
   end
+
   def commit(surface), do: tx(fn -> GrantRegistry.commit(surface) end)
 
   # ------------------------------------------------------------ loci · D.1.1
@@ -274,6 +319,42 @@ defmodule Ampd.Authority do
   form of the law this runtime has held since C0, *installation confers
   zero authority*.
   """
+  def record_development_attempt(fields),
+    do: tx(fn -> Ampd.Loci.record_development_attempt(fields) end)
+
+  def begin_development_test(id, fields),
+    do: tx(fn -> Ampd.Loci.begin_development_test(id, fields) end)
+
+  def prepare_development_acceptance(id, fields),
+    do: tx(fn -> Ampd.Loci.prepare_development_acceptance(id, fields) end)
+
+  def accept_development_attempt(id, revision, token, note, world),
+    do: tx(fn -> Ampd.Loci.accept_development_attempt(id, revision, token, note, world) end)
+
+  def recover_development_tests(id, world),
+    do: tx(fn -> Ampd.Loci.recover_development_tests(id, world) end)
+
+  def finish_development_test(id, run_id, world, outcome),
+    do: tx(fn -> Ampd.Loci.finish_development_test(id, run_id, world, outcome) end)
+
+  def check_development_attempt_text(id, revision),
+    do: tx(fn -> Ampd.Loci.check_development_attempt_text(id, revision) end)
+
+  def update_development_attempt(id, revision, status, note),
+    do: tx(fn -> Ampd.Loci.update_development_attempt(id, revision, status, note) end)
+
+  def create_development_task(fields), do: tx(fn -> Ampd.Loci.create_development_task(fields) end)
+
+  def update_development_task(id, revision, status, note),
+    do: tx(fn -> Ampd.Loci.update_development_task(id, revision, status, note) end)
+
+  def register_bot(fields), do: tx(fn -> Ampd.Loci.create_bot(fields) end)
+
+  def update_bot(ref, fields, revision),
+    do: tx(fn -> Ampd.Loci.update_bot(ref, fields, revision) end)
+
+  def remove_bot(ref), do: tx(fn -> Ampd.Loci.remove_bot(ref) end)
+  def delete_workspace(ref), do: tx(fn -> Ampd.Loci.delete_workspace(ref) end)
   def open_workspace(fields), do: tx(fn -> Ampd.Loci.create_workspace(fields) end)
   def open_goal(fields), do: tx(fn -> Ampd.Loci.create_goal(fields) end)
   def open_lane(fields), do: tx(fn -> Ampd.Loci.create_lane(fields) end)
@@ -557,9 +638,12 @@ defmodule Ampd.Authority do
         (a["world_generation"] != gen or a["world_installation_id"] != iid)
     end)
     |> Enum.filter(fn a ->
-      Approvals.mark(a["id"], "stale",
+      Approvals.mark(
+        a["id"],
+        "stale",
         "world lineage advanced to generation #{gen} (#{reason}) — " <>
-          "the authority state this consent was given under can no longer be re-derived") == :ok
+          "the authority state this consent was given under can no longer be re-derived"
+      ) == :ok
     end)
     |> Enum.map(& &1["id"])
   end

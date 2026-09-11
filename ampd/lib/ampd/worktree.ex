@@ -85,7 +85,6 @@ defmodule Ampd.Worktree do
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
-
   # ------------------------------------------------- participant boundary
   #
   # C1.0b·2·1. Inside `Ampd.AuthorityCoordinator`, a bare `GenServer.call`
@@ -168,6 +167,20 @@ defmodule Ampd.Worktree do
 
   def resource(ref), do: ask({:get, "resources", ref})
   def repo(ref), do: ask({:get, "repos", ref})
+
+  # Host-only folder comparison. Never returns the registered path.
+  def matches_repository?(reference, path) do
+    case repo(reference) do
+      %{"path" => registered} ->
+        case {real(path), real(registered)} do
+          {{:ok, selected}, {:ok, expected}} -> selected == expected
+          _ -> false
+        end
+
+      _ ->
+        false
+    end
+  end
 
   @doc "Every bound `source-basis@1`, by ref."
   def source_bases, do: ask({:all, "bases"})
@@ -286,8 +299,9 @@ defmodule Ampd.Worktree do
   # value, and a digest that is structurally incapable of ever matching is
   # still worth refusing at the door.
   def scope_digest?(d),
-    do: is_binary(d) and byte_size(d) == 64 and
-          d |> :binary.bin_to_list() |> Enum.all?(&((&1 in ?0..?9) or (&1 in ?a..?f)))
+    do:
+      is_binary(d) and byte_size(d) == 64 and
+        d |> :binary.bin_to_list() |> Enum.all?(&(&1 in ?0..?9 or &1 in ?a..?f))
 
   @doc """
   An exact Git object name, and nothing that has to be *resolved* to become
@@ -496,7 +510,16 @@ defmodule Ampd.Worktree do
   # bootstrap path, and `Ampd.Ordered` is explicit that bootstrap satisfies
   # the rule by running inside the coordinator rather than by being excepted
   # from it. `Ampd.Authority.register_repository/1` is now that path.
-  @ordered_ops [:request, :set_state, :create, :register_repo, :bind_basis, :open_job, :reset, :load_state]
+  @ordered_ops [
+    :request,
+    :set_state,
+    :create,
+    :register_repo,
+    :bind_basis,
+    :open_job,
+    :reset,
+    :load_state
+  ]
 
   @doc """
   Every operation this module refuses outside the coordinator.
@@ -658,6 +681,7 @@ defmodule Ampd.Worktree do
 
               not File.dir?(target) ->
                 q = quarantine(creating, "effector reported success and the directory is absent")
+
                 {:reply, {:error, "worktree-unobserved", %{"resource_ref" => ref}},
                  %{st | s: Ampd.Store.save(tab, put_in(s1, ["resources", ref], q))}}
 
@@ -665,6 +689,7 @@ defmodule Ampd.Worktree do
               # thing that got created still has to *be* where we think.
               not confined?(target, root()) ->
                 q = quarantine(creating, "created path resolves outside the confinement root")
+
                 {:reply, {:error, "worktree-escaped-confinement", %{"resource_ref" => ref}},
                  %{st | s: Ampd.Store.save(tab, put_in(s1, ["resources", ref], q))}}
 
@@ -844,18 +869,19 @@ defmodule Ampd.Worktree do
         # The basis names a resource no worktree capability claims. That is a
         # broken chain, not an ownership violation, and saying so keeps the
         # two apart in a refusal log.
-        {:reply,
-         {:error, "source-basis-unowned", %{"source_basis_ref" => basis["ref"]}}, st}
+        {:reply, {:error, "source-basis-unowned", %{"source_basis_ref" => basis["ref"]}}, st}
 
       owning_lane != lane["id"] ->
         {:reply,
          {:error, "validation-job-lane-mismatch",
-          %{"source_basis_ref" => basis["ref"], "basis_locus" => owning_lane,
-            "worker_locus" => lane["id"]}}, st}
+          %{
+            "source_basis_ref" => basis["ref"],
+            "basis_locus" => owning_lane,
+            "worker_locus" => lane["id"]
+          }}, st}
 
       not scope_digest?(f["scope_digest"]) ->
-        {:reply,
-         {:error, "scope-digest-malformed", %{"scope_digest" => f["scope_digest"]}}, st}
+        {:reply, {:error, "scope-digest-malformed", %{"scope_digest" => f["scope_digest"]}}, st}
 
       true ->
         seq = s["seq"] + 1

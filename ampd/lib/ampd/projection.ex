@@ -100,6 +100,9 @@ defmodule Ampd.Projection do
       # is serialized, framed, coalesced and rendered would make every
       # confinement argument above it decorative the moment a pane is
       # screenshotted or a frame is logged.
+      "development_tasks" => Ampd.Loci.development_tasks(),
+      "development_attempts" => Ampd.Loci.development_attempts(),
+      "bots" => Ampd.Loci.bots(),
       "workspaces" => Ampd.Loci.workspaces(),
       "goals" => Ampd.Loci.goals(),
       "lanes" => Ampd.Loci.lanes(),
@@ -125,14 +128,21 @@ defmodule Ampd.Projection do
         Ampd.Carrier.unresolved()
         |> Map.new(fn a ->
           {a["ticket_id"],
-           Map.take(a, ~w(ticket_id carrier_ref worker_ref locus_ref state refused_as admitted_at))}
+           Map.take(
+             a,
+             ~w(ticket_id carrier_ref worker_ref locus_ref state refused_as admitted_at)
+           )}
         end),
       "worktree_caps" => Ampd.Loci.caps(),
-      "repositories" => Ampd.Worktree.repos() |> Map.new(fn {ref, _} -> {ref, %{"ref" => ref}} end),
+      "repositories" =>
+        Ampd.Worktree.repos() |> Map.new(fn {ref, _} -> {ref, %{"ref" => ref}} end),
       "worktree_resources" =>
         Ampd.Worktree.resources() |> Map.new(fn {ref, r} -> {ref, Ampd.Locus.view(r)} end),
       "recent_refusals" => Ampd.RefusalLog.recent(20),
-      "seals" => Enum.map(Ampd.seals(), fn {m, reason} -> %{"registry" => inspect(m), "reason" => reason} end),
+      "seals" =>
+        Enum.map(Ampd.seals(), fn {m, reason} ->
+          %{"registry" => inspect(m), "reason" => reason}
+        end),
       "runtime" => runtime_status(),
 
       # --- history: a window, and the size of what it looks onto --------
@@ -312,6 +322,8 @@ defmodule Ampd.Projection do
 
     %{
       "schema" => "agent-projection@2",
+      "bot_identity" =>
+        Enum.find_value(Ampd.Loci.bots(), fn {_id, bot} -> if bot["actor"] == actor, do: bot end),
       "actor" => actor,
       "workspace" => Session.ctx()["workspace"],
       "run" => Session.run(),
@@ -326,13 +338,17 @@ defmodule Ampd.Projection do
       "grant_requests" =>
         GrantRegistry.requests() |> mine.() |> Enum.filter(&(&1["status"] == "pending")),
       "grant_requests_history" =>
-        GrantRegistry.requests() |> mine.() |> Enum.reject(&(&1["status"] == "pending")) |> window(),
+        GrantRegistry.requests()
+        |> mine.()
+        |> Enum.reject(&(&1["status"] == "pending"))
+        |> window(),
       "pending_approvals" =>
         Enum.filter(Approvals.all(), &(&1["status"] == "pending" and &1["actor"] == actor)),
       # Bounded for the same reason the operator's is: an agent's own
       # receipts also only ever grow.
       "effects" => Effects.all() |> mine.() |> Enum.reject(&Effects.terminal?/1),
-      "effects_history" => Effects.all() |> mine.() |> Enum.filter(&Effects.terminal?/1) |> window(),
+      "effects_history" =>
+        Effects.all() |> mine.() |> Enum.filter(&Effects.terminal?/1) |> window(),
       # Capability receipts carry a top-level `actor`; this is the filter
       # they were designed for.
       "receipts" => Receipts.of_kind(Receipts.default_kind()) |> mine.() |> window(),
@@ -702,7 +718,6 @@ defmodule Ampd.Projection do
         )
     }
   end
-
 
   @doc """
   Health for a caller with no identity.

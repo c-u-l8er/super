@@ -637,6 +637,11 @@ defmodule Ampd.Transport do
       _ -> :error
     end
 
+    defp test_world_current?(expected) do
+      frame = Ampd.Projection.continuity()
+      Enum.map(~w(world_incarnation world_generation projection_epoch), &frame[&1]) == expected
+    end
+
     defp run("bind_control_channel", _f, [fd | rest]) do
       Enum.each(rest, &close_fd/1)
 
@@ -774,6 +779,87 @@ defmodule Ampd.Transport do
     # the process the runtime was born holding a descriptor to. A person
     # naming a path to trust is a decision the host makes on their behalf,
     # not a command an agent channel could ever carry.
+    defp run("prepare_development_acceptance", %{"attempt_ref" => id, "fields" => fields}, fds)
+         when is_binary(id) and byte_size(id) <= 100 and is_map(fields) do
+      Enum.each(fds, &close_fd/1)
+
+      case if test_world_current?(fields["world"]),
+             do: Ampd.Authority.prepare_development_acceptance(id, fields),
+             else: {:refused, %{"public_message" => "The runtime changed."}} do
+        a when is_map(a) -> ok(%{"run" => a["acceptance_check"]})
+        {:refused, r} -> %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+      end
+    end
+
+    defp run("recover_development_tests", %{"attempt_ref" => id, "world" => expected}, fds)
+         when is_binary(id) and byte_size(id) <= 100 do
+      Enum.each(fds, &close_fd/1)
+      frame = Ampd.Projection.continuity()
+      world = Enum.map(~w(world_incarnation world_generation projection_epoch), &frame[&1])
+
+      if world != expected do
+        %{"schema" => "bridge-reply@1", "ok" => false}
+      else
+        case Ampd.Authority.recover_development_tests(id, world) do
+          a when is_map(a) -> ok(%{"run" => Map.get(a, "test_runs", %{})})
+          {:refused, r} -> %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+        end
+      end
+    end
+
+    defp run("begin_development_test", %{"attempt_ref" => id, "fields" => fields}, fds)
+         when is_binary(id) and byte_size(id) <= 100 and is_map(fields) do
+      Enum.each(fds, &close_fd/1)
+
+      case if test_world_current?(fields["world"]),
+             do: Ampd.Authority.begin_development_test(id, fields),
+             else: {:refused, %{"public_message" => "The runtime changed. Reopen the review."}} do
+        a when is_map(a) -> ok(%{"run" => a["test_runs"][fields["run_id"]]})
+        {:refused, r} -> %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+      end
+    end
+
+    defp run(
+           "finish_development_test",
+           %{"attempt_ref" => id, "run_id" => run_id, "world" => world, "outcome" => outcome},
+           fds
+         )
+         when is_binary(id) and byte_size(id) <= 100 and is_binary(run_id) and
+                byte_size(run_id) <= 100 and is_map(outcome) do
+      Enum.each(fds, &close_fd/1)
+
+      case if test_world_current?(world),
+             do: Ampd.Authority.finish_development_test(id, run_id, world, outcome),
+             else: {:refused, %{"public_message" => "The runtime changed. Reopen the review."}} do
+        a when is_map(a) -> ok(%{"run" => a["test_runs"][run_id]})
+        {:refused, r} -> %{"schema" => "bridge-reply@1", "ok" => false, "refusal" => r}
+      end
+    end
+
+    defp run(
+           "resolve_development_test",
+           %{"attempt_ref" => id, "revision" => revision, "path" => path, "world" => world},
+           fds
+         )
+         when is_binary(id) and byte_size(id) <= 100 and is_integer(revision) and revision > 0 and
+                is_binary(path) and byte_size(path) <= 4096 and is_list(world) and
+                length(world) == 3 do
+      Enum.each(fds, &close_fd/1)
+      ok(%{"review" => Ampd.DevelopmentAttempt.for_local_tests(id, revision, path, world)})
+    end
+
+    defp run(
+           "match_development_repository",
+           %{"task_ref" => id, "revision" => revision, "path" => path, "world" => world},
+           fds
+         )
+         when is_binary(id) and byte_size(id) <= 100 and is_integer(revision) and revision > 0 and
+                is_binary(path) and byte_size(path) > 0 and byte_size(path) <= 4096 and
+                is_list(world) and length(world) == 3 do
+      Enum.each(fds, &close_fd/1)
+      ok(%{"match" => Ampd.DevelopmentTask.repository_match(id, revision, path, world)})
+    end
+
     defp run("register_repository", %{"path" => path}, fds) when is_binary(path) do
       Enum.each(fds, &close_fd/1)
 

@@ -317,6 +317,129 @@ defmodule Ampd.CommandSpec do
     # through `Ampd.Worktree.register_repository!/1`, and it is recorded
     # in the D.1.1 ambient-authority census as exactly that rather than
     # dressed up as a typed command.
+    "record_development_change_set" => %{
+      cmd: :record_development_change_set,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "client_ref", type: {:string, 100}, required: true},
+        %{name: "task_ref", type: {:id, "dt_"}, required: true},
+        %{name: "task_revision", type: {:count, @max_generation}, required: true},
+        %{name: "material", type: {:map, 240_000}, required: true}
+      ]
+    },
+    "record_development_attempt" => %{
+      cmd: :record_development_attempt,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "client_ref", type: {:string, 100}, required: true},
+        %{name: "task_ref", type: {:id, "dt_"}, required: true},
+        %{name: "task_revision", type: {:count, @max_generation}, required: true},
+        %{name: "source", type: {:map, 4096}, required: true},
+        %{name: "shared_draft", type: {:string, 24000}, required: true},
+        %{name: "proposed_text", type: {:string, 32000}, required: true}
+      ]
+    },
+    "check_development_attempt_text" => %{
+      cmd: :check_development_attempt_text,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "attempt_ref", type: {:id, "da_"}, required: true},
+        %{name: "revision", type: {:count, @max_generation}, required: true}
+      ]
+    },
+    "accept_development_attempt" => %{
+      cmd: :accept_development_attempt,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "attempt_ref", type: {:id, "da_"}, required: true},
+        %{name: "revision", type: {:count, @max_generation}, required: true},
+        %{name: "token", type: {:string, 100}, required: true},
+        %{name: "note", type: {:string, 1000}, required: true}
+      ]
+    },
+    "update_development_attempt" => %{
+      cmd: :update_development_attempt,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "attempt_ref", type: {:id, "da_"}, required: true},
+        %{name: "revision", type: {:count, @max_generation}, required: true},
+        %{name: "status", type: {:string, 20}, required: true},
+        %{name: "note", type: {:string, 1000}, required: true}
+      ]
+    },
+    "create_development_task" => %{
+      cmd: :create_development_task,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "client_ref", type: {:string, 100}, required: true},
+        %{name: "lane_ref", type: {:id, "ln_"}, required: true},
+        %{name: "title", type: {:string, 320}, required: true},
+        %{name: "criteria", type: {:string, 4000}, required: true},
+        %{name: "required_checks", type: {:map, 256}, required: false, default: nil}
+      ]
+    },
+    "update_development_task" => %{
+      cmd: :update_development_task,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "task_ref", type: {:id, "dt_"}, required: true},
+        %{name: "revision", type: {:count, @max_generation}, required: true},
+        %{name: "status", type: {:string, 20}, required: true},
+        %{name: "note", type: {:string, 1000}, required: true}
+      ]
+    },
+    "register_bot" => %{
+      cmd: :register_bot,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "client_ref", type: {:string, 100}, required: true},
+        %{name: "workspace_ref", type: {:id, "ws_"}, required: true},
+        %{name: "name", type: {:string, 320}, required: true},
+        %{name: "role", type: {:string, 400}, required: true},
+        %{name: "instructions", type: {:string, 16000}, required: false, default: ""},
+        %{name: "group", type: {:string, 320}, required: true},
+        %{name: "provider", type: {:string, 20}, required: true}
+      ]
+    },
+    "update_bot" => %{
+      cmd: :update_bot,
+      channel: :human_control,
+      kind: :mutation,
+      fields:
+        [
+          %{name: "bot_ref", type: {:id, "bt_"}, required: true},
+          %{name: "revision", type: {:count, @max_generation}, required: true}
+        ] ++
+          [
+            %{name: "client_ref", type: {:string, 100}, required: true},
+            %{name: "workspace_ref", type: {:id, "ws_"}, required: true},
+            %{name: "name", type: {:string, 320}, required: true},
+            %{name: "role", type: {:string, 400}, required: true},
+            %{name: "instructions", type: {:string, 16000}, required: false, default: ""},
+            %{name: "group", type: {:string, 320}, required: true},
+            %{name: "provider", type: {:string, 20}, required: true}
+          ]
+    },
+    "remove_bot" => %{
+      cmd: :remove_bot,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [%{name: "bot_ref", type: {:id, "bt_"}, required: true}]
+    },
+    "delete_workspace" => %{
+      cmd: :delete_workspace,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [%{name: "workspace_ref", type: {:id, "ws_"}, required: true}]
+    },
     "open_workspace" => %{
       cmd: :open_workspace,
       channel: :human_control,

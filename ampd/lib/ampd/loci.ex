@@ -249,6 +249,9 @@ defmodule Ampd.Loci do
       "goals" => %{},
       "lanes" => %{},
       "workers" => %{},
+      "bots" => %{},
+      "development_tasks" => %{},
+      "development_attempts" => %{},
       "caps" => %{},
       "carrier_attempts" => %{},
       "seq" => 0
@@ -266,6 +269,9 @@ defmodule Ampd.Loci do
       "goals" => %{},
       "lanes" => %{},
       "workers" => %{},
+      "bots" => %{},
+      "development_tasks" => %{},
+      "development_attempts" => %{},
       "caps" => %{},
       "carrier_attempts" => %{},
       "seq" => 0
@@ -279,6 +285,43 @@ defmodule Ampd.Loci do
   def workspaces, do: ask({:all, "workspaces"})
   def goals, do: ask({:all, "goals"})
   def lanes, do: ask({:all, "lanes"})
+  def development_attempts, do: ask({:all, "development_attempts"})
+
+  def record_development_attempt(fields),
+    do: ask({:create, "development_attempts", "da_", fields})
+
+  def begin_development_test(id, fields),
+    do: ask({:patch, "development_attempts", id, {:begin_test, fields}})
+
+  def prepare_development_acceptance(id, fields),
+    do: ask({:patch, "development_attempts", id, {:prepare_acceptance, fields}})
+
+  def accept_development_attempt(id, revision, token, note, world),
+    do: ask({:patch, "development_attempts", id, {:accept, revision, token, note, world}})
+
+  def recover_development_tests(id, world),
+    do: ask({:patch, "development_attempts", id, {:recover_tests, world}})
+
+  def finish_development_test(id, run_id, world, outcome),
+    do: ask({:patch, "development_attempts", id, {:finish_test, run_id, world, outcome}})
+
+  def check_development_attempt_text(id, revision),
+    do: ask({:patch, "development_attempts", id, {:check_text, revision}})
+
+  def update_development_attempt(id, revision, status, note),
+    do: ask({:patch, "development_attempts", id, {revision, status, note}})
+
+  def development_tasks, do: ask({:all, "development_tasks"})
+  def create_development_task(fields), do: ask({:create, "development_tasks", "dt_", fields})
+
+  def update_development_task(id, revision, status, note),
+    do: ask({:patch, "development_tasks", id, {revision, status, note}})
+
+  def bots, do: ask({:all, "bots"})
+  def bot(id), do: ask({:get, "bots", id})
+  def create_bot(fields), do: ask({:create, "bots", "bt_", fields})
+  def update_bot(id, fields, revision), do: ask({:patch, "bots", id, {fields, revision}})
+  def remove_bot(id), do: ask({:patch, "bots", id, :remove})
   def workers, do: ask({:all, "workers"})
   def caps, do: ask({:all, "caps"})
 
@@ -315,6 +358,7 @@ defmodule Ampd.Loci do
   end
 
   # --------------------------------------------------------- mutations
+  def delete_workspace(ref), do: ask({:delete_workspace, ref})
   def create_workspace(f), do: ask({:create, "workspaces", "ws_", f})
   def create_goal(f), do: ask({:create, "goals", "gl_", f})
   def create_lane(f), do: ask({:create, "lanes", "ln_", f})
@@ -344,7 +388,7 @@ defmodule Ampd.Loci do
   def attempt(id), do: ask({:get, "carrier_attempts", id})
   def reset, do: ask(:reset)
 
-  @ordered_ops [:create, :create_attempt, :patch, :reset, :load_state]
+  @ordered_ops [:delete_workspace, :create, :create_attempt, :patch, :reset, :load_state]
 
   # ------------------------------------------------- the ordered boundary
   #
@@ -421,22 +465,237 @@ defmodule Ampd.Loci do
     do: {:reply, s |> Map.get(kind, %{}) |> Map.get(id), st}
 
   # --- ordered implementations (reached only via the guard above) ----
-  def handle_ordered({:create, kind, prefix, fields}, %{tab: tab, s: s} = st) do
-    seq = s["seq"] + 1
-    id = prefix <> String.pad_leading(Integer.to_string(seq), 4, "0")
+  # Refuse at the receiving store boundary, in the same ordered transaction
+  # that removes the workspace and goals. Lanes retain their ancestry.
+  def handle_ordered({:delete_workspace, ref}, %{tab: tab, s: s} = st) do
+    goals =
+      s["goals"]
+      |> Enum.filter(fn {_id, g} -> g["workspace_ref"] == ref end)
+      |> Enum.map(&elem(&1, 0))
 
-    schema =
-      case kind do
-        "workspaces" -> @workspace_schema
-        "goals" -> @goal_schema
-        "lanes" -> @lane_schema
-        "workers" -> @worker_schema
-        "caps" -> @cap_schema
+    code =
+      cond do
+        not Map.has_key?(s["workspaces"], ref) ->
+          {"workspace-unknown", "No such workspace."}
+
+        Enum.any?(s["lanes"], fn {_id, lane} -> lane["goal_ref"] in goals end) ->
+          {"workspace-has-lanes",
+           "This workspace has lanes. Workspace deletion cannot remove established lanes or workers."}
+
+        Enum.any?(s["bots"], fn {_id, bot} -> bot["workspace_ref"] == ref end) ->
+          {"workspace-has-bots", "Remove this workspace’s registered bots before deleting it."}
+
+        true ->
+          nil
       end
 
-    rec = Map.merge(%{"schema" => schema, "id" => id}, fields)
-    s2 = s |> put_in([kind, id], rec) |> Map.put("seq", seq)
-    {:reply, rec, %{st | s: Ampd.Store.save(tab, s2)}}
+    if code do
+      {name, message} = code
+
+      refusal =
+        Ampd.Refusal.new(name,
+          component: "loci",
+          requires_human: true,
+          public_message: message,
+          operator_detail: %{"workspace_ref" => ref}
+        )
+
+      {:reply, {:refused, refusal}, st}
+    else
+      next =
+        s
+        |> Map.update!("workspaces", &Map.delete(&1, ref))
+        |> Map.update!("goals", &Map.drop(&1, goals))
+
+      {:reply, %{"workspace_ref" => ref, "deleted_goals" => goals},
+       %{st | s: Ampd.Store.save(tab, next)}}
+    end
+  end
+
+  # All validation is at the receiving store, within the existing ordered
+  # create/patch boundary. Identity fields cannot be provided or overwritten.
+  def handle_ordered({:create, "development_attempts", "da_", fields}, %{s: s, tab: tab} = st) do
+    case Ampd.DevelopmentAttempt.create(fields, s) do
+      {:ok, attempt, next} -> {:reply, attempt, %{st | s: Ampd.Store.save(tab, next)}}
+      refusal -> {:reply, refusal, st}
+    end
+  end
+
+  def handle_ordered({:patch, "development_attempts", id, patch}, %{s: s, tab: tab} = st) do
+    case Ampd.DevelopmentAttempt.update(id, patch, s) do
+      {:ok, attempt, next} -> {:reply, attempt, %{st | s: Ampd.Store.save(tab, next)}}
+      refusal -> {:reply, refusal, st}
+    end
+  end
+
+  def handle_ordered({:create, "development_tasks", "dt_", fields}, %{s: s, tab: tab} = st) do
+    case Ampd.DevelopmentTask.create(fields, s) do
+      {:ok, task, next} -> {:reply, task, %{st | s: Ampd.Store.save(tab, next)}}
+      refusal -> {:reply, refusal, st}
+    end
+  end
+
+  def handle_ordered({:patch, "development_tasks", id, patch}, %{s: s, tab: tab} = st) do
+    case Ampd.DevelopmentTask.update(id, patch, s) do
+      {:ok, task, next} -> {:reply, task, %{st | s: Ampd.Store.save(tab, next)}}
+      refusal -> {:reply, refusal, st}
+    end
+  end
+
+  def handle_ordered({:create, "bots", "bt_", fields}, %{s: s, tab: tab} = st) do
+    existing =
+      if is_map(fields),
+        do:
+          Enum.find_value(s["bots"], fn {_id, b} ->
+            if b["client_ref"] == fields["client_ref"], do: b
+          end)
+
+    result = Ampd.BotIdentity.validate(fields, s)
+
+    cond do
+      result != :ok ->
+        {:reply, result, st}
+
+      existing != nil ->
+        if Map.take(existing, Ampd.BotIdentity.fields()) == fields do
+          {:reply, existing, st}
+        else
+          {:reply,
+           Ampd.BotIdentity.refuse(
+             "bot-already-registered",
+             "This local bot is already registered. Open its runtime profile to edit it."
+           ), st}
+        end
+
+      map_size(s["bots"]) >= 50 ->
+        {:reply,
+         Ampd.BotIdentity.refuse("bot-limit", "This world supports up to 50 registered bots."),
+         st}
+
+      true ->
+        seq = s["seq"] + 1
+        id = "bt_" <> String.pad_leading(Integer.to_string(seq), 4, "0")
+
+        bot =
+          Map.merge(fields, %{
+            "schema" => "bot@1",
+            "id" => id,
+            "actor" => "bot_" <> Base.encode16(:crypto.strong_rand_bytes(16), case: :lower),
+            "revision" => 1,
+            "world_ref" => Ampd.World.lineage()
+          })
+
+        next = s |> put_in(["bots", id], bot) |> Map.put("seq", seq)
+
+        if Ampd.BotIdentity.within_budget?(next["bots"]) do
+          {:reply, bot, %{st | s: Ampd.Store.save(tab, next)}}
+        else
+          {:reply, Ampd.BotIdentity.budget_refusal(), st}
+        end
+    end
+  end
+
+  def handle_ordered({:patch, "bots", id, {fields, revision}}, %{s: s, tab: tab} = st) do
+    bot = s["bots"][id]
+    result = Ampd.BotIdentity.validate(fields, s)
+
+    cond do
+      bot == nil ->
+        {:reply, Ampd.BotIdentity.refuse("bot-unknown", "This bot is no longer registered."), st}
+
+      result != :ok ->
+        {:reply, result, st}
+
+      not is_integer(revision) or revision !== bot["revision"] ->
+        {:reply,
+         Ampd.BotIdentity.refuse(
+           "bot-revision-stale",
+           "The bot changed. Reopen its profile before saving."
+         ), st}
+
+      fields["client_ref"] != bot["client_ref"] or fields["workspace_ref"] != bot["workspace_ref"] ->
+        {:reply,
+         Ampd.BotIdentity.refuse(
+           "bot-identity-immutable",
+           "This edit cannot move or replace a bot identity."
+         ), st}
+
+      true ->
+        next_bot = bot |> Map.merge(fields) |> Map.put("revision", revision + 1)
+        next = put_in(s, ["bots", id], next_bot)
+
+        if Ampd.BotIdentity.within_budget?(next["bots"]) do
+          {:reply, next_bot, %{st | s: Ampd.Store.save(tab, next)}}
+        else
+          {:reply, Ampd.BotIdentity.budget_refusal(), st}
+        end
+    end
+  end
+
+  def handle_ordered({:patch, "bots", id, :remove}, %{s: s, tab: tab} = st) do
+    bot = s["bots"][id]
+
+    cond do
+      bot == nil ->
+        {:reply, Ampd.BotIdentity.refuse("bot-unknown", "This bot is no longer registered."), st}
+
+      Enum.any?(s["lanes"], fn {_id, lane} -> lane["actor"] == bot["actor"] end) or
+        Enum.any?(
+          Ampd.GrantRegistry.list(),
+          &(&1["actor"] == bot["actor"] and &1["status"] == "active")
+        ) or
+        Enum.any?(
+          Ampd.GrantRegistry.requests(),
+          &(&1["actor"] == bot["actor"] and &1["status"] == "pending")
+        ) or
+        Enum.any?(
+          Ampd.Approvals.all(),
+          &(&1["actor"] == bot["actor"] and &1["status"] == "pending")
+        ) or
+          Enum.any?(
+            Ampd.Effects.all(),
+            &(&1["actor"] == bot["actor"] and not Ampd.Effects.terminal?(&1))
+          ) ->
+        {:reply,
+         Ampd.BotIdentity.refuse(
+           "bot-in-use",
+           "This bot has lanes, grants, requests or active effects. Resolve them before removing its identity."
+         ), st}
+
+      true ->
+        {:reply, %{"bot_ref" => id},
+         %{st | s: Ampd.Store.save(tab, Map.update!(s, "bots", &Map.delete(&1, id)))}}
+    end
+  end
+
+  def handle_ordered({:create, kind, prefix, fields}, %{tab: tab, s: s} = st) do
+    linked_bot =
+      if kind == "lanes",
+        do: Enum.find_value(s["bots"], fn {_id, b} -> if b["actor"] == fields["actor"], do: b end)
+
+    if linked_bot && fields["workspace_ref"] != linked_bot["workspace_ref"] do
+      {:reply,
+       Ampd.BotIdentity.refuse(
+         "bot-workspace-mismatch",
+         "Assign this bot only to lanes in its registered workspace."
+       ), st}
+    else
+      seq = s["seq"] + 1
+      id = prefix <> String.pad_leading(Integer.to_string(seq), 4, "0")
+
+      schema =
+        case kind do
+          "workspaces" -> @workspace_schema
+          "goals" -> @goal_schema
+          "lanes" -> @lane_schema
+          "workers" -> @worker_schema
+          "caps" -> @cap_schema
+        end
+
+      rec = Map.merge(%{"schema" => schema, "id" => id}, fields)
+      s2 = s |> put_in([kind, id], rec) |> Map.put("seq", seq)
+      {:reply, rec, %{st | s: Ampd.Store.save(tab, s2)}}
+    end
   end
 
   def handle_ordered({:create_attempt, ticket}, %{tab: tab, s: s} = st) do
@@ -444,6 +703,11 @@ defmodule Ampd.Loci do
     s2 = put_in(s, ["carrier_attempts", id], ticket)
     {:reply, {:ok, ticket}, %{st | s: Ampd.Store.save(tab, s2)}}
   end
+
+  def handle_ordered({:patch, "bots", _id, _patch}, st),
+    do:
+      {:reply,
+       Ampd.BotIdentity.refuse("bot-fields-invalid", "Use a versioned bot profile update."), st}
 
   def handle_ordered({:patch, kind, id, patch}, %{tab: tab, s: s} = st) do
     case get_in(s, [kind, id]) do
