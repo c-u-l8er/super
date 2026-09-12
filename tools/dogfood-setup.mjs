@@ -101,8 +101,19 @@ try {
   note(bot.created ? 'created' : 'kept', `bot · ${BOT.name} · ${bot.record.actor}`);
 
   const repos = await cockpit.list('repositories');
-  const repo = repos[0];
-  if (repo) note('kept', `repository · ${repo.ref ?? repo.id}`);
+  const repo = repos.find(r => /\/super$/.test(r.name ?? '')) ?? repos[0];
+  // Evidence for the second held proposal, taken live rather than asserted:
+  // a repository published without a name is the defect; with one, the fix.
+  // The option text is read from the page because that is where a person makes
+  // the choice, and an unnamed option is what made the choice unmakeable.
+  if (repos.length) {
+    const options = await cockpit.page(
+      `const s=document.querySelector('[data-draft=lane_repo]');
+       return s ? JSON.stringify([...s.options].map(o => o.textContent)) : '[]';`);
+    console.log(`  repositories: ${repos.map(r => `${r.ref ?? r.id}=${r.name ?? '(no name published)'}`).join(', ')}`);
+    console.log(`  lane form offers: ${options}`);
+  }
+  if (repo) note('kept', `repository · ${repo.ref ?? repo.id}${repo.name ? ` · ${repo.name}` : ' · unnamed'}`);
   else note('needs-a-person',
     `repository · none registered. Nav → Repositories → choose ${ROOT}. ` +
     `The chooser takes no path from a script, which is the point of it.`);
