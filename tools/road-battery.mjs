@@ -40,6 +40,7 @@ try{
   await click('#open-road');
   let road=await until(()=>surface('cd-road'));
   await until(()=>sc("return document.body.dataset.ready === '1';"));
+  await sc("window.__roadErrors=[];window.addEventListener('error',e=>window.__roadErrors.push(e.message));window.addEventListener('unhandledrejection',e=>window.__roadErrors.push(String(e.reason)));return true;");
   check('cockpit opens a live road in the same application session',!!road && road!==cockpit);
   check('road recognizes its Super host',await sc("return !document.getElementById('cockpit').hidden;"));
   const generation=await sc('return window.__ROAD_GENERATION;');
@@ -55,6 +56,26 @@ try{
   await click('#entrance');
   await until(()=>sc("return window.__roadScene.snapshot().phase==='driving' && window.__roadScene.snapshot().position[2]<window.__roadScene.snapshot().entranceZ;"));
   check('entrance drives through the gantry into the lane',true);
+  await click('#lane');
+  await until(()=>sc("return window.__roadScene.snapshot().phase==='ramp';"));
+  check('lane switch travels on a ramp with no live pane',await sc("return window.__apply('status').then(r=>!r.result.present);"));
+  check('driving cannot interrupt a ramp',await sc("return window.__roadScene.drive(144).then(r=>r===false);"));
+  await until(()=>sc("return window.__roadScene.snapshot().lane==='summaries'&&window.__roadScene.snapshot().phase==='driving';"));
+  check('ramp enters the named destination lane',await sc("return Math.abs(window.__roadScene.snapshot().position[0]-1200)<.01&&document.getElementById('enter').textContent.includes('DIGEST');"));
+  if(process.argv[2])check('capture destination lane',spawnSync('import',['-window',roadWindow(),process.argv[2].replace(/\.png$/,'-summaries.png')]).status===0);
+  await click('#enter');
+  const digest=await until(()=>sc("return window.__apply('status').then(r=>r.ok&&r.result.present?r.result:null);"));
+  const digestPane=await until(()=>surface(digest.pane_label));
+  await until(()=>sc("return document.body.dataset.ready==='1';"));
+  check('destination entrance opens Digest',await sc("return window.__paneProbe().package==='digest';"));
+  await select(road);
+  check('destination lane sign aligns with the native read frame',await sc("const a=window.__roadScene.snapshot().readRect,b=document.getElementById('readframe').getBoundingClientRect();return ['x','y','width','height'].every(k=>Math.abs(a[k]-b[k])<2);"));
+  await click('#leave');
+  await until(()=>sc("return window.__roadScene.snapshot().phase==='driving';"));
+  check('leaving Digest restores its own lane',await sc("return window.__roadScene.snapshot().lane==='summaries'&&Math.abs(window.__roadScene.snapshot().position[0]-1200)<.01;"));
+  await click('#lane');
+  await until(()=>sc("return window.__roadScene.snapshot().lane==='documents'&&window.__roadScene.snapshot().phase==='driving';"));
+  check('reverse ramp returns to Documents',await sc("return Math.abs(window.__roadScene.snapshot().position[0])<.01;"));
   const beforeKey=await sc('return window.__roadScene.snapshot().position[2];');
   await sc("window.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp'})); return true;");
   await until(()=>sc(`return window.__roadScene.snapshot().phase==='driving' && window.__roadScene.snapshot().position[2]<${beforeKey};`));
@@ -98,5 +119,5 @@ try{
   check('reopening mints a new road generation',await sc(`return window.__ROAD_GENERATION>${generation};`));
   check('old road generation is refused',await sc(`return window.__apply('place',{dash:1,side:1},{generation:${generation}}).then(r=>!r.ok);`));
   console.log(`Super road: ${held} held · 0 failed`);
-}catch(e){console.error(`FAILED · ${e.message}`);try{console.error(await sc('return document.body.innerText.slice(-1800);'));}catch{}process.exitCode=1;}
+}catch(e){console.error(`FAILED · ${e.message}`);try{console.error(await sc('return {text:document.body.innerText.slice(-1800),camera:window.__roadScene?.snapshot(),errors:window.__roadErrors};'));}catch{}process.exitCode=1;}
 finally{try{if(session)await wd('DELETE',`/session/${session}`);}catch{}stop();}

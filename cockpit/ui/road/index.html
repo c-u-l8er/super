@@ -40,8 +40,9 @@
   #fullscreen { bottom:9%; left:3%; }
   #services { bottom:9%; right:3%; }
   #cockpit { top:4%; right:3%; }
+  #lane { top:23%; right:3%; }
   #exit { bottom:9%; left:50%; transform:translateX(-50%); }
-  #road.reading #enter, #road.reading #handoff, #road.reading #next { visibility:hidden; }
+  #road.reading #enter, #road.reading #handoff, #road.reading #next, #road.reading #lane { visibility:hidden; }
   #road.reading #leave { top:auto; bottom:9%; right:21%; width:130px; }
   #road.reading #exit { display:none; }
   #notice { position:absolute; left:25%; right:25%; bottom:2%; text-align:center;
@@ -70,6 +71,7 @@
   <div id="signwrap"></div>
   <div id="readframe"></div>
   <button class="sign" id="entrance">ENTRANCE ↑<small>ComputeDriven · enter the lane</small></button>
+  <button class="sign" id="lane">SUMMARIES ↗<small>Exit ramp · switch lane</small></button>
   <button class="sign" id="enter">↖ NOTES<small>Enter window</small></button>
   <button class="sign" id="leave">LEAVE WINDOW ↗<small>Return to the lane</small></button>
   <button class="sign" id="handoff">DOCUMENT →<small>Start Notes handoff</small></button>
@@ -230,7 +232,22 @@ document.getElementById('cockpit').onclick = async () => {
 };
 document.getElementById('entrance').onclick = async () => {
   const r = await demote(); if (!r.ok) { show(r); return; }
-  await roadScene.enter(); notice('Inside the lane · Notes left · Digest right');
+  await roadScene.enter(); updateLaneSigns();
+};
+function updateLaneSigns(){
+  const summaries=roadScene.snapshot().lane==='summaries';
+  document.getElementById('lane').innerHTML=`${summaries?'DOCUMENTS':'SUMMARIES'} ↗<small>Exit ramp · switch lane</small>`;
+  document.getElementById('enter').innerHTML=`↖ ${summaries?'DIGEST':'NOTES'}<small>Enter window</small>`;
+  document.getElementById('entrance').innerHTML=`${summaries?'SUMMARIES':'DOCUMENTS'} ↑<small>Entrance · ComputeDriven</small>`;
+  notice(`${summaries?'Summaries · Digest':'Documents · Notes'} lane · scroll to travel`);
+}
+document.getElementById('perspective').addEventListener('lanechange',updateLaneSigns);
+document.getElementById('lane').onclick=async()=>{
+  if(navigation||leaving)return;
+  const r=await demote();if(!r.ok){show(r);return;}
+  navigation=roadScene.switchLane(roadScene.snapshot().lane==='documents'?'summaries':'documents');
+  document.getElementById('road').classList.add('flying');notice('Taking the connecting ramp…');
+  try{await navigation;}finally{navigation=null;document.getElementById('road').classList.remove('flying');}
 };
 document.getElementById('exit').onclick = async () => {
   const r = await demote(); if (!r.ok) { show(r); return; }
@@ -345,7 +362,7 @@ document.getElementById('handoff').onclick = async () =>
   show(await window.__handoff('document', 'a document that entered the road'));
 
 document.getElementById('enter').onclick = async () => {
-  const r = await promote(CATALOGUE.packages[0].id, null);
+  const r = await promote(roadScene.snapshot().lanes.find(l=>l.id===roadScene.snapshot().lane).package, null);
   show(r.ok ? r.result : r);
 };
 
@@ -403,6 +420,7 @@ window.__apply = apply;
   try { roadScene=createRoadScene(document.getElementById('perspective')); }
   catch(e) { show('The 3D road could not start: '+String(e)); return; }
   window.__roadScene=roadScene;
+  updateLaneSigns();
   drawSigns(CATALOGUE);
   await status();
   document.body.dataset.ready = '1';

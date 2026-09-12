@@ -16,17 +16,17 @@ export function createRoadScene(canvas) {
   camera.position.copy(driving);
   const forward=new THREE.Quaternion();
   const cards=new Map();
+  const lanes=[{id:'documents',name:'Documents',x:0,package:'notes'},
+    {id:'summaries',name:'Summaries',x:1200,package:'digest'}];
+  let lane=0,changingLane=false;
   let phase='driving', animation=null, selected=null, frames=0;
   const materials=new Map();
   function material(color){if(!materials.has(color))materials.set(color,new THREE.MeshBasicMaterial({color}));return materials.get(color);}
   function box(x,y,z,w,h,d,color){const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),material(color));
     m.position.set(x,y,z);scene.add(m);return m;}
-  box(0,ROAD_Y-2,-1600,180,4,5200,0x191b23);
-  for(const side of [-1,1])box(side*91,ROAD_Y,-1600,2,1,5200,0x8c7542);
-  for(let i=-4;i<29;i++)box(0,ROAD_Y+1,DASH_0_Z-i*DASH_PITCH,3,1,DASH_LEN,0xf2c14e);
-  function gantry(z,title,subtitle){
-    for(const side of [-1,1])box(side*205,90,z,10,240,12,0x39404b);
-    box(0,213,z,420,10,14,0x2de2e6);
+  function gantry(x,z,title,subtitle){
+    for(const side of [-1,1])box(x+side*205,90,z,10,240,12,0x39404b);
+    box(x,213,z,420,10,14,0x2de2e6);
     const c=document.createElement('canvas');c.width=720;c.height=160;
     const g=c.getContext('2d');g.fillStyle='#0a101b';g.fillRect(0,0,720,160);
     g.strokeStyle='#f2c14e';g.lineWidth=6;g.strokeRect(3,3,714,154);
@@ -34,10 +34,37 @@ export function createRoadScene(canvas) {
     g.fillStyle='#2de2e6';g.font='26px monospace';g.fillText(subtitle,24,122);
     const texture=new THREE.CanvasTexture(c);texture.colorSpace=THREE.SRGBColorSpace;
     const sign=new THREE.Mesh(new THREE.PlaneGeometry(410,92),new THREE.MeshBasicMaterial({map:texture}));
-    sign.position.set(0,264,z+8);scene.add(sign);
+    sign.position.set(x,264,z+8);scene.add(sign);
   }
-  gantry(ENTER_Z,'T&R · ENTRANCE ↑','ComputeDriven · Notes / Digest');
-  gantry(exitZ,'EXIT ↓','End of lane · return to entrance');
+  for(const l of lanes){
+    box(l.x,ROAD_Y-2,-1230,180,4,3620,0x191b23);
+    for(const side of [-1,1])box(l.x+side*91,ROAD_Y,-1230,2,1,3620,0x8c7542);
+    for(let i=-2;i<19;i++)box(l.x,ROAD_Y+1,DASH_0_Z-i*DASH_PITCH,3,1,DASH_LEN,0xf2c14e);
+    gantry(l.x,ENTER_Z,`${l.name.toUpperCase()} ↑`,'T&R · ENTRANCE');
+    gantry(l.x,exitZ,'EXIT · CONNECTING RAMP',`To ${lanes.find(other=>other!==l).name}`);
+  }
+  // Camera and pavement share this curve: switching lanes is a continuous
+  // exit/return/entrance route, not a camera teleport across unrelated roads.
+  const ramps=lanes.map((l,i)=>{
+    const dest=lanes[1-i],mid=i===0?480:720;
+    const curve=new THREE.CatmullRomCurve3([
+      [l.x,exitZ],[l.x,exitZ-300],[mid,exitZ-550],[mid,exitZ-150],
+      [mid,startZ+100],[dest.x,startZ+350],[dest.x,startZ],[dest.x,ENTER_Z],
+    ].map(([x,z])=>new THREE.Vector3(x,ROAD_CAMERA_Y,z)));
+    const positions=[],indices=[];
+    for(let n=0;n<=240;n++){
+      const p=curve.getPointAt(n/240),t=curve.getTangentAt(n/240);
+      const side=new THREE.Vector3(-t.z,0,t.x).normalize();
+      for(const s of [-1,1])positions.push(p.x+side.x*55*s,ROAD_Y,p.z+side.z*55*s);
+      if(n<240){const a=n*2;indices.push(a,a+2,a+1,a+1,a+2,a+3);}
+    }
+    const geometry=new THREE.BufferGeometry();
+    geometry.setAttribute('position',new THREE.Float32BufferAttribute(positions,3));geometry.setIndex(indices);
+    const pavement=new THREE.Mesh(geometry,new THREE.MeshBasicMaterial({color:0x242932,side:THREE.DoubleSide}));scene.add(pavement);
+    const line=new THREE.BufferGeometry().setFromPoints(curve.getSpacedPoints(160).map(p=>new THREE.Vector3(p.x,ROAD_Y+1,p.z)));
+    scene.add(new THREE.Line(line,new THREE.LineBasicMaterial({color:0xf2c14e})));
+    return curve;
+  });
   function rectOf(mesh){
     mesh.updateMatrixWorld();camera.updateMatrixWorld();
     const points=[[-90,-49.5],[90,-49.5],[90,49.5],[-90,49.5]].map(([x,y])=>
@@ -52,11 +79,11 @@ export function createRoadScene(canvas) {
   function draw(){
     camera.updateMatrixWorld();
     renderer.render(scene,camera);frames++;
-    for(const {mesh,element} of cards.values()){
+    for(const {mesh,element,lane:cardLane} of cards.values()){
       const r=rectOf(mesh);
       element.style.left=`${r.x}px`;element.style.top=`${r.y}px`;
       element.style.width=`${r.width}px`;element.style.height=`${r.height}px`;
-      element.style.transform='none';element.style.visibility=r.visible?'visible':'hidden';
+      element.style.transform='none';element.style.visibility=r.visible&&cardLane===lane&&phase!=='ramp'?'visible':'hidden';
     }
   }
   function animate(position,quaternion,nextPhase,duration=850,scaleTo=1){
@@ -76,11 +103,34 @@ export function createRoadScene(canvas) {
       };animation.frame=requestAnimationFrame(tick);
     });
   }
-  async function travelTo(z){
-    if(phase==='approaching'||phase==='reading'||phase==='returning')return false;
+  async function travelTo(z,internal=false){
+    if(changingLane&&!internal)return false;
+    if(!['driving','traveling'].includes(phase))return false;
     driving.z=THREE.MathUtils.clamp(z,exitZ-220,startZ);
     const arrived=await animate(driving.clone(),forward,'traveling',600);
     if(arrived)phase='driving';return arrived;
+  }
+  async function switchLane(id){
+    const target=lanes.findIndex(l=>l.id===id);if(target<0)return false;
+    if(changingLane||!['driving','traveling'].includes(phase))return false;
+    if(target===lane)return true;
+    changingLane=true;
+    await travelTo(exitZ,true);
+    phase='ramp';
+    const curve=ramps[lane];
+    await new Promise(resolve=>{
+      const start=performance.now(),up=new THREE.Vector3(0,1,0),matrix=new THREE.Matrix4();
+      const tick=now=>{
+        const t=Math.min(1,(now-start)/3200),s=t*t*(3-2*t);
+        const p=curve.getPointAt(s),tangent=curve.getTangentAt(s);
+        camera.position.copy(p);matrix.lookAt(p,p.clone().add(tangent),up);
+        camera.quaternion.setFromRotationMatrix(matrix);draw();
+        if(t<1)requestAnimationFrame(tick);else resolve();
+      };requestAnimationFrame(tick);
+    });
+    lane=target;driving.set(lanes[lane].x,ROAD_CAMERA_Y,ENTER_Z);phase='driving';
+    await travelTo(DASH_0_Z-4*DASH_PITCH,true);changingLane=false;
+    canvas.dispatchEvent(new CustomEvent('lanechange',{detail:lanes[lane]}));return true;
   }
   function resize(){
     const w=canvas.clientWidth,h=canvas.clientHeight;
@@ -99,18 +149,21 @@ export function createRoadScene(canvas) {
           element.onblur=()=>{mesh.children[0].material.color.setHex(0x2de2e6);draw();};
         };
         if(existing){existing.element=element;existing.mesh.material.map.image=element;existing.mesh.material.map.needsUpdate=true;focus(existing.mesh);return;}
-        const side=i%2?1:-1,z=DASH_0_Z-(7+Math.floor(i/2)*2)*DASH_PITCH;
+        const cardLane=Math.max(0,lanes.findIndex(l=>l.package===id));
+        const side=-1,z=DASH_0_Z-7*DASH_PITCH,x=lanes[cardLane].x+side*STAND_X;
         const texture=new THREE.CanvasTexture(element);texture.colorSpace=THREE.SRGBColorSpace;
         const mesh=new THREE.Mesh(new THREE.PlaneGeometry(180,99),new THREE.MeshBasicMaterial({map:texture,side:THREE.DoubleSide}));
-        mesh.position.set(side*STAND_X,110,z);mesh.rotation.y=-side*.42;scene.add(mesh);
+        mesh.position.set(x,110,z);mesh.rotation.y=-side*.42;scene.add(mesh);
         const edge=new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0x2de2e6}));mesh.add(edge);
         focus(mesh);
-        box(side*STAND_X,15,z,5,90,5,0xa98430);
-        cards.set(id,{mesh,element});
+        box(x,15,z,5,90,5,0xa98430);
+        cards.set(id,{mesh,element,lane:cardLane});
       });draw();
     },
     async arrive(id,rect){
       const card=cards.get(id);if(!card)return false;
+      if(changingLane||!['driving','traveling'].includes(phase))return false;
+      if(card.lane!==lane&&!await switchLane(lanes[card.lane].id))return false;
       if(phase==='traveling')driving.copy(camera.position);
       selected=id;
       const normal=new THREE.Vector3(0,0,1).applyQuaternion(card.mesh.quaternion);
@@ -130,8 +183,10 @@ export function createRoadScene(canvas) {
     enter:()=>travelTo(DASH_0_Z-4*DASH_PITCH),
     exit:()=>travelTo(exitZ-220),
     home:()=>travelTo(startZ),
+    switchLane,
     resize,
     snapshot:()=>({phase,frames,position:camera.position.toArray(),drivingZ:driving.z,
+      lane:lanes[lane].id,lanes:lanes.map(l=>({id:l.id,name:l.name,package:l.package})),
       selected,entranceZ:ENTER_Z,exitZ,readRect:selected?rectOf(cards.get(selected).mesh):null}),
   };
 }

@@ -62,7 +62,32 @@ static ACL gate passed **41 checks**. The shared runtime's four principal tests
 passed with the integration feature enabled. These are targeted integration and
 regression results, not a new claim that the complete sabotage sweep was run.
 
-Multi-lane ramps, the full T&R cockpit, cockpit-as-an-in-road-pane, and routing
+**Two-lane pass, 2026-09-12:** Documents contains Notes; Summaries contains Digest.
+The lane sign takes a paved exit/return/entrance ramp. Accepted handoffs travel
+to the destination lane before opening its app; leaving restores that lane's
+saved read-entry position. Driving cannot interrupt a connecting ramp. These are
+fixed presentation lanes, not Super runtime work lanes, and N=1 is unchanged.
+
+The two-lane integration battery passed **30 checks**, including two captures,
+on a 1920×1080 isolated Mutter/XWayland desktop. The user's locked desktop paused
+animation frames, so the test ran without unlocking it. Headless GPU buffer
+allocation failed initially; the passing run used software rendering:
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=1 LIBGL_ALWAYS_SOFTWARE=1 NO_AT_BRIDGE=1 \
+  dbus-run-session -- mutter --headless --wayland --virtual-monitor 1920x1080 \
+  -- node tools/road-battery.mjs /tmp/super-lanes.png
+```
+
+This proves the native transitions on that test display, not physical monitor
+performance. The static capability gates remained 41/41 in Super and 24/24 in
+the shared runtime. No new full sabotage-sweep or macOS claim is made.
+The accepted-handoff battery passed 24 checks, including destination-lane arrival.
+The fullscreen native pane measured 1382×670 at (269,205), zero offset in all
+four coordinates, at 1920×1080 and 1× scale. The integration battery also checks
+the destination lane's projected sign against the CSS read frame.
+
+The full T&R cockpit, cockpit-as-an-in-road-pane, and routing
 Super runtime tasks through road manifests are not implemented. macOS remains
 unmeasured. This separate-surface integration does not decide the pending
 ROAD_SHELL §13 ruling about replacing Super's `main` with the road.
