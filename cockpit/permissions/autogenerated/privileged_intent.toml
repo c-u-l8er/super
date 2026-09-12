@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-privileged-intent"
+description = "Enables the privileged_intent command without any pre-configured scope."
+commands.allow = ["privileged_intent"]
+
+[[permission]]
+identifier = "deny-privileged-intent"
+description = "Denies the privileged_intent command without any pre-configured scope."
+commands.deny = ["privileged_intent"]

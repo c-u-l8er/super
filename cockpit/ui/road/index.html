@@ -1,0 +1,423 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Tier 1 proof — the road</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; overflow:hidden; font:13px/1.5 ui-sans-serif,system-ui,sans-serif; background:#0b0d13; color:#c9d3e4; }
+  header { display:none; }
+  h1 { font-size:13px; margin:0; font-weight:600; letter-spacing:.02em; }
+  .sub { color:#6b7689; font-size:11px; margin-top:2px; }
+  #road { position:fixed; inset:0; background:#03040a; overflow:hidden; }
+  #perspective { position:absolute; inset:0; width:100%; height:100%; }
+  #signwrap { position:absolute; inset:0; pointer-events:none; }
+  #signwrap canvas { position:absolute; transform-origin:center; pointer-events:auto;
+    cursor:pointer; border:2px solid #2de2e6; box-shadow:0 0 0 4px #101923; }
+  #signwrap canvas:focus { outline:3px solid #f2c14e; }
+  #readframe { position:absolute; left:50%; top:15%; transform:translateX(-50%);
+               width:72%; height:62%;
+               outline:2px solid #2de2e6; display:none; background:#0b0d13; }
+  #readframe.on { display:block; }
+  #road.reading #perspective { opacity:.22; }
+  #drivehint { position:absolute; bottom:10px; left:0; right:0; text-align:center;
+    color:#f2c14e; font:11px ui-monospace,monospace; pointer-events:none; }
+  .bar { display:flex; gap:6px; flex-wrap:wrap; }
+  .sign { position:absolute; z-index:2; width:150px; padding:10px;
+    background:#123c30; border:2px solid #d3e4d9; border-radius:0;
+    color:#eff9f3; font:bold 14px ui-monospace,monospace; box-shadow:0 0 0 4px #0c211c; }
+  .sign::after { content:''; position:absolute; width:5px; height:30px;
+    background:#897952; top:calc(100% + 4px); left:50%; pointer-events:none; }
+  .sign small { display:block; font:10px/1.6 ui-monospace,monospace; margin-top:4px; }
+  .sign:hover { background:#205542; }
+  .sign:focus-visible { outline:3px solid #f2c14e; outline-offset:5px; }
+  #entrance { top:4%; left:50%; transform:translateX(-50%); width:250px; }
+  #entrance::after { width:4px; left:0; box-shadow:244px 0 #897952; height:60px; }
+  #enter { left:3%; top:48%; }
+  #handoff { left:3%; top:64%; }
+  #next { right:3%; top:64%; }
+  #leave { right:3%; top:48%; }
+  #fullscreen { bottom:9%; left:3%; }
+  #services { bottom:9%; right:3%; }
+  #cockpit { top:4%; right:3%; }
+  #exit { bottom:9%; left:50%; transform:translateX(-50%); }
+  #road.reading #enter, #road.reading #handoff, #road.reading #next { visibility:hidden; }
+  #road.reading #leave { top:auto; bottom:9%; right:21%; width:130px; }
+  #road.reading #exit { display:none; }
+  #notice { position:absolute; left:25%; right:25%; bottom:2%; text-align:center;
+    color:#f2c14e; font:12px ui-monospace,monospace; pointer-events:none; }
+  dialog { width:min(680px,80vw); max-height:70vh; overflow:auto; border:2px solid #f2c14e;
+    background:#091019; color:#c9d3e4; }
+  dialog::backdrop { background:#03040acc; }
+  dialog pre { max-height:32vh; margin:12px 0; }
+  @media(max-width:700px) { .sign { width:110px; font-size:11px; padding:6px; }
+    #road.reading #leave { right:3%; bottom:23%; } }
+  button { font:12px ui-sans-serif,system-ui,sans-serif; background:#171b28; color:#c9d3e4;
+           border:1px solid #2a3145; border-radius:4px; padding:5px 9px; cursor:pointer; }
+  button:hover { background:#1e2434; }
+  pre { margin:0 14px 14px; padding:10px; background:#0f1219; border:1px solid #1c2130;
+        border-radius:6px; font:11px/1.45 ui-monospace,monospace; color:#8fa0bb;
+        white-space:pre-wrap; max-height:max(22px,calc(35vh - 180px)); overflow:auto; }
+</style>
+
+<header>
+  <h1>T&R · ComputeDriven road</h1>
+  <div class="sub">Standalone Tier 1 · scroll to travel · select a roadside window to enter · leave to return</div>
+</header>
+
+<div id="road">
+  <canvas id="perspective" aria-label="Road extending ahead, with windows on either side"></canvas>
+  <div id="signwrap"></div>
+  <div id="readframe"></div>
+  <button class="sign" id="entrance">ENTRANCE ↑<small>ComputeDriven · enter the lane</small></button>
+  <button class="sign" id="enter">↖ NOTES<small>Enter window</small></button>
+  <button class="sign" id="leave">LEAVE WINDOW ↗<small>Return to the lane</small></button>
+  <button class="sign" id="handoff">DOCUMENT →<small>Start Notes handoff</small></button>
+  <button class="sign" id="next">→ DIGEST<small>Continue accepted handoff</small></button>
+  <button class="sign" id="fullscreen">FULL SCREEN<small>F11 · toggle desktop view</small></button>
+  <button class="sign" id="services">SERVICES ↗<small>Status · diagnostics · Super</small></button>
+  <button class="sign" id="cockpit" hidden>SUPER (CD) ↗<small>Return to cockpit</small></button>
+  <button class="sign" id="exit">EXIT LANE ↓<small>Return to desktop</small></button>
+  <div id="notice" role="status">Scroll to travel · select an app sign to enter</div>
+</div>
+
+<dialog id="service-panel">
+<h2>Road services</h2>
+<p id="integration-status">Super (CD) is not connected to this standalone road yet. Notes and Digest are the two packaged test apps.</p>
+<button id="close-services">Return to road</button>
+<div class="bar">
+  <button id="try-place">allowed op (place)</button>
+  <button id="try-intent">privileged op</button>
+  <button id="try-intent-as-cockpit">privileged op, claiming by: 'cockpit'</button>
+  <button id="replay-old-gen">replay captured old generation</button>
+  <button id="refresh">status</button>
+</div>
+
+<pre id="status">…</pre>
+</dialog>
+
+<script>
+const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
+/* The road's generation is ASKED FOR, never waited for. `whoami` is the only
+   call that needs none, which is what makes it the bootstrap. */
+let ROAD_GENERATION = null;
+const gen = () => ROAD_GENERATION;
+
+/* ── THE VOCABULARY SEAM (page side). ─────────────────────────────────────
+   ROAD_SHELL.md §6.2.1: this is the closed table, the validation, the log and
+   the refusal FEEDBACK. It enforces nothing against its own page and is not
+   described as a boundary. `by` is recorded here and travels no further than
+   the log — the host never reads it.                                        */
+const TABLE = {
+  cockpit: { args: [], host: 'road_cockpit' },
+  fullscreen: { args: [], host: 'road_fullscreen' },
+  place:   { args: ['dash', 'side'], host: 'road_place' },
+  promote: { args: ['rect', 'package'], host: 'road_promote' },
+  route:   { args: ['kind'],         host: 'road_route' },
+  demote:  { args: [],               host: 'road_demote' },
+  status:  { args: [],               host: 'road_status' },
+  manifest:{ args: [],               host: 'road_manifest' },
+  intent:  { args: ['payload'],      host: 'privileged_intent' },
+};
+const LOG = [];
+
+async function apply(op, args = {}, { by = 'road', generation = null } = {}) {
+  const spec = TABLE[op];
+  if (!spec) return { ok: false, why: 'OP_UNKNOWN' };
+  for (const a of spec.args) {
+    if (!(a in args)) return { ok: false, why: `OP_MISSING_ARG:${a}` };
+  }
+  LOG.push({ op, by, at: Date.now() });
+  try {
+    const result = await invoke(spec.host, { generation: generation ?? gen(), ...args, by });
+    return { ok: true, result };
+  } catch (e) {
+    /* A refusal from the HOST, surfaced through the seam rather than decided
+       by it. The distinction is the whole of §6.2.1. */
+    return { ok: false, why: String(e) };
+  }
+}
+
+/* ── the published sign — no pixels are ever sampled from anywhere ───────── */
+let CATALOGUE = null;
+let SIGN_PRIMITIVES = 0;
+
+/* ONE SIGN PER PACKAGE, all of them drawn with ZERO LIVE PANES. That is the
+   §5 claim in its strongest form: a road is laid out from the coordinator's
+   catalogue, and nothing on it required an app to start. */
+function drawSigns(catalogue) {
+  const wrap = document.getElementById('signwrap');
+  wrap.textContent = '';
+  SIGN_PRIMITIVES = 0;
+  for (const pkg of catalogue.packages) {
+    const c = document.createElement('canvas');
+    c.width = 240; c.height = 132; c.id = `sign-${pkg.id}`;
+    c.tabIndex = 0;
+    c.setAttribute('role', 'button');
+    c.setAttribute('aria-label', `Enter ${pkg.id}`);
+    c.onclick = async () => { const r = await promote(pkg.id); show(r.ok ? r.result : r); };
+    c.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); c.click(); } };
+    wrap.appendChild(c);
+    SIGN_PRIMITIVES += drawSign(c, pkg.sign);
+  }
+  paintRoad();
+}
+
+/* A single forward-facing projection places the tarmac, dash addresses,
+   sign supports and window centres. Like m2/world.js, opposing windows use
+   the SAME dash; travel changes depth, never swaps x and z. This lightweight
+   standalone renderer does not import the compositor or replace m2. */
+let travel = 0;
+function paintRoad() {
+  const road = document.getElementById('road');
+  const canvas = document.getElementById('perspective');
+  const w = road.clientWidth, h = road.clientHeight, dpr = devicePixelRatio;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext('2d'); g.scale(dpr, dpr);
+  const focal = Math.min(w * .72, h * 1.3), horizon = h * .30;
+  const project = (x, y, z) => ({ x:w/2 + focal*x/z, y:horizon + focal*(170-y)/z });
+  const polygon = (points, fill) => {
+    g.beginPath(); points.forEach((p, i) => i ? g.lineTo(p.x,p.y) : g.moveTo(p.x,p.y));
+    g.closePath(); g.fillStyle=fill; g.fill();
+  };
+  const ground = (x1,x2,z1,z2,color) => polygon([
+    project(x1,0,z1),project(x2,0,z1),project(x2,0,z2),project(x1,0,z2)],color);
+  ground(-160,160,120,6000,'#191b23');
+  ground(-163,-160,120,6000,'#5f5740'); ground(160,163,120,6000,'#5f5740');
+  for(let i=0;i<34;i++) {
+    const z=200+i*180-travel;
+    if(z>130) ground(-3,3,z,z+96,'#f2c14e');
+  }
+  // The exit is ahead on the lane, never a crosswise strip through the windows.
+  const exit=project(0,185,1900-travel);
+  g.fillStyle='#163b30'; g.strokeStyle='#b9d8cc';
+  g.fillRect(exit.x-65,exit.y-22,130,34); g.strokeRect(exit.x-65,exit.y-22,130,34);
+  g.fillStyle='#d9eee5'; g.textAlign='center'; g.font='12px ui-monospace,monospace';
+  g.fillText('EXIT · AHEAD ↑',exit.x,exit.y);
+  for(const [i,c] of [...document.querySelectorAll('#signwrap canvas')].entries()) {
+    const side=i%2 ? 1:-1, z=720+Math.floor(i/2)*360-travel;
+    const p=project(side*310,190,z), foot=project(side*310,0,z), scale=focal/z;
+    g.strokeStyle='#a98430'; g.lineWidth=Math.max(2,6*scale);
+    g.beginPath();g.moveTo(p.x,p.y+66*scale);g.lineTo(foot.x,foot.y);g.stroke();
+    c.style.left=`${p.x}px`;c.style.top=`${p.y}px`;
+    c.style.transform=`translate(-50%,-50%) scale(${scale}) perspective(${z}px) rotateY(${-side*.42}rad)`;
+    c.dataset.side=String(side); c.dataset.depth=String(z);
+    g.fillStyle='#f2c14e';g.font='11px ui-monospace,monospace';
+    g.fillText(`${side<0 ? '↖' : '↗'} ENTER ${CATALOGUE.packages[i].id.toUpperCase()}`,p.x,p.y-80*scale);
+  }
+}
+document.getElementById('road').addEventListener('wheel', (e) => {
+  if(document.getElementById('readframe').classList.contains('on')) return;
+  e.preventDefault(); travel=Math.max(0,Math.min(240,travel+e.deltaY*.35));paintRoad();
+}, {passive:false});
+let resizeTimer;
+window.addEventListener('resize', () => {
+  paintRoad(); clearTimeout(resizeTimer);
+  // Native panes cannot follow CSS transforms. Leave on resize rather than
+  // displaying a live pane against a frame that has moved underneath it.
+  if(document.getElementById('readframe').classList.contains('on'))
+    resizeTimer=setTimeout(async () => { await demote();show('Returned to the road after resizing. Enter the window to resume.'); },100);
+});
+
+function drawSign(c, sign) {
+  const g = c.getContext('2d');
+  g.clearRect(0, 0, c.width, c.height);
+  let n = 0;
+  for (const p of sign.primitives) {
+    if (p.kind === 'rect') {
+      g.fillStyle = '#141a28'; g.strokeStyle = '#2c3549';
+      g.fillRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
+      g.strokeRect(p.x + .5, p.y + .5, p.w - 1, p.h - 1);
+    } else if (p.kind === 'line') {
+      g.strokeStyle = '#2c3549'; g.beginPath();
+      g.moveTo(p.x, p.y + .5); g.lineTo(p.x + p.w, p.y + .5); g.stroke();
+    } else if (p.kind === 'text') {
+      g.fillStyle = p.weight ? '#dbe4f2' : '#8fa0bb';
+      g.font = `${p.weight ?? 400} ${p.size}px ui-sans-serif, system-ui, sans-serif`;
+      g.fillText(p.value, p.x, p.y);
+    } else { continue; }
+    n++;
+  }
+  return n;
+}
+
+const notice = (text) => { document.getElementById('notice').textContent = text; };
+const show = (v) => {
+  document.getElementById('status').textContent = typeof v === 'string' ? v : JSON.stringify(v, null, 2);
+  if (typeof v === 'string') notice(v);
+  else if (v?.ok === false) notice('Action unavailable. See Road services for details.');
+};
+
+let displayBusy = false;
+async function setFullscreen(enabled) {
+  if (displayBusy) return;
+  displayBusy = true;
+  try {
+    if (document.getElementById('readframe').classList.contains('on')) {
+      const left = await demote(); if (!left.ok) { show(left); return; }
+    }
+    const r = await apply('fullscreen', { enabled });
+    if (!r.ok) { show(r); return; }
+    notice(enabled ? 'Full screen · Exit lane returns to your desktop' : 'Windowed road · Full screen sign to expand');
+  } finally { displayBusy = false; }
+}
+document.getElementById('fullscreen').onclick = async () => {
+  const r = await apply('fullscreen');
+  if (r.ok) await setFullscreen(!r.result.fullscreen); else show(r);
+};
+document.getElementById('cockpit').onclick = async () => {
+  const r = await demote(); if (!r.ok) { show(r); return; }
+  show(await apply('cockpit'));
+};
+document.getElementById('entrance').onclick = async () => {
+  const r = await demote(); if (!r.ok) { show(r); return; }
+  travel=120; paintRoad(); notice('Inside the lane · Notes left · Digest right');
+};
+document.getElementById('exit').onclick = async () => {
+  const r = await demote(); if (!r.ok) { show(r); return; }
+  travel=0; paintRoad(); await setFullscreen(false); notice('At the entrance · back on your desktop');
+};
+document.getElementById('services').onclick = async () => {
+  const r = await demote(); if (!r.ok) { show(r); return; }
+  await status(); document.getElementById('service-panel').showModal();
+};
+document.getElementById('close-services').onclick = () => document.getElementById('service-panel').close();
+document.getElementById('next').onclick = async () => show(await window.__handoffNext());
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'F11') { e.preventDefault(); document.getElementById('fullscreen').click(); }
+  if (e.key === 'Escape' && !document.getElementById('service-panel').open) {
+    e.preventDefault();
+    if (document.getElementById('readframe').classList.contains('on')) demote();
+    else setFullscreen(false);
+  }
+});
+
+async function status() {
+  const r = await apply('status');
+  show(r.ok ? r.result : r);
+  return r;
+}
+
+/* the read rect, in the road window's logical coordinates */
+function readRect() {
+  const f = document.getElementById('readframe').getBoundingClientRect();
+  return { x: f.x, y: f.y, width: f.width, height: f.height };
+}
+
+let CAPTURED_GENERATION = null;
+
+async function promote(pkg, task) {
+  const wasReading = document.getElementById('readframe').classList.contains('on');
+  document.getElementById('readframe').classList.add('on');
+  const r = await apply('promote', { rect: readRect(), package: pkg, task: task ?? null });
+  if (r.ok) {
+    document.getElementById('road').classList.add('reading');
+    CAPTURED_GENERATION = r.result.pane.generation;
+    document.getElementById('signwrap').style.display = 'none';
+    notice(`${pkg} · use Leave window to return to the road`);
+  } else if (!wasReading) {
+    document.getElementById('readframe').classList.remove('on');
+  }
+  return r;
+}
+
+async function demote() {
+  const r = await apply('demote');
+  if (!r.ok) return r;
+  document.getElementById('road').classList.remove('reading');
+  document.getElementById('readframe').classList.remove('on');
+  document.getElementById('signwrap').style.display = '';
+  drawSigns(CATALOGUE);
+  notice('On the road · select an app sign to enter');
+  return r;
+}
+
+/* THE HANDOFF, UNDER N = 1. Route by declared acceptance, promote, let the app
+   offer, let the COORDINATOR accept, evict, route the accepted result, promote
+   the next. At no point are two panes live: eviction is not an optimisation
+   here, it is the only way the second app can stand. */
+window.__handoff = async (kind, payload) => {
+  const steps = [];
+  const step = (name, r) => { steps.push({ name, ...r }); return r; };
+  const first = step('route', await apply('route', { kind }));
+  if (!first.ok) return { ok: false, steps };
+  step('promote-1', await promote(first.result.package, { kind, payload }));
+  return { ok: true, steps, awaiting: 'the app to offer' };
+};
+
+window.__handoffNext = async () => {
+  const steps = [];
+  const st = await apply('status');
+  const ledger = st.ok ? st.result.ledger : [];
+  const latest = ledger[ledger.length - 1];
+  if (!latest) return { ok: false, why: 'nothing has been ACCEPTED — there is no transfer to route' };
+  steps.push({ name: 'evict', ...(await demote()) });
+  const next = await apply('route', { kind: latest.kind });
+  steps.push({ name: 'route', ...next });
+  if (!next.ok) return { ok: false, steps };
+  steps.push({ name: 'promote-2',
+    ...(await promote(next.result.package, { kind: latest.kind, payload: latest.payload })) });
+  return { ok: true, steps, accepted: latest };
+};
+
+document.getElementById('handoff').onclick = async () =>
+  show(await window.__handoff('document', 'a document that entered the road'));
+
+document.getElementById('enter').onclick = async () => {
+  const r = await promote(CATALOGUE.packages[0].id, null);
+  show(r.ok ? r.result : r);
+};
+
+document.getElementById('leave').onclick = async () => {
+  show((await demote()).result ?? 'demoted');
+};
+
+document.getElementById('try-place').onclick = async () =>
+  show(await apply('place', { dash: 12, side: 1 }));
+
+document.getElementById('try-intent').onclick = async () =>
+  show(await apply('intent', { payload: 'do a privileged thing' }));
+
+document.getElementById('try-intent-as-cockpit').onclick = async () =>
+  show(await apply('intent', { payload: 'do a privileged thing' }, { by: 'cockpit' }));
+
+document.getElementById('replay-old-gen').onclick = async () =>
+  show(await apply('place', { dash: 12, side: 1 }, { generation: CAPTURED_GENERATION ?? 0 }));
+
+document.getElementById('refresh').onclick = status;
+
+/* the probe. A fact written to state that nothing can read is not an
+   instrument — PAPER_ROADS.md DOCTRINE, learned there and reused here. */
+window.__probe = () => ({
+  roadGeneration: gen(),
+  signSource: 'coordinator',      /* there is no fetch in this file at all */
+  manifestOwner: 'host',
+  signPrimitives: SIGN_PRIMITIVES,
+  packages: CATALOGUE ? CATALOGUE.packages.map((p) => p.id) : [],
+  signVisible: document.getElementById('signwrap').style.display !== 'none',
+  readPose: document.getElementById('readframe').classList.contains('on'),
+  capturedGeneration: CAPTURED_GENERATION,
+  log: LOG.slice(-8),
+});
+window.__apply = apply;
+
+/* THE SIGN ARRIVES FROM THE COORDINATOR, and this page contains no `fetch`
+   at all — `tools/check-acl.mjs` asserts that statically. §5 says a sign is
+   renderable before any app is live; an app fetching its own sign only looks
+   like that because the file sits in the same bundle. The road asks the HOST,
+   which holds the package. No pane has ever existed at this point. */
+(async () => {
+  const me = await invoke('whoami');
+  ROAD_GENERATION = me.principal.generation;
+  if (me.principal.surface === 'cd-road') {
+    document.getElementById('cockpit').hidden = false;
+    document.getElementById('integration-status').textContent =
+      'Connected to Super (CD). The road and cockpit run in the same application. The cockpit retains runtime controls; this lane hosts Notes and Digest.';
+  }
+  window.__ROAD_GENERATION = ROAD_GENERATION;   /* for the battery's probes */
+  const r = await apply('manifest');
+  if (!r.ok) { show(r); return; }
+  CATALOGUE = r.result;
+  drawSigns(CATALOGUE);
+  await status();
+  document.body.dataset.ready = '1';
+})();
+</script>

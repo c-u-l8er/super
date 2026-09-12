@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pane-beat"
+description = "Enables the pane_beat command without any pre-configured scope."
+commands.allow = ["pane_beat"]
+
+[[permission]]
+identifier = "deny-pane-beat"
+description = "Denies the pane_beat command without any pre-configured scope."
+commands.deny = ["pane_beat"]

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-road-fullscreen"
+description = "Enables the road_fullscreen command without any pre-configured scope."
+commands.allow = ["road_fullscreen"]
+
+[[permission]]
+identifier = "deny-road-fullscreen"
+description = "Denies the road_fullscreen command without any pre-configured scope."
+commands.deny = ["road_fullscreen"]

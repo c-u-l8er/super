@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-road-cockpit"
+description = "Enables the road_cockpit command without any pre-configured scope."
+commands.allow = ["road_cockpit"]
+
+[[permission]]
+identifier = "deny-road-cockpit"
+description = "Denies the road_cockpit command without any pre-configured scope."
+commands.deny = ["road_cockpit"]

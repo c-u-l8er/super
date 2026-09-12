@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-whoami"
+description = "Enables the whoami command without any pre-configured scope."
+commands.allow = ["whoami"]
+
+[[permission]]
+identifier = "deny-whoami"
+description = "Denies the whoami command without any pre-configured scope."
+commands.deny = ["whoami"]

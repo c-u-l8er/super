@@ -1,0 +1,136 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Notes — a CD app</title>
+<style>
+  :root { color-scheme: dark; }
+  body { margin:0; font:13px/1.5 ui-sans-serif,system-ui,sans-serif;
+         background:#101725; color:#cfd9ea; padding:14px; }
+  h1 { font-size:13px; margin:0 0 2px; }
+  .sub { color:#6b7689; font-size:11px; margin-bottom:10px; }
+  button { font:12px ui-sans-serif,system-ui,sans-serif; background:#1a2233; color:#cfd9ea;
+           border:1px solid #2f3a52; border-radius:4px; padding:5px 9px; cursor:pointer; }
+  #counter { font:600 26px ui-monospace,monospace; color:#e6edf9; }
+  pre { margin-top:10px; padding:8px; background:#0c1220; border:1px solid #1e2739;
+        border-radius:5px; font:11px/1.4 ui-monospace,monospace; color:#8fa0bb;
+        white-space:pre-wrap; }
+</style>
+
+<h1 id="title">…</h1>
+<div class="sub" id="sub">a CD app standing in the read pose</div>
+<div class="sub" id="task">task: none</div>
+
+<div>counter <span id="counter">0</span></div>
+<p><input id="note" placeholder="a note that must survive the round trip" size="42"></p>
+<p>
+  <button id="inc">+1</button>
+  <button id="stall">stop beating</button>
+  <button id="who">who am I</button>
+  <button id="produce">offer a result</button>
+</p>
+<pre id="out">…</pre>
+
+<script>
+const invoke = (c, a) => window.__TAURI__.core.invoke(c, a);
+
+/* THE GENERATION COMES FROM THE HOST, in the URL the host itself built. The
+   page did not choose it and cannot raise it: carrying a higher number just
+   fails the staleness check the other way. */
+const GEN = Number(new URLSearchParams(location.search).get('gen'));
+/* The PACKAGE is in the URL the host built, like the generation. The pane
+   does not choose which app it is any more than it chooses its authority. */
+const PKG = new URLSearchParams(location.search).get('pkg');
+
+/* ── state preservation is the APP's contract, not the shell's ─────────────
+   ROAD_SHELL.md §4.1 / §10.4: the shell cannot checkpoint an app and must not
+   claim to. The counter lives in this app's own storage; the host holds no
+   copy, and `road_status.host_state` is dumped whole so that can be asserted
+   rather than believed.                                                     */
+/* PER PACKAGE. The two apps share an origin — they are the same entry page
+   served to two packages — so one key would make "state survived eviction"
+   and "the other app read my state" indistinguishable. */
+const KEY = `tier1-proof.${PKG}.counter`;
+const NOTE = `tier1-proof.${PKG}.note`;
+const read = () => { try { return Number(localStorage.getItem(KEY) ?? 0) || 0; }
+                     catch { return 0; } };
+const write = (n) => { try { localStorage.setItem(KEY, String(n)); } catch {} };
+const readNote = () => { try { return localStorage.getItem(NOTE) ?? ''; } catch { return ''; } };
+
+let counter = read();
+const noteEl = document.getElementById('note');
+noteEl.value = readNote();
+noteEl.addEventListener('input', () => {
+  try { localStorage.setItem(NOTE, noteEl.value); } catch {}
+});
+const paint = () => { document.getElementById('counter').textContent = String(counter); };
+paint();
+
+const show = (v) => { document.getElementById('out').textContent =
+  typeof v === 'string' ? v : JSON.stringify(v, null, 2); };
+
+document.getElementById('inc').onclick = () => { counter++; write(counter); paint(); };
+
+let beating = true, beats = 0, lastBeat = null;
+document.getElementById('stall').onclick = () => {
+  beating = false;
+  show('beating stopped — the host must read `unresponsive`, never `gone`');
+};
+
+document.getElementById('who').onclick = async () => {
+  try { show(await invoke('pane_hello', { generation: GEN })); }
+  catch (e) { show(String(e)); }
+};
+
+/* THE PANE OFFERS; IT DOES NOT DECIDE. What comes back is the coordinator's
+   acceptance record, and that — not this call returning — is what a road may
+   render as a transfer. §5.1. A terminal package has no `offer` grant and no
+   ACL permission for this command, so the same button is refused by the host
+   rather than hidden by the page: a control that reports success is not
+   evidence the thing happened (§17.1), and neither is a control that is
+   missing. */
+let ME = null;
+document.getElementById('produce').onclick = async () => {
+  const kind = ME && ME.produces;
+  try {
+    const r = await invoke('pane_offer', {
+      generation: GEN,
+      kind: kind ?? 'summary',
+      payload: { from: PKG, text: `digest of ${JSON.stringify(ME && ME.task)}`, counter },
+    });
+    window.__lastOffer = { ok: true, r };
+    show(r);
+  } catch (e) {
+    window.__lastOffer = { ok: false, why: String(e) };
+    show(String(e));
+  }
+};
+
+async function beat() {
+  if (!beating) return;
+  try { await invoke('pane_beat', { generation: GEN }); beats++; lastBeat = Date.now(); }
+  catch (e) { lastBeat = String(e); }
+}
+beat();
+setInterval(beat, 400);
+
+window.__paneProbe = () => ({
+  generation: GEN, package: PKG, counter, beating, beats, lastBeat,
+  task: ME && ME.task, produces: ME && ME.produces,
+  note: noteEl.value, storageKeys: [KEY, NOTE],
+  lastOffer: window.__lastOffer ?? null,
+});
+/* Deliberately reachable: the battery replays a captured old-generation
+   request from INSIDE the pane, which is the caller a real stale message
+   would come from. */
+window.__invokeRaw = (cmd, args) => invoke(cmd, args).then(
+  (r) => ({ ok: true, r }), (e) => ({ ok: false, why: String(e) }));
+/* Identity, package and TASK all arrive from the host, in one call the pane
+   cannot aim at another surface. Only then is the page ready. */
+invoke('pane_hello', { generation: GEN }).then((me) => {
+  ME = me;
+  document.getElementById('title').textContent = me.package ?? PKG ?? 'app';
+  document.getElementById('sub').textContent =
+    `${me.package ?? PKG} · produces ${me.produces ?? 'nothing'} · ${me.principal.surface}`;
+  document.getElementById('task').textContent = `task: ${JSON.stringify(me.task) ?? 'none'}`;
+  document.body.dataset.ready = '1';
+}, (e) => { show(String(e)); document.body.dataset.ready = 'error'; });
+</script>

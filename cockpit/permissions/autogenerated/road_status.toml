@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-road-status"
+description = "Enables the road_status command without any pre-configured scope."
+commands.allow = ["road_status"]
+
+[[permission]]
+identifier = "deny-road-status"
+description = "Denies the road_status command without any pre-configured scope."
+commands.deny = ["road_status"]

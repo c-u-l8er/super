@@ -1,0 +1,53 @@
+# T&R road surface in Super
+
+**Status: implemented, Linux integration measured 2026-09-12.**
+
+The cockpit's **T&R road** button opens the road in the same Super process.
+The road fills its window, supports native fullscreen, hosts Notes and Digest
+as child webviews, and exposes a **Super (CD)** sign to return to the cockpit.
+Services contains the diagnostic controls; the normal road has no JSON panel.
+
+The cockpit is still the `main` webview. The road is `cd-road`, in a separate
+window, with a disjoint capability. It cannot submit runtime intents, open
+terminals, select repositories, or use bot/development commands. Returning to
+the cockpit closes the road's live app pane and leaves road fullscreen first.
+Closing and reopening the native road window creates a new generation; late
+destruction events only clean up the generation they belong to.
+
+The code is the shared `RRABBIT/tier1-proof` Rust library with its
+`super-integration` feature. `cockpit/build.rs` copies the frontend into
+`cockpit/ui/road` from the adjacent RRABBIT checkout. Edit that source, not the
+generated copy. Both repositories must be available in the existing sibling
+layout to build Super. The standalone harness still builds independently.
+The shared-runtime checkpoint for this integration is RRABBIT `9365ee9`.
+
+```sh
+cd cockpit
+cargo build --release --offline
+cd ..
+tools/start-desktop.sh
+```
+
+Use **T&R road** in the cockpit. `SUPER_ROAD=1 tools/start-desktop.sh` also opens
+the road at startup. This does not start the standalone road process.
+
+```sh
+node tools/check-webview-acl.mjs
+node tools/road-battery.mjs /tmp/super-road.png
+```
+
+The native integration test uses an ephemeral runtime world and never opens
+the user's saved world. It measured 17 passing assertions with the optional
+capture enabled: entry from the cockpit, host recognition, road/app denials,
+fullscreen, app pane creation, return, road reuse, native close/reopen and
+stale-generation rejection. It requires the existing Tauri/WebKit driver,
+X11 capture tools, and a C compiler/X11 headers for the native close helper.
+Super's pre-existing cockpit battery also passed **89 checks**, and the expanded
+static ACL gate passed **41 checks**. The shared runtime's four principal tests
+passed with the integration feature enabled. These are targeted integration and
+regression results, not a new claim that the complete sabotage sweep was run.
+
+The full T&R camera, multi-lane ramps, cockpit-as-an-in-road-pane, and routing
+Super runtime tasks through road manifests are not implemented. macOS remains
+unmeasured. This separate-surface integration does not decide the pending
+ROAD_SHELL §13 ruling about replacing Super's `main` with the road.

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pane-hello"
+description = "Enables the pane_hello command without any pre-configured scope."
+commands.allow = ["pane_hello"]
+
+[[permission]]
+identifier = "deny-pane-hello"
+description = "Denies the pane_hello command without any pre-configured scope."
+commands.deny = ["pane_hello"]
