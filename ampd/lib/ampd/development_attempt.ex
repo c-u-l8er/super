@@ -38,13 +38,19 @@ defmodule Ampd.DevelopmentAttempt do
 
   defp nonempty?(s, cap), do: text?(s, cap) and String.trim(s) != ""
 
-  defp refuse(code, message),
+  defp refuse(code, message), do: refuse(code, message, %{})
+
+  # `operator_detail` carries WHICH file and WHICH side failed. It never
+  # carries file content: a refusal that quotes the bytes it refused would
+  # disclose them back to a caller that may not read them.
+  defp refuse(code, message, detail),
     do:
       {:refused,
        Ampd.Refusal.new(code,
          component: "development-attempt",
          requires_human: true,
-         public_message: message
+         public_message: message,
+         operator_detail: detail
        )}
 
   defp result_digest(nil, path), do: digest(JSON.encode!(["deleted-file@1", path]))
@@ -169,15 +175,21 @@ defmodule Ampd.DevelopmentAttempt do
 
   def create(_, _), do: refuse("attempt-fields-invalid", "Review fields must be an object.")
 
+  # A set may hold up to this many members. Higher than the four an inline set
+  # allowed, because the limit is now what a person can actually read in one
+  # review rather than what a frame could carry.
+  @max_members 12
+
+  def max_members, do: @max_members
+
   defp create_set(f, s) do
     task = s["development_tasks"][f["task_ref"]]
     files = if is_map(f["material"]), do: f["material"]["files"], else: nil
     keys = ~w(schema client_ref task_ref task_revision material)
 
-    valid =
+    envelope? =
       Enum.sort(Map.keys(f)) == Enum.sort(keys) and nonempty?(f["client_ref"], 100) and
-        is_map(f["material"]) and Map.keys(f["material"]) == ["files"] and is_list(files) and
-        length(files) in 2..4 and Enum.all?(files, &set_file?/1)
+        is_map(f["material"]) and Map.keys(f["material"]) == ["files"] and is_list(files)
 
     old =
       Enum.find_value(s["development_attempts"], fn {_, a} ->
@@ -185,10 +197,31 @@ defmodule Ampd.DevelopmentAttempt do
       end)
 
     cond do
-      not valid ->
+      not envelope? ->
         refuse(
           "attempt-fields-invalid",
-          "A change set needs two to four complete, valid file replacements."
+          "A change set needs a client reference, a plan revision and a list of files."
+        )
+
+      # Four distinct answers where there was one boolean. A two-file set that
+      # was too large used to be refused with a sentence about counting files,
+      # and a person read it and counted their files.
+      length(files) not in 2..@max_members ->
+        refuse(
+          "review-file-count",
+          "A change set holds 2 to #{@max_members} files; this one has #{length(files)}.",
+          %{"count" => length(files), "min" => 2, "max" => @max_members}
+        )
+
+      (bad = Enum.find_value(files, &member_fault/1)) != nil ->
+        {code, message, detail} = bad
+        refuse(code, message, detail)
+
+      (total = set_bytes(files)) > set_limit() ->
+        refuse(
+          "review-set-too-large",
+          "A change set carries at most #{set_limit()} bytes; this one carries #{total}.",
+          %{"bytes" => total, "max" => set_limit()}
         )
 
       old != nil ->
@@ -262,24 +295,311 @@ defmodule Ampd.DevelopmentAttempt do
     end
   end
 
-  defp set_file?(row) when is_map(row) do
-    Enum.sort(Map.keys(row)) == ~w(proposed_text shared_draft source) and
-      text?(row["shared_draft"], 24000) and
-      (row["proposed_text"] == nil or text?(row["proposed_text"], 32000)) and
-      source?(row["source"], row["shared_draft"], row["proposed_text"]) and
-      row["source"]["basis_id"] ==
+  # ------------------------------------------------------------ members
+  #
+  # A member is STAGED or INLINE.
+  #
+  #   staged   `%{"source" => …}` alone. Its content is already published in
+  #            `Ampd.ReviewContent` under the digests its own source records:
+  #            `draft_sha256` IS the current text's content address and
+  #            `result_sha256` the proposed text's. A member therefore needs no
+  #            second pair of fields to say where its content is, and the record
+  #            cannot name one thing and carry another.
+  #
+  #   inline   `%{"source" =>, "shared_draft" =>, "proposed_text" =>}`, the
+  #            shape recorded before staging existed. Still accepted, still
+  #            validated exactly as before, still subject to the old byte caps —
+  #            because those caps are the only thing bounding a member that
+  #            carries its own bytes.
+  #
+  # `member_fault/1` returns `nil` for a good member and `{code, message,
+  # detail}` for a bad one, so each way of being wrong is answered by its own
+  # name instead of one boolean for all of them.
+
+  @inline_draft 24_000
+  @inline_proposed 32_000
+
+  def set_limit, do: @max_members * Ampd.ReviewContent.file_bytes()
+
+  defp staged?(row), do: is_map(row) and Map.keys(row) == ["source"]
+
+  defp inline?(row),
+    do: is_map(row) and Enum.sort(Map.keys(row)) == ~w(proposed_text shared_draft source)
+
+  defp member_fault(row) when is_map(row) do
+    cond do
+      staged?(row) -> staged_fault(row["source"])
+      inline?(row) -> inline_fault(row)
+      true -> {"attempt-fields-invalid", "A file is neither a staged nor a complete inline replacement.", %{}}
+    end
+  end
+
+  defp member_fault(_),
+    do: {"attempt-fields-invalid", "A file must be an object.", %{}}
+
+  defp staged_fault(source) when is_map(source) do
+    path = source["path"]
+    draft = source["draft_sha256"]
+    proposed = source["result_sha256"]
+    deletion? = source["schema"] == "selected-file-deletion-basis@1"
+    # Bound before the cond: a size read inside a short-circuiting `and` is not
+    # in scope in the branch that uses it.
+    draft_size = Ampd.ReviewContent.size(draft) || 0
+    proposed_size = Ampd.ReviewContent.size(proposed) || 0
+
+    cond do
+      not shape?(source) ->
+        {"attempt-fields-invalid", "A staged file carries an incomplete source basis.",
+         %{"path" => path}}
+
+      Ampd.ReviewContent.status(draft) != :available ->
+        unavailable(path, "current", draft)
+
+      not deletion? and Ampd.ReviewContent.status(proposed) != :available ->
+        unavailable(path, "proposed", proposed)
+
+      draft_size > Ampd.ReviewContent.file_bytes() ->
+        too_large(path, "current", draft_size)
+
+      not deletion? and proposed_size > Ampd.ReviewContent.file_bytes() ->
+        too_large(path, "proposed", proposed_size)
+
+      # Sizes are re-derived from what is stored, never taken from the caller.
+      source["draft_bytes"] !== draft_size ->
+        {"review-content-invalid", "A staged file reports a size its content does not have.",
+         %{"path" => path, "side" => "current"}}
+
+      not deletion? and source["result_bytes"] !== proposed_size ->
+        {"review-content-invalid", "A staged file reports a size its content does not have.",
+         %{"path" => path, "side" => "proposed"}}
+
+      not basis_bound?(source) ->
+        {"review-content-invalid", "A staged file's basis does not bind its own content.",
+         %{"path" => path}}
+
+      true ->
+        nil
+    end
+  end
+
+  defp staged_fault(_),
+    do: {"attempt-fields-invalid", "A staged file carries no source basis.", %{}}
+
+  defp unavailable(path, side, digest) do
+    state = Ampd.ReviewContent.status(digest)
+
+    {"review-content-unavailable",
+     "The #{side} content of #{path} is #{state}. Stage it again; nothing is accepted without it.",
+     %{"path" => path, "side" => side, "digest" => digest, "state" => to_string(state)}}
+  end
+
+  defp too_large(path, side, bytes) do
+    {"review-file-too-large",
+     "#{path} is #{bytes} bytes; one file carries at most #{Ampd.ReviewContent.file_bytes()}.",
+     %{"path" => path, "side" => side, "bytes" => bytes, "max" => Ampd.ReviewContent.file_bytes()}}
+  end
+
+  # Content is checked to be UTF-8 text at PUBLICATION, on the bytes already
+  # being read to hash them, so nothing here reads a blob to find out. That
+  # matters because every check in this module runs inside the ordered
+  # transaction, where an unbounded read would block the world.
+
+  # The same predicate the inline shape uses, minus the two body fields.
+  defp shape?(source) do
+    Enum.sort(Map.keys(source)) == Enum.sort(@source_fields) and
+      source["schema"] in ~w(selected-file-basis@1 selected-file-deletion-basis@1) and
+      source["scope"] == "selected-file-only" and
+      nonempty?(source["path"], 1024) and not String.starts_with?(source["path"], "/") and
+      Enum.all?(String.split(source["path"], "/"), &(&1 not in ["", ".", "..", ".git"])) and
+      is_binary(source["head"]) and
+      Regex.match?(~r/\A(?:[0-9a-f]{40}|[0-9a-f]{64})\z/, source["head"]) and
+      hash?(source["basis_id"]) and hash?(source["draft_sha256"]) and
+      (source["disk_sha256"] == nil or hash?(source["disk_sha256"])) and
+      is_boolean(source["unsaved"]) and
+      source["unsaved"] == (source["disk_sha256"] != source["draft_sha256"])
+  end
+
+  defp basis_bound?(source),
+    do:
+      source["basis_id"] ==
         digest(
           JSON.encode!([
             "selected-file-basis@1",
-            row["source"]["head"],
-            row["source"]["path"],
-            row["source"]["disk_sha256"],
-            row["source"]["draft_sha256"]
+            source["head"],
+            source["path"],
+            source["disk_sha256"],
+            source["draft_sha256"]
           ])
         )
+
+  defp inline_fault(row) do
+    cond do
+      not text?(row["shared_draft"], @inline_draft) ->
+        too_large(row["source"]["path"], "current", byte_size(row["shared_draft"] || ""))
+
+      row["proposed_text"] != nil and not text?(row["proposed_text"], @inline_proposed) ->
+        too_large(row["source"]["path"], "proposed", byte_size(row["proposed_text"] || ""))
+
+      not source?(row["source"], row["shared_draft"], row["proposed_text"]) ->
+        {"review-content-invalid", "An inline file's content identities do not match its bytes.",
+         %{"path" => row["source"]["path"]}}
+
+      not basis_bound?(row["source"]) ->
+        {"review-content-invalid", "An inline file's basis does not bind its own content.",
+         %{"path" => row["source"]["path"]}}
+
+      true ->
+        nil
+    end
   end
 
-  defp set_file?(_), do: false
+  # What the SET weighs, from what is stored rather than from what was said.
+  defp set_bytes(files) do
+    Enum.reduce(files, 0, fn row, acc ->
+      acc +
+        if staged?(row) do
+          s = row["source"]
+          (Ampd.ReviewContent.size(s["draft_sha256"]) || 0) +
+            (Ampd.ReviewContent.size(s["result_sha256"]) || 0)
+        else
+          byte_size(row["shared_draft"] || "") + byte_size(row["proposed_text"] || "")
+        end
+    end)
+  end
+
+  @doc """
+  The current and proposed text of one member, or why it cannot be read.
+
+  The single place any consumer resolves a member's content, so an inline
+  member and a staged one read the same to a caller — and so **there is one
+  place that can return `:missing` or `:corrupt`**. It never falls back to other
+  bytes: a member whose content is gone answers `{:error, state}` and the caller
+  must refuse.
+  """
+  def member_content(%{"source" => source} = row) do
+    cond do
+      is_binary(row["shared_draft"]) ->
+        {:ok, %{"current" => row["shared_draft"], "proposed" => row["proposed_text"]}}
+
+      true ->
+        deletion? = source["schema"] == "selected-file-deletion-basis@1"
+
+        with {:ok, current} <- Ampd.ReviewContent.fetch(source["draft_sha256"]),
+             {:ok, proposed} <- fetch_proposed(deletion?, source["result_sha256"]) do
+          {:ok, %{"current" => current, "proposed" => proposed}}
+        end
+    end
+  end
+
+  def member_content(_), do: {:error, :missing}
+
+  defp fetch_proposed(true, _), do: {:ok, nil}
+  defp fetch_proposed(false, digest), do: Ampd.ReviewContent.fetch(digest)
+
+  @doc """
+  Whether every member of an attempt can still be read, and what is wrong.
+
+  Bound at acceptance: a result may not be accepted against content that is
+  missing or that no longer hashes to what was reviewed.
+  """
+  # Bounded on purpose: this runs inside the ordered transaction at test and
+  # acceptance time, so it asks whether each blob is PRESENT rather than
+  # re-hashing up to twelve four-megabyte files while the world waits. The full
+  # verification happens in the host, in `resolve_review_bodies`, before any
+  # runner sees a byte — so corrupt content fails the acceptance preflight and
+  # never reaches an accepted result.
+  def content_state(%{"files" => files}) when is_list(files) do
+    faults = Enum.flat_map(files, &member_fault_state/1)
+    if faults == [], do: :ok, else: {:error, faults}
+  end
+
+  def content_state(%{"source" => _} = a) do
+    case member_fault_state(a) do
+      [] -> :ok
+      faults -> {:error, faults}
+    end
+  end
+
+  def content_state(_), do: :ok
+
+  defp member_fault_state(%{"source" => source} = row) when is_map(source) do
+    if is_binary(row["shared_draft"]) do
+      []
+    else
+      deletion? = source["schema"] == "selected-file-deletion-basis@1"
+
+      [{"current", source["draft_sha256"]}]
+      |> then(&if deletion?, do: &1, else: &1 ++ [{"proposed", source["result_sha256"]}])
+      |> Enum.reject(fn {_, d} -> Ampd.ReviewContent.status(d) == :available end)
+      |> Enum.map(fn {side, d} ->
+        %{
+          "path" => source["path"],
+          "side" => side,
+          "state" => to_string(Ampd.ReviewContent.status(d))
+        }
+      end)
+    end
+  end
+
+  defp member_fault_state(_), do: []
+
+  @doc """
+  Rewrite inline members to name their content, for members whose content is
+  already published.
+
+  **Phase two of the migration, and deliberately not wired to a command.**
+  Compatibility is what fixes the problem: inline bodies stopped reaching the
+  projection the moment `Ampd.Projection` began publishing members without
+  them, so an existing record already costs a frame nothing. What migrating
+  buys is the space those bodies take in the `loci` authority store, which
+  `Ampd.Store.save/2` rewrites whole on every unrelated mutation — a real cost,
+  but a bounded one that only applies to records written before staging existed.
+
+  It is a pure transform over the state so it can be tested, reviewed and
+  wired later as its own proposal, through the mechanism this change adds.
+
+  A member is rewritten **only** if both of its bodies are published and
+  readable. Anything else is left exactly as it is: a half-migrated member
+  would name content that is not there, which is the one state this whole
+  design exists to make impossible.
+  """
+  def migrate_inline(%{"development_attempts" => attempts} = s) do
+    migrated = Map.new(attempts, fn {id, a} -> {id, migrate_attempt(a)} end)
+
+    moved =
+      Enum.count(migrated, fn {id, a} -> a != attempts[id] end)
+
+    {Map.put(s, "development_attempts", migrated), %{"migrated" => moved}}
+  end
+
+  defp migrate_attempt(%{"files" => files} = a) when is_list(files),
+    do: Map.put(a, "files", Enum.map(files, &migrate_member/1))
+
+  defp migrate_attempt(%{"source" => _} = a), do: migrate_member(a)
+  defp migrate_attempt(a), do: a
+
+  defp migrate_member(%{"source" => source} = row) when is_map(source) do
+    deletion? = source["schema"] == "selected-file-deletion-basis@1"
+
+    both_there? =
+      Ampd.ReviewContent.verify(source["draft_sha256"]) == :available and
+        (deletion? or Ampd.ReviewContent.verify(source["result_sha256"]) == :available)
+
+    if is_binary(row["shared_draft"]) and both_there?,
+      do: Map.drop(row, ["shared_draft", "proposed_text"]),
+      else: row
+  end
+
+  defp migrate_member(row), do: row
+
+  defp unavailable_message(faults) do
+    listed =
+      faults
+      |> Enum.map(fn f -> "#{f["path"]} (#{f["state"]})" end)
+      |> Enum.join(", ")
+
+    "Review content is unavailable: #{listed}. Stage it again; nothing is tested or accepted without it."
+  end
 
   defp coherent_set?(files, task) do
     first = hd(files)["source"]
@@ -346,6 +666,12 @@ defmodule Ampd.DevelopmentAttempt do
 
       map_size(runs) >= 8 ->
         refuse("test-run-limit", "This review retains up to eight test runs.")
+
+      # Same reason as acceptance: a test run against content that cannot be
+      # read is a run against something other than the review.
+      (content = content_state(a)) != :ok ->
+        {:error, faults} = content
+        refuse("review-content-unavailable", unavailable_message(faults), %{"files" => faults})
 
       true ->
         run = %{
@@ -518,6 +844,14 @@ defmodule Ampd.DevelopmentAttempt do
           "acceptance-stale",
           "The plan, review or test profile coverage changed. Reopen the review."
         )
+
+      # Acceptance is bound to the EXACT content that was reviewed. A member
+      # whose bytes are gone, or whose bytes no longer hash to what the record
+      # names, is not a result anyone can accept — and the alternative, reading
+      # whatever is on disk now, would accept something nobody reviewed.
+      (content = content_state(a)) != :ok ->
+        {:error, faults} = content
+        refuse("review-content-unavailable", unavailable_message(faults), %{"files" => faults})
 
       true ->
         decision = %{

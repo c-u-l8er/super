@@ -1,7 +1,7 @@
 import {codeEditor} from './vendor/code-editor.js';
 import {proposalChanges,displayLine} from './proposal-changes.js';
 import {checkProposalSet,prepareProposalSet,proposalSetMaterial} from './file-proposal-set.js';
-export function reviewProposalSet({items,current,verify,stage,record,navigate,el,button}){
+export function reviewProposalSet({items,current,verify,stage,publish,record,navigate,el,button}){
   if(document.querySelector('#bot-file-review,#bot-file-set-review'))throw Error('Finish the current file review first.');
   checkProposalSet(items,current);navigate('editor');
   const dialog=el('dialog',undefined,'file-proposal-review');dialog.id='bot-file-set-review';
@@ -32,9 +32,14 @@ export function reviewProposalSet({items,current,verify,stage,record,navigate,el
   let saved=false;
   const save=record?button('Save combined review','bot-file-set-record',async()=>{
     if(working||saved)return;working=true;save.disabled=true;use.disabled=true;
-    status.textContent='Checking every file before saving the combined review…';
+    status.textContent=publish
+      ?'Checking every file, then publishing its reviewed content…'
+      :'Checking every file before saving the combined review…';
     try{
-      const material=await proposalSetMaterial(items,current,verify,()=>dialog.open);
+      // `publish` makes the saved record name its files by digest instead of
+      // carrying their bytes. Without it the older inline shape is produced,
+      // which the runtime still accepts and still bounds.
+      const material=await proposalSetMaterial(items,current,verify,()=>dialog.open,publish);
       if(!dialog.open)return;
       const id=await record(material);saved=true;
       if(dialog.open){save.textContent='Combined review saved';status.textContent='Saved '+id+' on the plan. No drafts staged or files saved.';}

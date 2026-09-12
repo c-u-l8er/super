@@ -1376,7 +1376,13 @@ initBots({ invoke, apply: submit, current: () => window.cockpit, runtimeBotActio
   update:args=>submit('update_bot',args),
   remove:args=>submit('remove_bot',args)
 } });
-initDevelopment({invoke,apply:submit,recordAttempt:args=>submit('record_development_attempt',args),recordSet:args=>submit('record_development_change_set',args),current:()=>window.cockpit});
+/* `stageContent` publishes one chunk of a reviewed file. It is on this list
+   because saving a combined review really submits it — `file-proposal-set.js`
+   publishes every body before the record that names them — and not to satisfy a
+   gate. Reading a body back is NOT here: a read on the intent surface is
+   refused, so `review-content.js` reads through the `review_content` host
+   command instead. */
+initDevelopment({invoke,apply:submit,recordAttempt:args=>submit('record_development_attempt',args),recordSet:args=>submit('record_development_change_set',args),stageContent:args=>submit('put_review_content',args),current:()=>window.cockpit});
 const nativeReviewActions={'accept_development_attempt':args=>invoke('review_tests',{request:{operation:'accept',...args}})};
 initDevelopmentTasks({invoke,actions:{accept:nativeReviewActions['accept_development_attempt'],create:args=>submit('create_development_task',args),update:args=>submit('update_development_task',args),updateAttempt:args=>submit('update_development_attempt',args),checkAttempt:args=>submit('check_development_attempt_text',args)},current:()=>window.cockpit});
 initShell();

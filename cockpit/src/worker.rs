@@ -217,6 +217,18 @@ pub const INTENT_SURFACE: &[&str] = &[
     // anything. What makes the gate's proposition true is the form in
     // `ui/cockpit.js` and the loci block in `operator-projection@2` that
     // gives the form something to choose from.
+    // Publishing review content is a step INSIDE submitting a proposal, not an
+    // operation of its own: the page stages each file, then records the change
+    // set that names them by digest. It is on this surface because it is a
+    // human-control mutation the page really submits — `initDevelopment` wires
+    // it beside `recordSet` and `file-proposal-set.js` calls it — and not
+    // because a name was appended to turn a gate green.
+    //
+    // Reading content back is NOT here, and cannot be: a read on this surface
+    // is refused by `tools/check-intent-surface.mjs`, because a cockpit that
+    // can ask the world a question has a second source of truth. Bodies are
+    // read through the `review_content` host command instead.
+    "put_review_content",
     "record_development_change_set",
     "record_development_attempt",
     "update_development_attempt",
@@ -833,6 +845,16 @@ fn frame_json(seq: u64, frame: &CockpitFrame, reacquisitions: u64, coalesced: u6
 /// runtime directory and destroyed on shutdown. Anything else is the
 /// person's world, which this program never deletes — the rule
 /// `WorldDir::Persistent` exists to state.
+/// The world directory this process's runtime uses, from the same inputs
+/// `main_loop` uses. Deterministic within a process: the ephemeral path is
+/// keyed on this process's own pid, and the persistent one on the environment.
+/// Recomputed rather than threaded through, so there is no second value that
+/// can disagree with the one the runtime was actually started on.
+pub fn world_dir() -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("super-cockpit-{}", std::process::id()));
+    world_for(&dir).path().to_path_buf()
+}
+
 pub fn world_for(dir: &PathBuf) -> WorldDir {
     match std::env::var("SUPER_WORLD_MODE").as_deref() {
         Ok("ephemeral") => WorldDir::ephemeral(dir),

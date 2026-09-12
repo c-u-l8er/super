@@ -1,3 +1,4 @@
+import {stageContent} from './review-content.js';
 import {reviewProposalSet} from './file-proposal-set-review.js';
 import {checkProposalSet} from './file-proposal-set.js';
 import {publishTaskEditor,canOpenTaskEditor} from './task-editor.js';
@@ -12,7 +13,7 @@ import {createBotRoster} from './bot-roster.js';
 import {navigate} from './app-shell.js';
 import {heldProjection,runtimeWorld,waitForBot} from './runtime-bots.js';
 // Device-local work surfaces; runtime observations stay bound to their worker.
-export function initDevelopment({invoke,apply,recordAttempt,recordSet,current}) {
+export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageContent:putContent,current}) {
   const el=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;};
   const button=(text,id,fn)=>{const b=el('button',text);b.type='button';b.id=id;b.onclick=fn;return b;};
   const recoveryStore=createWorkbenchRecovery(localStorage),initialRecovery=recoveryStore.snapshot(),recoveryBars={};
@@ -164,7 +165,12 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,current}) 
       if(!await recordSet({client_ref,task_ref:ref.task.id,task_revision:ref.task.revision,material}))throw Error('The runtime did not confirm the combined review. Check Activity; retrying keeps the same request identity.');
       let saved;await waitForBot(current,origin,p=>{saved=Object.values(p.development_attempts??{}).find(a=>a.client_ref===client_ref);return !!saved;});
       return saved.id;
-    }:null,verify:(r,text)=>verifyPlan(r,text),stage:drafts=>{
+    }:null,verify:(r,text)=>verifyPlan(r,text),
+    // Publishing a reviewed body is a step inside saving the review, not
+    // something the page offers on its own. Absent, the older inline shape is
+    // recorded, so a runtime without staging is still submittable to.
+    publish:putContent?(digest,text)=>stageContent(putContent,digest,text):null,
+    stage:drafts=>{
       if(busy)throw Error('The editor is busy. Try again.');
       checkProposalSet(items,state);
       // Allocate every Editor state before changing any open file.

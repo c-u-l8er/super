@@ -297,6 +297,12 @@
           "markdownDescription": "Enables the mobile_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the review_content command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-review-content",
+          "markdownDescription": "Enables the review_content command without any pre-configured scope."
+        },
+        {
           "description": "Enables the review_tests command without any pre-configured scope.",
           "type": "string",
           "const": "allow-review-tests",
@@ -457,6 +463,12 @@
           "type": "string",
           "const": "deny-mobile-status",
           "markdownDescription": "Denies the mobile_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the review_content command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-review-content",
+          "markdownDescription": "Denies the review_content command without any pre-configured scope."
         },
         {
           "description": "Denies the review_tests command without any pre-configured scope.",

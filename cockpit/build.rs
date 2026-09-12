@@ -23,6 +23,7 @@ fn main() {
             "intent",
             "choose_repository",
             "choose_workbench",
+            "review_content",
             "development_request",
             "review_tests",
             "browser_surface",

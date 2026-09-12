@@ -249,7 +249,7 @@ impl Runs {
         .map_err(err)?;
         fs::write(
             dir.join("attempt.json"),
-            serde_json::to_vec(&attempt).map_err(err)?,
+            serde_json::to_vec(&resolve_review_bodies(&attempt)?).map_err(err)?,
         )
         .map_err(err)?;
         let receipt = base.join(format!("{id}.json"));
@@ -566,6 +566,74 @@ mod recovery_tests {
     }
 }
 
+
+/// Put the reviewed bodies back into an attempt before a runner sees it.
+///
+/// Review content is published separately and a recorded attempt names it by
+/// digest, so `development_attempts` can be projected without carrying file
+/// text. The test runner and the acceptance check need the actual bytes, and
+/// they need **the bytes that were reviewed** rather than whatever is on disk
+/// now — so they are read from the content store and re-hashed here, once, and
+/// handed over inline.
+///
+/// A member that already carries its own bytes is left exactly as it is: that
+/// is the shape recorded before content was published separately, and it is
+/// still valid material.
+///
+/// **Missing or corrupt content fails the whole operation.** There is no
+/// fallback to the working tree: a test or an acceptance run against bytes
+/// nobody reviewed is worse than one that does not happen.
+fn resolve_review_bodies(attempt: &Value) -> Result<Value, String> {
+    let mut attempt = attempt.clone();
+    let blobs = crate::worker::world_dir().join("review-content").join("blobs");
+
+    let read = |digest: &Value, path: &str, side: &str| -> Result<String, String> {
+        let d = digest.as_str().unwrap_or_default();
+        if d.len() != 64 || !d.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+            return Err(format!("{path}: the {side} content is not named by a digest."));
+        }
+        let bytes = fs::read(blobs.join(d))
+            .map_err(|_| format!("{path}: the {side} reviewed content is no longer stored. Stage the proposal again."))?;
+        let actual = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&bytes);
+            format!("{:x}", h.finalize())
+        };
+        if actual != d {
+            return Err(format!("{path}: the {side} reviewed content no longer matches its digest."));
+        }
+        String::from_utf8(bytes).map_err(|_| format!("{path}: reviewed content is not text."))
+    };
+
+    let resolve = |member: &mut Value| -> Result<(), String> {
+        if member.get("shared_draft").and_then(|v| v.as_str()).is_some() {
+            return Ok(());
+        }
+        let source = member.get("source").cloned().unwrap_or(Value::Null);
+        let path = source.get("path").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let deletion = source.get("schema").and_then(|v| v.as_str())
+            == Some("selected-file-deletion-basis@1");
+        let draft = read(source.get("draft_sha256").unwrap_or(&Value::Null), &path, "current")?;
+        member["shared_draft"] = json!(draft);
+        member["proposed_text"] = if deletion {
+            Value::Null
+        } else {
+            json!(read(source.get("result_sha256").unwrap_or(&Value::Null), &path, "proposed")?)
+        };
+        Ok(())
+    };
+
+    if let Some(files) = attempt.get_mut("files").and_then(|f| f.as_array_mut()) {
+        for member in files.iter_mut() {
+            resolve(member)?;
+        }
+    } else if attempt.get("source").is_some() {
+        resolve(&mut attempt)?;
+    }
+    Ok(attempt)
+}
+
 pub fn verify_acceptance(
     data: &Path,
     root: &Path,
@@ -600,7 +668,7 @@ pub fn verify_acceptance(
         .map_err(err)?;
         fs::write(
             dir.join("attempt.json"),
-            serde_json::to_vec(attempt).map_err(err)?,
+            serde_json::to_vec(&resolve_review_bodies(attempt)?).map_err(err)?,
         )
         .map_err(err)?;
         fs::write(dir.join("run.json"), serde_json::to_vec(run).map_err(err)?).map_err(err)?;
@@ -744,5 +812,91 @@ mod accepted_tests {
             changed[key] = json!("forged");
             assert!(serde_json::from_value::<Request>(changed).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod review_content_tests {
+    use super::*;
+    use sha2::{Digest, Sha256};
+
+    fn sha(b: &[u8]) -> String {
+        let mut h = Sha256::new();
+        h.update(b);
+        format!("{:x}", h.finalize())
+    }
+
+    /// Publish a blob where `resolve_review_bodies` will look for it.
+    fn publish(body: &str) -> String {
+        let d = sha(body.as_bytes());
+        let blobs = crate::worker::world_dir().join("review-content").join("blobs");
+        fs::create_dir_all(&blobs).unwrap();
+        fs::write(blobs.join(&d), body).unwrap();
+        d
+    }
+
+    fn member(path: &str, draft: &str, proposed: &str) -> Value {
+        json!({"source": {
+            "path": path,
+            "schema": "selected-file-basis@1",
+            "draft_sha256": sha(draft.as_bytes()),
+            "result_sha256": sha(proposed.as_bytes()),
+        }})
+    }
+
+    #[test]
+    fn resolves_staged_bodies_and_leaves_inline_members_alone() {
+        publish("current text");
+        publish("proposed text");
+        let inline = json!({
+            "source": {"path": "b.js", "schema": "selected-file-basis@1"},
+            "shared_draft": "kept as it is",
+            "proposed_text": "also kept"
+        });
+        let attempt = json!({"files": [member("a.js", "current text", "proposed text"), inline]});
+
+        let out = resolve_review_bodies(&attempt).expect("resolves");
+        let files = out["files"].as_array().unwrap();
+        assert_eq!(files[0]["shared_draft"], "current text");
+        assert_eq!(files[0]["proposed_text"], "proposed text");
+        // An inline member carries its own bytes and is not touched.
+        assert_eq!(files[1]["shared_draft"], "kept as it is");
+    }
+
+    #[test]
+    fn missing_content_fails_the_whole_operation_rather_than_falling_back() {
+        let attempt = json!({"files": [member("gone.js", "never published", "nor this")]});
+        let e = resolve_review_bodies(&attempt).expect_err("must refuse");
+        assert!(e.contains("gone.js"), "the message names the file: {e}");
+        assert!(e.contains("no longer stored"), "and says which fault it is: {e}");
+    }
+
+    #[test]
+    fn content_that_no_longer_hashes_to_its_name_is_refused_as_corrupt() {
+        let d = publish("honest bytes");
+        let blobs = crate::worker::world_dir().join("review-content").join("blobs");
+        fs::write(blobs.join(&d), "tampered bytes").unwrap();
+
+        let attempt = json!({"files": [member("a.js", "honest bytes", "honest bytes")]});
+        let e = resolve_review_bodies(&attempt).expect_err("must refuse");
+        assert!(e.contains("no longer matches its digest"), "{e}");
+    }
+
+    #[test]
+    fn a_deletion_member_resolves_its_current_side_and_a_null_proposal() {
+        publish("about to be deleted");
+        let mut m = member("gone.js", "about to be deleted", "");
+        m["source"]["schema"] = json!("selected-file-deletion-basis@1");
+        let out = resolve_review_bodies(&json!({"files": [m]})).expect("resolves");
+        assert_eq!(out["files"][0]["shared_draft"], "about to be deleted");
+        assert!(out["files"][0]["proposed_text"].is_null());
+    }
+
+    #[test]
+    fn a_name_that_is_not_a_digest_cannot_reach_the_filesystem() {
+        let mut m = member("a.js", "x", "y");
+        m["source"]["draft_sha256"] = json!("../../../../etc/passwd");
+        let e = resolve_review_bodies(&json!({"files": [m]})).expect_err("must refuse");
+        assert!(e.contains("not named by a digest"), "{e}");
     }
 }

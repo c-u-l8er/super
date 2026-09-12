@@ -246,6 +246,53 @@ async fn intent(name: String, args: Value, queue: State<'_, Queues>) -> Result<V
     .map_err(|e| format!("intent join: {e}"))?
 }
 
+/// Read one published review-content blob.
+///
+/// **A host read, not an intent.** `tools/check-intent-surface.mjs` refuses a
+/// read on the intent surface — a cockpit that can ask the world a question has
+/// a second, unpaired source of truth — so review bodies, which are
+/// deliberately absent from routine snapshots, are read from the store the
+/// runtime publishes them into rather than requested from the runtime.
+///
+/// Its entire reach is one directory of content-addressed blobs. The digest is
+/// validated as 64 lower-case hex characters **before** it is joined to a path,
+/// so nothing can traverse out of that directory, and nothing but review
+/// content is in it. Which webview may call it is the Tauri ACL, granted to
+/// `main` alone in `capabilities/default.json`.
+///
+/// The bytes are re-hashed on the way out. A blob sits on a disk between
+/// publication and reading, and answering with whatever is in the file would be
+/// a store that can be edited from outside and believed. `missing` and
+/// `corrupt` are reported apart, and neither ever falls back to other bytes.
+#[tauri::command]
+async fn review_content(digest: String) -> Result<Value, String> {
+    if digest.len() != 64 || !digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) {
+        return Err("A content name must be a SHA-256 digest in lower-case hex.".into());
+    }
+    let path = worker::world_dir().join("review-content").join("blobs").join(&digest);
+    tauri::async_runtime::spawn_blocking(move || {
+        let bytes = match std::fs::read(&path) {
+            Ok(b) => b,
+            Err(_) => return Ok(json!({"state": "missing", "digest": digest})),
+        };
+        let actual = {
+            use sha2::{Digest, Sha256};
+            let mut h = Sha256::new();
+            h.update(&bytes);
+            format!("{:x}", h.finalize())
+        };
+        if actual != digest {
+            return Ok(json!({"state": "corrupt", "digest": digest, "hashed_to": actual}));
+        }
+        match String::from_utf8(bytes) {
+            Ok(text) => Ok(json!({"state": "available", "digest": digest, "content": text})),
+            Err(_) => Ok(json!({"state": "corrupt", "digest": digest, "reason": "not text"})),
+        }
+    })
+    .await
+    .map_err(|e| format!("review content: {e}"))?
+}
+
 #[tauri::command]
 async fn choose_workbench(
     window: tauri::Window,
@@ -836,6 +883,7 @@ fn main() {
             intent,
             choose_repository,
             choose_workbench,
+            review_content,
             development_request,
             review_tests,
             browser_surface,

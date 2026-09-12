@@ -101,7 +101,7 @@ defmodule Ampd.Projection do
       # confinement argument above it decorative the moment a pane is
       # screenshotted or a frame is logged.
       "development_tasks" => Ampd.Loci.development_tasks(),
-      "development_attempts" => Ampd.Loci.development_attempts(),
+      "development_attempts" => attempt_views(Ampd.Loci.development_attempts()),
       "bots" => Ampd.Loci.bots(),
       "workspaces" => Ampd.Loci.workspaces(),
       "goals" => Ampd.Loci.goals(),
@@ -295,6 +295,65 @@ defmodule Ampd.Projection do
   # `next_cursor` is the last item *shown*, matching `page/3` — the cursor
   # is always "what you have already seen", never "what comes next". The
   # two disagreeing is what lost a record per page.
+  # ---------------------------------------------------- review material
+  #
+  # **File bodies do not travel in a routine snapshot.** `development_attempts`
+  # is published in full on every frame, and a member may carry 24 000 bytes of
+  # current text and 32 000 of proposed. Measured: two recorded change sets of
+  # the maximum permitted size exceed `Ampd.Frame.max_bytes/0`, so the
+  # projection stops being publishable and the world stops being viewable —
+  # over material that is already recorded and cannot be unrecorded.
+  #
+  # So every member is published as its **source basis and sizes**, which is
+  # what a list, a count and an attention computation need, and the bodies are
+  # fetched on demand by whoever is actually reading a diff.
+  #
+  # This applies to INLINE members too, not only staged ones. The overflow is a
+  # property of what is published, not of how the content was submitted, and
+  # records written before staging existed are the ones already in the world.
+  defp attempt_views(attempts) when is_map(attempts),
+    do: Map.new(attempts, fn {id, a} -> {id, attempt_view(a)} end)
+
+  defp attempt_views(other), do: other
+
+  defp attempt_view(%{"files" => files} = a) when is_list(files),
+    do: Map.put(a, "files", Enum.map(files, &member_view/1))
+
+  defp attempt_view(%{"source" => _} = a), do: member_view(a)
+  defp attempt_view(a), do: a
+
+  # `content` names where the bytes are and what state they are in, so a reader
+  # can tell "not sent in this frame" from "gone", which are entirely different
+  # things and were indistinguishable while both were simply absent.
+  defp member_view(%{"source" => source} = row) when is_map(source) do
+    inline? = is_binary(row["shared_draft"])
+    deletion? = source["schema"] == "selected-file-deletion-basis@1"
+
+    row
+    |> Map.drop(~w(shared_draft proposed_text))
+    |> Map.put("content", %{
+      "schema" => "review-content-ref@1",
+      "held" => if(inline?, do: "inline", else: "staged"),
+      "current" => content_ref(inline?, source["draft_sha256"], source["draft_bytes"]),
+      "proposed" =>
+        if(deletion?,
+          do: nil,
+          else: content_ref(inline?, source["result_sha256"], source["result_bytes"])
+        )
+    })
+  end
+
+  defp member_view(row), do: row
+
+  defp content_ref(inline?, digest, bytes) do
+    %{
+      "digest" => digest,
+      "bytes" => bytes,
+      "state" =>
+        if(inline?, do: "available", else: to_string(Ampd.ReviewContent.status(digest)))
+    }
+  end
+
   defp window(list) do
     sorted = Enum.sort_by(list, &order_key/1, :desc)
     recent = Enum.take(sorted, @history_window)

@@ -621,6 +621,16 @@ defmodule Ampd.Control do
   # Opening a Lane names the actor that may occupy it. That is a person
   # deciding who stands where, and it is the only place the association is
   # made — an agent cannot open a Lane and cannot name itself into one.
+  # Publishing content changes NO world state, so it does not enter the ordered
+  # transaction. The coordinator is where the world's total order is decided,
+  # and writing and fsyncing a file there would be an unbounded host round trip
+  # inside it — the crossing `tools/check-dispatch-partition.mjs` exists to keep
+  # out. It is still a human-control mutation, because it is a durable write.
+  defp dispatch_mutation(_peer, :put_review_content, [digest, offset, chunk, part]) do
+    Ampd.ReviewContent.put_encoded(digest, offset, chunk, part == "final")
+    |> settled(fn r -> Map.put(r, "allow", true) end)
+  end
+
   defp dispatch_mutation(_peer, :record_development_change_set, [client, task, revision, material]) do
     Authority.record_development_attempt(%{
       "schema" => "development-change-set-request@1",

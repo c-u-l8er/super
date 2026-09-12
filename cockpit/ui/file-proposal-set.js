@@ -1,4 +1,5 @@
 import {checkFileProposal} from './file-proposal.js';
+import {stageContent} from './review-content.js';
 // One response, one plan revision, one Editor session. This produces drafts only.
 export function checkProposalSet(items,current){
   if(!Array.isArray(items)||items.length<2||items.length>4)throw Error('Review between two and four file edits together.');
@@ -22,8 +23,22 @@ export async function prepareProposalSet(items,current,verify,isOpen=()=>true){
   return checkProposalSet(items,current);
 }
 
-export async function proposalSetMaterial(items,current,verify,isOpen=()=>true){
+export async function proposalSetMaterial(items,current,verify,isOpen=()=>true,stage=null){
   const sources=[];
   await prepareProposalSet(items,current,async(r,text)=>sources.push(await verify(r,text)),isOpen);
-  return {files:items.map((item,i)=>({source:sources[i],shared_draft:item.reference.draft,proposed_text:item.proposal.content}))};
+  const members=items.map((item,i)=>({source:sources[i],draft:item.reference.draft,proposed:item.proposal.content}));
+  // Without a `stage` the member carries its own bytes, which is the shape
+  // recorded before content was published separately. It is still accepted by
+  // the runtime and still bounded by the per-file caps that shape needs.
+  if(!stage)return {files:members.map(m=>({source:m.source,shared_draft:m.draft,proposed_text:m.proposed}))};
+  // Publish FIRST, then name. The record must never reference content that is
+  // not yet stored, and the digests are the ones the source already carries -
+  // draft_sha256 IS the current text's address, result_sha256 the proposed
+  // text's - so a member cannot name one thing and carry another.
+  for(const m of members){
+    await stage(m.source.draft_sha256,m.draft);
+    if(m.proposed!==null)await stage(m.source.result_sha256,m.proposed);
+    if(!isOpen())throw Error('Review closed. Nothing was recorded.');
+  }
+  return {files:members.map(m=>({source:m.source}))};
 }

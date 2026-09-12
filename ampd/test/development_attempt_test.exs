@@ -94,7 +94,27 @@ defmodule Ampd.DevelopmentAttemptTest do
     assert a["shared_draft"] == "before\r\n" and a["proposed_text"] == "after\n"
     assert a["status"] == "recorded" and a["revision"] == 1
     assert a["criteria"] == c.fields["criteria"] and a["bot_ref"] == c.bot["id"]
-    assert Projection.operator()["development_attempts"][a["id"]] == a
+    # **The record keeps the material; the projection does not carry it.**
+    # `development_attempts` is published in full on every frame, and two
+    # recorded sets of the maximum permitted size exceed the frame — so a
+    # projection that equalled the stored record was a projection that could
+    # stop being publishable. What is published is the record minus the bodies,
+    # plus a reference saying where each side is and whether it can be read.
+    stored = Loci.development_attempts()[a["id"]]
+    assert stored["shared_draft"] == "before\r\n" and stored["proposed_text"] == "after\n"
+
+    published = Projection.operator()["development_attempts"][a["id"]]
+    refute Map.has_key?(published, "shared_draft")
+    refute Map.has_key?(published, "proposed_text")
+    assert Map.drop(published, ["content"]) == Map.drop(stored, ["shared_draft", "proposed_text"])
+
+    assert published["content"]["held"] == "inline"
+    assert published["content"]["current"]["digest"] == stored["source"]["draft_sha256"]
+    assert published["content"]["current"]["bytes"] == stored["source"]["draft_bytes"]
+    assert published["content"]["proposed"]["digest"] == stored["source"]["result_sha256"]
+    # Inline material is by definition readable: its bytes are in the record.
+    assert published["content"]["current"]["state"] == "available"
+
     refute Map.has_key?(Projection.agent(c.bot["actor"]), "development_attempts")
 
     assert before ==

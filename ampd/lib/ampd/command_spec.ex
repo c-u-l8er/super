@@ -317,6 +317,28 @@ defmodule Ampd.CommandSpec do
     # through `Ampd.Worktree.register_repository!/1`, and it is recorded
     # in the D.1.1 ambient-authority census as exactly that rather than
     # dressed up as a typed command.
+    # Publishing one chunk of review material. A step INSIDE submitting a
+    # proposal, not an operation of its own: the page stages each file and then
+    # records the change set that names them by digest, which is why a change
+    # set's frame stops depending on the size of the files it describes.
+    #
+    # `part` is an enum rather than a flag because "this is the last one" is a
+    # statement about the upload and reads at the call site. `chunk` is base64:
+    # a byte-wise split of UTF-8 text can land inside a character, and a chunk
+    # that is not valid UTF-8 cannot be a JSON string. The cap here is the
+    # base64 EXPANSION of `Ampd.ReviewContent.chunk_bytes/0`; the real bound is
+    # on the decoded bytes, which is what is stored.
+    "put_review_content" => %{
+      cmd: :put_review_content,
+      channel: :human_control,
+      kind: :mutation,
+      fields: [
+        %{name: "digest", type: {:string, 64}, required: true},
+        %{name: "offset", type: {:count, 4_194_304}, required: true},
+        %{name: "chunk", type: {:string, 92_000}, required: true},
+        %{name: "part", type: {:enum, ["continue", "final"]}, required: true}
+      ]
+    },
     "record_development_change_set" => %{
       cmd: :record_development_change_set,
       channel: :human_control,

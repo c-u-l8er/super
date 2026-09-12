@@ -21,6 +21,7 @@ export function taskReviewCounts(p,taskId){
   }
   return counts;
 }
+import {readContent} from './review-content.js';
 export function initDevelopmentTasks({invoke,actions,current}){
   const root=node('section',undefined,'app-screen');root.dataset.screen='development-tasks';root.hidden=true;root.id='development-tasks';
   root.append(node('p','SUPER / DEVELOPMENT TASKS','eyebrow'),node('h1','Development tasks'),node('p','Keep a development plan, acceptance criteria and blocker history with its assigned bot. Plans do not start execution.','screen-description'));
@@ -117,7 +118,24 @@ export function initDevelopmentTasks({invoke,actions,current}){
       card.append(node('p',`Recorded against plan revision ${attempt.task_revision}; current plan revision ${task.revision}. Review revision ${attempt.revision}.`,'availability-note'),node('p',attempt.criteria));
       const material=node('details');material.append(node('summary','Retained source and proposed text'));
       const retained=combined?attempt.files:[attempt];
-      for(const row of retained){const file=node('section');file.dataset.retainedFile=row.source.path;file.append(node('h4',row.source.path));for(const [label,text] of [['Shared draft',row.shared_draft],[row.proposed_text===null?'Delete file':'Proposed text',row.proposed_text===null?'This reviewed result removes the file.':row.proposed_text]])file.append(node('h4',label),node('pre',text,'attempt-text'));material.append(file);}
+      /* Bodies are NOT in the projection: `development_attempts` is published on
+         every frame, and two maximum-size change sets exceed the frame. Each
+         side is fetched when a person opens this, and a side that cannot be
+         read says which of missing or corrupt it is rather than rendering
+         blank — that distinction decides whether staging again will help. */
+      for(const row of retained){
+        const file=node('section');file.dataset.retainedFile=row.source.path;file.append(node('h4',row.source.path));
+        const deletion=row.proposed_text===null||row.content?.proposed===null;
+        for(const [label,inline,ref] of [
+          ['Shared draft',row.shared_draft,row.content?.current],
+          [deletion?'Delete file':'Proposed text',deletion?'This reviewed result removes the file.':row.proposed_text,deletion?null:row.content?.proposed]]){
+          file.append(node('h4',label));
+          if(typeof inline==='string'){file.append(node('pre',inline,'attempt-text'));continue;}
+          if(!ref){file.append(node('p','Not recorded.','availability-note'));continue;}
+          const pre=node('pre',`Reading ${ref.bytes} bytes…`,'attempt-text');pre.dataset.contentDigest=ref.digest;file.append(pre);
+          readContent(invoke,ref.digest).then(t=>{pre.textContent=t;}).catch(e=>{pre.textContent=String(e.message||e);pre.dataset.contentState='unavailable';});
+        }
+        material.append(file);}
 
       const source=node('details');source.append(node('summary','Recorded source identities'),node('pre',JSON.stringify(attempt.source,null,2),'attempt-text'));material.append(source);card.append(material);
       if(combined)card.append(node('p','Combined review retained. Tests apply every replacement to one snapshot. Acceptance checks all saved files against that tested snapshot.','availability-note'));
