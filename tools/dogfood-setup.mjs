@@ -22,6 +22,7 @@
 import {resolve, dirname} from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {open, Refused} from './lib/cockpit-control.mjs';
+import {selectRepository, carriedPlan, refOf} from './lib/dogfood-selection.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REAL = process.argv.includes('--real');
@@ -30,6 +31,8 @@ const REAL = process.argv.includes('--real');
 // using the app. A dogfood whose tasks are invented teaches nothing about
 // whether the product can carry work.
 const WORKSPACE = 'Super';
+// The repository this dogfood is about, by the name the projection publishes.
+const REPOSITORY = 'ProjectAmp2/super';
 const GOAL = 'Build Super from Super';
 const BOT = {
   name: 'Super builder',
@@ -66,6 +69,35 @@ const TASKS = [
      'Runtime proves — present tense — so a mockup reads as the product. This has already cost ' +
      'one session. Done when the bullet names it as a design reference and the page says so ' +
      'where a reader arrives.'},
+  {title: 'A repository is offered as a bare reference with nothing to recognise it by',
+   criteria:
+     'Ampd.Projection publishes repositories as {ref} and discards the stored record, which ' +
+     'holds the path. So the Repositories page titles a record with its own id and the lane ' +
+     "form offers rp_0001 and rp_0002 — while choosing repository_ref is deciding which source " +
+     'tree a bot may work in. Done when a person choosing a repository is shown something they ' +
+     'recognise it by, without the reference being taken away, and without putting a home ' +
+     'directory into a frame several surfaces read.'},
+  {title: 'A change set cannot carry Super\u2019s own larger files',
+   criteria:
+     'A change set carries whole file text, not a diff, under three independent ceilings: ' +
+     'shared_draft <= 24000 and proposed_text <= 32000 per file (command_spec.ex:340-341, ' +
+     'development_attempt.ex:267-268), material <= 240000, and a bridge frame of 262144 bytes. ' +
+     'Measured 2026-09-12 submitting the second held dogfood proposal against this repository: ' +
+     'seven files refused with "frame of 336202 bytes exceeds the 262144 byte limit" before the ' +
+     'validator saw them, and a two-file subset — a legal count — refused on the per-file caps. ' +
+     'ampd/lib/ampd/projection.ex is 34282 bytes, cockpit/ui/cockpit.js is 72809 and ' +
+     'cockpit/ui/cockpit.css is 35044, so Super cannot review a change to its own projection, ' +
+     'its own UI entry point or its own stylesheet. Done when a review of a file this size is ' +
+     'either carried or refused with a reason a person can act on, and the limit is stated ' +
+     'before the material is composed rather than after it is submitted.'},
+  {title: 'A refusal about size says the count is wrong',
+   criteria:
+     'Submitting two files whose bytes exceed the per-file caps is refused with ' +
+     '"A change set needs two to four complete, valid file replacements." The count was two. ' +
+     'set_file?/1 folds membership, byte caps, text validity and every digest into one boolean, ' +
+     'so every failure returns the sentence about counting. A person reads it and counts their ' +
+     'files. Done when a refusal names which of those conditions failed, and for which file, ' +
+     'without disclosing the file contents back to the caller.'},
 ];
 
 const G = '\x1b[32m', Y = '\x1b[33m', R = '\x1b[31m', X = '\x1b[0m';
@@ -101,7 +133,14 @@ try {
   note(bot.created ? 'created' : 'kept', `bot · ${BOT.name} · ${bot.record.actor}`);
 
   const repos = await cockpit.list('repositories');
-  const repo = repos.find(r => /\/super$/.test(r.name ?? '')) ?? repos[0];
+  /* `?? repos[0]` stood here, and on the first real run it opened the lane
+     against the wrong repository. The missing labels made the list confusing;
+     THE GUESS is what bound the lane, and no command closes a lane. There is no
+     fallback now: an explicit unambiguous match, or this stops.
+     `tools/dogfood-selection-test.mjs` holds the rule. */
+  const wanted = (process.argv.find(a => a.startsWith('--repo=')) ?? '').slice('--repo='.length);
+  const chosen = selectRepository({repos, wanted, name: REPOSITORY});
+  const repo = chosen.repo;
   // Evidence for the second held proposal, taken live rather than asserted:
   // a repository published without a name is the defect; with one, the fix.
   // The option text is read from the page because that is where a person makes
@@ -113,20 +152,24 @@ try {
     console.log(`  repositories: ${repos.map(r => `${r.ref ?? r.id}=${r.name ?? '(no name published)'}`).join(', ')}`);
     console.log(`  lane form offers: ${options}`);
   }
-  if (repo) note('kept', `repository · ${repo.ref ?? repo.id}${repo.name ? ` · ${repo.name}` : ' · unnamed'}`);
-  else note('needs-a-person',
-    `repository · none registered. Nav → Repositories → choose ${ROOT}. ` +
-    `The chooser takes no path from a script, which is the point of it.`);
+  if (repo) note('kept', `repository · ${refOf(repo)}${repo.name ? ` · ${repo.name}` : ' · unnamed'}`);
+  else note('needs-a-person', `repository · ${chosen.refusal.replace('the folder', ROOT)}`);
 
-  let lane = await cockpit.find('lanes', 'actor', bot.record.actor);
-  if (lane) note('kept', `lane · ${lane.id}`);
+  /* A lane is (goal, actor, repository). Matching on the actor alone made an
+     existing lane on a DIFFERENT repository read as this one already being
+     set up. */
+  let lane = (await cockpit.list('lanes')).find(
+    l => l.actor === bot.record.actor && l.goal_ref === goal.record.id &&
+         l.repository_ref === (repo && refOf(repo)));
+  if (lane) note('kept', `lane · ${lane.id} · ${lane.repository_ref}`);
   else if (!repo) note('blocked', 'lane · a lane names a repository, and none is registered');
   else {
-    const made = await cockpit.create('open_lane',
+    await cockpit.intent('open_lane',
       {goal_ref: goal.record.id, actor: bot.record.actor,
-       repository_ref: repo.ref ?? repo.id, base_revision: 'main'},
-      {kind: 'lanes', field: 'actor', value: bot.record.actor});
-    lane = made.record;
+       repository_ref: refOf(repo), base_revision: 'main'});
+    lane = await cockpit.until(async () => (await cockpit.list('lanes')).find(
+      l => l.actor === bot.record.actor && l.goal_ref === goal.record.id &&
+           l.repository_ref === refOf(repo)), 20_000, `lane on ${refOf(repo)}`);
     note('created', `lane · ${bot.record.actor} on ${GOAL} · ${lane.id}`);
   }
 
@@ -136,12 +179,20 @@ try {
       {kind: 'workers', field: 'locus_ref', value: lane.id});
     note(worker.created ? 'created' : 'kept', `worker · ${WORKER_PURPOSE} · ${worker.record.id}`);
 
+    /* Keyed on (lane, title, not cancelled) rather than title alone. Title
+       alone matched a plan on a DIFFERENT lane — and, after a recovery, one
+       that had been cancelled — so a plan this lane does not have read as
+       already set up. */
+    const planOn = async title =>
+      carriedPlan({tasks: await cockpit.list('development_tasks'), lane: lane.id, title});
     for (const [n, t] of TASKS.entries()) {
-      const task = await cockpit.create('create_development_task',
-        {client_ref: `dogfood-task-${n + 1}`, lane_ref: lane.id,
-         title: t.title, criteria: t.criteria},
-        {kind: 'development_tasks', field: 'title', value: t.title});
-      note(task.created ? 'created' : 'kept', `task · ${t.title}`);
+      const already = await planOn(t.title);
+      if (already) { note('kept', `task · ${t.title} · ${already.id}`); continue; }
+      await cockpit.intent('create_development_task',
+        {client_ref: `dogfood-task-${n + 1}-${lane.id}`, lane_ref: lane.id,
+         title: t.title, criteria: t.criteria});
+      const made = await cockpit.until(() => planOn(t.title), 20_000, `task ${t.title}`);
+      note('created', `task · ${t.title} · ${made.id}`);
     }
   } else {
     note('blocked', `worker and ${TASKS.length} tasks · both need a lane`);
