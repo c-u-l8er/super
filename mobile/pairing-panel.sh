@@ -11,9 +11,14 @@
 #   SUPER_MOBILE_PANEL=1 ./mobile/start-local.sh    launch it with the observer
 #   ./mobile/pairing-panel.sh --demo          a placeholder code, for screenshots
 #
-# A new code needs a fresh observer launch, so this window offers no button that
-# would claim otherwise. Its lifetime is the code's: the drain bar at the bottom
-# is the ten minutes, and it closes when the code is dead.
+# A new code does NOT need a restart. The desktop mints one from Runtime →
+# Mobile device → "New pairing code", which reaches `renewPairing` in
+# mobile/server.mjs: it resets the code, its ten minutes, the spent flag and the
+# failure window, and touches no session — so a device that is already paired
+# stays paired. This window still offers no button for it, because the code must
+# be minted by the desktop that owns the gateway, not by a panel reading its
+# file. Its lifetime is the code's: the drain bar at the bottom is the ten
+# minutes, and it closes when the code is dead.
 set -euo pipefail
 super_mobile_panel_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 super_mobile_panel_lifetime=600
@@ -64,7 +69,10 @@ super_mobile_panel_left=$(( super_mobile_panel_lifetime - ( $(date +%s) - super_
 super_mobile_panel_expires=$(date -d "@$(( super_mobile_panel_born + super_mobile_panel_lifetime ))" +%H:%M:%S)
 
 if (( super_mobile_panel_left <= 5 )); then
-  echo 'pairing-panel: that code has expired. Relaunch the observer for a new one.' >&2; exit 1
+  echo 'pairing-panel: that code has expired. Mint another from the desktop —' >&2
+  echo '  Runtime → Mobile device → "New pairing code". No restart, and every' >&2
+  echo '  paired device keeps its session.' >&2
+  exit 1
 fi
 
 # Without yad there is still an answer, and it is the one the README gave before
@@ -83,7 +91,7 @@ super_mobile_panel_group < "$super_mobile_panel_file" | yad \
 Super → Host tab → <i>One-use code from the desktop observer</i>.
 Spaces are only to read by; the app strips them.
 
-<span font='11'>One use · expires at <b>$super_mobile_panel_expires</b> · a new code needs a fresh observer launch</span>
+<span font='11'>One use · expires at <b>$super_mobile_panel_expires</b> · for another, use <i>Runtime → Mobile device → New pairing code</i> — no restart, and paired devices stay paired</span>
 
 <span font='10'>$(super_mobile_panel_health)</span>" \
   --text-info --fontname='Monospace Bold 20' --wrap --margins=10 \
