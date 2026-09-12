@@ -144,6 +144,67 @@ defmodule Ampd.ReviewContentRecordTest do
     """
   end
 
+  test "THE REACHABLE BOUND is the store's 64 KiB guard, not the frame", c do
+    # An earlier version of this work claimed a world could be made unviewable by
+    # recording two maximal change sets. It cannot: `persist/2` caps the whole
+    # persisted collection at 64 KiB encoded and refuses `attempt-directory-full`,
+    # preserving what is already there. That guard is on shipped main. This is
+    # what actually happens, through the real record path.
+    # 6 KB a side, so a record is about 26 KB and two fit the 64 KiB budget
+    # while the third does not. (At 20 KB a side the FIRST record is already
+    # refused — one inline change set of two 20 KB files does not fit a world.)
+    body = String.duplicate("i", 6_000)
+
+    inline = fn path ->
+      %{
+        "source" => source(c.task, path, body, body),
+        "shared_draft" => body,
+        "proposed_text" => body
+      }
+    end
+
+    outcome =
+      Enum.reduce_while(1..10, :never_refused, fn n, _ ->
+        case record(c, [inline.("a#{n}.js"), inline.("b#{n}.js")], "inline-#{n}") do
+          %{"allow" => true} -> {:cont, :never_refused}
+          %{"allow" => false, "refusal" => r} -> {:halt, r}
+        end
+      end)
+
+    assert outcome != :never_refused, "the collection must be bounded"
+    assert map_size(Loci.development_attempts()) < 10, "it refused before the tenth"
+    assert outcome["code"] == "attempt-directory-full"
+    assert outcome["public_message"] =~ "Existing records are preserved"
+
+    # And what was already recorded is intact — the guard refuses, it does not
+    # discard.
+    assert map_size(Loci.development_attempts()) > 0
+    assert Enum.all?(Loci.development_attempts(), fn {_, a} -> a["status"] == "recorded" end)
+  end
+
+  test "staging multiplies how many reviews one world can hold", c do
+    # The 64 KiB budget is spent on BODIES when members are inline. With the
+    # bodies published separately a record is its metadata, so the same budget
+    # holds many more reviews. This is the benefit staging earns beyond making
+    # a large submission possible at all.
+    big = String.duplicate("s", 20_000)
+
+    assert %{"allow" => true, "development_attempt" => a} =
+             record(c, [
+               staged_member(c.task, "a.js", big, big <> "x"),
+               staged_member(c.task, "b.js", big, big <> "y")
+             ])
+
+    staged_bytes = byte_size(JSON.encode!(Loci.development_attempts()[a["id"]]))
+    assert staged_bytes < 4_000, "a staged record is metadata: #{staged_bytes} bytes"
+
+    assert div(64 * 1024, staged_bytes) >= 16, """
+    At #{staged_bytes} bytes a record, the 64 KiB collection budget holds
+    #{div(64 * 1024, staged_bytes)} reviews of two 20 KB files each. Inline, the
+    same two files are 80 KB and one such record does not fit at all.
+    """
+  end
+
   test "an agent is never given review material, staged or otherwise", c do
     assert %{"allow" => true} = record(c, [
              staged_member(c.task, "a.js", "one", "two"),

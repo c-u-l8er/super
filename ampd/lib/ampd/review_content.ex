@@ -6,12 +6,11 @@ defmodule Ampd.ReviewContent do
 
   A change set carried whole file text, so its frame grew with the files it
   described, and `development_attempts` is published **in full on every frame**.
-  Two ceilings met that: the encoded frame (`Ampd.Frame.max_bytes/0`, enforced by
-  the socket driver *before* the bytes reach the VM) and the per-field caps.
-  Measured: two change sets of the maximum permitted size exceed the frame, so
-  the projection stops being publishable and the world stops being viewable —
-  over material already recorded. `docs/app/REVIEW_CONTENT_LIMITS_2026_09_12.md`
-  has the numbers and the option that was not taken.
+  Transport and per-field ceilings prevent large-file submissions. Synthetic
+  maps containing two maximal inline sets exceed a frame, but the shipped
+  runtime also caps persisted attempts at 64 KiB. That admission guard means
+  the synthetic size test does not prove a reachable projection overflow.
+  Staging removes file bodies from frames; metadata admission remains bounded.
 
   ## This is NOT a cache
 
@@ -34,13 +33,12 @@ defmodule Ampd.ReviewContent do
   actually written, and only then rename into `blobs/`. The bytes are on the
   device before the name exists, so a published blob is never a half-written one.
 
-  **The parent directory is not fsynced, because Erlang cannot open a directory**
-  — `:file.open/2` answers `{:error, :eisdir}` with and without `:raw`. So a
-  crash in the window between the rename and the filesystem committing it can
-  lose the *name* of a blob whose *bytes* were durable. That is why content is
-  published **before** the attempt that references it is recorded, and why a
-  missing blob is a first-class reported state rather than an assertion failure:
-  the recovery path is to stage it again, and nothing accepts in the meantime.
+  Correction: Erlang CAN open a directory with `:directory`. On this Linux
+  host (OTP 28), opening with `[:read, :raw, :directory]` and syncing succeeds.
+  Publication syncs both directories after rename and the directory chain up
+  to the existing world directory before returning success. Unsupported sync
+  or I/O failure refuses publication; it never becomes a successful receipt.
+  This is an OS/filesystem durability contract, not a power-loss test.
 
   ## Retention and collection
 
@@ -185,7 +183,10 @@ defmodule Ampd.ReviewContent do
   def put(digest, offset, chunk, final?) do
     cond do
       not named?(digest) ->
-        refuse("review-content-invalid", "A content name must be a SHA-256 digest in lower-case hex.")
+        refuse(
+          "review-content-invalid",
+          "A content name must be a SHA-256 digest in lower-case hex."
+        )
 
       not is_binary(chunk) ->
         refuse("review-content-invalid", "A chunk must be binary content.")
@@ -203,12 +204,34 @@ defmodule Ampd.ReviewContent do
       # Already published under its own name, byte for byte. Re-publishing is
       # not an error and must not truncate what is there.
       File.exists?(blob(digest)) ->
-        {:ok, %{"digest" => digest, "bytes" => size(digest), "complete" => true, "kept" => true}}
+        case verify(digest) do
+          :available ->
+            # A previous publication may have failed after rename. Retrying
+            # must establish durability again before acknowledging its name.
+            with :ok <- sync_path(blob(digest), [:read, :raw]),
+                 :ok <- sync_directories() do
+              {:ok,
+               %{"digest" => digest, "bytes" => size(digest), "complete" => true, "kept" => true}}
+            else
+              {:error, reason} -> storage_refusal(reason)
+            end
+
+          state ->
+            refuse(
+              "review-content-unavailable",
+              "Stored review content could not be verified.",
+              %{"state" => to_string(state)}
+            )
+        end
 
       true ->
-        File.mkdir_p!(blobs())
-        File.mkdir_p!(staging())
-        append(digest, offset, chunk, final?)
+        with :ok <- File.mkdir_p(blobs()),
+             :ok <- File.mkdir_p(staging()),
+             :ok <- sync_directories() do
+          append(digest, offset, chunk, final?)
+        else
+          {:error, reason} -> storage_refusal(reason)
+        end
     end
   end
 
@@ -216,6 +239,18 @@ defmodule Ampd.ReviewContent do
     written = staged_bytes(digest)
 
     cond do
+      offset < written and offset + byte_size(chunk) <= written and
+          replay_matches?(digest, offset, chunk) ->
+        # The UI retries a submission from zero after a lost reply. A matching
+        # prefix is an idempotent replay, never permission to overwrite bytes.
+        with :ok <- sync_path(partial(digest), [:read, :raw]) do
+          if final? and offset + byte_size(chunk) == written,
+            do: publish(digest),
+            else: {:ok, progress(digest, false)}
+        else
+          {:error, reason} -> storage_refusal(reason)
+        end
+
       offset != written ->
         refuse(
           "review-content-offset",
@@ -239,8 +274,22 @@ defmodule Ampd.ReviewContent do
         )
 
       true ->
-        write_chunk(digest, chunk)
-        if final?, do: publish(digest), else: {:ok, progress(digest, false)}
+        case write_chunk(digest, chunk) do
+          :ok -> if final?, do: publish(digest), else: {:ok, progress(digest, false)}
+          {:error, reason} -> storage_refusal(reason)
+        end
+    end
+  end
+
+  defp replay_matches?(digest, offset, chunk) do
+    with {:ok, fd} <- :file.open(String.to_charlist(partial(digest)), [:read, :raw, :binary]) do
+      try do
+        :file.pread(fd, offset, byte_size(chunk)) == {:ok, chunk}
+      after
+        :file.close(fd)
+      end
+    else
+      _ -> false
     end
   end
 
@@ -248,15 +297,41 @@ defmodule Ampd.ReviewContent do
   # durable at its last byte is an upload that a crash turns into nothing,
   # and the offset discipline above exists so it can be resumed instead.
   defp write_chunk(digest, chunk) do
-    {:ok, fd} = :file.open(String.to_charlist(partial(digest)), [:append, :binary, :raw])
-
-    try do
-      :ok = :file.write(fd, chunk)
-      :ok = :file.sync(fd)
-    after
-      :file.close(fd)
+    with {:ok, fd} <- :file.open(String.to_charlist(partial(digest)), [:append, :binary, :raw]) do
+      try do
+        with :ok <- :file.write(fd, chunk), do: :file.sync(fd)
+      after
+        :file.close(fd)
+      end
     end
   end
+
+  defp sync_path(path, modes) do
+    with {:ok, fd} <- :file.open(String.to_charlist(path), modes) do
+      try do
+        :file.sync(fd)
+      after
+        :file.close(fd)
+      end
+    end
+  end
+
+  defp sync_directories do
+    # Bottom-up: persist blob names, the source-side rename, and the newly
+    # created store directories in the already-established world directory.
+    Enum.reduce_while([blobs(), staging(), dir(), Ampd.Store.data_dir()], :ok, fn path, :ok ->
+      case sync_path(path, [:read, :raw, :directory]) do
+        :ok -> {:cont, :ok}
+        error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp storage_refusal(reason),
+    do:
+      refuse("review-content-storage-error", "Review content could not be durably stored.", %{
+        "reason" => inspect(reason)
+      })
 
   # Hash what was WRITTEN, never what was claimed, and publish by rename so a
   # reader never sees a partial blob under a real name.
@@ -275,8 +350,13 @@ defmodule Ampd.ReviewContent do
       case File.read(partial(digest)) do
         {:ok, bytes} ->
           if String.valid?(bytes) and not String.contains?(bytes, <<0>>) do
-            File.rename!(partial(digest), blob(digest))
-            {:ok, %{"digest" => digest, "bytes" => size(digest), "complete" => true, "kept" => false}}
+            with :ok <- File.rename(partial(digest), blob(digest)),
+                 :ok <- sync_directories() do
+              {:ok,
+               %{"digest" => digest, "bytes" => size(digest), "complete" => true, "kept" => false}}
+            else
+              {:error, reason} -> storage_refusal(reason)
+            end
           else
             discard(digest)
 
@@ -289,6 +369,7 @@ defmodule Ampd.ReviewContent do
 
         {:error, reason} ->
           discard(digest)
+
           refuse("review-content-invalid", "The staged file could not be read back.", %{
             "reason" => to_string(reason)
           })
@@ -340,7 +421,7 @@ defmodule Ampd.ReviewContent do
         {n, bytes} =
           Enum.reduce(names, {0, 0}, fn name, {n, b} ->
             path = Path.join(staging(), name)
-            size = (File.stat(path) |> elem(1) |> Map.get(:size, 0)) || 0
+            size = File.stat(path) |> elem(1) |> Map.get(:size, 0) || 0
             File.rm(path)
             {n + 1, b + size}
           end)
@@ -487,7 +568,10 @@ defmodule Ampd.ReviewContent do
     do: Enum.flat_map(files, &inline_bodies/1)
 
   defp inline_bodies(%{"source" => source} = row) when is_map(source) do
-    [{source["draft_sha256"], row["shared_draft"]}, {source["result_sha256"], row["proposed_text"]}]
+    [
+      {source["draft_sha256"], row["shared_draft"]},
+      {source["result_sha256"], row["proposed_text"]}
+    ]
     |> Enum.filter(fn {d, body} -> named?(d) and is_binary(body) end)
   end
 

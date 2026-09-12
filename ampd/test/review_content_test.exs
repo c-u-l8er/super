@@ -50,22 +50,41 @@ defmodule Ampd.ReviewContentTest do
     %{
       "shared_draft" => String.duplicate("a", 24_000),
       "proposed_text" => String.duplicate("b", 32_000),
-      "source" => %{"schema" => "selected-file-basis@1", "path" => path,
-                    "head" => String.duplicate("0", 40)}
+      "source" => %{
+        "schema" => "selected-file-basis@1",
+        "path" => path,
+        "head" => String.duplicate("0", 40)
+      }
     }
   end
 
   defp maximal_inline_attempt(id),
-    do: {id, %{"id" => id, "schema" => "development-review-set@1",
-               "files" => Enum.map(1..4, &maximal_inline_member("f#{&1}.js"))}}
+    do:
+      {id,
+       %{
+         "id" => id,
+         "schema" => "development-review-set@1",
+         "files" => Enum.map(1..4, &maximal_inline_member("f#{&1}.js"))
+       }}
 
-  test "one maximal INLINE change set already occupies most of a frame" do
+  # **These two are ARITHMETIC, not reachability, and an earlier version of this
+  # file claimed otherwise.** `Ampd.DevelopmentAttempt.persist/2` — on shipped
+  # main, before any of this — caps the whole persisted `development_attempts`
+  # collection at 64 KiB encoded plus a reserve per unfinished test run, and
+  # refuses `attempt-directory-full` while preserving what is already recorded.
+  # So a world never reaches a projection of this size: the store refuses first.
+  # These tests encode synthetic maps and go nowhere near admission, which is
+  # exactly why they cannot establish a shipped failure. What they do show is
+  # how little inline material fits a frame, which is why the 64 KiB guard has
+  # to exist and must be kept. `review_content_record_test.exs` has the
+  # reachable version, through the real record path.
+  test "ARITHMETIC ONLY: one maximal inline change set would occupy most of a frame" do
     one = JSON.encode!(%{"development_attempts" => Map.new([maximal_inline_attempt("da_0001")])})
     assert byte_size(one) > 224_000
     assert byte_size(one) < Frame.max_bytes(), "one still fits, which is why it was not noticed"
   end
 
-  test "two maximal INLINE change sets could not be published at all" do
+  test "ARITHMETIC ONLY: two of them would not encode inside one frame" do
     two =
       JSON.encode!(%{
         "development_attempts" =>
@@ -73,10 +92,24 @@ defmodule Ampd.ReviewContentTest do
       })
 
     assert byte_size(two) > Frame.max_bytes(), """
-    Two recorded change sets of the maximum permitted size exceed the frame, so
-    the projection stops being publishable and the world stops being viewable —
-    over material already recorded. The attempt limit permits fifty.
+    Two inline sets of the maximum per-file size do not encode inside a frame.
+    This is arithmetic about the SHAPE, not a reachable state: persist/2 refuses
+    at 64 KiB long before, so the world is protected by the guard rather than by
+    luck. The conclusion to draw is about how little inline material fits, not
+    that a shipped world can be made unviewable.
     """
+  end
+
+  test "the guard that actually bounds it is on shipped main and is far tighter" do
+    # 64 KiB, not 256 KiB — and it counts the whole collection, not one record.
+    # Recorded on 2026-09-12: one real three-file inline change set (`da_0030`)
+    # was 30 632 bytes, which is 47% of the entire budget for a world.
+    assert 64 * 1024 < Frame.max_bytes()
+
+    four = JSON.encode!(Map.new([maximal_inline_attempt("da_0001")]))
+    assert byte_size(four) > 64 * 1024,
+           "even ONE maximal inline set exceeds the collection budget, so it is " <>
+             "the store that refuses, with attempt-directory-full"
   end
 
   # --------------------------------------------------------- publication
@@ -229,8 +262,13 @@ defmodule Ampd.ReviewContentTest do
       "da_0001" => %{
         "files" =>
           Enum.map(digests, fn {draft, proposed} ->
-            %{"source" => %{"draft_sha256" => draft, "result_sha256" => proposed,
-                            "schema" => "selected-file-basis@1"}}
+            %{
+              "source" => %{
+                "draft_sha256" => draft,
+                "result_sha256" => proposed,
+                "schema" => "selected-file-basis@1"
+              }
+            }
           end)
       }
     }
@@ -259,8 +297,11 @@ defmodule Ampd.ReviewContentTest do
     inline = %{
       "da_0001" => %{
         "files" => [
-          %{"shared_draft" => "a", "proposed_text" => "b",
-            "source" => %{"draft_sha256" => orphan, "result_sha256" => orphan}}
+          %{
+            "shared_draft" => "a",
+            "proposed_text" => "b",
+            "source" => %{"draft_sha256" => orphan, "result_sha256" => orphan}
+          }
         ]
       }
     }
@@ -298,7 +339,52 @@ defmodule Ampd.ReviewContentTest do
 
   test "a backup that takes only the stores takes the attempts and not their material" do
     assert ReviewContent.paths() == [ReviewContent.blobs()]
+
     assert String.starts_with?(ReviewContent.blobs(), Ampd.Store.data_dir()),
            "content lives under the world, so whatever copies a world copies it"
+  end
+
+  test "publication refuses a storage path that cannot be a directory" do
+    File.mkdir_p!(ReviewContent.dir())
+    File.write!(ReviewContent.blobs(), "not a directory")
+    assert {:refused, r} = ReviewContent.put(sha("body"), 0, "body", true)
+    assert r["code"] == "review-content-storage-error"
+  end
+
+  test "republication does not acknowledge corrupt content as complete" do
+    {digest, {:ok, _}} = stage("reviewed")
+    File.write!(Path.join(ReviewContent.blobs(), digest), "damaged")
+    assert {:refused, r} = ReviewContent.put(digest, 0, "reviewed", true)
+    assert r["code"] == "review-content-unavailable"
+    assert r["operator_detail"]["state"] == "corrupt"
+  end
+
+  test "republication refuses when its directory durability cannot be established" do
+    {digest, {:ok, _}} = stage("reviewed")
+    File.rmdir!(ReviewContent.staging())
+    File.write!(ReviewContent.staging(), "not a directory")
+    assert {:refused, r} = ReviewContent.put(digest, 0, "reviewed", true)
+    assert r["code"] == "review-content-storage-error"
+    assert ReviewContent.fetch(digest) == {:ok, "reviewed"}
+  end
+
+  test "submission restarted at zero replays confirmed chunks without duplicating them" do
+    bytes = String.duplicate("x", ReviewContent.chunk_bytes()) <> "tail"
+    digest = sha(bytes)
+    chunk = binary_part(bytes, 0, ReviewContent.chunk_bytes())
+    assert {:ok, _} = ReviewContent.put(digest, 0, chunk, false)
+    assert {:ok, replay} = ReviewContent.put(digest, 0, chunk, false)
+    assert replay["bytes"] == byte_size(chunk)
+    assert {:ok, _} = ReviewContent.put(digest, byte_size(chunk), "tail", true)
+    assert ReviewContent.fetch(digest) == {:ok, bytes}
+  end
+
+  test "a replay with different bytes refuses without changing the partial" do
+    digest = sha("abcdef")
+    assert {:ok, _} = ReviewContent.put(digest, 0, "abc", false)
+    assert {:refused, r} = ReviewContent.put(digest, 0, "xyz", false)
+    assert r["code"] == "review-content-offset"
+    assert {:ok, _} = ReviewContent.put(digest, 3, "def", true)
+    assert ReviewContent.fetch(digest) == {:ok, "abcdef"}
   end
 end

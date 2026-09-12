@@ -1,6 +1,6 @@
 # Staged review content — implementation, recovery and deployment
 
-**Status: complete and tested, NOT deployed.** The design and the comparison it
+**Status: original implementation plus isolated audit corrections, NOT deployed.** The design and the comparison it
 came from are in `REVIEW_CONTENT_LIMITS_2026_09_12.md`. This is what was built,
 how it recovers, and exactly what deploying it would do.
 
@@ -17,6 +17,19 @@ It is still not an **authority** store. `Ampd.World.authority_stores/0` holds
 the stores whose absence is indistinguishable from an order nobody gave;
 absence here is distinguishable and *refuses*. So it adds no seal and no way for
 a world to fail to open — and it is not exempt from backup.
+
+## Correction to the overflow rationale
+
+The original handoff claimed two maximal recorded reviews make the shipped
+world unviewable. Its test encodes synthetic maps without recording them.
+Both main (`ecd545f`) and this branch enforce a **64 KiB aggregate attempt
+admission limit**, including encoded size and test-result reservations, in
+`DevelopmentAttempt.persist`. A real capacity probe was refused with
+`attempt-directory-full` before fifty twelve-member reviews could be stored.
+The synthetic test therefore does not establish the claimed reachable failure.
+Large-file submission limits remain real and staging still addresses them.
+The fifty-attempt count is an upper bound, not a promise that every legal shape
+fits fifty times. Do not remove the aggregate guard based on the synthetic test.
 
 ## What was built
 
@@ -55,13 +68,24 @@ refused file does not appear in its refusal.
 Publication is: append, **fsync each chunk**, hash what was written, check it is
 text, rename into `blobs/`.
 
-**The parent directory is not fsynced, because Erlang cannot open one** —
-`:file.open/2` answers `{:error, :eisdir}` with and without `:raw`. A crash in
-the window between the rename and the filesystem committing it can lose the
-*name* of a blob whose *bytes* were durable. Two things make that safe rather
-than silent: content is published **before** the attempt that references it is
-recorded, and a missing blob is a reported state that blocks acceptance. The
-recovery is to stage it again.
+**Correction, 2026-09-12:** the prior claim that Erlang cannot open a directory
+was false. The documented `:directory` option works: on this Linux host with
+OTP 28, `:file.open(path, [:read, :raw, :directory])` followed by `:file.sync/1`
+returns `:ok`. See [Erlang file documentation](https://www.erlang.org/docs/25/man/file.html)
+and [Linux fsync documentation](https://man7.org/linux/man-pages/man2/fsync.2.html).
+
+The follow-up syncs `blobs/`, `staging/`, `review-content/`, and the existing
+world directory before publication returns success. Re-publication verifies
+existing bytes and re-establishes file and directory sync before acknowledging
+them. Failed sync or directory creation returns `review-content-storage-error`.
+Corrupt existing bytes return `review-content-unavailable`, never success.
+This relies on the world's existing directory having been durably established.
+No physical power-loss experiment or non-Linux filesystem validation was run.
+
+Submission retry starts at zero. The store now accepts a repeated range only
+when it exactly matches the staged bytes, without appending them twice. A
+changed range still refuses. This makes the page's retry behavior usable after
+a lost response or interrupted submission.
 
 ## Recovery
 
@@ -99,7 +123,7 @@ needs. No existing record has to move.
 What migrating buys is the space those bodies take in the `loci` authority
 store, which `Ampd.Store.save/2` rewrites whole on every unrelated mutation. It
 is a real cost, bounded, and only for records written before staging existed.
-So it is provided as two tested pure functions and **no command**:
+So it is provided as two tested functions and **no command**. `absorb/1` performs filesystem I/O; it is not pure:
 
     1. Ampd.ReviewContent.absorb/1          publishes the inline bodies.
                                              Writes only into the content store,
@@ -113,7 +137,7 @@ So it is provided as two tested pure functions and **no command**:
 Wiring them is its own proposal, and it can now go through review, because the
 mechanism this change adds is what makes a proposal of that size reviewable.
 
-## Verification
+## Original implementation verification (reported before this audit)
 
     ampd                                    808 tests · 0 failures   (771 before)
     cockpit (Rust)                           76 passed · 0 failed    (71 before)
@@ -158,7 +182,19 @@ excluded outright — records with a **request under 8 000 bytes**.
     #    "New pairing code" (no further restart, existing sessions untouched).
 
 **Rolling back** is `git revert` of the merge plus a rebuild and the same
-restart. Published content is inert to a rollback: an older runtime simply does
-not look in `review-content/`, and no record written by it names a digest.
+restart. A code-only rollback is NOT established as safe after new staged records
+have been written: the old runtime expects inline bodies. Before deployment,
+prove downgrade compatibility or define a verified conversion/restore procedure
+that preserves records created after deployment. Retaining blobs alone does not
+make the old reader compatible.
 
 Nothing here has been merged, built into the shared checkout, or restarted.
+
+## Isolated audit follow-up verification — 2026-09-12
+
+813 runtime tests, 0 failures; 42 focused tests (five new); 10 publishing/reading
+JavaScript tests; 8 gates held, 0 failed, 0 could not run. Warnings-as-errors
+compilation and changed-file formatting passed. The gates used the unchanged
+baseline cockpit binary copied into the isolated tree; Rust was not rebuilt.
+No merge or restart occurred. Physical power-loss, non-Linux qualification,
+downgrade after staged writes, and live phone acceptance were not tested.
