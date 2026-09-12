@@ -2,6 +2,21 @@
 
 **Status: implemented, Linux integration measured 2026-09-12.**
 
+**3D travel added in the subsequent pass.** The shared road now uses Three.js
+from RRABBIT checkpoint `de1252a`
+and the same geometry constants as T&R. Scroll or use Up/Down to drive; Entrance
+passes through the entrance gantry, Exit travels past the end gantry, Home
+returns to the start, and End drives to the exit. Selecting an app flies to its
+front normal before creating the native pane. Leaving destroys that pane and
+flies back to the saved lane position. Published sign faces are textures;
+no live webview image is sampled. Keyboard focus highlights the 3D sign.
+
+This pass measured **22 integrated checks**, **29 standalone lifecycle checks**,
+and **23 accepted-handoff checks**, all passing. The fullscreen pose probe
+observed the approach with no native pane and measured zero pixel offset at
+arrival. The original compositor build and its 65 operation, 35 wiring and
+34 track-store checks passed after extracting the shared geometry constants.
+
 The cockpit's **T&R road** button opens the road in the same Super process.
 The road fills its window, supports native fullscreen, hosts Notes and Digest
 as child webviews, and exposes a **Super (CD)** sign to return to the cockpit.
@@ -42,12 +57,12 @@ capture enabled: entry from the cockpit, host recognition, road/app denials,
 fullscreen, app pane creation, return, road reuse, native close/reopen and
 stale-generation rejection. It requires the existing Tauri/WebKit driver,
 X11 capture tools, and a C compiler/X11 headers for the native close helper.
-Super's pre-existing cockpit battery also passed **89 checks**, and the expanded
+At the initial integration checkpoint, Super's cockpit battery passed **89 checks**, and the expanded
 static ACL gate passed **41 checks**. The shared runtime's four principal tests
 passed with the integration feature enabled. These are targeted integration and
 regression results, not a new claim that the complete sabotage sweep was run.
 
-The full T&R camera, multi-lane ramps, cockpit-as-an-in-road-pane, and routing
+Multi-lane ramps, the full T&R cockpit, cockpit-as-an-in-road-pane, and routing
 Super runtime tasks through road manifests are not implemented. macOS remains
 unmeasured. This separate-surface integration does not decide the pending
 ROAD_SHELL §13 ruling about replacing Super's `main` with the road.

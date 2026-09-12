@@ -50,12 +50,23 @@ try{
   await until(()=>sc("return window.__apply('fullscreen').then(r=>r.ok&&r.result.fullscreen);"));
   await sleep(700);
   check('road enters native fullscreen inside Super',true);
+  const start=await sc('return window.__roadScene.snapshot();');
+  check('camera starts before the entrance gantry',start.position[2]>start.entranceZ);
+  await click('#entrance');
+  await until(()=>sc("return window.__roadScene.snapshot().phase==='driving' && window.__roadScene.snapshot().position[2]<window.__roadScene.snapshot().entranceZ;"));
+  check('entrance drives through the gantry into the lane',true);
+  const beforeKey=await sc('return window.__roadScene.snapshot().position[2];');
+  await sc("window.dispatchEvent(new KeyboardEvent('keydown',{key:'ArrowUp'})); return true;");
+  await until(()=>sc(`return window.__roadScene.snapshot().phase==='driving' && window.__roadScene.snapshot().position[2]<${beforeKey};`));
+  check('arrow navigation advances along the forward axis',true);
+  const parked=await sc('return window.__roadScene.snapshot().position[2];');
   if(process.argv[2]){
     const id=roadWindow();
     if(!id)throw Error('road X11 window not found');
     check('capture integrated road',spawnSync('import',['-window',id,process.argv[2]]).status===0);
   }
   await click('#sign-notes');
+  check('camera approaches before a pane exists',await sc("return window.__apply('status').then(r=>!r.result.present&&window.__roadScene.snapshot().phase==='approaching');"));
   const live=await until(()=>sc("return window.__apply('status').then(r=>r.ok&&r.result.present?r.result:null);"));
   const pane=await until(()=>surface(live.pane_label));
   check('the integrated road opens its packaged app pane',!!pane);
@@ -67,6 +78,7 @@ try{
   check('return sign tears down the live pane',true);
   await until(()=>sc("return window.__apply('fullscreen').then(r=>r.ok&&!r.result.fullscreen);"));
   check('return sign leaves fullscreen',true);
+  check('leaving restores the saved lane position',await sc(`return window.__roadScene.snapshot().phase==='driving'&&Math.abs(window.__roadScene.snapshot().position[2]-(${parked}))<.01;`));
   await select(cockpit);
   check('cockpit cannot invoke road pane commands',await denied('road_promote'));
   await click('#open-road');

@@ -10,14 +10,16 @@
   #road { position:fixed; inset:0; background:#03040a; overflow:hidden; }
   #perspective { position:absolute; inset:0; width:100%; height:100%; }
   #signwrap { position:absolute; inset:0; pointer-events:none; }
-  #signwrap canvas { position:absolute; transform-origin:center; pointer-events:auto;
+  #signwrap canvas { position:absolute; opacity:.001; transform-origin:center; pointer-events:auto;
     cursor:pointer; border:2px solid #2de2e6; box-shadow:0 0 0 4px #101923; }
   #signwrap canvas:focus { outline:3px solid #f2c14e; }
-  #readframe { position:absolute; left:50%; top:15%; transform:translateX(-50%);
+  #readframe { position:absolute; left:50%; top:19%; transform:translateX(-50%);
                width:72%; height:62%;
-               outline:2px solid #2de2e6; display:none; background:#0b0d13; }
-  #readframe.on { display:block; }
-  #road.reading #perspective { opacity:.22; }
+               outline:2px solid #2de2e6; visibility:hidden; background:#0b0d13; }
+  #readframe.on { visibility:visible; }
+  #road.flying .sign:not(#leave) { visibility:hidden; }
+  #road.flying #signwrap { pointer-events:none; }
+  #road.flying #signwrap canvas { pointer-events:none; }
   #drivehint { position:absolute; bottom:10px; left:0; right:0; text-align:center;
     color:#f2c14e; font:11px ui-monospace,monospace; pointer-events:none; }
   .bar { display:flex; gap:6px; flex-wrap:wrap; }
@@ -94,7 +96,8 @@
 <pre id="status">…</pre>
 </dialog>
 
-<script>
+<script type="module">
+import { createRoadScene } from './road-scene.js';
 const invoke = (cmd, args) => window.__TAURI__.core.invoke(cmd, args);
 /* The road's generation is ASKED FOR, never waited for. `whoami` is the only
    call that needs none, which is what makes it the bootstrap. */
@@ -158,62 +161,20 @@ function drawSigns(catalogue) {
     wrap.appendChild(c);
     SIGN_PRIMITIVES += drawSign(c, pkg.sign);
   }
-  paintRoad();
+  roadScene?.setSigns([...wrap.querySelectorAll('canvas')]);
 }
 
-/* A single forward-facing projection places the tarmac, dash addresses,
-   sign supports and window centres. Like m2/world.js, opposing windows use
-   the SAME dash; travel changes depth, never swaps x and z. This lightweight
-   standalone renderer does not import the compositor or replace m2. */
-let travel = 0;
-function paintRoad() {
-  const road = document.getElementById('road');
-  const canvas = document.getElementById('perspective');
-  const w = road.clientWidth, h = road.clientHeight, dpr = devicePixelRatio;
-  canvas.width = w * dpr; canvas.height = h * dpr;
-  const g = canvas.getContext('2d'); g.scale(dpr, dpr);
-  const focal = Math.min(w * .72, h * 1.3), horizon = h * .30;
-  const project = (x, y, z) => ({ x:w/2 + focal*x/z, y:horizon + focal*(170-y)/z });
-  const polygon = (points, fill) => {
-    g.beginPath(); points.forEach((p, i) => i ? g.lineTo(p.x,p.y) : g.moveTo(p.x,p.y));
-    g.closePath(); g.fillStyle=fill; g.fill();
-  };
-  const ground = (x1,x2,z1,z2,color) => polygon([
-    project(x1,0,z1),project(x2,0,z1),project(x2,0,z2),project(x1,0,z2)],color);
-  ground(-160,160,120,6000,'#191b23');
-  ground(-163,-160,120,6000,'#5f5740'); ground(160,163,120,6000,'#5f5740');
-  for(let i=0;i<34;i++) {
-    const z=200+i*180-travel;
-    if(z>130) ground(-3,3,z,z+96,'#f2c14e');
-  }
-  // The exit is ahead on the lane, never a crosswise strip through the windows.
-  const exit=project(0,185,1900-travel);
-  g.fillStyle='#163b30'; g.strokeStyle='#b9d8cc';
-  g.fillRect(exit.x-65,exit.y-22,130,34); g.strokeRect(exit.x-65,exit.y-22,130,34);
-  g.fillStyle='#d9eee5'; g.textAlign='center'; g.font='12px ui-monospace,monospace';
-  g.fillText('EXIT · AHEAD ↑',exit.x,exit.y);
-  for(const [i,c] of [...document.querySelectorAll('#signwrap canvas')].entries()) {
-    const side=i%2 ? 1:-1, z=720+Math.floor(i/2)*360-travel;
-    const p=project(side*310,190,z), foot=project(side*310,0,z), scale=focal/z;
-    g.strokeStyle='#a98430'; g.lineWidth=Math.max(2,6*scale);
-    g.beginPath();g.moveTo(p.x,p.y+66*scale);g.lineTo(foot.x,foot.y);g.stroke();
-    c.style.left=`${p.x}px`;c.style.top=`${p.y}px`;
-    c.style.transform=`translate(-50%,-50%) scale(${scale}) perspective(${z}px) rotateY(${-side*.42}rad)`;
-    c.dataset.side=String(side); c.dataset.depth=String(z);
-    g.fillStyle='#f2c14e';g.font='11px ui-monospace,monospace';
-    g.fillText(`${side<0 ? '↖' : '↗'} ENTER ${CATALOGUE.packages[i].id.toUpperCase()}`,p.x,p.y-80*scale);
-  }
-}
+/* The 3D camera owns all world-to-screen placement. */
+let roadScene = null;
+const paintRoad = () => roadScene?.resize();
 document.getElementById('road').addEventListener('wheel', (e) => {
-  if(document.getElementById('readframe').classList.contains('on')) return;
-  e.preventDefault(); travel=Math.max(0,Math.min(240,travel+e.deltaY*.35));paintRoad();
+  if (navigation || document.getElementById('readframe').classList.contains('on')) return;
+  e.preventDefault(); roadScene?.drive(e.deltaY*.6);
 }, {passive:false});
 let resizeTimer;
 window.addEventListener('resize', () => {
   paintRoad(); clearTimeout(resizeTimer);
-  // Native panes cannot follow CSS transforms. Leave on resize rather than
-  // displaying a live pane against a frame that has moved underneath it.
-  if(document.getElementById('readframe').classList.contains('on'))
+  if (navigation || document.getElementById('readframe').classList.contains('on'))
     resizeTimer=setTimeout(async () => { await demote();show('Returned to the road after resizing. Enter the window to resume.'); },100);
 });
 
@@ -251,7 +212,7 @@ async function setFullscreen(enabled) {
   if (displayBusy) return;
   displayBusy = true;
   try {
-    if (document.getElementById('readframe').classList.contains('on')) {
+    if (navigation || document.getElementById('readframe').classList.contains('on')) {
       const left = await demote(); if (!left.ok) { show(left); return; }
     }
     const r = await apply('fullscreen', { enabled });
@@ -269,11 +230,11 @@ document.getElementById('cockpit').onclick = async () => {
 };
 document.getElementById('entrance').onclick = async () => {
   const r = await demote(); if (!r.ok) { show(r); return; }
-  travel=120; paintRoad(); notice('Inside the lane · Notes left · Digest right');
+  await roadScene.enter(); notice('Inside the lane · Notes left · Digest right');
 };
 document.getElementById('exit').onclick = async () => {
   const r = await demote(); if (!r.ok) { show(r); return; }
-  travel=0; paintRoad(); await setFullscreen(false); notice('At the entrance · back on your desktop');
+  await roadScene.exit(); await setFullscreen(false); notice('Past the exit · Entrance sign to drive back into the lane');
 };
 document.getElementById('services').onclick = async () => {
   const r = await demote(); if (!r.ok) { show(r); return; }
@@ -282,6 +243,12 @@ document.getElementById('services').onclick = async () => {
 document.getElementById('close-services').onclick = () => document.getElementById('service-panel').close();
 document.getElementById('next').onclick = async () => show(await window.__handoffNext());
 window.addEventListener('keydown', (e) => {
+  if (!navigation && !leaving && !document.getElementById('readframe').classList.contains('on') &&
+      !document.getElementById('service-panel').open && ['ArrowUp','ArrowDown','Home','End'].includes(e.key)) {
+    e.preventDefault();
+    if(e.key==='Home')roadScene.home();else if(e.key==='End')roadScene.exit();
+    else roadScene.drive(e.key==='ArrowUp'?144:-144);
+  }
   if (e.key === 'F11') { e.preventDefault(); document.getElementById('fullscreen').click(); }
   if (e.key === 'Escape' && !document.getElementById('service-panel').open) {
     e.preventDefault();
@@ -303,31 +270,46 @@ function readRect() {
 }
 
 let CAPTURED_GENERATION = null;
+let navigation = null, leaving = null;
 
 async function promote(pkg, task) {
-  const wasReading = document.getElementById('readframe').classList.contains('on');
-  document.getElementById('readframe').classList.add('on');
-  const r = await apply('promote', { rect: readRect(), package: pkg, task: task ?? null });
-  if (r.ok) {
-    document.getElementById('road').classList.add('reading');
-    CAPTURED_GENERATION = r.result.pane.generation;
-    document.getElementById('signwrap').style.display = 'none';
-    notice(`${pkg} · use Leave window to return to the road`);
-  } else if (!wasReading) {
-    document.getElementById('readframe').classList.remove('on');
-  }
-  return r;
+  if (navigation || leaving || document.getElementById('readframe').classList.contains('on'))
+    return {ok:false,why:'TIER_ALREADY_LIVE_OR_TRAVELING'};
+  navigation=(async()=>{
+    document.getElementById('road').classList.add('flying');
+    notice(`Approaching ${pkg}…`);
+    if (!await roadScene.arrive(pkg,readRect())) return {ok:false,why:'ARRIVAL_CANCELLED'};
+    // The native pane is created only AFTER the camera is square to its sign.
+    document.getElementById('readframe').classList.add('on');
+    const r=await apply('promote',{rect:readRect(),package:pkg,task:task??null});
+    if(r.ok){
+      document.getElementById('road').classList.add('reading');
+      CAPTURED_GENERATION=r.result.pane.generation;
+      document.getElementById('signwrap').style.display='none';
+      notice(`${pkg} · use Leave window to return to the road`);
+    }else{
+      document.getElementById('readframe').classList.remove('on');
+      await roadScene.leave();
+    }
+    return r;
+  })();
+  try{return await navigation;}finally{navigation=null;document.getElementById('road').classList.remove('flying');}
 }
 
 async function demote() {
-  const r = await apply('demote');
-  if (!r.ok) return r;
-  document.getElementById('road').classList.remove('reading');
-  document.getElementById('readframe').classList.remove('on');
-  document.getElementById('signwrap').style.display = '';
-  drawSigns(CATALOGUE);
-  notice('On the road · select an app sign to enter');
-  return r;
+  if(leaving)return leaving;
+  leaving=(async()=>{
+    if(navigation)await navigation;
+    const r=await apply('demote');if(!r.ok)return r;
+    document.getElementById('road').classList.remove('reading');
+    document.getElementById('readframe').classList.remove('on');
+    document.getElementById('signwrap').style.display='';
+    drawSigns(CATALOGUE);
+    document.getElementById('road').classList.add('flying');
+    await roadScene.leave();
+    notice('On the road · select an app sign to enter');return r;
+  })();
+  try{return await leaving;}finally{leaving=null;document.getElementById('road').classList.remove('flying');}
 }
 
 /* THE HANDOFF, UNDER N = 1. Route by declared acceptance, promote, let the app
@@ -339,7 +321,8 @@ window.__handoff = async (kind, payload) => {
   const step = (name, r) => { steps.push({ name, ...r }); return r; };
   const first = step('route', await apply('route', { kind }));
   if (!first.ok) return { ok: false, steps };
-  step('promote-1', await promote(first.result.package, { kind, payload }));
+  const promoted = step('promote-1', await promote(first.result.package, { kind, payload }));
+  if (!promoted.ok) return {ok:false,steps};
   return { ok: true, steps, awaiting: 'the app to offer' };
 };
 
@@ -353,9 +336,9 @@ window.__handoffNext = async () => {
   const next = await apply('route', { kind: latest.kind });
   steps.push({ name: 'route', ...next });
   if (!next.ok) return { ok: false, steps };
-  steps.push({ name: 'promote-2',
-    ...(await promote(next.result.package, { kind: latest.kind, payload: latest.payload })) });
-  return { ok: true, steps, accepted: latest };
+  const promoted = await promote(next.result.package, { kind: latest.kind, payload: latest.payload });
+  steps.push({ name: 'promote-2', ...promoted });
+  return { ok: promoted.ok, steps, accepted: latest };
 };
 
 document.getElementById('handoff').onclick = async () =>
@@ -395,6 +378,7 @@ window.__probe = () => ({
   signVisible: document.getElementById('signwrap').style.display !== 'none',
   readPose: document.getElementById('readframe').classList.contains('on'),
   capturedGeneration: CAPTURED_GENERATION,
+  camera: roadScene?.snapshot(),
   log: LOG.slice(-8),
 });
 window.__apply = apply;
@@ -416,6 +400,9 @@ window.__apply = apply;
   const r = await apply('manifest');
   if (!r.ok) { show(r); return; }
   CATALOGUE = r.result;
+  try { roadScene=createRoadScene(document.getElementById('perspective')); }
+  catch(e) { show('The 3D road could not start: '+String(e)); return; }
+  window.__roadScene=roadScene;
   drawSigns(CATALOGUE);
   await status();
   document.body.dataset.ready = '1';

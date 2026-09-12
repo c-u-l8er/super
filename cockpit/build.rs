@@ -28,6 +28,9 @@ fn main() {
     }
     println!("cargo:rerun-if-changed=../../RRABBIT/tier1-proof/ui");
     copy_tree(std::path::Path::new("../../RRABBIT/tier1-proof/ui"), std::path::Path::new("ui/road"));
+    println!("cargo:rerun-if-changed=../../RRABBIT/m2/road-geometry.js");
+    std::fs::copy("../../RRABBIT/m2/road-geometry.js", "ui/road/road-geometry.js")
+        .expect("package shared T&R road geometry");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "bind_frame_stream",
