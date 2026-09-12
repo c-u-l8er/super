@@ -171,3 +171,84 @@ running and restarting it, which revokes every paired phone session.
   one's record: without `projection.ex` nothing publishes a name and the other
   files do nothing.
 * Any path that records or accepts material without the runtime validating it.
+
+---
+
+# Addendum, same day — two findings from building it, and the fork they reach
+
+## A third cost, and it is the serious one
+
+`Ampd.Projection` publishes `"development_attempts" => Ampd.Loci.development_attempts()`
+— **the whole collection, with all inlined text, in every frame.** Receipts,
+validations and `effects_history` are passed through `window/1`, which keeps the
+newest fifty. Attempts are not windowed at all.
+
+So recorded review material is not merely stored; it is re-published on every
+frame, against a 262 144-byte frame limit. `ampd/test/review_content_test.exs`
+measures it rather than arguing it:
+
+    ONE maximal change set already occupies most of a frame        > 224 000 B, fits
+    TWO maximal change sets cannot be published at all             > frame limit
+    the attempt limit permits an order of magnitude more           50 x 4 x 56 000
+
+A member may carry 24 000 bytes of current text and 32 000 of proposed, a set
+may hold four, and the runtime's own `attempt-limit` permits **fifty** sets. Two
+of maximum size make the projection unpublishable — so **the world stops being
+viewable, over material that is already recorded and cannot be unrecorded.**
+
+This is reachable in the runtime as it ships, with no change from this round. It
+also settles the comparison: content has to leave the *projection*, not only the
+command. Option A cannot reach it — raising the frame to fit two sets leaves
+three over the line.
+
+## What is built and tested
+
+Held at `~/Documents/Codex/2026-09-10/wh/outputs/super-bootstrap-review-content/`,
+**not committed and not applied**:
+
+| | |
+|---|---|
+| `Ampd.ReviewContent` | content-addressed staging beside the world, deliberately outside `@authority_stores` — losing it is a cache miss. Chunked, bounded per chunk / per file / per store, hashed on completion and **re-hashed on the way out**, so a blob edited on disk behind the store is not served. |
+| `put_review_content` | one human-control mutation, base64 chunks, **outside the ordered transaction** — writing a file inside the coordinator is the unbounded host round trip `check-dispatch-partition.mjs` exists to keep out. |
+| `cockpit/src/worker.rs` | one name on `INTENT_SURFACE`. |
+
+Evidence: **14 tests · 0 failures**, whole ampd suite **785 · 0** (771 before).
+A 600 000-byte blob stages and reads back byte for byte; `cockpit/ui/cockpit.js`
+and `ampd/lib/ampd/projection.ex` both stage. Refusals proved by name for a
+digest that disagrees with its bytes, a lost write offset, an oversized chunk,
+an oversized file (with its partial discarded), a name that is not a digest, and
+a blob edited behind the store. The chunk boundary is tested **inclusive**:
+exactly at the limit is accepted, one over is refused.
+
+## The fork, which `check-intent-surface.mjs` found and I did not
+
+With the runtime half in place the gate went red twice, and the second one is
+the design question:
+
+    declared by the runtime, absent from the cockpit: put_review_content
+    on INTENT_SURFACE, absent from ui/cockpit.js: put_review_content
+      — appending a name to the const does not make a person able to perform it
+
+The gate's law is that an intent must be **submittable from the page**. Adding a
+wiring line with nothing calling it would satisfy the letter and be exactly the
+cosmetic green the gate's own comment was written to refuse, so it was not done.
+
+That makes the honest bootstrap larger than three files, and **which way it goes
+is a ruling, not a detail**:
+
+1. **Is staging content an operation a person performs, or a step inside one?**
+   If it is a step, modelling it as its own human-control mutation is what the
+   gate is objecting to, and it may belong on the **host** surface beside
+   `development_request` and `review_tests` — which already read and write
+   repository files from the Rust side — rather than on the intent surface.
+2. **Does a recorded attempt store digests or bytes?** It must store digests, or
+   the authority store and the projection keep the weight. But consumers read
+   `proposed_text` off the record through the projection: the combined-review
+   UI, `tools/lib/proposal-test-runner.mjs`, and acceptance preflight. They
+   would fetch content on demand instead. That is the blast radius, and it is
+   the reason this stopped here rather than guessing.
+
+**Once the mechanism carries a complete change, the UI's use of it can be the
+first thing reviewed through it** — `cockpit/ui/cockpit.js` is 72 809 bytes and
+is precisely what the new mechanism exists to carry. Only the runtime half has
+to arrive outside review.
