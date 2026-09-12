@@ -317,7 +317,7 @@ fn action(name: &str, args: Value) -> Result<Value, String> {
                 .split('/')
                 .any(|p| p.is_empty() || p == "." || p == "..")
             || path.contains('\0')
-            || content.len() > 32000
+            || content.len() > crate::attachments::REVIEW_FILE_BYTES
             || content.contains('\0')
         {
             return Err("The file proposal is invalid or too large. Nothing was changed.".into());
@@ -461,9 +461,9 @@ pub async fn chat(
             total += file.content.len();
             if message.role != "user"
                 || file.name.len() > 255
-                || file.content.len() > 32000
+                || file.content.len() > crate::attachments::REVIEW_FILE_BYTES
                 || file.content.contains('\0')
-                || total > 256000
+                || total > 4 * crate::attachments::REVIEW_FILE_BYTES
             {
                 return Err("Attachments exceed the supported text limits.".into());
             }
@@ -599,7 +599,8 @@ pub async fn chat(
         .await
         .map_err(|_| "The provider reply was interrupted.")?
     {
-        if bytes.len() + chunk.len() > 1_048_576 {
+        // Twelve proposals of REVIEW_FILE_BYTES, escaped, and the prose around them.
+        if bytes.len() + chunk.len() > 4 * 1_048_576 {
             return Err("The provider reply exceeded the size limit.".into());
         }
         bytes.extend_from_slice(&chunk);
@@ -649,9 +650,14 @@ mod tests {
         }
         assert!(action(
             "propose_file_edit",
-            json!({"path":"ok.js","content":"x".repeat(32001)})
+            json!({"path":"ok.js","content":"x".repeat(crate::attachments::REVIEW_FILE_BYTES + 1)})
         )
         .is_err());
+        assert!(action(
+            "propose_file_edit",
+            json!({"path":"ok.js","content":"x".repeat(crate::attachments::REVIEW_FILE_BYTES)})
+        )
+        .is_ok());
         assert!(action(
             "propose_file_edit",
             json!({"path":"ok.js","content":"text","execute":true})

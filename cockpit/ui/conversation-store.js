@@ -1,3 +1,4 @@
+import {REVIEW_FILE_BYTES} from './review-limits.js';
 /* Local presentation history. Never stores credentials, runtime authority, or
  * executable proposals. Failed writes leave the previous saved history intact. */
 export const STORAGE_KEY = 'super-conversations-v1';
@@ -12,7 +13,7 @@ function array(value, max, convert) {
   return value.map(convert);
 }
 function files(value) {
-  return array(value, 4, f => ({ name: string(f.name, 255), content: string(f.content, 32000) }));
+  return array(value, 4, f => ({ name: string(f.name, 255), content: string(f.content, REVIEW_FILE_BYTES) }));
 }
 function clean(data) {
   return {

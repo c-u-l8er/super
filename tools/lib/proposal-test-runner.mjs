@@ -7,6 +7,10 @@ import {resolve,dirname,join,relative,sep} from 'node:path';
 
 const hash=b=>createHash('sha256').update(b).digest('hex');
 const maxFiles=1024,maxFile=2*1024*1024,maxBytes=32*1024*1024,maxOutput=128*1024;
+// One reviewed member's body: the runtime's Ampd.ReviewContent.file_bytes/0. The
+// page limits what it will attach or accept from a bot (256 KiB); the runner
+// checks what the runtime recorded.
+const MEMBER_BYTES=4*1024*1024;
 const env={PATH:'/usr/bin:/bin',LANG:'C.UTF-8',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_OPTIONAL_LOCKS:'0',GIT_TERMINAL_PROMPT:'0'};
 const git=(root,args)=>execFileSync('/usr/bin/git',['-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null',...args],{cwd:root,env,encoding:'utf8',timeout:10000,maxBuffer:1024*1024});
 function pathOK(path){return typeof path==='string'&&path.length<=1024&&!path.includes('\0')&&!path.includes('\\')&&path.split('/').every(p=>p&&!['.','..','.git'].includes(p));}
@@ -37,7 +41,7 @@ function digest(files){return hash(JSON.stringify(manifest(files)));}
 function checkFileAttempt(attempt){
   const s=attempt?.source,p=attempt?.proposed_text,d=attempt?.shared_draft;
   assert(['selected-file-basis@1','selected-file-deletion-basis@1'].includes(s?.schema)&&s.scope==='selected-file-only'&&pathOK(s.path),'A selected-file review attempt is required.');
-  assert((s.schema==='selected-file-deletion-basis@1'?p===null&&/^[a-f0-9]{64}$/.test(s.disk_sha256):typeof p==='string'&&Buffer.byteLength(p)<=32000&&!p.includes('\0'))&&typeof d==='string'&&Buffer.byteLength(d)<=24000&&!d.includes('\0'),'Review text exceeds its bounds.');
+  assert((s.schema==='selected-file-deletion-basis@1'?p===null&&/^[a-f0-9]{64}$/.test(s.disk_sha256):typeof p==='string'&&Buffer.byteLength(p)<=MEMBER_BYTES&&!p.includes('\0'))&&typeof d==='string'&&Buffer.byteLength(d)<=MEMBER_BYTES&&!d.includes('\0'),typeof d!=='string'?'Review text is missing: the record carries no body for '+s.path+'.':'Review text exceeds its bounds.');
   assert(s.result_sha256===(p===null?hash(JSON.stringify(['deleted-file@1',s.path])):hash(p))&&s.result_bytes===(p===null?0:Buffer.byteLength(p))&&s.draft_sha256===hash(d)&&s.draft_bytes===Buffer.byteLength(d),'Review content identity mismatch.');
   assert(/^[a-f0-9]{40}(?:[a-f0-9]{24})?$/.test(s.head),'A concrete source commit is required.');
   assert(s.basis_id===hash(JSON.stringify(['selected-file-basis@1',s.head,s.path,s.disk_sha256,s.draft_sha256])),'Review source basis mismatch.');

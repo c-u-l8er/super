@@ -356,6 +356,143 @@ defmodule Ampd.DowngradeTest do
     assert again["converted"] == 0 and again["verified"]
   end
 
+  # ----------------------------------------------------- failure injection
+
+  # A failure at each boundary of the write, and what must be true of the disk
+  # afterwards. Steps before the mutation leave every byte as it was and say
+  # so; steps after the insert say the mutation began, name the backup, and
+  # the backup restores the store exactly.
+  defp two_sets!(c) do
+    record!(
+      c,
+      [staged(c.task, "a.js", "one\n", "two\n"), staged(c.task, "b.js", "3\n", "4\n")],
+      "s1"
+    )
+
+    record!(
+      c,
+      [staged(c.task, "c.js", "five\n", "six\n"), staged(c.task, "d.js", "7\n", "8\n")],
+      "s2"
+    )
+  end
+
+  for step <-
+        ~w(after_backup_created after_backup_copied after_backup_synced after_backup_durable after_open)a do
+    test "INJECT #{step}: an untouched refusal — the store is byte-identical and the report says so",
+         c do
+      two_sets!(c)
+      world = disposable_copy()
+      before = sha_file(store(world))
+
+      assert {:refused, r} = Downgrade.run(world, fail_at: unquote(step))
+      assert r["refusal"] == "injected-failure-#{unquote(step)}"
+      assert r["written"] == false and r["mutation_began"] == false
+      assert r["phase"] == "backup" or unquote(step) == :after_open
+      assert sha_file(store(world)) == before, "the store was not touched"
+
+      # A backup that got as far as being copied is a faithful copy; one that
+      # was only created is empty and named — never a half-written store
+      # under the store's own name.
+      case backups(world) do
+        [] ->
+          assert unquote(step) == :after_backup_created and false, "the name is created first"
+
+        [b] ->
+          if unquote(step) == :after_backup_created,
+            do: assert(File.read!(b) == ""),
+            else: assert(sha_file(b) == before)
+      end
+    end
+  end
+
+  for step <- ~w(after_insert after_sync after_close before_verify)a do
+    test "INJECT #{step}: a failure after the mutation began is reported as such, and the backup restores the store",
+         c do
+      two_sets!(c)
+      world = disposable_copy()
+      before = sha_file(store(world))
+      attempts_before = attempts_on_disk(world)
+
+      assert {:refused, r} = Downgrade.run(world, fail_at: unquote(step))
+      assert r["refusal"] == "injected-failure-#{unquote(step)}"
+      assert r["mutation_began"] == true and r["written"] == false and r["phase"] == "write"
+      assert r["recover"] =~ r["backup"]
+      assert [backup] = backups(world)
+      assert sha_file(backup) == before, "the backup is the store exactly as it was"
+
+      # Recovery: the backup goes back, durably, and the state reads as before.
+      assert {:ok, %{"restored_from" => ^backup}} = Downgrade.restore(world, backup)
+      assert sha_file(store(world)) == before
+      assert attempts_on_disk(world) == attempts_before
+
+      # And the world converts on the next run, as if nothing had happened —
+      # under a NEW backup name, never over the one that saved it.
+      assert {:ok, ok} = Downgrade.run(world)
+      assert ok["written"] and ok["verified"] and ok["backup"] != backup
+      assert length(backups(world)) == 2
+    end
+  end
+
+  test "ORDER: the backup's bytes and its NAME are durable before the store is opened for writing",
+       c do
+    two_sets!(c)
+    world = disposable_copy()
+    assert {:ok, r} = Downgrade.run(world, trace: self())
+    backup = Path.basename(r["backup"])
+
+    events =
+      Stream.repeatedly(fn ->
+        receive do
+          {:downgrade, e} -> e
+        after
+          0 -> nil
+        end
+      end)
+      |> Enum.take_while(&(&1 != nil))
+
+    # Read-only preflight first; then the copy, its sync, the directory sync
+    # (the name), and only THEN the store is opened read-write.
+    assert events == [
+             {:open, :read},
+             {:copy, "loci.dets", backup},
+             {:sync_file, backup},
+             :sync_dir,
+             {:open, :read_write},
+             :insert,
+             :dets_sync,
+             :sync_dir,
+             {:open, :read}
+           ]
+  end
+
+  test "BACKUP: two runs in the same second get two names, and no backup is ever overwritten",
+       c do
+    two_sets!(c)
+    world = disposable_copy()
+    now = ~U[2026-09-12 21:00:00Z]
+    before = sha_file(store(world))
+
+    assert {:ok, first} = Downgrade.run(world, now: now)
+    assert first["backup"] == store(world) <> ".before-downgrade-20260912T210000Z"
+    after_first = sha_file(store(world))
+
+    assert {:ok, second} = Downgrade.run(world, now: now)
+    assert second["backup"] == store(world) <> ".before-downgrade-20260912T210000Z-1"
+    assert sha_file(first["backup"]) == before, "the first backup still holds the original"
+    assert sha_file(second["backup"]) == after_first, "the second holds the converted store"
+  end
+
+  test "RESTORE: refuses an absent backup and a locked world, and writes nothing", c do
+    two_sets!(c)
+    world = disposable_copy()
+    before = sha_file(store(world))
+
+    assert {:refused, %{"refusal" => "backup-absent"}} =
+             Downgrade.restore(world, store(world) <> ".nope")
+
+    assert sha_file(store(world)) == before
+  end
+
   test "RUN: refuses while the world lock is held, and writes nothing", c do
     record!(
       c,

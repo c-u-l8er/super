@@ -223,15 +223,36 @@ reasons: refuse while `world.lock` is held (the wrapper holds that same
 `flock(2)` for the whole run, which is the only way to close the window
 between a probe and the write); refuse a manifest this build does not trust;
 open `loci.dets` **read-only** under a private table name (a store not closed
-cleanly is refused, not repaired); preflight; and only if downgradable, copy
-`loci.dets` to `loci.dets.before-downgrade-<utc>` and sync it, write the
-converted state, `dets` sync, close, sync the directory, then **re-open and
-compare**. A refusal writes nothing: measured byte-identical.
+cleanly is refused, not repaired); preflight; and only if downgradable, write
+in three phases that the report names:
 
-Every rule was falsified before it was trusted: widening the member limit,
-the directory budget, the reserve, the lock check and the "write anyway"
-branch each turn exactly the tests written for them red
-(`ampd/test/downgrade_test.exs`, 9 tests).
+| phase | what happens | on failure the report says |
+|---|---|---|
+| `backup` | create `loci.dets.before-downgrade-<utc>` **exclusively** (a name that did not exist — a second run in the same second gets `-1`, never an overwrite), copy the store into it, sync the copy, **then sync the directory so the name is durable** | `mutation_began: false, written: false` — every byte of the world as it was |
+| `write` | open read-write, insert, `dets` sync, close, sync the directory | `mutation_began: true, written: false`, the backup path, and `recover`: restore from it before any runtime opens the world |
+| `verify` | re-open read-only and compare | `written: true, verified: false` |
+
+`Downgrade.restore/2` (`tools/downgrade-world.sh <world> --restore <backup>`)
+puts a backup back the same way: copy, sync the file, sync the directory, read
+back. The audit's two findings — the backup's directory entry was not synced
+before the store changed, and a failure after the mutation began reported
+`written: false` as if nothing had changed — are both closed by this shape.
+
+Falsified before trusted, all of it. `fail_at:` is failure injection at each
+boundary (`after_backup_created`, `after_backup_copied`, `after_backup_synced`,
+`after_backup_durable`, `after_open`, `after_insert`, `after_sync`,
+`after_close`, `before_verify`): the five before the mutation leave the store
+byte-identical and say so; the four after it say the mutation began, the backup
+equals the original store, `restore/2` brings the state back exactly, and the
+next run converts under a *new* backup name. `trace:` pins the **order** of
+durability calls — copy, sync the copy, sync the directory, and only then open
+the store read-write — which no inspection of the disk afterwards can show.
+Sabotage confirmed each: removing the pre-mutation directory sync fails the
+order test; overwriting instead of exclusive create fails five; reporting a
+post-mutation failure as untouched fails four. `ampd/test/downgrade_test.exs`,
+21 tests. A real `kill -9` inside the write was not performed; the injection
+returns where the real step would fail, with the same bytes on disk up to
+that point.
 
 ### Measured, 2026-09-12 — the old runtime opening the converted world
 
@@ -355,6 +376,50 @@ baseline cockpit binary copied into the isolated tree; Rust was not rebuilt.
 No merge or restart occurred. Physical power-loss, non-Linux qualification,
 downgrade after staged writes, and live phone acceptance were not tested.
 
+## The large-file workflow, finished through the page — 2026-09-12 (round 3)
+
+Item 6 above said the page could not produce a large member. Every limit on
+the path was traced and moved to **one number per layer**, named where it is
+enforced, rather than raised where it happened to bite:
+
+| layer | where | was | now | why this number |
+|---|---|---|---|---|
+| page: Editor → bot (related files, Discuss route, file picker, plan context, conversation store) | `cockpit/ui/review-limits.js` `REVIEW_FILE_BYTES` | 24 000 / 32 000 | **256 KiB** | larger than any file in this tree (cockpit.js is 73 KB); a provider prompt of four such files is 1 MiB |
+| page: a bot's proposed file | `file-proposal.js` | 32 000 | 256 KiB | the same number |
+| host: attachment read, plan-linked file basis | `attachments.rs::REVIEW_FILE_BYTES`, `workbench.rs::file_basis` | 32 000 / 24 000 | 256 KiB | the same number, in Rust |
+| host: provider bridge | `bots.rs` — per attachment, total per message, reply body | 32 000 / 256 000 / 1 MiB | 256 KiB / 1 MiB / **4 MiB** | twelve proposals of 256 KiB, escaped, fit one reply |
+| publishing | `put_review_content` chunk `{:string, 92_000}`; page `CHUNK` 64 KiB | — | unchanged | 64 KiB decoded is 87 384 base64 chars, inside the field; the frame is 256 KiB |
+| runtime store | `Ampd.ReviewContent.file_bytes/0` | 4 MiB | unchanged | the store's limit, not the page's |
+| the runner and the accepted build | `tools/lib/proposal-test-runner.mjs` `MEMBER_BYTES`; `tools/proposal-test-runner.mjs` record cap | 24 000 / 32 000; 64 KiB record | **4 MiB** per member; 64 MiB record | the runner checks what the runtime recorded, and a resolved record carries its bodies |
+| a **single-file** inline review | `record_development_attempt` in `CommandSpec` | 24 000 / 32 000 | **unchanged** | inline bodies live in the 64 KiB `loci` directory; a large file is reviewable as a member of a combined review, published by digest |
+
+Twelve numbers, one per edge, and a JavaScript suite (`tools/review-limits-test.mjs`)
+that holds each page edge at exactly the limit and one byte over. The Rust
+tests that pinned the old numbers moved with them (76 passed).
+
+**Not a transport this page controls:** a provider's context window. Four
+files of 256 KiB is about a quarter of a million tokens; a model that cannot
+take them says so as a provider error, which the page already surfaces.
+
+**Found on the way, not fixed:** after a restart, a saved combined review
+has no apply control — the transcript restores none (by design, since
+2fc6bdc) and the plan page offers none — so the person asks the bot again and
+stages the re-issued proposal; the record and its acceptance are the original.
+The smoke does exactly that. And the runner refuses to start until the plan's
+repository is chosen in the Editor again (*"Choose the plan's repository in
+Editor first."*), which is the native chooser: both are restart facts a
+person meets, and both cost this round a run each.
+
+`tools/large-file-review-smoke.mjs` is the demonstration: the real
+`cockpit/ui/cockpit.js` (73 KB) copied into a disposable repository, attached
+from the Editor by the page's own related-files control, proposed back by the
+provider fixture with one changed line, reviewed in the combined dialog,
+recorded by digest — two publish chunks, and the record itself under 8 KB —
+reopened after an actual process restart, tested to a pass, applied, accepted,
+and built by the accepted-build runner into an executable that prints both
+accepted files. No record is injected and no validation is bypassed. Results
+are in the verification section.
+
 ## Verification, 2026-09-12 — rollback settled and the UI cycle driven
 
 Reported apart, as asked: unit tests, the UI, and the old runtime.
@@ -404,4 +469,45 @@ Nothing here has been merged into the shared checkout, built there, or
 restarted; the running desktop, the paired phone and the held proposals were
 not touched. The four stray test blobs in the real world's
 `review-content/blobs` (item 3) were left for Travis.
+
+## Verification, 2026-09-12 — round 3 (durability, the large file, the old cockpit)
+
+Reported apart again.
+
+**Runtime and host tests.** ampd **843 tests · 0 failures** (12 new: nine
+failure-injection and ordering cases for the writer, backup naming, restore;
+the whole `downgrade_test.exs` is 21). cockpit (Rust) **76 passed · 0
+failed · 1 ignored**, with the three cap tests moved to the new limit and
+holding exactly the limit as accepted. **24 JavaScript suites pass** (one
+new, `review-limits-test.mjs`). `tools/gates.sh` **8 held**. Formatting
+checked.
+
+**Through the actual UI**, one smoke at a time:
+
+| smoke | held |
+|---|---|
+| `large-file-review-smoke` — the real cockpit.js attached from the Editor, proposed back, recorded by digest in two chunks, restarted, repository re-chosen, tested, re-proposed, applied, accepted, built, previewed | **56** |
+| `old-cockpit-downgrade-smoke` — this cockpit records by digest; `downgrade-world.sh` converts under the lock; the cockpit built from `cf3931f` opens the world, shows both retained files, runs its tests to a pass, refuses acceptance until the files are saved, accepts | **27** |
+| the seven smokes of round 2, on the final page code, one at a time | change-set 31 · apply 31 · deletion 38 · crash 34 · acceptance 40 · combined 52 · review-content 32 |
+
+Run back-to-back on one port, two of the seven failed once each — the apply
+smoke's provider connect never enabled, and a combined build "ended without a
+complete result" with an empty error file — and both passed when run alone
+straight after. Neither reproduced; both are recorded here rather than
+smoothed over.
+
+**Under the old runtime**, this time its cockpit too: phase 3 above is the
+old binary and the old `ampd`, driven through their own page, against a
+world this runtime wrote and the tool converted. Applying the files in that
+phase is the smoke writing them (see the note on restart facts).
+
+**Not done, still.** No `kill -9` inside the write itself (injection returns
+where the step would fail, with the same bytes on disk to that point); no
+physical power loss; no non-Linux filesystem; no live phone; a single-file
+inline review is still capped at 24 000 / 32 000 (a large file is reviewed
+as a member of a combined review); the four stray blobs stay where they are.
+
+Nothing here has been merged into the shared checkout, built there, or
+restarted; production data, phone sessions and held proposals were not
+touched.
 

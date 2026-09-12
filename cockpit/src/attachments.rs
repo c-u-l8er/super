@@ -78,15 +78,20 @@ fn read(path: &Path) -> Result<Value, String> {
         return Err("Choose a regular file.".into());
     }
     let mut bytes = vec![];
-    file.take(32001)
+    file.take(REVIEW_FILE_BYTES as u64 + 1)
         .read_to_end(&mut bytes)
         .map_err(|_| "Could not read the file.")?;
-    if bytes.len() > 32000 || bytes.contains(&0) {
-        return Err("Choose a UTF-8 text file no larger than 32 KB.".into());
+    if bytes.len() > REVIEW_FILE_BYTES || bytes.contains(&0) {
+        return Err("Choose a UTF-8 text file no larger than 256 KB.".into());
     }
     let content = String::from_utf8(bytes).map_err(|_| "Choose a UTF-8 text file.")?;
     Ok(json!({"name":name,"content":content}))
 }
+/// One file on the review path through the page: attached, proposed, or
+/// snapshotted. The same number as `cockpit/ui/review-limits.js`, and the
+/// reasoning is there.
+pub const REVIEW_FILE_BYTES: usize = 256 * 1024;
+
 pub fn read_selected(paths: Vec<PathBuf>) -> Result<Value, String> {
     if paths.len() > 4 {
         return Err("Choose up to four files at a time.".into());
@@ -112,7 +117,9 @@ mod tests {
         );
         std::fs::write(&path, [0, 1]).unwrap();
         assert!(read(&path).is_err());
-        std::fs::write(&path, vec![b'a'; 32001]).unwrap();
+        std::fs::write(&path, vec![b'a'; REVIEW_FILE_BYTES]).unwrap();
+        assert!(read(&path).is_ok(), "exactly the limit is a file");
+        std::fs::write(&path, vec![b'a'; REVIEW_FILE_BYTES + 1]).unwrap();
         assert!(read(&path).is_err());
         assert!(read_selected(vec![path; 5]).is_err());
         std::fs::remove_dir_all(dir).unwrap();

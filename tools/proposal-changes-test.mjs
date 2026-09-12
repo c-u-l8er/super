@@ -21,7 +21,8 @@ test('comparison and rendering limits are explicit and counts remain complete',(
 test('plan-file attachment preserves exact source text and labels unverified matching',()=>{
  const task={id:'dt_1',revision:2,title:'Improve review',criteria:'Show changed lines.'};const draft='<script>example</script>\n';const text=taskFileAttachment(task,'review.html',draft);
  assert.ok(text.includes('dt_1 (revision 2)'));assert.ok(text.includes(task.criteria));assert.ok(text.endsWith(draft));assert.ok(text.includes('has not been verified'));
- assert.throws(()=>taskFileAttachment(task,'file','x'.repeat(32000)),/attachment limit/);
+ assert.throws(()=>taskFileAttachment(task,'file','x'.repeat(262144+16384)),/attachment limit/);
+ assert.ok(taskFileAttachment(task,'file','x'.repeat(262144)).length>262144,'a file at the review limit still fits with its plan');
 });
 
 test('attachment claims a repository match only for its exact plan receipt',()=>{

@@ -291,12 +291,18 @@ defmodule Ampd.Downgrade do
        is refused, not repaired: repair is the running runtime's decision.
     4. **Preflight.** Not downgradable → close, report, and every byte of the
        world is as it was.
-    5. **Back up** `loci.dets` to `loci.dets.before-downgrade-<utc>` and sync
-       the copy, so the state the new runtime wrote can be restored exactly.
+    5. **Back up** `loci.dets` to `loci.dets.before-downgrade-<utc>` — a name
+       created exclusively, so no backup is ever overwritten — sync the copy,
+       then sync the directory so the NAME is durable before anything changes.
     6. **Write** the converted state, `dets` sync, close, and sync the world
        directory so the rename-free rewrite is durable.
     7. **Read back** and compare the attempts to what was meant to be written.
-       A mismatch is reported as an error, with the backup path.
+
+  The report says which of three things happened: `mutation_began: false`
+  (an untouched refusal — every byte as it was), `mutation_began: true,
+  written: false` (a failure after the write started — restore from the named
+  backup with `restore/2` before any runtime opens the world), or `written:
+  true, verified: true`.
 
   Runs with `AMPD_DATA_DIR` pointed at `world` for its duration, because
   `Ampd.ReviewContent` resolves its blobs from `Ampd.Store.data_dir/0`. The
@@ -304,6 +310,7 @@ defmodule Ampd.Downgrade do
   """
   def run(world, opts \\ []) when is_binary(world) do
     now = Keyword.get(opts, :now, DateTime.utc_now())
+    Process.put(:ampd_downgrade_trace, Keyword.get(opts, :trace))
 
     with_data_dir(world, fn ->
       with :ok <- lock_free(world, Keyword.get(opts, :lock, :probe)),
@@ -311,10 +318,15 @@ defmodule Ampd.Downgrade do
            {:ok, s} <- read_state(world),
            {next, report} <- preflight(s),
            :ok <- downgradable(report) do
-        write_and_verify(world, next, report, now)
+        write_and_verify(world, next, report, now, opts)
       else
         {:refused, refusal, report} ->
-          {:refused, Map.merge(report, %{"written" => false, "refusal" => refusal})}
+          {:refused,
+           Map.merge(report, %{
+             "written" => false,
+             "mutation_began" => false,
+             "refusal" => refusal
+           })}
       end
     end)
   end
@@ -357,6 +369,7 @@ defmodule Ampd.Downgrade do
   defp store(world), do: Path.join(world, "loci.dets")
 
   defp open(world, access) do
+    trace({:open, access})
     file = String.to_charlist(store(world))
 
     case :dets.open_file(@tab, file: file, repair: false, access: access) do
@@ -388,54 +401,192 @@ defmodule Ampd.Downgrade do
     end
   end
 
-  defp write_and_verify(world, next, report, now) do
-    stamp = now |> DateTime.truncate(:second) |> DateTime.to_iso8601(:basic)
-    backup = store(world) <> ".before-downgrade-#{stamp}"
+  # The write, in phases, and the report says which phase failed.
+  #
+  #   backup   copy the store to a NEW name (exclusive create — never over an
+  #            existing backup), sync the copy, then sync the directory so the
+  #            NAME is durable too. Nothing about the world has changed yet:
+  #            a failure here is an untouched refusal.
+  #   write    open read-write, insert, sync, close, sync the directory.
+  #            From the insert on, the store may differ from the backup: a
+  #            failure here is reported as `mutation_began: true` with the
+  #            backup path and the phase, never as "nothing changed".
+  #   verify   re-open read-only and compare.
+  #
+  # `fail_at` is failure injection for the tests of exactly those boundaries.
+  # It returns the error the real step would; the bytes on disk up to that
+  # point are the bytes a crash there would leave.
+  defp write_and_verify(world, next, report, now, opts) do
+    fail_at = Keyword.get(opts, :fail_at)
 
-    with :ok <- copy_synced(store(world), backup),
+    with {:ok, backup} <- make_backup(world, now, fail_at),
+         report = Map.put(report, "backup", backup),
+         :ok <- inject(fail_at, :after_backup_durable),
          {:ok, tab} <- open(world, :read_write),
-         :ok <- :dets.insert(tab, {:state, next}),
-         :ok <- :dets.sync(tab),
-         :ok <- :dets.close(tab),
-         :ok <- sync_dir(world),
-         {:ok, again} <- read_state(world) do
-      if again["development_attempts"] == next["development_attempts"] do
-        {:ok, Map.merge(report, %{"written" => true, "verified" => true, "backup" => backup})}
+         :ok <- inject(fail_at, :after_open) do
+      # From here the store is being mutated.
+      report = Map.put(report, "mutation_began", true)
+
+      with :ok <- :dets.insert(tab, {:state, next}),
+           _ = trace(:insert),
+           :ok <- inject(fail_at, :after_insert),
+           :ok <- :dets.sync(tab),
+           _ = trace(:dets_sync),
+           :ok <- inject(fail_at, :after_sync),
+           :ok <- :dets.close(tab),
+           :ok <- inject(fail_at, :after_close),
+           :ok <- sync_dir(world),
+           :ok <- inject(fail_at, :before_verify),
+           {:ok, again} <- read_state(world) do
+        if again["development_attempts"] == next["development_attempts"] do
+          {:ok, Map.merge(report, %{"written" => true, "verified" => true, "phase" => "done"})}
+        else
+          {:refused,
+           Map.merge(report, %{
+             "written" => true,
+             "verified" => false,
+             "refusal" => "read-back-mismatch",
+             "phase" => "verify"
+           })}
+        end
       else
-        {:refused,
-         Map.merge(report, %{
-           "written" => true,
-           "verified" => false,
-           "refusal" => "read-back-mismatch",
-           "backup" => backup
-         })}
+        # The store may be partly written. Say so, and say what to do.
+        {:error, why} ->
+          _ = :dets.close(tab)
+          {:refused, after_mutation(report, why)}
+
+        {:refused, why, detail} ->
+          {:refused, after_mutation(Map.merge(report, detail), why)}
       end
     else
       {:error, why} ->
         {:refused,
-         Map.merge(report, %{"written" => false, "refusal" => to_string(why), "backup" => backup})}
-
-      {:refused, why, detail} ->
-        {:refused,
-         Map.merge(
-           report,
-           Map.merge(detail, %{"written" => true, "refusal" => why, "backup" => backup})
-         )}
+         Map.merge(report, %{
+           "written" => false,
+           "mutation_began" => false,
+           "refusal" => to_string(why),
+           "phase" => "backup"
+         })}
     end
   end
 
-  defp copy_synced(from, to) do
-    with :ok <- File.cp(from, to),
-         {:ok, fd} <- :file.open(String.to_charlist(to), [:read, :write, :raw, :binary]),
-         :ok <- :file.sync(fd),
-         :ok <- :file.close(fd) do
-      :ok
+  defp after_mutation(report, why) do
+    Map.merge(report, %{
+      "written" => false,
+      "mutation_began" => true,
+      "verified" => false,
+      "refusal" => to_string(why),
+      "phase" => "write",
+      "recover" =>
+        "The store may be partly written. Restore it from #{report["backup"]} " <>
+          "(Ampd.Downgrade.restore/2, or tools/downgrade-world.sh --restore) before any runtime opens it."
+    })
+  end
+
+  defp inject(nil, _), do: :ok
+  defp inject(at, at), do: {:error, "injected-failure-#{at}"}
+  defp inject(_, _), do: :ok
+
+  # `trace: pid` receives every durability step in the order it happens, so a
+  # test can pin the ORDER — backup contents, backup name, then the store —
+  # which no inspection of the disk afterwards can show.
+  defp trace(event) do
+    case Process.get(:ampd_downgrade_trace) do
+      pid when is_pid(pid) -> send(pid, {:downgrade, event})
+      _ -> :ok
+    end
+  end
+
+  # A backup under a name that did not exist: exclusive create, so two runs in
+  # one second — or a re-run after a failure — can never overwrite the copy
+  # that a recovery depends on. Contents synced, then the directory, so the
+  # name survives a crash as surely as the bytes.
+  defp make_backup(world, now, fail_at) do
+    stamp = now |> DateTime.truncate(:second) |> DateTime.to_iso8601(:basic)
+    base = store(world) <> ".before-downgrade-#{stamp}"
+
+    with {:ok, backup} <- create_exclusive(base, 0),
+         :ok <- inject(fail_at, :after_backup_created),
+         :ok <- copy_into(store(world), backup),
+         :ok <- inject(fail_at, :after_backup_copied),
+         :ok <- sync_file(backup),
+         :ok <- inject(fail_at, :after_backup_synced),
+         :ok <- sync_dir(world) do
+      {:ok, backup}
     else
+      {:error, why} when is_binary(why) -> {:error, why}
       {:error, why} -> {:error, "backup-failed-#{inspect(why)}"}
     end
   end
 
+  defp create_exclusive(base, n) when n < 1000 do
+    path = if n == 0, do: base, else: "#{base}-#{n}"
+
+    case :file.open(String.to_charlist(path), [:write, :exclusive, :raw, :binary]) do
+      {:ok, fd} ->
+        :ok = :file.close(fd)
+        {:ok, path}
+
+      {:error, :eexist} ->
+        create_exclusive(base, n + 1)
+
+      {:error, why} ->
+        {:error, "backup-create-failed-#{inspect(why)}"}
+    end
+  end
+
+  defp create_exclusive(_, _), do: {:error, "backup-create-failed-too-many-backups"}
+
+  defp copy_into(from, to) do
+    trace({:copy, Path.basename(from), Path.basename(to)})
+
+    case File.cp(from, to) do
+      :ok -> :ok
+      {:error, why} -> {:error, "backup-copy-failed-#{inspect(why)}"}
+    end
+  end
+
+  defp sync_file(path) do
+    trace({:sync_file, Path.basename(path)})
+
+    with {:ok, fd} <- :file.open(String.to_charlist(path), [:read, :write, :raw, :binary]),
+         :ok <- :file.sync(fd),
+         :ok <- :file.close(fd) do
+      :ok
+    else
+      {:error, why} -> {:error, "file-sync-failed-#{inspect(why)}"}
+    end
+  end
+
+  @doc """
+  Put a backup back, durably: copy over the store, sync the file and the
+  directory, then re-open the store read-only and prove it holds a state.
+
+  For the case the report names: a failure after the mutation began. The
+  backup is the store exactly as the newer runtime last wrote it.
+  """
+  def restore(world, backup) when is_binary(world) and is_binary(backup) do
+    with_data_dir(world, fn ->
+      with true <- File.exists?(backup) or {:error, "backup-absent"},
+           :ok <- lock_free(world, :probe),
+           :ok <- copy_into(backup, store(world)),
+           :ok <- sync_file(store(world)),
+           :ok <- sync_dir(world),
+           {:ok, s} <- read_state(world) do
+        {:ok, %{"restored_from" => backup, "attempts" => map_size(s["development_attempts"])}}
+      else
+        {:error, why} ->
+          {:refused, %{"refusal" => to_string(why), "restored_from" => backup}}
+
+        {:refused, why, detail} ->
+          {:refused, Map.merge(detail, %{"refusal" => why, "restored_from" => backup})}
+      end
+    end)
+  end
+
   defp sync_dir(dir) do
+    trace(:sync_dir)
+
     with {:ok, fd} <- :file.open(String.to_charlist(dir), [:read, :raw, :directory]),
          :ok <- :file.sync(fd),
          :ok <- :file.close(fd) do
@@ -461,7 +612,7 @@ defmodule Ampd.Downgrade do
   # ------------------------------------------------------------------ cli
 
   @doc """
-  `mix run --no-start -e 'Ampd.Downgrade.main(System.argv())' -- <world> [--report <file>] [--check] [--lock-held]`
+  `mix run --no-start -e 'Ampd.Downgrade.main(System.argv())' -- <world> [--report <file>] [--check] [--lock-held] [--restore <backup>]`
 
   Prints the report as JSON. Exit 0 when written and verified, 2 when refused,
   3 on a bad invocation. `--check` runs the preflight only and writes nothing.
@@ -470,14 +621,18 @@ defmodule Ampd.Downgrade do
   """
   def main(argv) do
     {opts, args, _} =
-      OptionParser.parse(argv, strict: [report: :string, check: :boolean, lock_held: :boolean])
+      OptionParser.parse(argv,
+        strict: [report: :string, check: :boolean, lock_held: :boolean, restore: :string]
+      )
 
     case args do
       [world] ->
         result =
-          if opts[:check],
-            do: check(Path.expand(world)),
-            else: run(Path.expand(world), lock: if(opts[:lock_held], do: :held, else: :probe))
+          cond do
+            opts[:restore] -> restore(Path.expand(world), Path.expand(opts[:restore]))
+            opts[:check] -> check(Path.expand(world))
+            true -> run(Path.expand(world), lock: if(opts[:lock_held], do: :held, else: :probe))
+          end
 
         {status, report} = result
         json = JSON.encode!(report)

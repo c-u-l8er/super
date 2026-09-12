@@ -889,10 +889,10 @@ fn file_basis(
     draft: &str,
     proposed: Option<&str>,
 ) -> Result<Value, String> {
-    if draft.len() > 24000
+    if draft.len() > crate::attachments::REVIEW_FILE_BYTES
         || draft.contains('\0')
         || original.is_some_and(|s| s.len() > FILE_LIMIT || s.contains('\0'))
-        || proposed.is_some_and(|s| s.len() > 32000 || s.contains('\0'))
+        || proposed.is_some_and(|s| s.len() > crate::attachments::REVIEW_FILE_BYTES || s.contains('\0'))
     {
         return Err("This file exceeds the plan-linked snapshot limits.".into());
     }
@@ -1279,7 +1279,7 @@ mod tests {
         symlink(s.0.join("seed"), s.0.join("alias")).unwrap();
         assert!(basis(&w, g, "alias", None, "", None).is_err());
         assert!(basis(&w, g, "../outside", None, "", None).is_err());
-        assert!(basis(&w, g, "new.txt", Some(""), &"x".repeat(24001), None).is_err());
+        assert!(basis(&w, g, "new.txt", Some(""), &"x".repeat(crate::attachments::REVIEW_FILE_BYTES + 1), None).is_err());
     }
     #[test]
     fn review_separates_index_worktree_and_untracked_without_writes() {

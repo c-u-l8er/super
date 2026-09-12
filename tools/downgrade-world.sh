@@ -3,9 +3,13 @@
 # open it, durably, or refuse and change nothing.
 #
 #   tools/downgrade-world.sh <world-dir> [--check] [--report <file>]
+#   tools/downgrade-world.sh <world-dir> --restore <backup>
 #
-# Exit 0: converted, synced and read back (or --check: downgradable).
-# Exit 2: refused — the report on stdout says why, and the world is untouched.
+# Exit 0: converted, synced and read back (or --check: downgradable; or
+#         --restore: the backup is back, synced, and reads as a state).
+# Exit 2: refused — the report on stdout says why. `mutation_began:false` means
+#         the world is untouched; `mutation_began:true` means the write failed
+#         part-way and the report names the backup to --restore from.
 # Exit 3: bad invocation.  Exit 75: the world is locked (a host is running).
 #
 # The lock is the same flock(2) a host holds for its lifetime, taken here for
@@ -19,7 +23,7 @@
 set -euo pipefail
 here=$(cd "$(dirname "$0")/.." && pwd)
 if [[ $# -lt 1 || $1 == -* ]]; then
-  echo "usage: tools/downgrade-world.sh <world-dir> [--check] [--report <file>]" >&2
+  echo "usage: tools/downgrade-world.sh <world-dir> [--check] [--report <file>] [--restore <backup>]" >&2
   exit 3
 fi
 world=$(cd "$1" && pwd)
