@@ -162,7 +162,12 @@ try {
   await click('#bot-file-set-record');
   const savedSet=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_attempts??{}).find(a=>a.schema==='development-review-set@1')`));
   await until(()=>script(`return document.querySelector('#bot-file-set-record').textContent==='Combined review saved'`));
-  check('one saved review retains both exact files without staging or writing',savedSet.files.length===2&&savedSet.files[0].shared_draft==='<h1>Before task</h1>\n'&&savedSet.files[1].proposed_text==='h1 { color: blue; }\n'&&await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n');photo('06_Combined_Review_Saved');
+  // Bodies are not in the projection any more: a member names its content by
+  // digest and the page reads it back through the `review_content` host
+  // command. The smoke reads it the same way, so what is asserted is what a
+  // person opening the review would see, not a field the frame stopped carrying.
+  const body=async ref=>{const r=await script(`return window.__TAURI__.core.invoke('review_content',{digest:arguments[0]})`,[ref.digest]);return r?.state==='available'?r.content:null;};
+  check('one saved review names both exact files by digest, published and readable, without staging or writing',savedSet.files.length===2&&savedSet.files.every(f=>f.content?.held==='staged'&&f.content.current.state==='available'&&!('shared_draft' in f))&&await body(savedSet.files[0].content.current)==='<h1>Before task</h1>\n'&&await body(savedSet.files[1].content.proposed)==='h1 { color: blue; }\n'&&await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n');photo('06_Combined_Review_Saved');
   check('successful recording disables duplicate submission',await script(`return document.querySelector('#bot-file-set-record').disabled&&Object.keys(window.cockpit.frame.projection.development_attempts).length===1`));
   await click('#bot-file-set-stage');await until(()=>script(`return !document.querySelector('#bot-file-set-review')`));
   check('one action stages both drafts without writing either file',await script(`return (document.querySelector('[data-screen=editor] .workbench-tabs').textContent.match(/●/g)||[]).length===2&&document.querySelector('#editor-content').textContent.includes('After task')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n'&&readFileSync(testRepo+'/style.css','utf8')==='h1 { color: red; }\n');photo('04_Staged_Drafts');
@@ -181,7 +186,9 @@ try {
   await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=development-tasks]');await click('#development-task-list article button');
   await click('[data-attempt-id="'+savedSet.id+'"] > summary');
   await click('[data-attempt-id="'+savedSet.id+'"] > details > summary');
-  check('plan exposes both retained files and combined test controls',await script(`const c=document.querySelector('[data-attempt-id="'+arguments[0]+'"]');return c.querySelectorAll('[data-retained-file]').length===2&&c.textContent.includes('Before task')&&c.textContent.includes('blue')&&!c.querySelector('[id^=attempt-check-]')&&!!c.querySelector('[id^=attempt-run-]')&&c.textContent.includes('one snapshot')`,[savedSet.id]));
+  // The retained bodies are fetched when the section opens, so they arrive a
+  // moment after the controls do.
+  check('plan exposes both retained files and combined test controls',await until(()=>script(`const c=document.querySelector('[data-attempt-id="'+arguments[0]+'"]');return c.querySelectorAll('[data-retained-file]').length===2&&c.textContent.includes('Before task')&&c.textContent.includes('blue')&&!c.querySelector('[id^=attempt-check-]')&&!!c.querySelector('[id^=attempt-run-]')&&c.textContent.includes('one snapshot')`,[savedSet.id]),15000));
   await script(`document.querySelector('[data-attempt-id="'+arguments[0]+'"] > details').scrollIntoView({block:'start'})`,[savedSet.id]);photo('07_Retained_Files');
   await script(`document.querySelector('#attempt-status-'+arguments[0]).value='needs_changes'`,[savedSet.id]);await type('#attempt-note-'+savedSet.id,'Check the CSS contrast before combined testing.');await click('[data-attempt-id="'+savedSet.id+'"] form button');
   await until(()=>script(`return window.cockpit.frame.projection.development_attempts[arguments[0]].revision===2`,[savedSet.id]));

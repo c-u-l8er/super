@@ -8,6 +8,21 @@ defmodule Ampd.Application do
     # that is absent afterwards is *lost*, not new.
     Ampd.Bootstrap.new_world!()
 
+    # Interrupted review-content uploads belong to an uploader that died with
+    # this runtime's last incarnation and cannot be resumed or verified, so
+    # they are discarded here, once, as the world opens. Published blobs are
+    # never touched. `ReviewContent.recover/0` was documented as running "when
+    # a world opens" and had no caller: an actual process restart in the
+    # cockpit left the `.partial` in place (measured 2026-09-12).
+    case Ampd.ReviewContent.recover() do
+      %{"discarded" => 0} ->
+        :ok
+
+      %{"discarded" => n, "bytes" => bytes} ->
+        require Logger
+        Logger.info("ampd: discarded #{n} interrupted review-content upload(s), #{bytes} bytes")
+    end
+
     # Before any child that can tick it — see `Ampd.ViewClock`.
     Ampd.ViewClock.init()
 

@@ -107,6 +107,7 @@ defmodule Ampd.ReviewContentTest do
     assert 64 * 1024 < Frame.max_bytes()
 
     four = JSON.encode!(Map.new([maximal_inline_attempt("da_0001")]))
+
     assert byte_size(four) > 64 * 1024,
            "even ONE maximal inline set exceeds the collection budget, so it is " <>
              "the store that refuses, with attempt-directory-full"
@@ -217,6 +218,24 @@ defmodule Ampd.ReviewContentTest do
     {:ok, done} = ReviewContent.put(d, 40, binary_part(bytes, 40, 60), true)
     assert done["complete"]
     assert ReviewContent.fetch(d) == {:ok, bytes}
+  end
+
+  test "recovery RUNS when the runtime starts: an actual application restart discards the partial" do
+    # `recover/0` existed and was documented as running when a world opens, and
+    # nothing called it. The cockpit smoke restarted the process and found the
+    # `.partial` still there. This restarts the application the way a runtime
+    # boot does and asserts the wiring, not the function.
+    {kept, {:ok, _}} = stage("survives the restart")
+    File.mkdir_p!(ReviewContent.staging())
+    partial = Path.join(ReviewContent.staging(), String.duplicate("f", 64) <> ".partial")
+    File.write!(partial, "an upload the runtime died in the middle of")
+
+    :ok = Application.stop(:ampd)
+    assert File.exists?(partial), "stopping discards nothing"
+    {:ok, _} = Application.ensure_all_started(:ampd)
+
+    refute File.exists?(partial), "the restart discarded the interrupted upload"
+    assert ReviewContent.verify(kept) == :available, "and kept every published blob"
   end
 
   test "recovery discards interrupted uploads and keeps every published blob" do

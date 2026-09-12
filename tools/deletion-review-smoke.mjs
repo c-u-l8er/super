@@ -168,7 +168,12 @@ try {
   await click('#bot-file-set-record');
   const savedSet=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_attempts??{}).find(a=>a.schema==='development-review-set@1')`));
   await until(()=>script(`return document.querySelector('#bot-file-set-record').textContent==='Combined review saved'`));
-  check('one saved review retains both exact files without staging or writing',savedSet.files.length===2&&savedSet.files[0].shared_draft==='<h1>Before task</h1>\n'&&savedSet.files[1].proposed_text===null&&savedSet.files[1].source.schema==='selected-file-deletion-basis@1'&&await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n');photo('06_Combined_Review_Saved');
+  // Bodies are not in the projection any more: a member names its content by
+  // digest and the page reads it back through the `review_content` host
+  // command. The smoke reads it the same way, so what is asserted is what a
+  // person opening the review would see, not a field the frame stopped carrying.
+  const body=async ref=>{const r=await script(`return window.__TAURI__.core.invoke('review_content',{digest:arguments[0]})`,[ref.digest]);return r?.state==='available'?r.content:null;};
+  check('one saved review names both exact files by digest, the deletion with no proposed side, without staging or writing',savedSet.files.length===2&&savedSet.files.every(f=>f.content?.held==='staged'&&f.content.current.state==='available'&&!('shared_draft' in f))&&await body(savedSet.files[0].content.current)==='<h1>Before task</h1>\n'&&savedSet.files[1].content.proposed===null&&savedSet.files[1].source.schema==='selected-file-deletion-basis@1'&&await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n');photo('06_Combined_Review_Saved');
   check('successful recording disables duplicate submission',await script(`return document.querySelector('#bot-file-set-record').disabled&&Object.keys(window.cockpit.frame.projection.development_attempts).length===1`));
 
   await click('#bot-file-set-cancel');

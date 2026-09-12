@@ -583,9 +583,30 @@ mod recovery_tests {
 /// **Missing or corrupt content fails the whole operation.** There is no
 /// fallback to the working tree: a test or an acceptance run against bytes
 /// nobody reviewed is worse than one that does not happen.
-fn resolve_review_bodies(attempt: &Value) -> Result<Value, String> {
+///
+/// **Every consumer of a record's bodies goes through here** — test start,
+/// acceptance check, accepted build, preview launch and the accepted-source
+/// verification in `main.rs`. The first version applied it to the first two
+/// only; driving the cockpit showed a staged set that tested and was accepted
+/// and whose accepted build then failed with "Review text exceeds its bounds."
+/// — the runner's shape assertion reading a body that was never resolved.
+pub(crate) fn resolve_review_bodies(attempt: &Value) -> Result<Value, String> {
+    resolve_review_bodies_in(
+        attempt,
+        &crate::worker::world_dir().join("review-content").join("blobs"),
+    )
+}
+
+/// The resolver over an explicit blob directory.
+///
+/// **The directory is a parameter so that a unit test never computes the
+/// product world path.** The first version of these tests called
+/// `worker::world_dir()` under `cargo test`, where nothing sets
+/// `SUPER_WORLD_MODE`, and published their fixtures into
+/// `~/.local/state/super/worlds/default/review-content/blobs` — the user's
+/// real world — which is where four test strings were found on 2026-09-12.
+fn resolve_review_bodies_in(attempt: &Value, blobs: &Path) -> Result<Value, String> {
     let mut attempt = attempt.clone();
-    let blobs = crate::worker::world_dir().join("review-content").join("blobs");
 
     let read = |digest: &Value, path: &str, side: &str| -> Result<String, String> {
         let d = digest.as_str().unwrap_or_default();
@@ -826,11 +847,20 @@ mod review_content_tests {
         format!("{:x}", h.finalize())
     }
 
-    /// Publish a blob where `resolve_review_bodies` will look for it.
-    fn publish(body: &str) -> String {
+    /// A blob directory private to one test. Never the product world: see
+    /// `resolve_review_bodies_in`.
+    fn blobs(name: &str) -> PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("super-review-content-test-{}", std::process::id()))
+            .join(name);
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// Publish a blob where `resolve_review_bodies_in` will look for it.
+    fn publish(blobs: &Path, body: &str) -> String {
         let d = sha(body.as_bytes());
-        let blobs = crate::worker::world_dir().join("review-content").join("blobs");
-        fs::create_dir_all(&blobs).unwrap();
         fs::write(blobs.join(&d), body).unwrap();
         d
     }
@@ -846,8 +876,9 @@ mod review_content_tests {
 
     #[test]
     fn resolves_staged_bodies_and_leaves_inline_members_alone() {
-        publish("current text");
-        publish("proposed text");
+        let blobs = blobs("resolves");
+        publish(&blobs, "current text");
+        publish(&blobs, "proposed text");
         let inline = json!({
             "source": {"path": "b.js", "schema": "selected-file-basis@1"},
             "shared_draft": "kept as it is",
@@ -855,7 +886,7 @@ mod review_content_tests {
         });
         let attempt = json!({"files": [member("a.js", "current text", "proposed text"), inline]});
 
-        let out = resolve_review_bodies(&attempt).expect("resolves");
+        let out = resolve_review_bodies_in(&attempt, &blobs).expect("resolves");
         let files = out["files"].as_array().unwrap();
         assert_eq!(files[0]["shared_draft"], "current text");
         assert_eq!(files[0]["proposed_text"], "proposed text");
@@ -866,28 +897,29 @@ mod review_content_tests {
     #[test]
     fn missing_content_fails_the_whole_operation_rather_than_falling_back() {
         let attempt = json!({"files": [member("gone.js", "never published", "nor this")]});
-        let e = resolve_review_bodies(&attempt).expect_err("must refuse");
+        let e = resolve_review_bodies_in(&attempt, &blobs("missing")).expect_err("must refuse");
         assert!(e.contains("gone.js"), "the message names the file: {e}");
         assert!(e.contains("no longer stored"), "and says which fault it is: {e}");
     }
 
     #[test]
     fn content_that_no_longer_hashes_to_its_name_is_refused_as_corrupt() {
-        let d = publish("honest bytes");
-        let blobs = crate::worker::world_dir().join("review-content").join("blobs");
+        let blobs = blobs("corrupt");
+        let d = publish(&blobs, "honest bytes");
         fs::write(blobs.join(&d), "tampered bytes").unwrap();
 
         let attempt = json!({"files": [member("a.js", "honest bytes", "honest bytes")]});
-        let e = resolve_review_bodies(&attempt).expect_err("must refuse");
+        let e = resolve_review_bodies_in(&attempt, &blobs).expect_err("must refuse");
         assert!(e.contains("no longer matches its digest"), "{e}");
     }
 
     #[test]
     fn a_deletion_member_resolves_its_current_side_and_a_null_proposal() {
-        publish("about to be deleted");
+        let blobs = blobs("deletion");
+        publish(&blobs, "about to be deleted");
         let mut m = member("gone.js", "about to be deleted", "");
         m["source"]["schema"] = json!("selected-file-deletion-basis@1");
-        let out = resolve_review_bodies(&json!({"files": [m]})).expect("resolves");
+        let out = resolve_review_bodies_in(&json!({"files": [m]}), &blobs).expect("resolves");
         assert_eq!(out["files"][0]["shared_draft"], "about to be deleted");
         assert!(out["files"][0]["proposed_text"].is_null());
     }
@@ -896,7 +928,7 @@ mod review_content_tests {
     fn a_name_that_is_not_a_digest_cannot_reach_the_filesystem() {
         let mut m = member("a.js", "x", "y");
         m["source"]["draft_sha256"] = json!("../../../../etc/passwd");
-        let e = resolve_review_bodies(&json!({"files": [m]})).expect_err("must refuse");
+        let e = resolve_review_bodies_in(&json!({"files": [m]}), &blobs("traversal")).expect_err("must refuse");
         assert!(e.contains("not named by a digest"), "{e}");
     }
 }

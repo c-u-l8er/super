@@ -308,9 +308,16 @@ defmodule Ampd.Projection do
   # what a list, a count and an attention computation need, and the bodies are
   # fetched on demand by whoever is actually reading a diff.
   #
-  # This applies to INLINE members too, not only staged ones. The overflow is a
-  # property of what is published, not of how the content was submitted, and
-  # records written before staging existed are the ones already in the world.
+  # INLINE members keep their bodies. They are bounded by the store: the
+  # `persist/2` admission limit caps the whole persisted collection at 64 KiB,
+  # so inline bodies can never take a frame past its 256 KiB (the overflow this
+  # was first written against was retracted at cf3931f — the store refuses
+  # first). And they have nowhere else to be read from: an inline member's
+  # bytes live in the record, not in the content store, so a projection that
+  # dropped them left the plan page and every single-file attempt written
+  # before staging existed showing "no longer stored" for content that was
+  # right there. Measured through the cockpit: recording a single-file attempt
+  # published no `shared_draft`, and the page could not read it back.
   defp attempt_views(attempts) when is_map(attempts),
     do: Map.new(attempts, fn {id, a} -> {id, attempt_view(a)} end)
 
@@ -330,7 +337,7 @@ defmodule Ampd.Projection do
     deletion? = source["schema"] == "selected-file-deletion-basis@1"
 
     row
-    |> Map.drop(~w(shared_draft proposed_text))
+    |> bodies_for(inline?)
     |> Map.put("content", %{
       "schema" => "review-content-ref@1",
       "held" => if(inline?, do: "inline", else: "staged"),
@@ -345,12 +352,16 @@ defmodule Ampd.Projection do
 
   defp member_view(row), do: row
 
+  # Named rather than a capture inside `then/2`: the ordered-closure census
+  # cannot follow a computed callee, and this runs inside the total order.
+  defp bodies_for(row, true), do: row
+  defp bodies_for(row, false), do: Map.drop(row, ~w(shared_draft proposed_text))
+
   defp content_ref(inline?, digest, bytes) do
     %{
       "digest" => digest,
       "bytes" => bytes,
-      "state" =>
-        if(inline?, do: "available", else: to_string(Ampd.ReviewContent.status(digest)))
+      "state" => if(inline?, do: "available", else: to_string(Ampd.ReviewContent.status(digest)))
     }
   end
 

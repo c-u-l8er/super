@@ -118,7 +118,7 @@ try {
   if(process.env.SUPER_VISUAL_EVIDENCE_DIR)await script(`document.querySelector(arguments[0])?.scrollIntoView({block:'center'})`,["#development-task-detail form"]);check('page reload reopens durable plan and blocker history',await script(`return document.querySelector('#development-task-detail').textContent.includes('Waiting for review guidance')`));
   await click('#development-task-detail [data-record-open^="goal:"]');
   if(process.env.SUPER_VISUAL_EVIDENCE_DIR)await script(`document.querySelector(arguments[0])?.scrollIntoView({block:'center'})`,["[data-development-task]"]);check('goal record links back to its development plan',await script(`return !!document.querySelector('[data-development-task="'+arguments[0]+'"]')`,[task.id]));
-  await click('[data-development-task="'+task.id+'"]');
+  await click('[data-screen=record] [data-development-task="'+task.id+'"]');
   check('goal backlink opens the same task',await script(`return !document.querySelector('#development-tasks').hidden&&document.querySelector('#development-task-detail').textContent.includes(arguments[0])`,[task.id]));
   if(shots){mkdirSync(shots,{recursive:true});execFileSync('/usr/bin/python3',[`${root}/tools/development-capture-window.py`,String(driver.pid),resolve(shots,'Super_Development_Task.png')]);}
   await click('#task-prepare-file');
@@ -206,6 +206,8 @@ try {
   await script(`[...document.querySelectorAll('.bot-proposal button')].filter(b=>b.textContent==='Review in Editor').at(-1).click()`);
   await until(()=>script(`return !!document.querySelector('#bot-file-review[open]')&&!document.querySelector('#bot-file-use-draft').disabled`));
   await click('#bot-file-use-draft');await until(()=>script(`return !document.querySelector('#bot-file-review')`));await click('#editor-save');await until(()=>script(`return document.querySelector('#editor-save').disabled`));
+  // The control disables before the host's write lands; wait for the bytes, as the change-set smoke does.
+  await until(()=>readFileSync(testRepo+'/index.html','utf8')===proposedText);
   check('explicit Save writes the proposal before acceptance',readFileSync(testRepo+'/index.html','utf8')===proposedText);
   await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=development-tasks]');
   if(!await script(`return !!document.querySelector('[data-attempt-id="'+arguments[0]+'"]')`,[attempt.id]))await click('#development-task-list article button');

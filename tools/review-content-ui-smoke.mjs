@@ -1,9 +1,14 @@
 
-// End-to-end plan/file fixture flow. Run via tools/native-ui-test.sh.
+// Review content through the real UI: a change set whose files the old inline
+// shape could not carry, its bodies published by digest and read back; the
+// plan page and the test runner REFUSING when the reviewed content is missing
+// or corrupt, and recovering when it is restored; and an actual process
+// restart discarding an interrupted upload while keeping published content
+// and the record that names it. Run via tools/native-ui-test.sh.
 /* Product flow in an isolated world; explicitly removes the disposable local test cache to verify runtime-only recovery. No runtime resets. */
 import { spawn, execFileSync as run } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
@@ -12,17 +17,23 @@ const port = Number(process.env.APP_SMOKE_PORT ?? 4464);
 const base = `http://127.0.0.1:${port}`;
 const shots = process.env.APP_SMOKE_SCREENSHOTS;
 const proposedText=process.env.SUPER_TEXT_CHECK_ISSUES==='1'?'<h1>After task</h1> \n':'<h1>After task</h1>\n';
+// The largest files the PAGE can put into a review today. The runtime records
+// members of any size up to 4 MiB (the cockpit.js case in
+// review_content_record_test), but the page's own limits are the old caps:
+// `related-files.js` and the Editor's Discuss route refuse to hand a bot a file
+// over 24 000 bytes, and `file-proposal.js` refuses a bot's proposed file over
+// 32 000 ("The file proposal is invalid or too large."). So this stays just
+// under both, and the headline case — reviewing cockpit.js — has no route
+// through the page yet. Measured 2026-09-12; the caps are a prompt-size
+// decision and are not changed here.
+const pad=(n,tag)=>{let s='';for(let i=0;s.length<n;i++)s+=`/* ${tag} padding line ${i} */\n`;return s;};
+const currentCss='h1 { color: red; }\n'+pad(20000,'current');
+const proposedCss='h1 { color: blue; }\n'+pad(28000,'proposed');
 const expectedTextOutcome=process.env.SUPER_TEXT_CHECK_ISSUES==='1'?'fail':'pass';
 const testData=mkdtempSync((process.env.DEVELOPMENT_TEST_ROOT??'/tmp')+'/super-app-smoke-');
 const testRoot=process.env.DEVELOPMENT_TEST_ROOT;if(!testRoot)throw Error('Set DEVELOPMENT_TEST_ROOT to a disposable folder visible to the native chooser.');
-const testRepo=mkdtempSync(testRoot+'/plan-repository-');run('git',['init','-q',testRepo]);writeFileSync(testRepo+'/index.html','<h1>Before task</h1>\n');writeFileSync(testRepo+'/style.css','h1 { color: red; }\n');
-mkdirSync(testRepo+'/tools');writeFileSync(testRepo+'/tools/proposal-test.mjs',"import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';test('combined page and style',async()=>{await new Promise(r=>setTimeout(r,1200));assert.equal(fs.readFileSync('index.html','utf8'),'<h1>After task</h1>\\n');assert.equal(fs.readFileSync('style.css','utf8'),'h1 { color: blue; }\\n');});");
-mkdirSync(testRepo+'/cockpit/src',{recursive:true});mkdirSync(testRepo+'/ampd');
-writeFileSync(testRepo+'/cockpit/Cargo.toml','[package]\nname="super-cockpit"\nversion="0.1.0"\nedition="2021"\n');
-writeFileSync(testRepo+'/cockpit/Cargo.lock','version = 4\n[[package]]\nname = "super-cockpit"\nversion = "0.1.0"\n');
-writeFileSync(testRepo+'/cockpit/src/main.rs','fn main(){if std::env::var("SUPER_BUILD_PREVIEW").as_deref()==Ok("1"){if std::path::Path::new("'+testRepo+'/preview-fail-trigger").exists(){eprintln!("Preview fixture could not open its runtime");std::process::exit(23);}let data=std::env::var("XDG_DATA_HOME").unwrap();std::fs::create_dir_all(&data).unwrap();assert_eq!(std::env::var("SUPER_WORLD_MODE").unwrap(),"ephemeral");assert!(std::env::var("SUPER_WORLD").is_err());std::fs::write(format!("{}/preview-proof",data),std::env::var("AMPD_DIR").unwrap()).unwrap();eprintln!("[super-preview-frame-painted@1]");loop{std::thread::sleep(std::time::Duration::from_secs(1));}}print!("{}{}",include_str!("../../index.html"),include_str!("../../style.css"));}');
-writeFileSync(testRepo+'/cockpit/build.rs','fn main(){assert!(std::env::var("SUPER_BUILD_SECRET").is_err());assert!(std::fs::write("/snapshot/forbidden","x").is_err());assert!(!std::path::Path::new("'+testRepo+'").exists());std::thread::sleep(std::time::Duration::from_secs(2));}');
-writeFileSync(testRepo+'/ampd/mix.exs','defmodule BuildFixture.MixProject do\n use Mix.Project\n def project, do: [app: :build_fixture, version: "0.1.0"]\nend\n');
+const testRepo=mkdtempSync(testRoot+'/plan-repository-');run('git',['init','-q',testRepo]);writeFileSync(testRepo+'/index.html','<h1>Before task</h1>\n');writeFileSync(testRepo+'/style.css',currentCss);
+mkdirSync(testRepo+'/tools');writeFileSync(testRepo+'/tools/proposal-test.mjs',"import test from 'node:test';import assert from 'node:assert/strict';import fs from 'node:fs';test('proposed page',async()=>{await new Promise(r=>setTimeout(r,1200));assert.equal(fs.readFileSync('index.html','utf8'),'<h1>After task</h1>\\n');});");
 run('git',['-C',testRepo,'add','index.html']);run('git',['-C',testRepo,'-c','user.name=Super fixture','-c','user.email=fixture@example.invalid','commit','-qm','Starting file']);
 const wrongRepo=mkdtempSync(testRoot+'/other-repository-');run('git',['init','-q',wrongRepo]);writeFileSync(wrongRepo+'/index.html','<h1>Before task</h1>\n');
 let driver = spawn('tauri-driver', ['--port', String(port), '--native-port', String(port + 1), '--native-driver', '/usr/bin/WebKitWebDriver'], {
@@ -37,7 +48,7 @@ const botFixture = createServer((req, res) => {
     lastBotRequest = JSON.parse(data); chatCalls++;
     if (lastBotRequest.messages.at(-1).content === 'Trigger provider error') { res.writeHead(503); res.end('{}'); return; }
     res.writeHead(200, {'content-type':'application/json'});
-    if(lastBotRequest.messages.at(-1).content.includes('Make the planned edit')){res.end(JSON.stringify({message:{role:'assistant',content:'Review the planned change.',tool_calls:[{function:{name:'propose_file_edit',arguments:{path:'index.html',content:proposedText}}},{function:{name:'propose_file_edit',arguments:{path:'style.css',content:'h1 { color: blue; }\n'}}}]},done:true}));return;}
+    if(lastBotRequest.messages.at(-1).content.includes('Make the planned edit')){res.end(JSON.stringify({message:{role:'assistant',content:'Review the planned change.',tool_calls:[{function:{name:'propose_file_edit',arguments:{path:'index.html',content:proposedText}}},{function:{name:'propose_file_edit',arguments:{path:'style.css',content:proposedCss}}}]},done:true}));return;}
     const ref=lastBotRequest.messages[0].content.match(/ws_\d+/)?.[0]??'';
     res.end(JSON.stringify({message:{role:'assistant',content:`I can propose a workspace for you to review. Related workspace: ${ref}`,tool_calls:[{function:{name:'open_workspace',arguments:{name:'Bot proposed workspace'}}}]},done:true}));
   });
@@ -110,12 +121,7 @@ try {
   await click('#bot-work [data-record-open^="worker:"]');
   check('Worker link opens the actual worker record',await script(`return document.querySelector('[data-screen=record]').dataset.recordKey==='worker:'+arguments[0]`,[worker.id]));
   await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=development-tasks]');
-  await type('#task-title','Highlight changed ranges');await type('#task-criteria','Changed lines are visible and Cancel preserves the draft.');
-  await click('#task-required-checks input');await click('#development-task-form button');
-  check('new plans cannot omit all required checks',await script(`return document.querySelector('#development-task-form').parentElement.textContent.includes('Choose at least one required check.')&&Object.keys(window.cockpit.frame.projection.development_tasks??{}).length===0`));
-  await click('#task-required-checks input');
-  if(shots){mkdirSync(shots,{recursive:true});execFileSync('/usr/bin/python3',[`${root}/tools/development-capture-window.py`,String(driver.pid),resolve(shots,'00_Required_Check_Selection.png')]);}
-  await click('#development-task-form button');
+  await type('#task-title','Highlight changed ranges');await type('#task-criteria','Changed lines are visible and Cancel preserves the draft.');await click('#development-task-form button');
   const task=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_tasks??{}).find(t=>t.title==='Highlight changed ranges')`));
   await until(()=>script(`return document.querySelector('#development-task-detail').textContent.includes('Plan history')`));
   check('task creation binds the selected lane and bot',task.lane_ref===lane.id&&task.bot_ref===bot.id&&task.status==='planned');
@@ -164,12 +170,12 @@ try {
   check('narrow combined review keeps both file choices and staging accessible',await script(`const d=document.querySelector('#bot-file-set-review'),b=d.querySelector('#bot-file-set-stage');return d.getBoundingClientRect().width<=innerWidth&&b.getBoundingClientRect().bottom<=innerHeight&&d.querySelectorAll('[data-proposal-set-path]').length===2`));
   await wd('POST',`/session/${session}/window/rect`,{width:1280,height:850});
   await click('#bot-file-set-cancel');
-  check('cancelling leaves every editor draft and disk file unchanged',await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n'&&readFileSync(testRepo+'/style.css','utf8')==='h1 { color: red; }\n');
+  check('cancelling leaves every editor draft and disk file unchanged',await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n'&&readFileSync(testRepo+'/style.css','utf8')===currentCss);
   await click('[data-rail-mode=bots]');await click(`#rail-bots [data-nav="${route}"]`);await click('[data-review-file-set]');
   writeFileSync(testRepo+'/style.css','External CSS edit\n');await click('#bot-file-set-stage');
   await until(()=>script(`return document.querySelector('#bot-file-set-review [role=status]').textContent.includes('changed on disk')`));
   check('changed second file refuses the whole set with no first-file staging',await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/style.css','utf8')==='External CSS edit\n');photo('03_Conflict_Refused');
-  writeFileSync(testRepo+'/style.css','h1 { color: red; }\n');
+  writeFileSync(testRepo+'/style.css',currentCss);
   await click('#bot-file-set-record');
   const savedSet=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_attempts??{}).find(a=>a.schema==='development-review-set@1')`));
   await until(()=>script(`return document.querySelector('#bot-file-set-record').textContent==='Combined review saved'`));
@@ -178,87 +184,49 @@ try {
   // command. The smoke reads it the same way, so what is asserted is what a
   // person opening the review would see, not a field the frame stopped carrying.
   const body=async ref=>{const r=await script(`return window.__TAURI__.core.invoke('review_content',{digest:arguments[0]})`,[ref.digest]);return r?.state==='available'?r.content:null;};
-  check('one saved review names both exact files by digest, published and readable, without staging or writing',savedSet.files.length===2&&savedSet.files.every(f=>f.content?.held==='staged'&&f.content.current.state==='available'&&!('shared_draft' in f))&&await body(savedSet.files[0].content.current)==='<h1>Before task</h1>\n'&&await body(savedSet.files[1].content.proposed)==='h1 { color: blue; }\n'&&await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n');photo('06_Combined_Review_Saved');
+  check('one saved review names both exact files by digest, published and readable, without staging or writing',savedSet.files.length===2&&savedSet.files.every(f=>f.content?.held==='staged'&&f.content.current.state==='available'&&!('shared_draft' in f))&&await body(savedSet.files[0].content.current)==='<h1>Before task</h1>\n'&&await body(savedSet.files[1].content.proposed)===proposedCss&&await script(`return !document.querySelector('[data-screen=editor] .workbench-tabs').textContent.includes('●')`)&&readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n');photo('06_Combined_Review_Saved');
   check('successful recording disables duplicate submission',await script(`return document.querySelector('#bot-file-set-record').disabled&&Object.keys(window.cockpit.frame.projection.development_attempts).length===1`));
 
+  // ---------------------------------------------------------------- bodies
+  const blobsDir=testData+'/state/super/worlds/durable-set-fixture/review-content/blobs';
+  const stagingDir=testData+'/state/super/worlds/durable-set-fixture/review-content/staging';
+  const cur=savedSet.files[1].content.current,prop=savedSet.files[1].content.proposed;
+  check('the largest files the page allows (20 KB current, 28 KB proposed) are recorded by digest, not carried',cur.bytes===Buffer.byteLength(currentCss)&&cur.bytes>20000&&prop.bytes===Buffer.byteLength(proposedCss)&&prop.bytes>28000&&savedSet.files.every(f=>f.content.held==='staged'&&!('shared_draft' in f)));
+  check('both bodies are published blobs that read back byte-for-byte through the host command',readFileSync(blobsDir+'/'+cur.digest,'utf8')===currentCss&&await body(prop)===proposedCss);
   await click('#bot-file-set-cancel');
-  async function openReview(){await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=development-tasks]');if(await script(`return !!document.querySelector('#development-task-list article button')?.getClientRects().length`))await click('#development-task-list article button');await until(()=>script(`return !!document.querySelector('[data-attempt-id="'+arguments[0]+'"]')`,[savedSet.id]));if(!await script(`return document.querySelector('[data-attempt-id="'+arguments[0]+'"]')?.open`,[savedSet.id]))await click('[data-attempt-id="'+savedSet.id+'"] > summary');}
+  async function openReview(){await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=development-tasks]');if(await script(`return !!document.querySelector('#development-task-list article button')?.getClientRects().length`))await click('#development-task-list article button');await until(()=>script(`return !!document.querySelector('[data-attempt-id="'+arguments[0]+'"]')`,[savedSet.id]));if(!await script(`return document.querySelector('[data-attempt-id="'+arguments[0]+'"]')?.open`,[savedSet.id]))await click('[data-attempt-id="'+savedSet.id+'"] > summary');if(!await script(`return document.querySelector('[data-attempt-id="'+arguments[0]+'"] > details')?.open`,[savedSet.id]))await click('[data-attempt-id="'+savedSet.id+'"] > details > summary');}
+  const retained=()=>script(`return [...document.querySelectorAll('[data-attempt-id="'+arguments[0]+'"] [data-retained-file="style.css"] pre')].map(p=>({text:p.textContent.slice(0,160),state:p.dataset.contentState??'shown'}))`,[savedSet.id]);
   await openReview();
-  await until(()=>script(`return document.querySelector('[data-profile-coverage="'+arguments[0]+'"]').textContent.includes('Required — not run yet')`,[savedSet.id]));
-  check('required JavaScript policy is retained and missing checks hide acceptance',await script(`return window.cockpit.frame.projection.development_tasks[arguments[0]].required_checks.profiles[0]==='super-javascript-behavior@1'&&!document.querySelector('[data-accept-result="'+arguments[1]+'"]')`,[savedSet.task_ref,savedSet.id]));
-  await script(`document.querySelector('[data-profile-coverage="'+arguments[0]+'"]').scrollIntoView({block:'center'})`,[savedSet.id]);photo('07_Required_Check_Missing');
-  const originalTest=readFileSync(testRepo+'/tools/proposal-test.mjs','utf8');writeFileSync(testRepo+'/tools/proposal-test.mjs',originalTest.replace('color: blue','color: wrong'));
+  await until(async()=>(await retained()).length===2&&(await retained()).every(p=>p.state==='shown'&&p.text.includes('color')),15000);
+  check('the plan page reads both bodies back and shows them',true);photo('07_Large_Bodies_Shown');
+  // ------------------------------------------------------------- missing
+  const proposedBlob=blobsDir+'/'+prop.digest,keep=readFileSync(proposedBlob);rmSync(proposedBlob);
+  await reloadPage();await openReview();
+  await until(async()=>(await retained()).some(p=>p.state==='unavailable'&&p.text.includes('no longer stored')),15000);
+  check('with the proposed blob deleted, the plan page says the reviewed content is no longer stored rather than rendering blank',await script(`return window.cockpit.frame.projection.development_attempts[arguments[0]].files[1].content.proposed.state==='missing'`,[savedSet.id]));photo('08_Content_Missing');
+  const runStatus=()=>script(`return [...document.querySelectorAll('[data-attempt-id="'+arguments[0]+'"] [role=status]')].map(s=>s.textContent).join(' | ')`,[savedSet.id]);
   await click('#attempt-run-'+savedSet.id);
-  const failed=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_attempts[arguments[0]].test_runs??{}).find(r=>r.state==='completed')`,[savedSet.id]));
-  check('failing required check prevents acceptance',failed.outcome.verdict==='fail'&&await script(`return !document.querySelector('[data-accept-result="'+arguments[0]+'"]')`,[savedSet.id]));
-  await until(()=>script(`return document.querySelector('[data-profile-coverage="'+arguments[0]+'"]').textContent.includes('Tests failed')`,[savedSet.id]));
-  await script(`document.querySelector('[data-profile-coverage="'+arguments[0]+'"]').scrollIntoView({block:'center'})`,[savedSet.id]);photo('08_Required_Check_Failed');
-  writeFileSync(testRepo+'/tools/proposal-test.mjs',originalTest);
-  await until(()=>script(`return !document.querySelector('#attempt-run-'+arguments[0]).disabled`,[savedSet.id]));await click('#attempt-run-'+savedSet.id);
-  const runRecord=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_attempts[arguments[0]].test_runs??{}).find(r=>r.state==='completed'&&r.outcome.verdict==='pass')`,[savedSet.id]));
-  check('native tests pass against both replacements in one bound snapshot',runRecord.outcome.verdict==='pass'&&runRecord.outcome.result_sha256===savedSet.source.result_sha256&&runRecord.outcome.source_basis_id===savedSet.source.basis_id);
-  check('testing the combined set leaves both repository files unchanged',readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n'&&readFileSync(testRepo+'/style.css','utf8')==='h1 { color: red; }\n');
-  await until(()=>script(`return !!document.querySelector('[data-accept-result="'+arguments[0]+'"]')`,[savedSet.id]));
-  await click('[data-run-output="'+runRecord.run_id+'"] > summary');
-  await script(`document.querySelector('[data-run-output="'+arguments[0]+'"]').scrollIntoView({block:'center'})`,[runRecord.run_id]);photo('09_Combined_Tests_Passed');
-  async function accept(){await script(`document.querySelector('[data-acceptance-note="'+arguments[0]+'"]').value=''`,[savedSet.id]);await type('[data-acceptance-note="'+savedSet.id+'"]','Both reviewed files match the passing combined snapshot.');await click('[data-accept-result="'+savedSet.id+'"]');}
-  await accept();await until(()=>script(`return document.querySelector('#attempt-tests-'+arguments[0]+' [role=status]').textContent.includes('selected file differs')`,[savedSet.id]));
-  check('acceptance refuses before the first replacement is saved',await script(`return !window.cockpit.frame.projection.development_attempts[arguments[0]].acceptance`,[savedSet.id]));
-  await click('[data-rail-mode=bots]');await click(`#rail-bots [data-nav="${route}"]`);await click('[data-review-file-set]');await click('#bot-file-set-stage');await until(()=>script(`return !document.querySelector('#bot-file-set-review')`));
-  await click('#editor-save');await until(()=>script(`return document.querySelector('#editor-save').disabled`));
-  await openReview();await accept();await until(()=>script(`return document.querySelector('#attempt-tests-'+arguments[0]+' [role=status]').textContent.includes('style.css')`,[savedSet.id]));
-  check('saving only the first file cannot accept the combined set',readFileSync(testRepo+'/index.html','utf8')===proposedText&&readFileSync(testRepo+'/style.css','utf8')==='h1 { color: red; }\n'&&await script(`return !window.cockpit.frame.projection.development_attempts[arguments[0]].acceptance`,[savedSet.id]));
-  await script(`document.querySelector('#attempt-tests-'+arguments[0]+' [role=status]').scrollIntoView({block:'center'})`,[savedSet.id]);photo('10_Partial_Save_Refused');
-  await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=editor]');await click('[data-file-path="style.css"]');await click('#editor-save');await until(()=>script(`return document.querySelector('#editor-save').disabled`));
-  writeFileSync(testRepo+'/unrelated.txt','Later unrelated edit');await openReview();await accept();await until(()=>script(`return document.querySelector('#attempt-tests-'+arguments[0]+' [role=status]').textContent.includes('repository files differ')`,[savedSet.id]));
-  check('other repository changes also refuse acceptance',await script(`return !window.cockpit.frame.projection.development_attempts[arguments[0]].acceptance`,[savedSet.id]));rmSync(testRepo+'/unrelated.txt');
-  // The reason remains after refusal; the existing control checks it again.
-  await click('[data-accept-result="'+savedSet.id+'"]');
-  const accepted=await until(()=>script(`const a=window.cockpit.frame.projection.development_attempts[arguments[0]];return a.status==='accepted'?a:null`,[savedSet.id]));
-  check('human acceptance binds all reviewed files and the passing snapshot',accepted.acceptance.result_sha256===savedSet.source.result_sha256&&accepted.acceptance.snapshot_sha256===runRecord.outcome.snapshot_sha256&&accepted.acceptance.run_id===runRecord.run_id);assert.deepEqual(accepted.files,savedSet.files);
-  await until(()=>script(`return !!document.querySelector('[data-accepted-attempt="'+arguments[0]+'"]')`,[savedSet.id]));await script(`document.querySelector('[data-accepted-attempt="'+arguments[0]+'"]').scrollIntoView({block:'center'})`,[savedSet.id]);photo('11_Accepted_Combined_Result');
-  async function verifySaved(expected){await click('[data-verify-accepted="'+savedSet.id+'"]');return until(()=>script(`const p=document.querySelector('[data-accepted-file-check="'+arguments[0]+'"] [role=status]');return p.textContent.includes(arguments[1])?p.textContent:null`,[savedSet.id,expected]));}
-  await verifySaved('Matched at');check('accepted source check confirms the complete saved snapshot',true);photo('13_Accepted_Files_Match');
-  writeFileSync(testRepo+'/style.css','h1 { color: green; }\n');await verifySaved('selected file differs');check('later edit refuses the accepted file check',readFileSync(testRepo+'/style.css','utf8').includes('green'));photo('14_Accepted_File_Drift');
-  writeFileSync(testRepo+'/style.css','h1 { color: blue; }\n');writeFileSync(testRepo+'/unrelated.txt','Later change');await verifySaved('repository files differ');check('accepted source check covers unrelated captured files',true);rmSync(testRepo+'/unrelated.txt');
-  await verifySaved('Matched at');assert.deepEqual(await script(`return window.cockpit.frame.projection.development_attempts[arguments[0]]`,[savedSet.id]),accepted);check('rechecking does not change acceptance, review history or test runs',true);
-  await click('[data-build-accepted="'+savedSet.id+'"]');
-  const buildId=await until(()=>script(`return document.querySelector('[data-accepted-builds="'+arguments[0]+'"] [data-cancel-build]')?.dataset.cancelBuild`,[savedSet.id]));
-  check('build progress appears for accepted source',true);photo('16_Build_Running');
-  await click('[data-cancel-build="'+buildId+'"]');await until(()=>script(`return document.querySelector('[data-build-id="'+arguments[0]+'"]').textContent.includes('Build cancelled')`,[buildId]),120000);check('cancelled build has no ready artifact',true);photo('17_Build_Cancelled');
-  await until(()=>script(`return !document.querySelector('[data-build-accepted="'+arguments[0]+'"]').disabled`,[savedSet.id]));await click('[data-build-accepted="'+savedSet.id+'"]');
-  await until(()=>script(`return document.querySelector('[data-accepted-builds="'+arguments[0]+'"]').textContent.includes('Development build ready')`,[savedSet.id]),120000);
-  const readyText=await script(`return document.querySelector('[data-accepted-builds="'+arguments[0]+'"]').textContent`,[savedSet.id]);
-  const launcher=readyText.match(/\/[^\n]*\/artifact\/launch-super\.sh/)?.[0];assert.ok(launcher);const binary=launcher.replace('launch-super.sh','super-cockpit');
-  check('native build compiles both accepted replacements into an executable',run(binary,[],{encoding:'utf8'})===proposedText+'h1 { color: blue; }\n');
-  await script(`document.querySelector('[data-accepted-builds="'+arguments[0]+'"]').scrollIntoView({block:'end'})`,[savedSet.id]);photo('18_Build_Ready');
-  const readyId=await script(`return document.querySelector('[data-try-build]').dataset.tryBuild`);
-  await click('[data-try-build="'+readyId+'"]');await until(()=>script(`return !!document.querySelector('[data-close-preview]')`));
-  const previewRoot=testData+'/com.computedriven.super.cockpit/build-previews';
-  const trial=await until(()=>{try{return readdirSync(previewRoot).find(n=>n.startsWith('trial-'));}catch{return false;}});
-  const proof=await until(()=>{try{return readFileSync(previewRoot+'/'+trial+'/data/preview-proof','utf8');}catch{return false;}});
-  check('preview runs a verified private source copy in a temporary world',proof===previewRoot+'/'+trial+'/source/ampd');
-  await until(()=>script(`return document.querySelector('[data-accepted-builds]').textContent.includes('first runtime frame')`));check('preview readiness requires the child frame signal',true);
-  photo('21_Preview_Running');
-  await click('[data-close-preview="'+readyId+'"]');await until(()=>script(`return document.querySelector('[data-accepted-builds]').textContent.includes('Preview closed')`));
-  check('closing preview removes its temporary session',!readdirSync(previewRoot).includes(trial));photo('22_Preview_Closed');
-  writeFileSync(testRepo+'/preview-fail-trigger','fail');await click('[data-try-build="'+readyId+'"]');
-  await until(()=>script(`return document.querySelector('[data-accepted-builds]').textContent.includes('Preview exited with code 23')`));
-  await until(()=>script(`return document.querySelector('[data-accepted-builds]').textContent.includes('Preview fixture could not open its runtime')`));
-  check('early preview failure shows exit reason and diagnostic output',!await script(`return !!document.querySelector('[data-close-preview]')`));
-  await script(`const d=[...document.querySelectorAll('[data-accepted-builds] details')].find(d=>d.textContent.includes('Preview diagnostic output'));d.open=true;d.scrollIntoView({block:'center'});`);photo('24_Preview_Failure');rmSync(testRepo+'/preview-fail-trigger');
-  await click('[data-try-build="'+readyId+'"]');await until(()=>script(`return !!document.querySelector('[data-close-preview]')`));check('failed preview can be tried again',true);await click('[data-close-preview]');await until(()=>script(`return !!document.querySelector('[data-try-build]')`));
-  const capturedRuntime=dirname(dirname(binary))+'/snapshot/ampd/mix.exs',runtimeBefore=readFileSync(capturedRuntime,'utf8');writeFileSync(capturedRuntime,runtimeBefore+'# changed');
-  await click('[data-try-build="'+readyId+'"]');await until(()=>script(`return document.querySelector('[data-accepted-builds]').textContent.includes('Captured source changed')`));
-  check('changed captured runtime refuses preview before launch',!await script(`return !!document.querySelector('[data-close-preview]')`));photo('23_Changed_Runtime_Refused');writeFileSync(capturedRuntime,runtimeBefore);
-  assert.deepEqual(await script(`return window.cockpit.frame.projection.development_attempts[arguments[0]]`,[savedSet.id]),accepted);check('building preserves accepted runtime history and repository bytes',readFileSync(testRepo+'/style.css','utf8')==='h1 { color: blue; }\n');
-  await click('[data-build-accepted="'+savedSet.id+'"]');
-  const crashBuild=await until(()=>script(`return document.querySelector('[data-accepted-builds="'+arguments[0]+'"] [data-cancel-build]')?.dataset.cancelBuild`,[savedSet.id]));
-  function childrenOfDriver(){const all=readdirSync('/proc').filter(p=>/^\d+$/.test(p));const desc=new Set([String(driver.pid)]);for(let n=0;n<8;n++)for(const pid of all)try{const stat=readFileSync('/proc/'+pid+'/stat','utf8').split(')').at(-1).trim().split(/\s+/);if(desc.has(stat[1]))desc.add(pid);}catch{}return [...desc].map(pid=>{try{return {pid:Number(pid),args:readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0')};}catch{return {pid:Number(pid),args:[]};}});}
-  const processes=await until(()=>{const rows=childrenOfDriver(),app=rows.find(p=>p.args[0]===root+'/cockpit/target/release/super-cockpit'),launcher=rows.find(p=>p.args.some(a=>a.includes('/'+crashBuild+'/runner.mjs')));return app&&launcher?{app,launcher}:null;});
-  const beforeWorld=await script('return window.cockpit.frame.world'),callsBefore=chatCalls;
-  process.kill(processes.app.pid,'SIGKILL');
-  await until(()=>{try{return readFileSync('/proc/'+processes.launcher.pid+'/stat','utf8').split(')').at(-1).trim().startsWith('Z');}catch{return true;}});check('app-only crash stops its build launcher',true);
+  await until(async()=>(await runStatus()).includes('no longer stored'),20000);
+  check('running tests against missing reviewed content is refused, and no run is recorded',await script(`return !window.cockpit.frame.projection.development_attempts[arguments[0]].test_runs`,[savedSet.id]));photo('09_Test_Refused_Missing');
+  // ------------------------------------------------------------- corrupt
+  writeFileSync(proposedBlob,'h1 { color: green; } /* not what was reviewed */\n');
+  await reloadPage();await openReview();
+  await until(async()=>(await retained()).some(p=>p.state==='unavailable'&&p.text.includes('no longer matches')),15000);
+  check('with the blob tampered, the plan page says the content no longer matches its digest — distinct from missing',true);
+  await click('#attempt-run-'+savedSet.id);
+  await until(async()=>(await runStatus()).includes('no longer matches'),20000);
+  check('running tests against corrupt reviewed content is refused by the re-hash, and no run is recorded',await script(`return !window.cockpit.frame.projection.development_attempts[arguments[0]].test_runs`,[savedSet.id]));photo('10_Test_Refused_Corrupt');
+  // ------------------------------------------------------------ restored
+  writeFileSync(proposedBlob,keep);
+  await reloadPage();await openReview();
+  await until(async()=>(await retained()).length===2&&(await retained()).every(p=>p.state==='shown'),15000);
+  await click('#attempt-run-'+savedSet.id);
+  const runRecord=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_attempts[arguments[0]].test_runs??{}).find(r=>r.state==='completed')`,[savedSet.id]),120000);
+  check('with the bytes restored the same review tests, against the reviewed result and no other bytes',runRecord.outcome.verdict==='pass'&&runRecord.outcome.result_sha256===savedSet.source.result_sha256&&runRecord.outcome.source_basis_id===savedSet.source.basis_id);
+  check('testing leaves both repository files unchanged',readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n'&&readFileSync(testRepo+'/style.css','utf8')===currentCss);photo('11_Tests_Pass_Restored');
+  // ------------------------------------------------------------- restart
+  mkdirSync(stagingDir,{recursive:true});const partial=stagingDir+'/'+'f'.repeat(64)+'.partial';writeFileSync(partial,'an upload the app died in the middle of');
+  const blobsBefore=readdirSync(blobsDir).sort();const beforeWorld=await script('return window.cockpit.frame.world');
   process.kill(-driver.pid,'SIGKILL');session=null;await sleep(1500);
   driver=spawn('tauri-driver',['--port',String(port),'--native-port',String(port+1),'--native-driver','/usr/bin/WebKitWebDriver'],{cwd:testRepo,detached:true,stdio:['ignore','pipe','pipe'],env:{...process.env,XDG_DATA_HOME:testData,XDG_STATE_HOME:testData+'/state',AMPD_DIR:root+'/ampd',SUPER_WORLD_MODE:'saved',SUPER_WORLD:'durable-set-fixture',SUPER_COCKPIT_FIXTURE:'0',SUPER_COCKPIT_CARRIER:'0',SUPER_COCKPIT_PANE:'0',WEBKIT_DISABLE_COMPOSITING_MODE:'1'}});
   driver.stdout.on('data',b=>{log=(log+b).slice(-8000)});driver.stderr.on('data',b=>{log=(log+b).slice(-8000)});
@@ -266,18 +234,9 @@ try {
   const reopened=await wd('POST','/session',{capabilities:{alwaysMatch:{'tauri:options':{application:root+'/cockpit/target/release/super-cockpit'}}}});session=reopened.sessionId;
   await until(()=>script(`return !!window.cockpit?.frame?.projection?.development_attempts?.[arguments[0]]`,[savedSet.id]));
   await wd('POST',`/session/${session}/window/rect`,{width:1280,height:850});
-  const restored=await script(`return window.cockpit.frame.projection.development_attempts[arguments[0]]`,[savedSet.id]);assert.deepEqual(restored.acceptance,accepted.acceptance);assert.deepEqual(restored.files,savedSet.files);
-  check('actual restart preserves the accepted combined result without another provider call',chatCalls===callsBefore&&await script(`return window.cockpit.frame.world.projection_epoch!==arguments[0].projection_epoch`,[beforeWorld]));
-  await openReview();await script(`document.querySelector('[data-accepted-attempt="'+arguments[0]+'"]').scrollIntoView({block:'center'})`,[savedSet.id]);photo('12_After_Restart');
-  check('required checks survive restart',await script(`return window.cockpit.frame.projection.development_tasks[arguments[0]].required_checks.profiles[0]==='super-javascript-behavior@1'`,[savedSet.task_ref]));
-  check('restart does not present an old file check as a current match',await script(`return !document.querySelector('[data-accepted-file-check="'+arguments[0]+'"] [role=status]').textContent.includes('Matched at')`,[savedSet.id]));
-  await click('[data-accepted-file-check="'+savedSet.id+'"] button:nth-of-type(2)');await until(()=>script(`return !document.querySelector('[data-screen=editor]').hidden`));
-  await click('#development-choose-editor');await sleep(700);execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid)]);await until(()=>script(`return !!document.querySelector('[data-file-path="index.html"]')`));
-  await openReview();await verifySaved('Matched at');check('accepted files can be checked again after native restart and repository selection',true);photo('15_Rechecked_After_Restart');
-  await until(()=>script(`return document.querySelector('[data-accepted-builds="'+arguments[0]+'"]').textContent.includes('Development build ready')`,[savedSet.id]));
-  await until(()=>script(`return document.querySelector('[data-build-id="'+arguments[0]+'"]').textContent.includes('Build interrupted')`,[crashBuild]));check('unfinished build is shown as interrupted after restart',true);
-  check('completed device-local build history survives restart',true);await script(`document.querySelector('[data-accepted-builds="'+arguments[0]+'"]').scrollIntoView({block:'end'})`,[savedSet.id]);photo('19_Build_After_Restart');
-  writeFileSync(binary,Buffer.concat([readFileSync(binary),Buffer.from('changed')]));
-  await until(()=>script(`return document.querySelector('[data-accepted-builds="'+arguments[0]+'"]').textContent.includes('artifact unavailable')`,[savedSet.id]));check('changed executable is no longer presented as a ready build',await script(`return !document.querySelector('[data-accepted-builds="'+arguments[0]+'"]').textContent.includes('Launcher')`,[savedSet.id]));photo('20_Changed_Artifact_Unavailable');
-  console.log(`combined testing smoke: ${checks} held`);
-} catch(e){console.error(log);if(session)try{console.error(await script(`return document.body.innerText.slice(-6500)`));}catch{}throw e;} finally {botFixture.close();if(session)try{await wd('DELETE',`/session/${session}`);}catch{}try{process.kill(-driver.pid,'SIGTERM');}catch{}}
+  check('an actual process restart discards the interrupted upload and keeps every published blob',!existsSync(partial)&&JSON.stringify(readdirSync(blobsDir).sort())===JSON.stringify(blobsBefore));
+  check('after the restart the record still names its content, the content is still readable, and the passing run is still there',await script(`const w=window.cockpit.frame.world,a=window.cockpit.frame.projection.development_attempts[arguments[1]];return w.world_incarnation===arguments[0].world_incarnation&&w.projection_epoch!==arguments[0].projection_epoch&&a.files[1].content.proposed.state==='available'&&Object.values(a.test_runs).some(r=>r.state==='completed'&&r.outcome.verdict==='pass')`,[beforeWorld,savedSet.id])&&await body(prop)===proposedCss);
+  await openReview();await until(async()=>(await retained()).length===2&&(await retained()).every(p=>p.state==='shown'),15000);photo('12_After_Restart');
+  console.log(`review content UI smoke: ${checks} held`);
+
+} catch(e){console.error(log);if(session)try{console.error(await script(`return document.querySelector('#workspace-canvas').innerText.slice(-4000)`));}catch{}throw e;} finally {botFixture.close();if(session)try{await wd('DELETE',`/session/${session}`);}catch{}try{process.kill(-driver.pid,'SIGTERM');}catch{}}

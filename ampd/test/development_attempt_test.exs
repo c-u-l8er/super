@@ -96,17 +96,17 @@ defmodule Ampd.DevelopmentAttemptTest do
     assert a["criteria"] == c.fields["criteria"] and a["bot_ref"] == c.bot["id"]
     # **The record keeps the material; the projection does not carry it.**
     # `development_attempts` is published in full on every frame, and two
-    # recorded sets of the maximum permitted size exceed the frame — so a
-    # projection that equalled the stored record was a projection that could
-    # stop being publishable. What is published is the record minus the bodies,
-    # plus a reference saying where each side is and whether it can be read.
+    # recorded sets of the maximum permitted size exceed the frame. A STAGED
+    # member is therefore published without its bodies. An INLINE record — this
+    # one — keeps them: its bytes live in the record and nowhere else, and the
+    # store's 64 KiB admission bounds every inline body that can exist. What is
+    # added is a reference saying where each side is and whether it can be read.
     stored = Loci.development_attempts()[a["id"]]
     assert stored["shared_draft"] == "before\r\n" and stored["proposed_text"] == "after\n"
 
     published = Projection.operator()["development_attempts"][a["id"]]
-    refute Map.has_key?(published, "shared_draft")
-    refute Map.has_key?(published, "proposed_text")
-    assert Map.drop(published, ["content"]) == Map.drop(stored, ["shared_draft", "proposed_text"])
+    assert published["shared_draft"] == "before\r\n" and published["proposed_text"] == "after\n"
+    assert Map.drop(published, ["content"]) == stored
 
     assert published["content"]["held"] == "inline"
     assert published["content"]["current"]["digest"] == stored["source"]["draft_sha256"]

@@ -383,13 +383,13 @@ async fn review_tests(
         });
         if let review_tests::Request::LaunchBuild{generation,attempt_ref,revision,world,build_id}=request {
             let path=work.matching_root(generation)?;let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref,revision,world:world.clone(),reply})?;
-            let attempt=wait.recv().map_err(|_|"Review lookup was interrupted.")??;
+            let attempt=review_tests::resolve_review_bodies(&wait.recv().map_err(|_|"Review lookup was interrupted.")??)?;
             if work.matching_root(generation)?!=path{return Err("The selected repository changed. Try again.".into());}
             previews.start(&data,world,build_id,attempt)
         }else if let review_tests::Request::PreviewStatus{world}=request {previews.status(world)
         }else if let review_tests::Request::StopPreview{world,build_id}=request {previews.stop(world,build_id)
         }else if let review_tests::Request::BuildAccepted{generation,attempt_ref,revision,world}=request {
-            let path=work.matching_root(generation)?;let resolve=||->Result<Value,String>{let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref:attempt_ref.clone(),revision,world:world.clone(),reply})?;wait.recv().map_err(|_|"Review lookup was interrupted.")?};
+            let path=work.matching_root(generation)?;let resolve=||->Result<Value,String>{let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref:attempt_ref.clone(),revision,world:world.clone(),reply})?;let a=wait.recv().map_err(|_|"Review lookup was interrupted.")??;review_tests::resolve_review_bodies(&a)};
             let attempt=resolve()?;review_tests::verify_accepted_result(&data,&path,&attempt)?;
             if work.matching_root(generation)?!=path||resolve()?!=attempt{return Err("The review or repository changed before the build. Try again.".into());}
             builds.start(&data,world,path,attempt)
@@ -397,7 +397,7 @@ async fn review_tests(
         }else if let review_tests::Request::CancelBuild{world,build_id}=request {builds.cancel(&data,world,build_id)
         }else if let review_tests::Request::VerifyAccepted{generation,attempt_ref,revision,world}=request {
             let path=work.matching_root(generation)?;
-            let resolve=||->Result<Value,String>{let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref:attempt_ref.clone(),revision,world:world.clone(),reply})?;wait.recv().map_err(|_|"Review lookup was interrupted.")?};
+            let resolve=||->Result<Value,String>{let (reply,wait)=sync_channel(1);q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref:attempt_ref.clone(),revision,world:world.clone(),reply})?;let a=wait.recv().map_err(|_|"Review lookup was interrupted.")??;review_tests::resolve_review_bodies(&a)};
             let attempt=resolve()?;
             let checked=review_tests::verify_accepted_result(&data,&path,&attempt)?;
             if work.matching_root(generation)?!=path||resolve()?!=attempt{return Err("The review or selected repository changed during the check. Try again.".into());}

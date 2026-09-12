@@ -81,7 +81,10 @@ defmodule Ampd.ReviewContentRecordTest do
       "task_revision" => task["revision"],
       "repository_ref" => task["repository_ref"],
       "world" =>
-        Enum.map(~w(world_incarnation world_generation projection_epoch), &Projection.continuity()[&1])
+        Enum.map(
+          ~w(world_incarnation world_generation projection_epoch),
+          &Projection.continuity()[&1]
+        )
     }
   end
 
@@ -100,11 +103,83 @@ defmodule Ampd.ReviewContentRecordTest do
     ])
   end
 
+  # ------------------------------------------ the door the page actually uses
+
+  test "publishing through the human-control command, offset 0 first, as the page does", c do
+    # The page's `stageContent` sends the first chunk of every file at offset 0.
+    # `ReviewContent.put/4` accepted that all along; the COMMAND did not, and no
+    # test had gone through the command. Measured in the cockpit: every publish
+    # failed on its first chunk and no change set could be saved.
+    small = "before\n"
+    d = hash(small)
+
+    assert %{"allow" => true} =
+             Control.command(c.human, :put_review_content, [d, 0, Base.encode64(small), "final"])
+
+    assert ReviewContent.verify(d) == :available
+
+    # Two chunks, the second continuing at exactly the chunk boundary.
+    chunk = ReviewContent.chunk_bytes()
+    big = String.duplicate("x", chunk + 7)
+    bd = hash(big)
+    first = binary_part(big, 0, chunk)
+    rest = binary_part(big, chunk, 7)
+
+    assert %{"allow" => true} =
+             Control.command(c.human, :put_review_content, [
+               bd,
+               0,
+               Base.encode64(first),
+               "continue"
+             ])
+
+    assert %{"allow" => true} =
+             Control.command(c.human, :put_review_content, [
+               bd,
+               chunk,
+               Base.encode64(rest),
+               "final"
+             ])
+
+    assert ReviewContent.verify(bd) == :available
+
+    # And what is still refused: a negative offset — by the spec at the
+    # bridge, and by the store itself when the command is called in-process.
+    assert %{"allow" => false, "refusal" => r} =
+             Control.command(c.human, :put_review_content, [d, -1, Base.encode64(small), "final"])
+
+    assert r["code"] in ~w(invalid-command-arguments review-content-invalid)
+
+    bound =
+      &Ampd.CommandSpec.bind("put_review_content", %{
+        "digest" => d,
+        "offset" => &1,
+        "chunk" => "",
+        "part" => "final"
+      })
+
+    assert {:error, _, _} = bound.(-1)
+
+    assert match?({:ok, _, _}, bound.(0)) or match?({:ok, _}, bound.(0)),
+           "offset 0 is the first chunk of every file: #{inspect(bound.(0))}"
+
+    # Then the record names them, and is accepted whole.
+    files = [
+      %{"source" => source(c.task, "a.js", small, big)},
+      %{"source" => source(c.task, "b.js", big, small)}
+    ]
+
+    assert %{"allow" => true, "development_attempt" => a} = record(c, files)
+    assert length(a["files"]) == 2
+  end
+
   # -------------------------------------------------- the thing it exists for
 
   test "a change set carries files far larger than a frame, and its request does not", c do
     big = File.read!(Path.expand(Path.join([__DIR__, "..", "..", "cockpit/ui/cockpit.js"])))
-    other = File.read!(Path.expand(Path.join([__DIR__, "..", "..", "ampd/lib/ampd/projection.ex"])))
+
+    other =
+      File.read!(Path.expand(Path.join([__DIR__, "..", "..", "ampd/lib/ampd/projection.ex"])))
 
     files = [
       staged_member(c.task, "cockpit/ui/cockpit.js", big, big <> "\n// proposed\n"),
@@ -125,8 +200,18 @@ defmodule Ampd.ReviewContentRecordTest do
 
   test "the projection stays inside a frame at the supported attempt limit", c do
     files = [
-      staged_member(c.task, "a.js", String.duplicate("x", 100_000), String.duplicate("y", 100_000)),
-      staged_member(c.task, "b.js", String.duplicate("p", 100_000), String.duplicate("q", 100_000))
+      staged_member(
+        c.task,
+        "a.js",
+        String.duplicate("x", 100_000),
+        String.duplicate("y", 100_000)
+      ),
+      staged_member(
+        c.task,
+        "b.js",
+        String.duplicate("p", 100_000),
+        String.duplicate("q", 100_000)
+      )
     ]
 
     assert %{"allow" => true} = record(c, files)
@@ -206,10 +291,11 @@ defmodule Ampd.ReviewContentRecordTest do
   end
 
   test "an agent is never given review material, staged or otherwise", c do
-    assert %{"allow" => true} = record(c, [
-             staged_member(c.task, "a.js", "one", "two"),
-             staged_member(c.task, "b.js", "three", "four")
-           ])
+    assert %{"allow" => true} =
+             record(c, [
+               staged_member(c.task, "a.js", "one", "two"),
+               staged_member(c.task, "b.js", "three", "four")
+             ])
 
     refute Map.has_key?(Projection.agent(c.bot["actor"]), "development_attempts")
 
@@ -287,9 +373,20 @@ defmodule Ampd.ReviewContentRecordTest do
     a = staged_member(c.task, "a.js", "one", "two")
     b = staged_member(c.task, "b.js", "three", "four")
     moved = put_in(b["source"]["head"], String.duplicate("b", 40))
-    moved = put_in(moved["source"]["basis_id"],
-             hash(JSON.encode!(["selected-file-basis@1", String.duplicate("b", 40), "b.js",
-                                hash("three"), hash("three")])))
+
+    moved =
+      put_in(
+        moved["source"]["basis_id"],
+        hash(
+          JSON.encode!([
+            "selected-file-basis@1",
+            String.duplicate("b", 40),
+            "b.js",
+            hash("three"),
+            hash("three")
+          ])
+        )
+      )
 
     assert %{"allow" => false, "refusal" => r} = record(c, [a, moved])
     assert r["code"] == "attempt-source-mismatch"
@@ -332,21 +429,35 @@ defmodule Ampd.ReviewContentRecordTest do
 
     # The projection says so rather than rendering a blank file.
     published = Projection.operator()["development_attempts"][a["id"]]
-    current = Enum.find(published["files"], &(&1["source"]["path"] == "a.js"))["content"]["current"]
+
+    current =
+      Enum.find(published["files"], &(&1["source"]["path"] == "a.js"))["content"]["current"]
+
     assert current["state"] == "missing"
 
     # And a test run against it is refused rather than run on other bytes.
     assert {:refused, r} =
              Ampd.DevelopmentAttempt.update(
                a["id"],
-               {:begin_test,
-                # The real repository, so the only fault this exercises is the
-                # missing content.
-                %{"run_id" => "r1", "revision" => a["revision"], "path" => c.repo,
-                  "world" => Enum.map(~w(world_incarnation world_generation projection_epoch),
-                                      &Projection.continuity()[&1])}},
-               %{"development_attempts" => %{a["id"] => stored},
-                 "development_tasks" => %{c.task["id"] => Loci.development_tasks()[c.task["id"]]}}
+               {
+                 :begin_test,
+                 # The real repository, so the only fault this exercises is the
+                 # missing content.
+                 %{
+                   "run_id" => "r1",
+                   "revision" => a["revision"],
+                   "path" => c.repo,
+                   "world" =>
+                     Enum.map(
+                       ~w(world_incarnation world_generation projection_epoch),
+                       &Projection.continuity()[&1]
+                     )
+                 }
+               },
+               %{
+                 "development_attempts" => %{a["id"] => stored},
+                 "development_tasks" => %{c.task["id"] => Loci.development_tasks()[c.task["id"]]}
+               }
              )
 
     assert r["code"] == "review-content-unavailable"
@@ -354,7 +465,8 @@ defmodule Ampd.ReviewContentRecordTest do
 
   # ------------------------------------------------------ compatibility
 
-  test "an inline set is still accepted, and its bodies still do not reach the projection", c do
+  test "an inline set is still accepted, and its bodies DO reach the projection, bounded by the store",
+       c do
     draft = "before\n"
     proposed = "after\n"
 
@@ -372,9 +484,20 @@ defmodule Ampd.ReviewContentRecordTest do
     stored = Loci.development_attempts()[a["id"]]
     assert Enum.all?(stored["files"], &(&1["shared_draft"] == draft))
 
+    # An inline member's bytes live in the record and nowhere else — there is
+    # no blob to read them back from — so the projection carries them, as it
+    # always did. The persisted collection is capped at 64 KiB by admission, so
+    # this cannot take a frame past its limit.
     published = Projection.operator()["development_attempts"][a["id"]]
-    refute Enum.any?(published["files"], &Map.has_key?(&1, "shared_draft"))
+
+    assert Enum.all?(
+             published["files"],
+             &(&1["shared_draft"] == draft and &1["proposed_text"] == proposed)
+           )
+
     assert Enum.all?(published["files"], &(&1["content"]["held"] == "inline"))
+    assert Enum.all?(published["files"], &(&1["content"]["current"]["state"] == "available"))
+
     assert Ampd.DevelopmentAttempt.content_state(stored) == :ok,
            "an inline member carries its bytes, so it is never unavailable"
   end
@@ -400,7 +523,9 @@ defmodule Ampd.ReviewContentRecordTest do
     report = ReviewContent.absorb(state["development_attempts"])
     assert report["published"] == 2 and report["refused"] == []
     assert ReviewContent.verify(hash(draft)) == :available
-    assert Loci.development_attempts()[a["id"]]["files"] |> Enum.all?(&(&1["shared_draft"] == draft)),
+
+    assert Loci.development_attempts()[a["id"]]["files"]
+           |> Enum.all?(&(&1["shared_draft"] == draft)),
            "phase one does not touch the record"
 
     # Phase two rewrites the members, and only because the content is there.
@@ -437,12 +562,17 @@ defmodule Ampd.ReviewContentRecordTest do
     {next, moved} = Ampd.DevelopmentAttempt.migrate_inline(state)
     assert moved["migrated"] == 0
     assert next == state, "nothing is rewritten while its content is absent"
-    assert Enum.all?(next["development_attempts"][a["id"]]["files"], &(&1["shared_draft"] == draft))
+
+    assert Enum.all?(
+             next["development_attempts"][a["id"]]["files"],
+             &(&1["shared_draft"] == draft)
+           )
   end
 
   # ---------------------------------------------------------- rollback
 
-  test "ROLLBACK: a staged record converts back to inline, and is then valid to the old shape", c do
+  test "ROLLBACK: a staged record converts back to inline, and is then valid to the old shape",
+       c do
     draft = "before\n"
     proposed = "after\n"
 
@@ -453,8 +583,12 @@ defmodule Ampd.ReviewContentRecordTest do
              ])
 
     state = %{"development_attempts" => Loci.development_attempts()}
-    assert Enum.all?(state["development_attempts"][a["id"]]["files"],
-                     &(Map.keys(&1) == ["source"])), "staged before conversion"
+
+    assert Enum.all?(
+             state["development_attempts"][a["id"]]["files"],
+             &(Map.keys(&1) == ["source"])
+           ),
+           "staged before conversion"
 
     {next, report} = Ampd.DevelopmentAttempt.inline_from_content(state)
     assert report["converted"] == 1 and report["blocked"] == [] and report["downgradable"]
@@ -483,9 +617,10 @@ defmodule Ampd.ReviewContentRecordTest do
                staged_member(c.task, "small.js", "d", "p")
              ])
 
-    {next, report} = Ampd.DevelopmentAttempt.inline_from_content(%{
-      "development_attempts" => Loci.development_attempts()
-    })
+    {next, report} =
+      Ampd.DevelopmentAttempt.inline_from_content(%{
+        "development_attempts" => Loci.development_attempts()
+      })
 
     refute report["downgradable"]
     assert report["converted"] == 0, "a record converts whole or not at all"
@@ -507,11 +642,13 @@ defmodule Ampd.ReviewContentRecordTest do
 
     File.rm!(Path.join(ReviewContent.blobs(), hash("one")))
 
-    {_, report} = Ampd.DevelopmentAttempt.inline_from_content(%{
-      "development_attempts" => Loci.development_attempts()
-    })
+    {_, report} =
+      Ampd.DevelopmentAttempt.inline_from_content(%{
+        "development_attempts" => Loci.development_attempts()
+      })
 
     refute report["downgradable"]
+
     assert [%{"path" => "a.js", "side" => "current", "reason" => "missing", "attempt" => id}] =
              report["blocked"]
 
@@ -522,8 +659,11 @@ defmodule Ampd.ReviewContentRecordTest do
     body = "before\n"
 
     inline = fn path ->
-      %{"source" => source(c.task, path, body, body),
-        "shared_draft" => body, "proposed_text" => body}
+      %{
+        "source" => source(c.task, path, body, body),
+        "shared_draft" => body,
+        "proposed_text" => body
+      }
     end
 
     assert %{"allow" => true} = record(c, [inline.("a.js"), inline.("b.js")])

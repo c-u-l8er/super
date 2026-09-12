@@ -334,7 +334,13 @@ defmodule Ampd.CommandSpec do
       kind: :mutation,
       fields: [
         %{name: "digest", type: {:string, 64}, required: true},
-        %{name: "offset", type: {:count, 4_194_304}, required: true},
+        # An offset, not a count: the FIRST chunk of every file is at 0, and
+        # `{:count, _}` refuses zero. Measured through the cockpit: with this
+        # as a count, every publish from the page failed on its first chunk
+        # ("The runtime did not confirm review content…") and no change set
+        # could be saved at all, while the runtime tests — which called
+        # `ReviewContent.put/4` directly — stayed green.
+        %{name: "offset", type: {:offset, 4_194_304}, required: true},
         %{name: "chunk", type: {:string, 92_000}, required: true},
         %{name: "part", type: {:enum, ["continue", "final"]}, required: true}
       ]
@@ -955,6 +961,17 @@ defmodule Ampd.CommandSpec do
   end
 
   defp check({:count, _}, v),
+    do: {:error, %{"reason" => "expected a whole number", "got" => tag(v)}}
+
+  # A position in a byte stream: zero is the first byte and is the common case,
+  # which is exactly what distinguishes it from a count.
+  defp check({:offset, max}, v) when is_integer(v) do
+    if v >= 0 and v <= max,
+      do: :ok,
+      else: {:error, %{"reason" => "out of range", "given" => v, "min" => 0, "max" => max}}
+  end
+
+  defp check({:offset, _}, v),
     do: {:error, %{"reason" => "expected a whole number", "got" => tag(v)}}
 
   defp check({:enum, allowed}, v) do
