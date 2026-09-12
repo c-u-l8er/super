@@ -181,12 +181,51 @@ excluded outright — records with a **request under 8 000 bytes**.
     # 4. Re-pair the phone from the panel, or Runtime → Mobile device →
     #    "New pairing code" (no further restart, existing sessions untouched).
 
-**Rolling back** is `git revert` of the merge plus a rebuild and the same
-restart. A code-only rollback is NOT established as safe after new staged records
-have been written: the old runtime expects inline bodies. Before deployment,
-prove downgrade compatibility or define a verified conversion/restore procedure
-that preserves records created after deployment. Retaining blobs alone does not
-make the old reader compatible.
+## Rolling back — settled, tested, and not free
+
+**Reverting the code is not a rollback.** An older runtime publishes a staged
+record with no bodies, and its UI, test runner and acceptance check all read
+`nil` where the reviewed text should be: the record is present and unusable,
+which is worse than either working or being absent. Verified against `main`'s
+own `set_file?/1`, which requires exactly `shared_draft`, `proposed_text` and
+`source` on every member.
+
+So a rollback is a **conversion first, then the revert**:
+
+    1. Quiesce the world (stop the desktop), so nothing records during it.
+    2. Ampd.DevelopmentAttempt.inline_from_content/1 puts the bodies back.
+       Reports {"converted" => n, "blocked" => [...], "downgradable" => bool}.
+    3. Only if "downgradable" is true: revert the merge, rebuild, restart.
+    4. If it is false, do NOT downgrade. Each block names the attempt, the
+       path, the side and the reason.
+
+`inline_from_content/1` performs filesystem I/O — it reads every referenced
+blob — and converts **a record whole or not at all**. Two reasons a member
+blocks:
+
+| reason | meaning | what to do |
+|---|---|---|
+| `missing` / `corrupt` | there is nothing to put back | stage it again, then retry the conversion |
+| `too-large` | the member exceeds the old inline caps (24 000 current, 32 000 proposed) | **it cannot be downgraded.** Export the record, or keep the new runtime. |
+
+**The second row is not a defect, and it will be the common one.** The files
+this change exists to make reviewable — `cockpit.js` at 72 809 bytes,
+`cockpit.css` at 35 044, `projection.ex` at 34 282 — are exactly the ones the
+old shape has no way to hold. A world that has reviewed any of them has no
+downgrade path that preserves that review, and the honest procedure says so
+before the deployment rather than after it.
+
+Published blobs are inert to a revert: an older runtime never looks in
+`review-content/`, and `collect/2` on the old code does not exist, so nothing
+removes them. Leaving them in place is what makes a re-upgrade cheap.
+
+Tested: `ROLLBACK:` cases in `ampd/test/review_content_record_test.exs` cover a
+staged record converting to the exact shape the old runtime requires and
+round-tripping back; a record the caps cannot represent, blocked and named; a
+record whose content is gone, reported rather than inlined as empty; and an
+already-inline record, reported downgradable with nothing done.
+
+
 
 Nothing here has been merged, built into the shared checkout, or restarted.
 

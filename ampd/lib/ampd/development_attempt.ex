@@ -592,6 +592,108 @@ defmodule Ampd.DevelopmentAttempt do
 
   defp migrate_member(row), do: row
 
+  @doc """
+  Put the bodies back into staged members, so records survive a downgrade.
+
+  **The inverse of `migrate_inline/1`, and the thing that makes a rollback a
+  rollback.** Reverting the code alone does not undo a deployment: an older
+  runtime publishes a staged record with no bodies and its UI, test runner and
+  acceptance check all read `nil` where the reviewed text should be. The record
+  is present and unusable, which is worse than either working or being absent.
+
+  Performs filesystem I/O — it reads every referenced blob — so it is
+  maintenance, run deliberately with the world quiet, never on a hot path.
+
+  **A record is converted only if ALL of its members convert.** Two reasons a
+  member cannot:
+
+    * its content is missing or corrupt, so there is nothing to put back;
+    * it is larger than the old inline caps (#{@inline_draft} current,
+      #{@inline_proposed} proposed) — which is the case this whole change
+      exists to make possible, so the files it was built for are exactly the
+      ones a downgrade cannot represent.
+
+  Both are reported per member rather than counted, because the operator has to
+  decide what to do with each: a missing blob can be staged again, and an
+  oversized one cannot be downgraded at all and has to be exported or kept.
+  """
+  def inline_from_content(%{"development_attempts" => attempts} = s) do
+    {converted, blocked} =
+      Enum.reduce(attempts, {%{}, []}, fn {id, a}, {acc, blocks} ->
+        case convert_attempt(a) do
+          {:ok, next} -> {Map.put(acc, id, next), blocks}
+          {:blocked, why} -> {Map.put(acc, id, a), blocks ++ Enum.map(why, &Map.put(&1, "attempt", id))}
+        end
+      end)
+
+    moved = Enum.count(converted, fn {id, a} -> a != attempts[id] end)
+
+    {Map.put(s, "development_attempts", converted),
+     %{"converted" => moved, "blocked" => blocked,
+       "downgradable" => blocked == []}}
+  end
+
+  defp convert_attempt(%{"files" => files} = a) when is_list(files) do
+    results = Enum.map(files, &convert_member/1)
+
+    case Enum.flat_map(results, fn {_, why} -> why end) do
+      [] -> {:ok, Map.put(a, "files", Enum.map(results, &elem(&1, 0)))}
+      why -> {:blocked, why}
+    end
+  end
+
+  defp convert_attempt(%{"source" => _} = a) do
+    case convert_member(a) do
+      {next, []} -> {:ok, next}
+      {_, why} -> {:blocked, why}
+    end
+  end
+
+  defp convert_attempt(a), do: {:ok, a}
+
+  defp convert_member(%{"source" => source} = row) when is_map(source) do
+    cond do
+      is_binary(row["shared_draft"]) ->
+        {row, []}
+
+      true ->
+        deletion? = source["schema"] == "selected-file-deletion-basis@1"
+        current = Ampd.ReviewContent.fetch(source["draft_sha256"])
+        proposed = if deletion?, do: {:ok, nil}, else: Ampd.ReviewContent.fetch(source["result_sha256"])
+
+        case {current, proposed} do
+          {{:ok, c}, {:ok, p}} ->
+            over =
+              cond do
+                byte_size(c) > @inline_draft ->
+                  [block(source, "current", byte_size(c), @inline_draft, "too-large")]
+
+                p != nil and byte_size(p) > @inline_proposed ->
+                  [block(source, "proposed", byte_size(p), @inline_proposed, "too-large")]
+
+                true ->
+                  []
+              end
+
+            if over == [],
+              do: {Map.merge(row, %{"shared_draft" => c, "proposed_text" => p}), []},
+              else: {row, over}
+
+          {{:error, state}, _} ->
+            {row, [block(source, "current", nil, nil, to_string(state))]}
+
+          {_, {:error, state}} ->
+            {row, [block(source, "proposed", nil, nil, to_string(state))]}
+        end
+    end
+  end
+
+  defp convert_member(row), do: {row, []}
+
+  defp block(source, side, bytes, max, reason),
+    do: %{"path" => source["path"], "side" => side, "bytes" => bytes, "max" => max,
+          "reason" => reason}
+
   defp unavailable_message(faults) do
     listed =
       faults

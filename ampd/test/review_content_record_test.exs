@@ -440,6 +440,100 @@ defmodule Ampd.ReviewContentRecordTest do
     assert Enum.all?(next["development_attempts"][a["id"]]["files"], &(&1["shared_draft"] == draft))
   end
 
+  # ---------------------------------------------------------- rollback
+
+  test "ROLLBACK: a staged record converts back to inline, and is then valid to the old shape", c do
+    draft = "before\n"
+    proposed = "after\n"
+
+    assert %{"allow" => true, "development_attempt" => a} =
+             record(c, [
+               staged_member(c.task, "a.js", draft, proposed),
+               staged_member(c.task, "b.js", draft <> "b", proposed <> "b")
+             ])
+
+    state = %{"development_attempts" => Loci.development_attempts()}
+    assert Enum.all?(state["development_attempts"][a["id"]]["files"],
+                     &(Map.keys(&1) == ["source"])), "staged before conversion"
+
+    {next, report} = Ampd.DevelopmentAttempt.inline_from_content(state)
+    assert report["converted"] == 1 and report["blocked"] == [] and report["downgradable"]
+
+    converted = next["development_attempts"][a["id"]]
+
+    # The shape an older runtime requires: exactly these three keys, with bodies
+    # whose digests are the ones the source already recorded.
+    for m <- converted["files"] do
+      assert Enum.sort(Map.keys(m)) == ~w(proposed_text shared_draft source)
+      assert hash(m["shared_draft"]) == m["source"]["draft_sha256"]
+      assert hash(m["proposed_text"]) == m["source"]["result_sha256"]
+    end
+
+    # And it round-trips: converting back forward gives what was there.
+    {again, _} = Ampd.DevelopmentAttempt.migrate_inline(next)
+    assert again["development_attempts"][a["id"]] == state["development_attempts"][a["id"]]
+  end
+
+  test "ROLLBACK: the files this change exists for CANNOT be downgraded, and it says so", c do
+    big = String.duplicate("L", 30_000)
+
+    assert %{"allow" => true, "development_attempt" => a} =
+             record(c, [
+               staged_member(c.task, "big.js", big, big <> "x"),
+               staged_member(c.task, "small.js", "d", "p")
+             ])
+
+    {next, report} = Ampd.DevelopmentAttempt.inline_from_content(%{
+      "development_attempts" => Loci.development_attempts()
+    })
+
+    refute report["downgradable"]
+    assert report["converted"] == 0, "a record converts whole or not at all"
+    assert [block | _] = report["blocked"]
+    assert block["attempt"] == a["id"] and block["path"] == "big.js"
+    assert block["reason"] == "too-large" and block["bytes"] == 30_000
+    assert block["max"] == 24_000
+
+    # Nothing is half-converted: the record is left exactly as it was.
+    assert next["development_attempts"] == Loci.development_attempts()
+  end
+
+  test "ROLLBACK: a record whose content is gone is reported, not silently inlined as empty", c do
+    assert %{"allow" => true, "development_attempt" => a} =
+             record(c, [
+               staged_member(c.task, "a.js", "one", "two"),
+               staged_member(c.task, "b.js", "three", "four")
+             ])
+
+    File.rm!(Path.join(ReviewContent.blobs(), hash("one")))
+
+    {_, report} = Ampd.DevelopmentAttempt.inline_from_content(%{
+      "development_attempts" => Loci.development_attempts()
+    })
+
+    refute report["downgradable"]
+    assert [%{"path" => "a.js", "side" => "current", "reason" => "missing", "attempt" => id}] =
+             report["blocked"]
+
+    assert id == a["id"]
+  end
+
+  test "ROLLBACK: an already-inline record needs no conversion and is reported downgradable", c do
+    body = "before\n"
+
+    inline = fn path ->
+      %{"source" => source(c.task, path, body, body),
+        "shared_draft" => body, "proposed_text" => body}
+    end
+
+    assert %{"allow" => true} = record(c, [inline.("a.js"), inline.("b.js")])
+
+    state = %{"development_attempts" => Loci.development_attempts()}
+    {next, report} = Ampd.DevelopmentAttempt.inline_from_content(state)
+    assert report["downgradable"] and report["converted"] == 0
+    assert next == state, "nothing to do, and nothing done"
+  end
+
   test "an inline member over the old per-file cap still refuses, by SIZE not by count", c do
     big = String.duplicate("z", 24_001)
 
