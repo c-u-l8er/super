@@ -3296,6 +3296,7 @@ dependencies = [
  "super-host",
  "tauri",
  "tauri-build",
+ "tier1-proof",
 ]
 
 [[package]]
@@ -3698,6 +3699,17 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
+]
+
+[[package]]
+name = "tier1-proof"
+version = "0.1.0"
+dependencies = [
+ "gtk",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
 ]
 
 [[package]]

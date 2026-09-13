@@ -5,6 +5,7 @@
     "main"
   ],
   "permissions": [
+    "allow-open-road",
     "allow-bind-frame-stream",
     "allow-unbind-frame-stream",
     "allow-intent",

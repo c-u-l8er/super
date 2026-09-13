@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-pane-offer"
+description = "Enables the pane_offer command without any pre-configured scope."
+commands.allow = ["pane_offer"]
+
+[[permission]]
+identifier = "deny-pane-offer"
+description = "Denies the pane_offer command without any pre-configured scope."
+commands.deny = ["pane_offer"]

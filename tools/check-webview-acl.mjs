@@ -56,6 +56,7 @@ function check(name, ok, detail = '') {
 console.log('[&] Super — cockpit webview ACL\n');
 
 const main = readFileSync(`${ROOT}/cockpit/src/main.rs`, 'utf8');
+const roadSource = readFileSync(`${ROOT}/../RRABBIT/tier1-proof/src/main.rs`, 'utf8');
 const build = readFileSync(`${ROOT}/cockpit/build.rs`, 'utf8');
 const cockpitJs = readFileSync(`${ROOT}/cockpit/ui/cockpit.js`, 'utf8');
 /* **EVERY capability file, and reading only `default.json` was a hole.**
@@ -84,7 +85,8 @@ const cap = (caps.find((c) => c.file === 'default.json') ?? {}).json;
 
 /* `generate_handler![a, b, c]` — read as source rather than as a comment
    about the source. */
-const handler = (main.match(/generate_handler!\[([\s\S]*?)\]/) ?? [])[1] ?? '';
+const handler = ((main.match(/generate_handler!\[([\s\S]*?)\]/) ?? [])[1] ?? '') + ',' +
+  ((roadSource.match(/generate_handler!\[([\s\S]*?)\]/) ?? [])[1] ?? '');
 const registered = handler
   .split(',')
   .map((s) => s.trim())
@@ -101,7 +103,8 @@ const granted = (cap.permissions ?? []).slice().sort();
    "does this grant name something real" are questions about the
    application, not about one file. Which webview holds which is the
    per-file question, checked below. */
-const allGranted = caps.flatMap((c) => c.json.permissions ?? []);
+const allGranted = caps.flatMap((c) => c.json.permissions ?? []).concat(
+  [...roadSource.matchAll(/\.permission\("(allow-[a-z-]+)"\)/g)].map(m => m[1]));
 const grantedCommands = [
   ...new Set(
     allGranted.filter((p) => p.startsWith('allow-')).map((p) => p.slice('allow-'.length)),
@@ -325,8 +328,13 @@ if (term) {
   const sourceDir = `${ROOT}/cockpit/src`;
   const allRust = readdirSync(sourceDir).filter(f=>f.endsWith('.rs')).map(f=>readFileSync(`${sourceDir}/${f}`,'utf8')).join('\n');
   const preview = readFileSync(`${sourceDir}/preview.rs`,'utf8');
-  const builders = [...allRust.matchAll(/WebviewBuilder::new\(/g)];
-  check('all native child constructors are accounted for across Rust modules', builders.length===3, `constructors: ${builders.length}`);
+  const builders = [...(allRust+'\n'+roadSource).matchAll(/WebviewBuilder::new\(/g)];
+  check('all native child constructors are accounted for across Rust modules and the shared road', builders.length===4, `constructors: ${builders.length}`);
+  const routed = [...((roadSource.match(/pub const COMMANDS:[\s\S]*?= &\[([\s\S]*?)\]/)??[])[1]??'').matchAll(/"([a-z_]+)"/g)].map(m=>m[1]).sort();
+  const roadHandler = ((roadSource.match(/generate_handler!\[([\s\S]*?)\]/)??[])[1]??'').split(',').map(s=>s.trim()).filter(Boolean).sort();
+  check('shared road dispatch names exactly its registered commands', JSON.stringify(routed)===JSON.stringify(roadHandler));
+  check('only the cockpit can open the road', caps.filter(c=>(c.json.permissions??[]).includes('allow-open-road')).every(c=>JSON.stringify(c.json.webviews)==='["main"]'));
+  check('road has no cockpit runtime permissions', !caps.find(c=>c.file==='road.json')?.json.permissions.some(p=>['allow-intent','allow-bind-frame-stream','allow-development-request','allow-terminal-surface'].includes(p)));
   check('all bounded browser tab labels remain untrusted', /const LABEL: &str = "development-preview";/.test(preview) && /tab > 7/.test(preview) && !caps.some(c=>(c.json.webviews??[]).some(label=>label.startsWith('development-preview'))));
   check('preview navigation is filtered and popup creation is refused', /\.on_navigation\(allowed\)/.test(preview) && /NewWindowResponse::Deny/.test(preview));
   check('development tools are granted only to the trusted main webview', ['allow-choose-workbench','allow-development-request','allow-browser-surface'].every(p=>caps.filter(c=>(c.json.permissions??[]).includes(p)).every(c=>c.json.webviews?.length===1&&c.json.webviews[0]==='main')));
@@ -535,7 +543,7 @@ check(
   'Delivery::bind / Delivery::unbind no longer refuse a superseded binding',
 );
 
-console.log(`\n  ${registered.length} commands · granted to webview ${(cap.webviews ?? []).join(', ')}`);
+console.log(`\n  ${registered.length} registered commands · ${caps.length} static capabilities plus per-instance road pane grants`);
 /* Prefixed — see the note in `tools/cockpit-battery.mjs`. */
 console.log(`webview acl: ${held} held · ${failed} failed`);
 process.exit(failed === 0 ? 0 : 1);

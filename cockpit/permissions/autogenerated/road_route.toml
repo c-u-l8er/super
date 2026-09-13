@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-road-route"
+description = "Enables the road_route command without any pre-configured scope."
+commands.allow = ["road_route"]
+
+[[permission]]
+identifier = "deny-road-route"
+description = "Denies the road_route command without any pre-configured scope."
+commands.deny = ["road_route"]

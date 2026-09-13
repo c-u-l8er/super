@@ -1,0 +1,17 @@
+{
+  "id": "notes",
+  "title": "Notes",
+  "entry": "pane.html",
+  "accepts": ["document"],
+  "produces": "summary",
+  "sign": {
+    "primitives": [
+      { "kind": "rect", "x": 0,  "y": 0,  "w": 240, "h": 132 },
+      { "kind": "text", "x": 14, "y": 30, "size": 17, "weight": 700, "value": "Notes" },
+      { "kind": "line", "x": 14, "y": 44, "w": 212 },
+      { "kind": "text", "x": 14, "y": 68, "size": 12, "value": "accepts: document" },
+      { "kind": "text", "x": 14, "y": 88, "size": 12, "value": "produces: summary" },
+      { "kind": "text", "x": 14, "y": 116, "size": 11, "value": "availability: unknown" }
+    ]
+  }
+}

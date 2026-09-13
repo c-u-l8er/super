@@ -16,6 +16,21 @@
 //! outside the ACL again, so the two lists are checked against each other by
 //! `tools/check-webview-acl.mjs` rather than by whoever remembers.
 fn main() {
+    // Package the shared road frontend from its source, never an edited fork.
+    fn copy_tree(source: &std::path::Path, target: &std::path::Path) {
+        std::fs::create_dir_all(target).expect("create road assets directory");
+        for entry in std::fs::read_dir(source).expect("read road assets") {
+            let entry = entry.expect("read road asset");
+            let to = target.join(entry.file_name());
+            if entry.path().is_dir() { copy_tree(&entry.path(), &to); }
+            else { std::fs::copy(entry.path(), to).expect("copy road asset"); }
+        }
+    }
+    println!("cargo:rerun-if-changed=../../RRABBIT/tier1-proof/ui");
+    copy_tree(std::path::Path::new("../../RRABBIT/tier1-proof/ui"), std::path::Path::new("ui/road"));
+    println!("cargo:rerun-if-changed=../../RRABBIT/m2/road-geometry.js");
+    std::fs::copy("../../RRABBIT/m2/road-geometry.js", "ui/road/road-geometry.js")
+        .expect("package shared T&R road geometry");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "bind_frame_stream",
@@ -46,6 +61,20 @@ fn main() {
             "terminal_ack",
             "terminal_close",
             "terminal_surface",
+            "open_road",
+            "road_place",
+            "road_fullscreen",
+            "road_cockpit",
+            "road_promote",
+            "road_demote",
+            "road_status",
+            "road_manifest",
+            "road_route",
+            "whoami",
+            "privileged_intent",
+            "pane_beat",
+            "pane_hello",
+            "pane_offer",
         ]),
     ))
     .expect("failed to run tauri-build");

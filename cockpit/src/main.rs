@@ -123,6 +123,12 @@ use tauri::{Manager, State};
 
 use worker::{Msg, Queues};
 
+/// Opens the separately permissioned road in THIS Super process.
+#[tauri::command]
+async fn open_road(app: tauri::AppHandle) -> Result<(), String> {
+    tier1_proof::open(&app)
+}
+
 /// Hand the worker somewhere to send frames.
 ///
 /// **This is the ordering fix.** The frontend constructs the channel,
@@ -877,7 +883,10 @@ fn main() {
         .manage(bots::Bots::default())
         .manage(codex_connection::Connection::default())
         .manage(claude_connection::Connection::default())
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+          let road = tier1_proof::handler();
+          let cockpit: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
+            open_road,
             bind_frame_stream,
             unbind_frame_stream,
             intent,
@@ -906,7 +915,12 @@ fn main() {
             terminal_ack,
             terminal_close,
             terminal_surface
-        ])
+          ]);
+          move |invoke: tauri::ipc::Invoke| {
+            if tier1_proof::COMMANDS.contains(&invoke.message.command()) { road(invoke) }
+            else { cockpit(invoke) }
+          }
+        })
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 window
@@ -920,6 +934,10 @@ fn main() {
             }
         })
         .setup(move |app| {
+            tier1_proof::install(app.handle());
+            if std::env::var("SUPER_ROAD").as_deref() == Ok("1") {
+                tier1_proof::open(app.handle()).map_err(std::io::Error::other)?;
+            }
             if std::env::var("SUPER_BUILD_PREVIEW").as_deref() == Ok("1") {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.set_title("Super — build preview (temporary session)");

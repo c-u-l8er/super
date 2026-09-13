@@ -297,6 +297,36 @@
           "markdownDescription": "Enables the mobile_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the open_road command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-open-road",
+          "markdownDescription": "Enables the open_road command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pane_beat command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pane-beat",
+          "markdownDescription": "Enables the pane_beat command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pane_hello command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pane-hello",
+          "markdownDescription": "Enables the pane_hello command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the pane_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-pane-offer",
+          "markdownDescription": "Enables the pane_offer command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the privileged_intent command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-privileged-intent",
+          "markdownDescription": "Enables the privileged_intent command without any pre-configured scope."
+        },
+        {
           "description": "Enables the review_content command without any pre-configured scope.",
           "type": "string",
           "const": "allow-review-content",
@@ -307,6 +337,54 @@
           "type": "string",
           "const": "allow-review-tests",
           "markdownDescription": "Enables the review_tests command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_cockpit command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-cockpit",
+          "markdownDescription": "Enables the road_cockpit command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_demote command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-demote",
+          "markdownDescription": "Enables the road_demote command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_fullscreen command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-fullscreen",
+          "markdownDescription": "Enables the road_fullscreen command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-manifest",
+          "markdownDescription": "Enables the road_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_place command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-place",
+          "markdownDescription": "Enables the road_place command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_promote command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-promote",
+          "markdownDescription": "Enables the road_promote command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_route command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-route",
+          "markdownDescription": "Enables the road_route command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the road_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-road-status",
+          "markdownDescription": "Enables the road_status command without any pre-configured scope."
         },
         {
           "description": "Enables the surface_sessions command without any pre-configured scope.",
@@ -343,6 +421,12 @@
           "type": "string",
           "const": "allow-unbind-frame-stream",
           "markdownDescription": "Enables the unbind_frame_stream command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the whoami command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-whoami",
+          "markdownDescription": "Enables the whoami command without any pre-configured scope."
         },
         {
           "description": "Denies the bind_frame_stream command without any pre-configured scope.",
@@ -465,6 +549,36 @@
           "markdownDescription": "Denies the mobile_status command without any pre-configured scope."
         },
         {
+          "description": "Denies the open_road command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-open-road",
+          "markdownDescription": "Denies the open_road command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pane_beat command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pane-beat",
+          "markdownDescription": "Denies the pane_beat command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pane_hello command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pane-hello",
+          "markdownDescription": "Denies the pane_hello command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the pane_offer command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-pane-offer",
+          "markdownDescription": "Denies the pane_offer command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the privileged_intent command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-privileged-intent",
+          "markdownDescription": "Denies the privileged_intent command without any pre-configured scope."
+        },
+        {
           "description": "Denies the review_content command without any pre-configured scope.",
           "type": "string",
           "const": "deny-review-content",
@@ -475,6 +589,54 @@
           "type": "string",
           "const": "deny-review-tests",
           "markdownDescription": "Denies the review_tests command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_cockpit command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-cockpit",
+          "markdownDescription": "Denies the road_cockpit command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_demote command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-demote",
+          "markdownDescription": "Denies the road_demote command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_fullscreen command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-fullscreen",
+          "markdownDescription": "Denies the road_fullscreen command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_manifest command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-manifest",
+          "markdownDescription": "Denies the road_manifest command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_place command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-place",
+          "markdownDescription": "Denies the road_place command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_promote command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-promote",
+          "markdownDescription": "Denies the road_promote command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_route command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-route",
+          "markdownDescription": "Denies the road_route command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the road_status command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-road-status",
+          "markdownDescription": "Denies the road_status command without any pre-configured scope."
         },
         {
           "description": "Denies the surface_sessions command without any pre-configured scope.",
@@ -511,6 +673,12 @@
           "type": "string",
           "const": "deny-unbind-frame-stream",
           "markdownDescription": "Denies the unbind_frame_stream command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the whoami command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-whoami",
+          "markdownDescription": "Denies the whoami command without any pre-configured scope."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

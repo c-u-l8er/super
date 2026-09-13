@@ -1,0 +1,11 @@
+{
+  "identifier": "cd-road",
+  "description": "The road surface only. No cockpit runtime, filesystem, terminal, or bot authority. Pane grants are minted per instance by the shared road runtime.",
+  "webviews": ["cd-road"],
+  "permissions": [
+    "allow-road-place", "allow-road-fullscreen", "allow-road-cockpit",
+    "allow-road-promote", "allow-road-demote", "allow-road-status",
+    "allow-road-manifest", "allow-road-route", "allow-whoami",
+    "allow-privileged-intent"
+  ]
+}

@@ -176,7 +176,36 @@ running and restarting it, which revokes every paired phone session.
 
 # Addendum, same day — two findings from building it, and the fork they reach
 
-## A third cost, and it is the serious one
+## A third cost — RETRACTED the same day, and the retraction is the point
+
+> **This section was wrong and is kept for the record rather than edited away.**
+> It claimed a shipped world could be made unviewable by recording two maximal
+> change sets. It cannot. `Ampd.DevelopmentAttempt.persist/2` — on shipped main,
+> predating all of this — caps the whole persisted `development_attempts`
+> collection at **64 KiB encoded** plus a reserve per unfinished test run, and
+> refuses `attempt-directory-full` while **preserving what is already recorded**.
+> The store refuses long before a frame is threatened.
+>
+> The tests cited below encoded **synthetic maps** and never went through
+> admission, so they measured arithmetic about a shape and were presented as
+> reachability. That is the error: a measurement that bypasses the guard cannot
+> establish a failure the guard exists to prevent. They are now named
+> `ARITHMETIC ONLY` and the reachable version records through the real path and
+> asserts `attempt-directory-full`.
+>
+> **What survives, and still justifies staging:** the *submission* ceiling is
+> real and was measured on the wire — seven files refused at
+> `frame of 336202 bytes exceeds the 262144 byte limit` — and the per-file caps
+> exclude `cockpit.js`, `cockpit.css` and `projection.ex` outright. And the
+> 64 KiB guard is a second, independent argument **for** staging rather than
+> against it: one real three-file inline change set (`da_0030`) was 30 632
+> bytes, 47% of the entire budget for a world, and two inline 20 KB files do not
+> fit at all. With bodies published separately a record is its metadata, so the
+> same budget holds roughly sixteen times as many reviews. **Keep the guard.**
+>
+> Found by the session that picked this up, 2026-09-12.
+
+## A third cost, as it was claimed
 
 `Ampd.Projection` publishes `"development_attempts" => Ampd.Loci.development_attempts()`
 — **the whole collection, with all inlined text, in every frame.** Receipts,
@@ -196,8 +225,9 @@ may hold four, and the runtime's own `attempt-limit` permits **fifty** sets. Two
 of maximum size make the projection unpublishable — so **the world stops being
 viewable, over material that is already recorded and cannot be unrecorded.**
 
-This is reachable in the runtime as it ships, with no change from this round. It
-also settles the comparison: content has to leave the *projection*, not only the
+**The sentence that followed here said "this is reachable in the runtime as it
+ships". It is not — see the retraction above.** The comparison is still settled,
+for the reasons that survive: content has to leave the *projection*, not only the
 command. Option A cannot reach it — raising the frame to fit two sets leaves
 three over the line.
 

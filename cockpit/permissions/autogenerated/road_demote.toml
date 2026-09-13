@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-road-demote"
+description = "Enables the road_demote command without any pre-configured scope."
+commands.allow = ["road_demote"]
+
+[[permission]]
+identifier = "deny-road-demote"
+description = "Denies the road_demote command without any pre-configured scope."
+commands.deny = ["road_demote"]

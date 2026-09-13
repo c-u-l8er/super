@@ -1,0 +1,17 @@
+{
+  "id": "digest",
+  "title": "Digest",
+  "entry": "pane.html",
+  "accepts": ["summary"],
+  "produces": null,
+  "sign": {
+    "primitives": [
+      { "kind": "rect", "x": 0,  "y": 0,  "w": 240, "h": 132 },
+      { "kind": "text", "x": 14, "y": 30, "size": 17, "weight": 700, "value": "Digest" },
+      { "kind": "line", "x": 14, "y": 44, "w": 212 },
+      { "kind": "text", "x": 14, "y": 68, "size": 12, "value": "accepts: summary" },
+      { "kind": "text", "x": 14, "y": 88, "size": 12, "value": "produces: nothing" },
+      { "kind": "text", "x": 14, "y": 116, "size": 11, "value": "availability: unknown" }
+    ]
+  }
+}
