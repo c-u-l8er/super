@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 /* Does `lib/cockpit-control.mjs` actually do what it says?
  *
+ * NAMED `-check`, NOT `-test`, ON PURPOSE. This drives a real cockpit through
+ * tauri-driver on a display. The JavaScript review profile runs every
+ * `tools/*-test.mjs` of a snapshot inside the runner's sandbox — no display,
+ * no driver, no built cockpit — and from 2026-09-11 (f7e6209) to 2026-09-13
+ * this file's old name put it in that glob, so Super's own required check
+ * could not pass on Super's own tree: 137 of 138 assertions, and this one
+ * `not ok`. Found by `tools/super-self-build-dogfood.mjs`. A sandbox-runnable
+ * unit suite is `-test.mjs`; a driven check is not.
+ *
  * It claims three things and each is checked here against a real cockpit and a
  * throwaway world:
  *

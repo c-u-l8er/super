@@ -401,14 +401,15 @@ tests that pinned the old numbers moved with them (76 passed).
 files of 256 KiB is about a quarter of a million tokens; a model that cannot
 take them says so as a provider error, which the page already surfaces.
 
-**Found on the way, not fixed:** after a restart, a saved combined review
-has no apply control — the transcript restores none (by design, since
-2fc6bdc) and the plan page offers none — so the person asks the bot again and
-stages the re-issued proposal; the record and its acceptance are the original.
-The smoke does exactly that. And the runner refuses to start until the plan's
+**Found on the way, fixed in round 4 below:** after a restart, a saved
+combined review had no apply control — the transcript restores none (by
+design, since 2fc6bdc) and the plan page offered none — so the person asked
+the bot again and staged the re-issued proposal; the record and its
+acceptance were the original. The large-file smoke still does exactly that,
+as the record of the gap. And the runner refuses to start until the plan's
 repository is chosen in the Editor again (*"Choose the plan's repository in
-Editor first."*), which is the native chooser: both are restart facts a
-person meets, and both cost this round a run each.
+Editor first."*), which is the native chooser: a restart fact a person meets,
+and one the saved-review action shares by design.
 
 `tools/large-file-review-smoke.mjs` is the demonstration: the real
 `cockpit/ui/cockpit.js` (73 KB) copied into a disposable repository, attached
@@ -511,3 +512,90 @@ Nothing here has been merged into the shared checkout, built there, or
 restarted; production data, phone sessions and held proposals were not
 touched.
 
+## Round 4 — a saved review is staged again from its own bytes, not asked for again (2026-09-13)
+
+Round 3 recorded a product gap: after a restart the transcript restores no
+apply control and the plan page offered none, so the person asked the bot
+again and staged the *re-issued* proposal. The reviewed bytes were already on
+the plan. Regenerating them costs a provider call and can return a different
+proposal — the record and its acceptance would then describe one thing and the
+files another.
+
+**What was built.** A plan-page action on a saved combined review, *Stage saved
+review in Editor* (`development-tasks.js` → `stage-saved-review` event →
+`development.js`), and a pure module `cockpit/ui/saved-review.js` that turns
+the record into the items the existing combined-review dialog accepts. The
+dialog (`file-proposal-set-review.js`), its *Stage all drafts*, and the Editor's
+*Apply staged change set* are then the same controls, running the same checks,
+as for a proposal that arrived a moment ago — the dialog is headed *Saved review
+da_NNNN · N files* and offers no second save. No new host command, no new
+intent: bodies are read through the `review_content` host command that
+already existed, and the write stays behind the apply control.
+
+What the action does, in order, and what it refuses by name:
+
+| step | refusal |
+|---|---|
+| the record: a combined review, open (not accepted/dismissed), on the plan's current revision, plan not cancelled/completed, 2–4 members with complete bases | *"Review da_0007 was recorded against plan revision 2; the plan is at revision 3"*, … |
+| the Editor: a repository chosen and the plan linked (Prepare file request → Open repository, the native chooser); no review or change set already open | *"Choose the plan's repository in Editor first"* |
+| every body, read back through the host (which re-hashes and tells missing from corrupt) **and re-hashed in the page** against the digest the record names; an inline record supplies its own bodies and is checked the same way | *"cockpit.js: This file's reviewed content is no longer stored"*, *"… no longer matches its digest"* |
+| every file **as the disk holds it now**, never as an open tab remembers it: hash equals the recorded `disk_sha256`; a new-file member must still be absent; a reviewed file must still exist | *"cockpit.js changed on disk since it was reviewed (now 1a2b…, reviewed at 3c4d…)"*, *"… was reviewed as a new file but now exists"*, *"… no longer exists"* |
+| an open tab with its own unsaved edit that is not the review's shared draft | *"cockpit.js has unsaved edits in the Editor. Save or reload it"* |
+| then, and only then: a tab per file showing the review's shared draft, the dialog over the record's bytes; *Stage all drafts* re-runs `verifyPlan` (`match_plan` + `file_basis`) per file and yields unsaved drafts; *Apply staged change set* re-verifies every basis again and writes atomically through `apply_set` | the existing refusals |
+
+Half a set is never staged: any refusal is for the whole review, before a tab
+changes. Retained content restores no permission to write — staging produces
+drafts, and the apply control is what a person presses to write.
+
+**Found by driving the real UI, again.** Two defects, neither visible to the
+unit suite:
+
+1. **A recovered tab's `original` is not the disk.** The first cut of the
+   handler took an open tab's `original` as the file's current bytes. After a
+   restart the Editor's recovery restored the cockpit.js tab with the bytes it
+   last saw, the file had been changed on disk, and the dialog opened over it
+   — the apply-time `file_basis` would still have refused the write, but the
+   refusal this action exists to give never came. Every member is now read
+   from disk; a clean tab follows the disk, a dirty one keeps its draft for the
+   conflict check.
+2. **`node --check` is not a parse.** The dialog function already declared
+   `let saved=false` for its own save flag; a new parameter named `saved`
+   shadowing it is a SyntaxError in every engine. `node --check` passed
+   (V8's lazy pre-parser does not check function bodies), the built page
+   failed to evaluate, and the cockpit sat at the static *Connecting to your
+   local runtime…* with a runtime that had in fact started — indistinguishable
+   from a runtime fault until a WebDriver `import('./x.js')` from inside the
+   page named the error. `node -e "import('./x.js')"` is the check; the
+   modules that touch `window` fail with a ReferenceError, which is the
+   distinction that matters.
+
+**Verification.** Unit: `tools/saved-review-test.mjs` **11 · 0**, falsified three
+ways (the disk-changed check, the page re-hash, the accepted/dismissed refusal
+each removed → 1, 2 and 1 tests red); **26 JavaScript suites pass**
+(`cockpit-control-check.mjs`, then still named `-test`, fails when a smoke holds
+its port and passes alone — coordination, not the app). `tools/gates.sh` **8 held** (ACL 35,
+intent surface 6). Runtime and Rust suites were not changed and not rerun.
+
+Through the actual UI, `tools/saved-review-resume-smoke.mjs` alone on the
+final binary: **45 held** — propose → record by digest → kill → restart →
+refused with no repository → repository chosen → required check fails then
+passes → acceptance refused unsaved → refused missing → refused corrupt →
+refused changed on disk → refused unsaved Editor edit → staged from the
+record (dialog headed *Saved review da_0007 · 2 files*, no save control) →
+record unchanged → apply refused over a changed file → applied together, no
+journal → accepted with the original identity, files and passing run →
+fixture build. The provider fixture counted **0 calls after the restart**.
+Its first three runs each stopped on something real: the page that never
+evaluated (defect 2), the recovered tab (defect 1), and twice an assertion of
+mine that asked the coarse diff summary for a line it is bounded not to show
+(600 rows of a 2,176-line file are all removals) — the summary shows
+`- // color: red`, the columns show both lines, and the apply step proves the
+staged bytes on disk.
+
+{{SELF_BUILD}}
+
+**Not done.** A single-file inline review is not resumed this way (its text is
+on the plan and its dialog is the single-file one); the self-build cycle used
+the provider fixture, not ChatGPT; no physical power loss; no non-Linux
+filesystem; no live phone; nothing merged, built in the shared checkout, or
+restarted; the four stray blobs stay where they are.
