@@ -31,3 +31,5 @@ test('workspace and bot lists intersect and exclude closed plans without modifyi
 });
 
 test('combined review guidance requires tests before a decision',()=>{const task={id:'dt_set',revision:1,status:'planned'};const p={development_attempts:{a:{id:'a',schema:'development-review-set@1',task_ref:task.id,task_revision:1,status:'recorded'}}};const result=taskProgress(p,task);assert.equal(result.state,'checks_missing');assert.match(result.reason,/run the appropriate test profile/);assert.equal(result.attempt,'a');});
+
+test('a decision points at staging the saved review, which needs no provider call',()=>{const p=projection([{...attempt,test_runs:{r:run}}]);const result=taskProgress(p,task);assert.equal(result.state,'decision');assert.match(result.reason,/Stage the saved review in Editor and apply the staged change set/);});

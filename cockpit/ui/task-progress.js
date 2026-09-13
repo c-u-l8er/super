@@ -19,7 +19,7 @@ export function taskProgress(p,task){
     if(!coverage.rows.length||coverage.rows.some(r=>r.status==='missing'))return result('checks_missing','Review proposal and run checks','Review the retained proposal, choose this plan’s repository in Editor, then run the appropriate test profile. Complete every required plan check.','review',a);
     if(!coverage.ready)return result('checks_attention','Resolve test results','A used profile is failed, incomplete, or tested a different snapshot. Open the review to inspect and rerun it.','review',a);
   }
-  if(open.length)return result('decision','Review saved files and decide','Used test profiles agree. Save the exact proposal in Editor, then use the review’s file check and acceptance control.','review',open[0]);
+  if(open.length)return result('decision','Review saved files and decide','Used test profiles agree. Stage the saved review in Editor and apply the staged change set (or save the exact proposal), then use the review’s file check and acceptance control.','review',open[0]);
   if(current.some(a=>a.status==='accepted'&&a.acceptance?.schema==='development-acceptance@1'&&a.acceptance.task_revision===task.revision))return result('finish','Review plan completion','A result for this plan revision is accepted. Confirm the criteria are met and record a completion reason. Integration and rebuilding remain separate.','completion');
   return result('prepare','Prepare file request',all.length?'No open review or accepted result covers this plan revision. Prepare a fresh request using the current criteria.':'Choose a source file in Editor and share it with the assigned bot.','prepare');
 }
