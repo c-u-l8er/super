@@ -11,7 +11,7 @@ if 'EXPIRED_FIXTURE' in prompt:
  emit({'type':'result','is_error':True,'result':'Failed to authenticate: OAuth session expired and could not be refreshed'});sys.exit(1)
 emit({'type':'system','subtype':'init'})
 emit({'type':'stream_event','event':{'delta':{'type':'thinking_delta','thinking':'PRIVATE_FIXTURE_MUST_NOT_APPEAR'}}})
-for part in ['I am checking ', 'the requested labels.']:
+for part in ([] if 'STRUCTURED_ONLY_FIXTURE' in prompt else ['I am checking ', 'the requested labels.']):
  emit({'type':'stream_event','event':{'delta':{'type':'text_delta','text':part}}});time.sleep(1)
 if 'CANCEL_FIXTURE' in prompt: time.sleep(15)
 time.sleep(1)

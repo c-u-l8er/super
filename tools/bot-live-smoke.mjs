@@ -31,6 +31,9 @@ try{
  check('Receiving a proposal does not execute it',!(await app.list('workspaces')).some(w=>w.name==='Reviewed fixture workspace'));
  await app.page(`document.querySelector('#bot-activity-action').click()`);
  check('Review action focuses a proposal control',await app.page(`return !!document.activeElement.closest('.bot-proposal')`));
+ await app.page(`document.querySelector('#bot-new').click()`);await send('STRUCTURED_ONLY_FIXTURE');await ready();
+ check('A complete structured reply does not claim text is still missing',await app.page(`return document.querySelector('#bot-activity').textContent.includes('Reply delivered at completion')`));
+ check('Completed reply offers Read reply',await app.page(`return document.querySelector('#bot-activity-action').textContent==='Read reply'`));
  await app.page(`document.querySelector('#bot-new').click()`);await send('CANCEL_FIXTURE');
  await app.until(()=>app.page(`return !document.querySelector('#bot-cancel-reply').hidden`),15000,'cancel available');
  await app.page(`document.querySelector('#bot-cancel-reply').click()`);await ready();
