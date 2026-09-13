@@ -159,7 +159,10 @@ missing half is published); and acceptance bound to the exact reviewed content.
 A change set carrying `cockpit/ui/cockpit.js` — 72 809 bytes, which the old caps
 excluded outright — records with a **request under 8 000 bytes**.
 
-## Deploying it — the exact steps, none of which have been taken
+## Deploying it — the exact steps, as written before deployment
+
+*(Deployed 2026-09-13; what actually happened, and where it departed from
+this, is under "Deployed — 2026-09-13" below.)*
 
     # 1. Merge the branch into the shared checkout.
     cd /home/travis/ProjectAmp2/super
@@ -650,3 +653,89 @@ on the plan and its dialog is the single-file one); the self-build cycle used
 the provider fixture, not ChatGPT; no physical power loss; no non-Linux
 filesystem; no live phone; nothing merged, built in the shared checkout, or
 restarted; the four stray blobs stay where they are.
+
+## Deployed — 2026-09-13, controlled local deployment through 1fe3175
+
+**Deployed commit `93ca96c`** on `review-content-staging` = `1fe3175` (the
+reviewed branch) with `main` (`8777d77`, road lanes) merged in. **Executable
+`1f96e2d53917b083e6008dec1a3dbd99746a37eaf61e03cc122d022d4a3fe348`**,
+`~/build/super-review-content/cockpit/target/release/super-cockpit`, running
+as `systemd --user` unit `super-desktop` (MainPID 2870860, started 16:44:36
+CDT) from the worktree, with `AMPD_DIR` = that tree's `ampd`. Verified from
+the process, not the build: `sha256sum /proc/<pid>/exe` equals the build.
+
+**State found first.** No cockpit was running: the host rebooted 2026-09-12
+14:35 and the desktop last ran 08:29 that day (journal), so "restart once"
+was a start, and the identity of the last binary that served the world is
+not recoverable. The shared checkout `ProjectAmp2/super` carried another
+session's uncommitted road-shell work (`carrier.ex`, `control.ex`, `peer.ex`,
+`worker.ex`, tests, `surface_profile.ex`, `tools/hypersurface/`), and
+`control.ex` is also changed by this branch — so a merge into that tree
+would have overwritten unrelated work. Two of this session's own fixture
+runtimes were still alive from killed self-build runs and were stopped by
+PID (a `pkill -f` pattern matches the shell that typed it — three times).
+
+**Backup, under the lock.** `~/build/backup-world.sh` takes the world's
+`flock(2)` (`flock -n`, refusing if a runtime holds it), copies
+`worlds/default` (14 files, the four blobs included) and the device-local
+`~/.local/share/com.computedriven.super.cockpit` (7,103 files: builds, test
+runs, page localStorage), re-hashes source and copy and compares the lists
+— equal. `~/build/super-world-backups/default-20260913T214036Z/`, with a
+`MANIFEST.md`. The copy's `loci.dets` reads: 12 plans (7 planned, 5
+cancelled), 1 combined review `da_0030` (recorded, 3 inline members,
+26,761 B), 5 workspaces, 3 goals, 4 lanes, 3 workers, 2 bots. **Restoring
+it restores that moment**; nothing recorded after the deployment is in it.
+Previous executable retained: `~/build/super-previous/super-cockpit-242c2a7b`
+(the shared checkout's build of 2026-09-12 16:39; provenance by hash and
+mtime only — see its README).
+
+**Merge.** `main` into the branch, in the worktree. Four conflicts, all
+generated Tauri schemas under `cockpit/gen/schemas`, resolved by taking
+main's copies and letting the build regenerate them from the merged command
+list. **Main's road-shell commits make the cockpit depend on the sibling
+`RRABBIT` repository by relative path** (`../../RRABBIT/tier1-proof` as a
+crate, its `ui` and `m2/road-geometry.js` copied at build,
+`check-webview-acl.mjs` reading its `main.rs`): the first build failed with
+"No such file" and the ACL gate went red for the same reason. Built with
+`~/build/RRABBIT → ProjectAmp2/RRABBIT` at `fa09f07`, clean. **`main`'s ref
+in the shared checkout was NOT advanced** (its dirty `control.ex`); the merge
+commit exists and `git merge --ff-only review-content-staging` is one
+command once that work is committed.
+
+**Release checks on `93ca96c`:** ampd **843 · 0**; cockpit **76 passed · 0
+failed · 1 ignored**; `tools/gates.sh` **8 held** (ACL 41 held, from 35);
+24 JavaScript suites.
+
+**After the start (one start, no restart):** gateway on 4318 within 1 s;
+lock held by the cockpit, world held by its ampd child; `loci.dets` not
+rewritten (mtime unchanged); a copy of it reads the same 12 / 1 / 5 / 3 /
+4 / 3 / 2 and `da_0030` with its 3 inline bodies; the four blobs
+byte-identical to the backup; no staging partials. Migration of inline
+records is not wired (by design) and did not run. **`ReviewContent.collect/2`
+has no caller** — the "collection after a 1 h grace" this document describes
+above is a tested function nothing runs, like `recover/0` was before round 2;
+so the runtime will not remove the four blobs, and that sentence overclaims.
+
+**Pairing.** The unit was started with `SUPER_MOBILE_PANEL=1`: the one-use
+code is in a `yad` window on the desktop's own screen, unspent when checked
+(by age and the gateway's `devices.json`, never by reading it). Then
+`super-mobile-tailnet`, `super-mobile-expo` and `super-mobile-connector`
+were started as transient units (they did not survive the reboot; the
+observer was NOT started — it contends for the world lock). Chain check:
+gateway 401 unpaired · connector 401 / 403 wrong owner / 403 no identity /
+**405 on writes** · tailnet 401 with `tlsVerified:true` · `/observe` 503
+(expected). `iphone-12-mini` is on the tailnet; its previous session was
+revoked by the start and the connector log shows no phone traffic yet.
+
+**Needs Travis, not claimed:** open the app on the phone, watch it fail
+its old session (401s in `journalctl --user -u super-mobile-connector`),
+enter the code from the panel, and read the *waiting on you* stat and the
+plan list — `00`/a count means the new gateway, `--` the old, absent means
+old app JS.
+
+**Recovery limitations, unchanged.** A review that carries a file over the
+old 24 000 / 32 000 caps cannot be downgraded to the old runtime
+(`cf3931f`, `~/build/super-old-runtime`); `tools/downgrade-world.sh`
+converts what fits and refuses the rest. The backup above is the other
+path and loses everything after 16:40 CDT today.
+
