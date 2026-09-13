@@ -87,7 +87,21 @@ const photo=name=>{if(shots){mkdirSync(shots,{recursive:true});try{run('/usr/bin
 const chooser=(...extra)=>execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid),...extra],{env:{...process.env,...(extra.length?{}:{})}});
 const env=(overrides={})=>({...process.env,XDG_DATA_HOME:testData,XDG_STATE_HOME:testData+'/state',AMPD_DIR:root+'/ampd',SUPER_WORLD_MODE:'saved',SUPER_WORLD:'self-build-fixture',SUPER_COCKPIT_FIXTURE:'0',SUPER_COCKPIT_CARRIER:'0',SUPER_COCKPIT_PANE:'0',WEBKIT_DISABLE_COMPOSITING_MODE:'1',...overrides});
 async function openSession(application){await until(async()=>{try{return (await fetch(base+'/status')).ok;}catch{return false;}});const created=await wd('POST','/session',{capabilities:{alwaysMatch:{'tauri:options':{application}}}});session=created.sessionId;await until(()=>script('return !!window.cockpit?.frame?.projection'));await wd('POST',`/session/${session}/window/rect`,{width:1280,height:850});}
-async function openTreePath(path){const parts=path.split('/');for(let i=0;i<parts.length;i++){const sub=parts.slice(0,i+1).join('/');while(!await script(`return !!document.querySelector('[data-file-path="'+arguments[0]+'"]')`,[sub])){await click('#editor-up');await sleep(200);}await click('[data-file-path="'+sub+'"]');}}
+// The tree lists one folder at a time and lists it asynchronously: after a
+// click, wait for the folder header to name the folder before looking for its
+// entries, and go up a bounded number of times rather than forever.
+async function openTreePath(path){
+  const parts=path.split('/');
+  const folder=()=>script(`return document.querySelector('#editor-tree .development-folder')?.textContent??null`);
+  for(let i=0;i<parts.length;i++){
+    const sub=parts.slice(0,i+1).join('/'),parent=parts.slice(0,i).join('/');
+    for(let up=0;(await folder())!==(parent||'/')&&up<8;up++){await click('#editor-up');await until(async()=>(await folder())!==null);await sleep(150);}
+    assert.equal(await folder(),parent||'/','the Editor tree could not reach '+(parent||'/'));
+    await until(()=>script(`return !!document.querySelector('[data-file-path="'+arguments[0]+'"]')`,[sub]));
+    await click('[data-file-path="'+sub+'"]');
+    if(i<parts.length-1)await until(async()=>(await folder())===sub);
+  }
+}
 let savedSet,task,route;
 try {
   await openSession(`${root}/cockpit/target/release/super-cockpit`);
