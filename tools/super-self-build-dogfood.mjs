@@ -101,8 +101,10 @@ try {
   execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid)],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});await sleep(800);if(!await script('return Object.keys(window.cockpit.frame.projection.repositories??{}).length'))execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid)],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});
   if(await script(`return !!document.querySelector('#retry-stream')`)){await click('#retry-stream');console.log('note: explicitly reconnected after native folder selection');}
   await until(()=>script('return Object.keys(window.cockpit.frame.projection.repositories??{}).length>0'));
-  const repo=await script('return Object.values(window.cockpit.frame.projection.repositories)[0]');
-  check('the registered repository is the disposable clone of Super, not this tree',(repo.name??'').endsWith(testRepo.split('/').at(-1))||JSON.stringify(repo).includes(testRepo.split('/').at(-1)));
+  // The projection publishes a repository's ref only (its name is a held
+  // proposal, not shipped), so the clone's identity is proven later: the
+  // Editor's `match_plan` binds the chosen folder to the plan's repository.
+  check('exactly one repository is registered — the folder the native chooser confirmed, which is the clone the driver runs in',await script('return Object.keys(window.cockpit.frame.projection.repositories).length===1'));
   await click('[data-rail-mode=bots]');await click('#rail-bots [data-nav=new-bot]');
   await type('#new-bot-name','Super Builder');await type('#new-bot-role','Implementation');await type('#new-bot-instructions','Build Super with reviewable changes.');await script(`document.querySelector('#new-bot-provider').value='ollama'`);await click('#create-bot-submit');
   await until(()=>script(`return document.querySelector('#bot-surface h1').textContent==='Super Builder' && !document.querySelector('#bot-provider').disabled`));
@@ -167,7 +169,7 @@ try {
   const runRecord=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_attempts[arguments[0]].test_runs??{}).find(r=>r.state==='completed')`,[savedSet.id]),120000);
   const runsList=await script(`return window.__TAURI__.core.invoke('review_tests',{request:{operation:'list',world:JSON.parse(arguments[1]),attempt_ref:arguments[0]}})`,[savedSet.id,JSON.stringify([worldBefore.world_incarnation,worldBefore.world_generation,(await script('return window.cockpit.frame.world')).projection_epoch])]);
   const runOutput=runsList.runs.find(r=>r.run_id===runRecord.run_id)?.result;
-  check('Super’s JavaScript suites — every tools/*-test.mjs in the accepted snapshot, the new assertion included — pass in the runner’s sandbox against the clone plus the proposal',runRecord.outcome.verdict==='pass'&&runRecord.outcome.result_sha256===savedSet.source.result_sha256&&(runOutput?.tests??[]).includes(PROGRESS_TEST)&&(runOutput?.tests?.length??0)>=25);
+  check('Super’s JavaScript suites — every tools/*-test.mjs in the accepted snapshot, the new assertion included — pass in the runner’s sandbox against the clone plus the proposal',runRecord.outcome.verdict==='pass'&&runRecord.outcome.result_sha256===savedSet.source.result_sha256&&(runOutput?.tests??[]).includes(PROGRESS_TEST)&&(runOutput?.tests?.length??0)===run('/bin/sh',['-c','ls tools/*-test.mjs | wc -l'],{cwd:testRepo,encoding:'utf8'}).trim()*1);
   console.log('note: test files run: '+(runOutput?.tests?.length)+' · snapshot '+runRecord.outcome.snapshot_sha256);
   photo('03_Super_Suites_Passed');
   // ------------------------------------------------ stage the SAVED review, apply, accept
