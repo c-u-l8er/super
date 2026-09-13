@@ -585,14 +585,65 @@ record (dialog headed *Saved review da_0007 · 2 files*, no save control) →
 record unchanged → apply refused over a changed file → applied together, no
 journal → accepted with the original identity, files and passing run →
 fixture build. The provider fixture counted **0 calls after the restart**.
-Its first three runs each stopped on something real: the page that never
+`tools/large-file-review-smoke.mjs` re-run on the final binary (with the
+promoted files): **56 held**, unchanged — it still records the bot-asked-again
+path, as the record of the gap this round closed. Its first three runs each
+stopped on something real: the page that never
 evaluated (defect 2), the recovered tab (defect 1), and twice an assertion of
 mine that asked the coarse diff summary for a line it is bounded not to show
 (600 rows of a 2,176-line file are all removals) — the summary shows
 `- // color: red`, the columns show both lines, and the apply step proves the
 staged bytes on disk.
 
-{{SELF_BUILD}}
+**The isolated self-build cycle — the actual application, not the fixture
+crate.** `tools/super-self-build-dogfood.mjs`, on the final code, **16 held**:
+a fresh `git clone` of this tree at `95a8bc4` in a disposable world
+(`self-build-fixture`), one registered repository (the clone), a plan
+requiring the JavaScript profile; the provider fixture (not ChatGPT) proposed
+two Super files — `cockpit/ui/task-progress.js` (the next action for a
+tested review now names the saved-review path) and `tools/task-progress-test.mjs`
+(a test that asserts it); recorded by digest at the clone's HEAD, nothing in
+the clone changed; killed and restarted; refused without a repository; the
+clone chosen again; **Super's own 24 suites, the new assertion included,
+passed in the runner's sandbox**; the saved review staged from its recorded
+bytes with **no provider call after the restart** (one call in the whole
+cycle); one apply wrote both files; acceptance bound them to the passing
+snapshot `8d32e7ce…`; *Build accepted app* ran the real
+`super-cockpit-release@1` profile — cargo, `--offline --locked --release`,
+two jobs, in bwrap — in **358 s** and produced a **20,368,632-byte ELF**,
+sha256 `5acedc3c…`, **byte-identical to the previous run's build** from a
+snapshot that differed only in a tools file; the build's captured snapshot
+carries the accepted files exactly; the artifact was then launched as a
+cockpit of its own, in a third disposable world with its runtime from the
+snapshot, served frames, and its own page — asked through `import()` —
+exported the saved-review module and produced the accepted wording. The two
+accepted files were then copied from that snapshot into this branch, checked
+against the build manifest (`1551757`).
+
+Three things the cycle found, all reported apart from the application:
+
+- **Super's required JavaScript check could not pass on Super's own tree from
+  f7e6209 (2026-09-11) to c3b7578 (2026-09-13).** The profile runs every
+  `tools/*-test.mjs` of the snapshot in the sandbox — no display, no driver —
+  and `cockpit-control-test.mjs` drove a real cockpit under that name: 137 of
+  138 assertions, one `not ok`. The 2026-09-10 real-provider cycle passed
+  because the file did not exist yet. Renamed `cockpit-control-check.mjs`
+  (application finding; it still passes alone, 10 held).
+- The cycle's own assertions were wrong three times (coordination, not the
+  app): it expected a repository record to carry a name (that projection
+  change is a held proposal); it hand-typed a suite count (now derived from
+  the clone); and it asked `strings` for page text that Tauri embeds
+  compressed — the tree's own binary has none either. The launched artifact
+  is the instrument.
+- Its Editor tree walk looked for the next folder before the asynchronous
+  listing rendered and pressed *Up* at the root for forty minutes; the walk
+  now waits for the folder header. Two earlier runs had passed that step by
+  timing.
+
+Evidence: `~/build/smoke-selfbuild.log`, the summary at
+`~/build/smoke-root/super-self-build-NlQNxD/self-build-summary.json`,
+screenshots under `~/build/smoke-root/shots-selfbuild/`, the failed runs'
+artifacts retained under `~/build/smoke-root/`.
 
 **Not done.** A single-file inline review is not resumed this way (its text is
 on the plan and its dialog is the single-file one); the self-build cycle used
