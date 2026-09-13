@@ -1,5 +1,6 @@
 import {REVIEW_FILE_BYTES,bytesOf} from './review-limits.js';
-import {stageContent} from './review-content.js';
+import {stageContent,readContent,sha256Text} from './review-content.js';
+import {savedReviewSet,savedReviewBodies,savedReviewItems} from './saved-review.js';
 import {reviewProposalSet} from './file-proposal-set-review.js';
 import {checkProposalSet} from './file-proposal-set.js';
 import {publishTaskEditor,canOpenTaskEditor} from './task-editor.js';
@@ -155,11 +156,12 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
     };
   }
   async function discuss(id,botId){let task;try{task=id==='editor'?selectedTask():null;if(task){const b=heldProjection(current)?.bots?.[task.bot_ref];if(!b)throw Error('The assigned bot is unavailable.');botId=b.client_ref;}}catch(e){return report(id,e.message||e);}let ref,content;if(id==='editor'&&file){ref={kind:id,key:file.path,generation,title:file.path,original:file.original,...(bytesOf(file.draft)<=REVIEW_FILE_BYTES?{draft:file.draft}:{})};content=file.path+'\n\n'+new TextDecoder().decode(new TextEncoder().encode(file.draft).slice(0,REVIEW_FILE_BYTES));}else if(id==='terminal'&&(worker||shell)){ref={kind:id,key:worker?'worker:'+worker.id:shell.id,generation,world:workerWorld,title:worker?'Worker '+worker.id:'Shell '+shell.id};const buffer=shell&&!worker?shell.term.buffer.active:null;const lines=[];if(buffer)for(let i=Math.max(0,buffer.length-200);i<buffer.length;i++)lines.push(buffer.getLine(i)?.translateToString(true)??'');content=ref.title+'\nRepository: '+root+'\n'+new TextDecoder().decode(new TextEncoder().encode(lines.join('\n')).slice(-16000));}else if(id==='browser'&&browser?.url){ref={kind:id,key:browser.id,token:browser.token,title:browser.url};content='Browser tab: '+browser.url;}else{return report(id,'Open a '+id+' tab first.');}if(task){if(typeof ref.draft!=='string')return report(id,'This file is too large for a complete plan-linked proposal. Choose a smaller file.');ref.task={id:task.id,revision:task.revision,world:activeTask.world};try{const capturedFile=file,capturedTask=activeTask;const match=await verifyPlan(ref);ref.source=await request('file_basis',{generation:ref.generation,path:ref.key,original:ref.original,draft:ref.draft,proposed:null});if(file!==capturedFile||file.draft!==ref.draft||file.original!==ref.original||generation!==ref.generation||activeTask!==capturedTask||selectedTask()?.revision!==task.revision)throw Error('The plan or file changed while checking its repository. Share it again.');content=taskFileAttachment(task,file.path,ref.draft,match,ref.source);}catch(e){return report(id,e.message||e);}}ref.session=surfaceSession;navigate('bot:'+botId);const event=new CustomEvent('bot-surface-context',{cancelable:true,detail:{botId,reference:ref,attachment:{name:ref.title.slice(0,120),content}}});if(!document.dispatchEvent(event))report(id,'Could not attach this context. Finish the current bot operation first.');}
-  document.addEventListener('review-file-proposal-set',e=>{try{
-    if(busy)throw Error('Finish the current file operation first.');
-    const items=e.detail.items;
+  // The combined-review dialog over `items`, wired to this Editor. `saved` names
+  // a review already on the plan, staged again from its recorded bytes: it is
+  // shown as such and offers no second save.
+  function openProposalSet(items,saved=null){
     const state=r=>({session:surfaceSession,generation,file:files.get(r.key),task:heldProjection(current)?.development_tasks?.[r.task?.id],world:runtimeWorld(current)});
-    reviewProposalSet({items,current:state,record:recordSet?async material=>{
+    reviewProposalSet({items,current:state,savedReview:saved,record:!saved&&recordSet?async material=>{
       checkProposalSet(items,state);
       const ref=items[0].reference,origin=runtimeWorld(current);
       const client_ref=items.reviewRequest??=crypto.randomUUID();
@@ -182,7 +184,67 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       file=prepared[0].target;editor.show(file.state);editor.readonly(!!file.pendingDeletion);paintFiles();paintSet();
       report('editor',prepared.length+' bot drafts staged together · Use Apply staged change set to save the complete set');
     },navigate,el,button});
-  }catch(error){e.detail.error=String(error.message||error);e.preventDefault();}});
+  }
+  document.addEventListener('review-file-proposal-set',e=>{try{if(busy)throw Error('Finish the current file operation first.');openProposalSet(e.detail.items);}catch(error){e.detail.error=String(error.message||error);e.preventDefault();}});
+  // A saved combined review, staged again from its recorded bytes after a
+  // restart or a closed transcript. Nothing asks a provider and nothing writes:
+  // the review's bodies are read back through the host and re-hashed here, each
+  // file is checked against the repository chosen in Editor NOW, and the result
+  // is the same dialog, the same unsaved drafts and the same apply control as a
+  // proposal that arrived a moment ago. The refusals are in saved-review.js.
+  document.addEventListener('stage-saved-review',e=>{
+    const d=e.detail;
+    try{
+      if(busy||review.open)throw Error('Finish the current file operation first.');
+      if(document.querySelector('#bot-file-review,#bot-file-set-review'))throw Error('Finish the current file review first.');
+      if(!root)throw Error("Choose the plan's repository in Editor first: use Prepare file request, then Open repository.");
+      const task=selectedTask();
+      if(!task||task.id!==d.taskId)throw Error('Prepare a file request for this plan and choose its repository in Editor first.');
+      const attempt=heldProjection(current)?.development_attempts?.[d.attemptId];
+      if(!attempt||attempt.revision!==d.revision)throw Error('The review changed. Reopen the plan.');
+      if(stagedSet||pendingSet)throw Error('Apply or finish the change set already staged in the Editor first.');
+      const members=savedReviewSet(attempt,task);
+      d.started=stageSavedReview(attempt,members,task,d.report??(()=>{}));
+    }catch(error){d.error=String(error.message||error);e.preventDefault();}
+  });
+  async function stageSavedReview(attempt,members,task,say){
+    const capturedTask=activeTask,capturedGeneration=generation;
+    busy=true;sync();
+    try{
+      say('Reading the recorded review content…');report('editor','Reading the recorded review content of '+attempt.id+'…');
+      const bodies=await savedReviewBodies(members,digest=>readContent(invoke,digest),sha256Text);
+      // Every file as the repository holds it NOW, read from disk before any
+      // tab changes — never from an open tab's `original`: a tab restored by
+      // recovery after a restart remembers the bytes it last saw, and a file
+      // that changed underneath it is exactly the case this must refuse. A
+      // clean tab follows the disk; a tab with its own unsaved edit keeps them,
+      // and the check below decides whether that is a conflict.
+      const states=new Map();
+      for(const m of members){
+        let disk;
+        try{disk=(await request('read',{path:m.path})).content;}catch(error){if(m.source.disk_sha256!==null)throw Error(m.path+': '+String(error.message||error));disk=null;}
+        const open=files.get(m.path),clean=!open||open.draft===open.original;
+        states.set(m.path,{original:disk,draft:clean?(disk??''):open.draft,originalSha256:disk===null?null:await sha256Text(disk)});
+      }
+      if(generation!==capturedGeneration||activeTask!==capturedTask||selectedTask()?.revision!==task.revision)throw Error('The repository or plan changed while reading. Try again.');
+      const items=savedReviewItems(members,bodies,states,{session:surfaceSession,generation,task:{id:task.id,revision:task.revision,world:capturedTask.world}});
+      if(items.filter(i=>!files.has(i.proposal.path)).length+files.size>16)throw Error('Close a file tab before staging this review.');
+      // Only now touch the Editor: a tab per file showing the review's own shared
+      // draft — the bytes on disk, unless the file was shared with an unsaved
+      // edit, which the checks above admit only as that exact text.
+      for(const item of items){
+        const path=item.proposal.path,s=states.get(path);
+        let f=files.get(path);
+        if(!f){f={path,original:s.original,draft:s.original??'',state:editor.state(path,s.original??'')};files.set(path,f);}
+        else if(f.original!==s.original){f.original=s.original;f.changed=false;}
+        if(f.draft!==item.reference.draft){f.draft=item.reference.draft;f.state=editor.state(path,f.draft);}
+      }
+      review.hide();file=files.get(items[0].proposal.path);editor.show(file.state);editor.readonly(!!file.pendingDeletion);paintFiles();
+      busy=false;sync();
+      say('Recorded content read and checked against its digests and the repository. Stage all drafts in the Editor; Apply staged change set is the step that writes.');
+      openProposalSet(items,attempt.id);
+    }catch(error){busy=false;sync();say(String(error.message||error));report('editor',String(error.message||error));}
+  }
   document.addEventListener('review-file-proposal',e=>{try{if(busy)throw Error('Finish the current file operation first.');const reference=e.detail.reference;const target=files.get(reference?.key);reviewFileProposal({reference,proposal:e.detail.proposal,verify:()=>verifyPlan(reference,e.detail.proposal.content),onIdentity:e.detail.onIdentity,recordAttempt:reference?.task&&recordAttempt?async source=>{
       const origin=runtimeWorld(current);
       if(origin!==reference.task.world)throw Error('The runtime changed. Reopen the review.');

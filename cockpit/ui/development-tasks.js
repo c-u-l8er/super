@@ -39,6 +39,9 @@ export function initDevelopmentTasks({invoke,actions,current}){
   const list=node('div');list.id='development-task-list';const details=node('section');details.id='development-task-detail';
   root.append(scope,all,notice,list,details,form);document.getElementById('workspace-canvas').append(root);
   let botFilter='',signature='',selection=null,pending=false,request=null,world=null,attemptSignature='';
+  // What staging a saved review last said, per review: a frame re-renders the
+  // cards and must not erase a refusal a person has not read yet.
+  const savedReviewNotes=new Map();
   const button=(label,fn)=>{const b=node('button',label,'subtle');b.type='button';b.onclick=fn;return b;};
   const record=(label,kind,id)=>{const b=node('button',label,'subtle');b.type='button';b.dataset.recordOpen=kind+':'+id;return b;};
   function show(task){
@@ -138,7 +141,23 @@ export function initDevelopmentTasks({invoke,actions,current}){
         material.append(file);}
 
       const source=node('details');source.append(node('summary','Recorded source identities'),node('pre',JSON.stringify(attempt.source,null,2),'attempt-text'));material.append(source);card.append(material);
-      if(combined)card.append(node('p','Combined review retained. Tests apply every replacement to one snapshot. Acceptance checks all saved files against that tested snapshot.','availability-note'));
+      if(combined){
+        card.append(node('p','Combined review retained. Tests apply every replacement to one snapshot. Acceptance checks all saved files against that tested snapshot.','availability-note'));
+        /* After a restart the transcript restores no apply control. The review's
+           bytes are on the plan, so it is staged again from them — read back,
+           re-hashed, checked against the repository chosen in Editor — rather
+           than asked for again. The Editor answers the event; refusals land on
+           the status line here, by file and fact. */
+        if(!['cancelled','completed'].includes(task.status)&&!['dismissed','accepted'].includes(attempt.status)){
+          const resume=node('section',undefined,'attempt-checks');resume.dataset.savedReview=attempt.id;
+          const line=node('p',savedReviewNotes.get(attempt.id)??'','availability-note');line.dataset.savedReviewStatus=attempt.id;line.setAttribute('role','status');
+          const say=text=>{savedReviewNotes.set(attempt.id,text);line.textContent=text;};
+          const stage=button('Stage saved review in Editor',()=>{const detail={attemptId:attempt.id,revision:attempt.revision,taskId:task.id,report:say};if(!document.dispatchEvent(new CustomEvent('stage-saved-review',{cancelable:true,detail})))say(detail.error||'The saved review could not be staged.');});
+          stage.dataset.stageSavedReview=attempt.id;
+          resume.append(node('h4','Stage this review again'),node('p','Reads the recorded content back, checks it against its digests and against the repository chosen in Editor, and opens it there as unsaved drafts. No bot is asked and nothing is written; Apply staged change set in the Editor is the step that writes.','directory-note'),stage,line);
+          card.append(resume);
+        }
+      }
       else {
       const checks=node('section',undefined,'attempt-checks');checks.id='attempt-checks-'+attempt.id;
       checks.append(node('h4','Proposed-text checks'),node('p','Checks cover this retained proposal only. App tests were not run. Changes in the editor or other files are not covered.','directory-note'));

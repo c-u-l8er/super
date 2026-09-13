@@ -77,3 +77,14 @@ export async function readContent(invoke, digest) {
     throw Error('This file’s reviewed content no longer matches its digest. It cannot be shown or accepted.');
   throw Error('This file’s reviewed content is no longer stored. Stage the proposal again; it cannot be shown or accepted.');
 }
+
+/**
+ * SHA-256 of `text` as lower-case hex — the page's own hash, for checking a
+ * body read back against the digest that names it rather than taking the
+ * host's word for the bytes it is about to stage.
+ */
+export async function sha256Text(text) {
+  const bytes = new TextEncoder().encode(text ?? '');
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)].map(b => b.toString(16).padStart(2, '0')).join('');
+}

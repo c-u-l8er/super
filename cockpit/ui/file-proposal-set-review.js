@@ -1,11 +1,15 @@
 import {codeEditor} from './vendor/code-editor.js';
 import {proposalChanges,displayLine} from './proposal-changes.js';
 import {checkProposalSet,prepareProposalSet,proposalSetMaterial} from './file-proposal-set.js';
-export function reviewProposalSet({items,current,verify,stage,publish,record,navigate,el,button}){
+export function reviewProposalSet({items,current,verify,stage,publish,record,navigate,el,button,savedReview=null}){
   if(document.querySelector('#bot-file-review,#bot-file-set-review'))throw Error('Finish the current file review first.');
   checkProposalSet(items,current);navigate('editor');
   const dialog=el('dialog',undefined,'file-proposal-review');dialog.id='bot-file-set-review';
-  dialog.append(el('h2',`Review ${items.length} files together`),el('p','Inspect each replacement or deletion, then stage all drafts together. Files remain unsaved. Save combined review keeps both versions on the plan. Open the saved review on the plan to test the complete set and review acceptance.','directory-note'));
+  // A saved review staged again carries the bytes the record names — read
+  // back and checked, not asked for again — and is already saved, so it offers
+  // no second save.
+  if(savedReview){dialog.dataset.savedReview=savedReview;dialog.append(el('h2',`Saved review ${savedReview} · ${items.length} files`),el('p','These are the exact bytes recorded on the plan, read back and checked against their digests and against the repository chosen in Editor. No bot was asked. Stage all drafts leaves every file unsaved; Apply staged change set in the Editor is the only step that writes.','directory-note'));}
+  else dialog.append(el('h2',`Review ${items.length} files together`),el('p','Inspect each replacement or deletion, then stage all drafts together. Files remain unsaved. Save combined review keeps both versions on the plan. Open the saved review on the plan to test the complete set and review acceptance.','directory-note'));
   const list=el('div',undefined,'connection-row'),body=el('section'),host=el('div'),views=[];
   let selected=0;
   function show(index){
