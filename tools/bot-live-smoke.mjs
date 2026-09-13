@@ -41,5 +41,7 @@ try{
  check('Expired authentication blocks send',await app.page(`return document.querySelector('#bot-send').disabled`));
  check('Expired authentication exposes reconnect',await app.page(`return document.querySelector('#bot-activity-state').textContent==='Needs connection' && !document.querySelector('#bot-activity-action').disabled`));
  check('Failed request preserves the assignment',await app.page(`return document.querySelector('#bot-message').value==='EXPIRED_FIXTURE'`));await app.page(`document.querySelector('#bot-activity').scrollIntoView({block:'start'})`);await shot('04-reconnect');
+ await app.page(`document.querySelector('[data-nav="edit-bot"]').click();const input=document.querySelector('#new-bot-instructions');input.value='Updated persistent instructions';input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#create-bot-submit').click()`);
+ check('Edited profile is stored for reopening',await app.page(`return JSON.parse(localStorage.getItem('super-bot-roster-v1')).bots.find(b=>b.name==='Live activity test').instructions==='Updated persistent instructions'`));
  writeFileSync(`${out}/checks.json`,JSON.stringify({passed:true,checks},null,2));
 }finally{if(app)await app.close();}

@@ -423,7 +423,7 @@ impl Connection {
         *self.1.lock().map_err(|_| "Reply status unavailable.")? = ReplyState {
             id, active: true, phase: "Waiting for provider".into(), ..ReplyState::default()
         };
-        let (ok, v) = run_reply(c, prompt, self.1.clone(), 120)?;
+        let (ok, v) = run_reply(c, prompt, self.1.clone(), 300)?;
         if needs_signin(&v) {
             std::fs::write(home.join("needs-signin"), b"expired\n")
                 .map_err(|_| "Could not record expired sign-in.")?;
