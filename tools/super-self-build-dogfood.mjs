@@ -200,8 +200,9 @@ try {
   const outcome=JSON.parse(readFileSync(buildDir+'/outcome.json','utf8'));
   check('the accepted build ran the real super-cockpit-release@1 profile, offline in the sandbox, and produced an ELF cockpit executable',outcome.profile==='super-cockpit-release@1'&&outcome.state==='completed'&&outcome.snapshot_sha256===accepted.acceptance.snapshot_sha256&&bytes.subarray(0,4).equals(Buffer.from([127,69,76,70]))&&bytes.length>5*1024*1024&&outcome.artifact.sha256===sha(bytes));
   console.log(`note: Super built from the accepted snapshot in ${buildSeconds} s · executable ${bytes.length} bytes · sha256 ${sha(bytes)} · snapshot ${outcome.snapshot_sha256} · head ${outcome.source_head}`);
-  const strings=run('/usr/bin/strings',['-n','12',binary],{encoding:'utf8',maxBuffer:256*1024*1024});
-  check('the built executable embeds the accepted page: the new next-action wording and the saved-review action are in its bytes; the old wording is not',strings.includes('Stage the saved review in Editor and apply the staged change set')&&strings.includes('Stage saved review in Editor')&&!strings.includes(oldReason));
+  // Tauri embeds the page compressed, so `strings` finds nothing of it in the
+  // executable (nor in this tree's own build); the built application itself is
+  // asked below, from inside its page, what its modules say.
   check('the snapshot the build captured carries the accepted files exactly',readFileSync(buildDir+'/snapshot/'+PROGRESS,'utf8')===proposedProgress&&readFileSync(buildDir+'/snapshot/'+PROGRESS_TEST,'utf8')===proposedTest);
   photo('08_Super_Build_Ready');
   // ------------------------------------------------ the built application, launched on its own
@@ -212,8 +213,10 @@ try {
   await openSession(binary);
   const running=await script(`return {world:window.cockpit.frame.world,screens:[...document.querySelectorAll('[data-screen]')].map(s=>s.dataset.screen).length,tasks:!!document.querySelector('#development-tasks')}`);
   const module=await script(`return import('./saved-review.js').then(m=>Object.keys(m).sort())`);
+  const reason=await script(`return import('./task-progress.js').then(m=>m.taskProgress({development_tasks:{t:{id:'t',revision:2,status:'planned'}},development_attempts:{a:{id:'a',task_ref:'t',task_revision:2,status:'recorded',test_runs:{r:{run_id:'r',started_at:'2026-09-13',state:'completed',outcome:{verdict:'pass',snapshot_sha256:'s'}}}}}},{id:'t',revision:2,status:'planned'}).reason)`);
   check('the built Super runs as a cockpit of its own — its runtime from the accepted snapshot, in a fresh world — and serves frames',running.world?.world_incarnation!==undefined&&running.tasks&&running.screens>5);
   check('the page the built Super serves carries the saved-review module',JSON.stringify(module)===JSON.stringify(['savedReviewBodies','savedReviewItem','savedReviewItems','savedReviewSet']));
+  check('the page the built Super serves carries the ACCEPTED next-action wording, not the old one — the accepted files are in the running application',reason===newReason&&reason!==oldReason);
   photo('09_Built_Super_Running');
   writeFileSync(testData+'/self-build-summary.json',JSON.stringify({source_head:sourceHead,clone:testRepo,attempt:accepted.id,snapshot_sha256:outcome.snapshot_sha256,executable:binary,executable_sha256:sha(bytes),executable_bytes:bytes.length,build_seconds:buildSeconds,provider_calls:chatCalls,files:[PROGRESS,PROGRESS_TEST]},null,2)+'\n');
   console.log('summary: '+testData+'/self-build-summary.json');
