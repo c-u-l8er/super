@@ -509,6 +509,7 @@ async fn bot_connection(
 #[tauri::command]
 async fn bot_claude_connection(
     operation: String,
+    request_id: Option<String>,
     app: tauri::AppHandle,
     state: State<'_, claude_connection::Connection>,
 ) -> Result<Value, String> {
@@ -519,6 +520,8 @@ async fn bot_claude_connection(
         .join("claude");
     let state = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || match operation.as_str() {
+        "reply_status" => state.reply_status(request_id.as_deref().ok_or("Reply identity required.")?),
+        "cancel_reply" => state.cancel_reply(request_id.as_deref().ok_or("Reply identity required.")?),
         "connect" => state.connect(home),
         "status" => state.status(home),
         "disconnect" => state.disconnect(home),

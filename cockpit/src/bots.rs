@@ -530,7 +530,7 @@ pub async fn chat(
                     .parent()
                     .ok_or("Connection folder is unavailable.")?
                     .join("claude");
-                claude.chat(claude_home, config.model, prompt, schema, turn.effort)
+                claude.chat(claude_home, config.model, prompt, schema, turn.effort, turn.request_id)
             } else {
                 codex.chat_tracked(
                     home,

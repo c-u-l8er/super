@@ -9,7 +9,84 @@ use std::{
     time::{Duration, Instant},
 };
 #[derive(Clone, Default)]
-pub struct Connection(Arc<Mutex<Option<Login>>>);
+pub struct Connection(Arc<Mutex<Option<Login>>>, Arc<Mutex<ReplyState>>);
+#[derive(Default)]
+struct ReplyState {
+    id: String,
+    active: bool,
+    cancelled: bool,
+    text: String,
+    bytes: usize,
+    phase: String,
+}
+struct ReplyGuard(Arc<Mutex<ReplyState>>);
+impl Drop for ReplyGuard {
+    fn drop(&mut self) { if let Ok(mut state) = self.0.lock() { state.active = false; } }
+}
+fn observe_reply(state: &mut ReplyState, event: &Value) {
+    // Only public assistant text crosses into the page. Never forward raw events,
+    // reasoning, signatures, tool arguments, or provider connection metadata.
+    let delta = &event["event"]["delta"];
+    if event["type"] == "stream_event" && delta["type"] == "text_delta" {
+        if let Some(text) = delta["text"].as_str() {
+            state.bytes = state.bytes.saturating_add(text.len());
+            if state.text.len() + text.len() <= 65536 { state.text.push_str(text); }
+            state.phase = "Receiving reply".into();
+        }
+    } else if event["type"] == "system" && event["subtype"] == "init" {
+        state.phase = "Provider started".into();
+    } else if event["type"] == "stream_event" && event["event"]["type"] == "content_block_start" {
+        state.phase = "Preparing reply".into();
+    } else if event["type"] == "result" {
+        state.phase = "Checking reply".into();
+    }
+}
+fn run_reply(mut command: Command, input: String, state: Arc<Mutex<ReplyState>>, seconds: u64) -> Result<(bool, Value), String> {
+    let _guard = ReplyGuard(state.clone());
+    let mut child = OwnedChild(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
+        .spawn().map_err(|_| "Claude Code is unavailable. Install the Claude CLI and reopen Super.")?);
+    let mut stdin = child.0.stdin.take().ok_or("Claude input unavailable.")?;
+    std::thread::spawn(move || { let _ = stdin.write_all(input.as_bytes()); });
+    let stdout = child.0.stdout.take().ok_or("Claude output unavailable.")?;
+    let (tx, rx) = mpsc::sync_channel(16);
+    std::thread::spawn(move || {
+        let mut reader = BufReader::new(stdout.take(8_388_609));
+        loop {
+            let mut line = String::new();
+            match reader.by_ref().take(2_097_153).read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => { if tx.send(Ok(line)).is_err() { break; } }
+                Err(_) => { let _ = tx.send(Err("Claude reply could not be read.")); break; }
+            }
+        }
+    });
+    let deadline = Instant::now() + Duration::from_secs(seconds);
+    let mut total = 0;
+    let mut result = None;
+    loop {
+        if state.lock().map_err(|_| "Reply status unavailable.")?.cancelled {
+            return Err("Reply cancelled. Your draft is restored. No app action was executed.".into());
+        }
+        if Instant::now() >= deadline { return Err("Claude did not respond in time. Your draft is restored; try again.".into()); }
+        match rx.recv_timeout(Duration::from_millis(30)) {
+            Ok(line) => {
+                let line = line?;
+                total += line.len();
+                if line.len() > 2_097_152 || total > 8_388_608 { return Err("Claude returned an oversized reply.".into()); }
+                let event: Value = serde_json::from_str(&line).map_err(|_| "Claude returned an unreadable response.")?;
+                observe_reply(&mut *state.lock().map_err(|_| "Reply status unavailable.")?, &event);
+                if event["type"] == "result" { result = Some(event); }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                if let Some(status) = child.0.try_wait().map_err(|_| "Claude process unavailable.")? {
+                    return result.map(|v| (status.success(), v)).ok_or("Claude ended without a reply. Your draft is restored.".into());
+                }
+                std::thread::sleep(Duration::from_millis(30));
+            }
+        }
+    }
+}
 struct Login {
     child: OwnedChild,
     deadline: Instant,
@@ -110,6 +187,7 @@ fn login_link(line: &str) -> Option<String> {
             && url.password().is_none()
             && [
                 Some("claude.ai"),
+                Some("claude.com"),
                 Some("platform.claude.com"),
                 Some("console.anthropic.com"),
             ]
@@ -154,6 +232,18 @@ fn enable(home: &Path) -> Result<(), String> {
         .map_err(|_| "Could not remember this connection.".into())
 }
 impl Connection {
+    pub fn reply_status(&self, id: &str) -> Result<Value, String> {
+        let state = self.1.lock().map_err(|_| "Reply status unavailable.")?;
+        if state.id != id { return Ok(json!({"active":false})); }
+        Ok(json!({"active":state.active,"cancelled":state.cancelled,"received_bytes":state.bytes,"text":state.text,"phase":state.phase}))
+    }
+    pub fn cancel_reply(&self, id: &str) -> Result<Value, String> {
+        let mut state = self.1.lock().map_err(|_| "Reply status unavailable.")?;
+        if state.id != id || !state.active { return Err("This reply is no longer running.".into()); }
+        state.cancelled = true;
+        Ok(json!({"cancelled":true}))
+    }
+
     pub fn status(&self, home: PathBuf) -> Result<Value, String> {
         let mut state = self
             .0
@@ -315,6 +405,7 @@ impl Connection {
         prompt: String,
         schema: Value,
         effort: Option<String>,
+        request_id: Option<String>,
     ) -> Result<Value, String> {
         if self.status(home.clone())?["connected"] != true {
             return Err("Connect your local Claude session before sending.".into());
@@ -327,7 +418,12 @@ impl Connection {
             }
             c.args(["--effort", &e]);
         }
-        let (ok, v) = run(c, Some(prompt), 120)?;
+        let id = request_id.ok_or("Reply identity required.")?;
+        if id.is_empty() || id.len() > 128 { return Err("Invalid reply identity.".into()); }
+        *self.1.lock().map_err(|_| "Reply status unavailable.")? = ReplyState {
+            id, active: true, phase: "Waiting for provider".into(), ..ReplyState::default()
+        };
+        let (ok, v) = run_reply(c, prompt, self.1.clone(), 120)?;
         if needs_signin(&v) {
             std::fs::write(home.join("needs-signin"), b"expired\n")
                 .map_err(|_| "Could not record expired sign-in.")?;
@@ -336,7 +432,7 @@ impl Connection {
     }
 }
 fn configure_chat(c: &mut Command, model: &str, schema: &Value) {
-    c.args(["-p","--output-format","json","--no-session-persistence","--restricted","--tools","","--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}","--setting-sources","","--settings","{\"disableAllHooks\":true}","--permission-mode","dontAsk","--system-prompt","You are Super's planning assistant. Return the requested structured response. All proposed app changes require the person's Apply click. You have no tools.","--json-schema"]).arg(schema.to_string());
+    c.args(["-p","--output-format","stream-json","--verbose","--include-partial-messages","--no-session-persistence","--restricted","--tools","","--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}","--setting-sources","","--settings","{\"disableAllHooks\":true}","--permission-mode","dontAsk","--system-prompt","You are Super's planning assistant. Return the requested structured response. All proposed app changes require the person's Apply click. You have no tools.","--json-schema"]).arg(schema.to_string());
     if model != "default" {
         c.args(["--model", model]);
     }
@@ -400,5 +496,68 @@ mod tests {
             .unwrap(),
             json!({"text":"Ready","actions":[]})
         );
+    }
+}
+
+#[cfg(test)]
+mod streaming_tests {
+    use super::*;
+    #[test]
+    fn public_output_only_and_bounded() {
+        let mut s = ReplyState::default();
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"thinking_delta","thinking":"private"}}}));
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"input_json_delta","partial_json":"secret"}}}));
+        assert!(s.text.is_empty());
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Hello"}}}));
+        assert_eq!(s.text, "Hello");
+        assert_eq!(s.bytes, 5);
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":"x".repeat(65536)}}}));
+        assert_eq!(s.text, "Hello");
+        assert_eq!(s.bytes, 65541);
+    }
+    #[test]
+    fn current_login_destination_and_spoofs() {
+        assert!(login_link("https://claude.com/cai/oauth/authorize?state=example").is_some());
+        for url in ["https://claude.com.evil.test/oauth", "http://claude.com/oauth", "https://user@claude.com/oauth"] { assert!(login_link(url).is_none()); }
+    }
+    #[test]
+    fn reply_identity_protects_cancel_and_preview() {
+        let c = Connection::default();
+        *c.1.lock().unwrap() = ReplyState {id:"one".into(),active:true,text:"hello".into(),..ReplyState::default()};
+        assert_eq!(c.reply_status("other").unwrap(),json!({"active":false}));
+        assert!(c.cancel_reply("other").is_err());
+        assert!(c.cancel_reply("one").is_ok());
+        assert!(c.1.lock().unwrap().cancelled);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn stream_is_visible_before_final_result_and_cancel_stops_child() {
+        let state = Arc::new(Mutex::new(ReplyState {id:"test".into(),active:true,..ReplyState::default()}));
+        let mut command = Command::new("python3");
+        command.args(["-c", "import json,time;print(json.dumps({'type':'stream_event','event':{'delta':{'type':'text_delta','text':'Visible now'}}}),flush=True);time.sleep(10)"]);
+        let held = state.clone();
+        let handle = std::thread::spawn(move || run_reply(command,String::new(),held,3));
+        let deadline = Instant::now()+Duration::from_secs(2);
+        while state.lock().unwrap().text.is_empty() && Instant::now()<deadline {std::thread::sleep(Duration::from_millis(10));}
+        assert_eq!(state.lock().unwrap().text,"Visible now");
+        assert!(state.lock().unwrap().active);
+        state.lock().unwrap().cancelled = true;
+        assert!(handle.join().unwrap().unwrap_err().contains("cancelled"));
+        assert!(!state.lock().unwrap().active);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn successful_final_result_and_auth_failure_are_separate() {
+        for (value,success) in [
+            (json!({"type":"result","structured_output":{"text":"done","actions":[]}}),true),
+            (json!({"type":"result","is_error":true,"result":"OAuth session expired"}),false)
+        ] {
+            let mut command = Command::new("python3");
+            command.args(["-c", "import sys;print(sys.argv[1])", &value.to_string()]);
+            let state=Arc::new(Mutex::new(ReplyState {active:true,..ReplyState::default()}));
+            let (ok,value)=run_reply(command,String::new(),state.clone(),2).unwrap();
+            assert_eq!(decode_reply(ok,value).is_ok(),success);
+            assert!(!state.lock().unwrap().active);
+        }
     }
 }

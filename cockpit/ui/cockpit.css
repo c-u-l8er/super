@@ -397,3 +397,12 @@ body:has(#bot-file-set-review[open]) .development-tree {overflow:hidden;}
 .mobile-new-code{margin-top:8px;padding:8px 14px;border-radius:8px;border:1px solid var(--line,#3c4732);background:var(--raise,#222a1c);color:var(--ink,#f1f3eb);font:inherit;cursor:pointer}
 .mobile-new-code:hover:not(:disabled){border-color:var(--accent,#c8f581)}
 .mobile-new-code:disabled{opacity:.5;cursor:default}
+
+.bot-activity {border:1px solid var(--line,#405066);border-radius:12px;padding:18px;margin:18px 0;background:var(--panel,#172131);}
+.bot-activity h2 {margin:0 0 8px;font-size:18px;}
+.bot-activity p {margin:8px 0;}
+.bot-live-output {white-space:pre-wrap;overflow-wrap:anywhere;max-height:240px;overflow:auto;font:inherit;padding:12px;background:rgba(0,0,0,.16);border-radius:8px;}
+
+.bot-activity-rail {border-block:1px solid var(--line);padding:12px 0;margin:12px 0;overflow-wrap:anywhere;}
+.bot-activity-rail p {margin:8px 0;}
+.bot-activity-rail .bot-live-output {max-height:160px;font-size:12px;}

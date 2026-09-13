@@ -1,3 +1,4 @@
+import {initBotActivity} from './bot-activity.js';
 import {REVIEW_FILE_BYTES,REVIEW_FILE_LABEL} from './review-limits.js';
 import {worldLineage,taskHistoryLinks} from './task-conversations.js';
 import {publishTaskSession} from './task-session.js';
@@ -50,7 +51,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const send=node('button','Send','primary');send.id='bot-send';send.type='submit';
   const cancelReply=node('button','Cancel reply');cancelReply.type='button';cancelReply.id='bot-cancel-reply';cancelReply.hidden=true;
   let replyId=null,replyPoll=null;
-  cancelReply.onclick=async()=>{const id=replyId;if(!id)return;cancelReply.disabled=true;try{await invoke('bot_connection',{operation:'cancel_reply',requestId:id});if(replyId===id)status.textContent='Cancelling reply…';}catch(error){if(replyId===id){status.textContent=String(error);cancelReply.disabled=false;}}};
+  cancelReply.onclick=async()=>{const id=replyId;if(!id)return;cancelReply.disabled=true;try{await invoke(managedCommand(provider.value),{operation:'cancel_reply',requestId:id});if(replyId===id)status.textContent='Cancelling reply…';}catch(error){if(replyId===id){status.textContent=String(error);cancelReply.disabled=false;}}};
   const fresh=node('button','New conversation');fresh.type='button';fresh.id='bot-new';
   const effort=node('select');effort.id='bot-effort';effort.setAttribute('aria-label','Thinking level');
   const attach=node('input');attach.type='file';attach.multiple=true;attach.id='bot-attachments';attach.accept='.txt,.md,.json,.csv,.js,.ts,.tsx,.jsx,.rs,.py,.ex,.exs,.html,.css,.yaml,.yml,.toml,.xml,.log';
@@ -64,6 +65,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const historyStatus=node('p','Conversations and text attachments are saved on this device.','availability-note');historyStatus.id='bot-save-status';historyStatus.setAttribute('role','status');
   const historyRow=node('div',undefined,'connection-row');historyRow.append(field('Saved conversations',historyPicker),deleteConversation);
   const conversation=node('section',undefined,'bot-conversation');
+  const activity=initBotActivity({root:conversation,connect,input,cancel:cancelReply});
   conversation.append(connection,settings,status,historyRow,historyStatus,sharing,transcript,composer);root.append(conversation);
   const workView=initBotWork({root,conversation,current,invoke});
   let taskReply=null,taskReplyRefs=[];
@@ -94,7 +96,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     catch(error){historyStatus.textContent=String(error);return false;}
   }
   function restoreSaved(id){
-    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];
+    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];activity.reset();
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
     restoring=true;conversationId=id;lastSaved='';messages=[];proposals=[];files=[];pendingTurn=null;input.value='';transcript.replaceChildren();
     const saved=id?history.get(selected,id):null;
@@ -131,6 +133,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   function publishSession(){publishTaskSession({botId:bot.id,world:runtimeWorld(current),ready:!!active,reply:taskReply,tasks:taskReplyRefs,message:status.textContent});}
   new MutationObserver(publishSession).observe(status,{childList:true});
   function refresh() {
+    activity.refresh({id:bot.id,name:bot.name,model:active?.model,ready:!!active,pending,busy,hasProposals:proposals.some(p=>p.state==='proposed')});
     publishSession();
     const cloud=['openai','anthropic'].includes(provider.value),isCodex=provider.value==='codex',isClaude=provider.value==='claude',managed=isCodex||isClaude;keyField.hidden=!cloud;endpointField.hidden=provider.value!=='ollama';rememberField.hidden=!cloud;forget.hidden=!cloud;disconnect.hidden=!managed;modelField.hidden=managed;save.hidden=managed;disconnect.textContent=isClaude?'Disconnect Claude from Super':'Disconnect ChatGPT';
     connect.disabled=busy||pending;provider.disabled=busy;modelPicker.disabled=busy;connect.textContent=pending?'Waiting for sign-in…':active?'Reconnect':'Connect provider';
@@ -254,8 +257,9 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     taskReplyRefs=sentReferences.map(r=>r.task).filter(Boolean);taskReply='Waiting for reply';
     pendingTurn={draft,files:sentFiles,messageCount:messages.length};
     messages.push({role:'user',content:text,attachments:sentFiles});line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();busy=true;refresh();status.textContent=active.provider==='codex'?'Waiting for Codex… Large file replies can take up to five minutes.':`Waiting for ${active.provider}… Replies can take up to two minutes.`;saveCurrent();
-    replyId=active.provider==='codex'?crypto.randomUUID():null;
-    if(replyId){const id=replyId;const poll=async()=>{try{const r=await invoke('bot_connection',{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving Codex reply… ${r.received_bytes.toLocaleString()} bytes received. Large file replies can take up to five minutes.`:'Waiting for Codex… Large file replies can take up to five minutes.';}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
+    activity.start(['codex','claude'].includes(active.provider));
+    replyId=['codex','claude'].includes(active.provider)?crypto.randomUUID():null;
+    if(replyId){const id=replyId,p=active.provider;const poll=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;activity.observe(r);if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
     try {
       const reply=await invoke('bot_chat' ,{turn:{request_id:replyId,provider:active.provider,messages,context:turnContext,bot_instructions:`Name: ${bot.name}\nRole: ${bot.role}\n${bot.instructions}`,effort:effort.value||null}});
       const entry=line('assistant',reply.text||'Review the proposed step below.');
@@ -292,8 +296,8 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
         dismiss.addEventListener('click',()=>{if(busy||a.state!=='proposed')return;a.state='dismissed';result.textContent='Dismissed · no change made';dismiss.disabled=true;messages.push({role:'user',content:`I dismissed the proposed ${a.name} action. It was not executed.`});refresh();});
         proposal.append(result,button,dismiss);entry.append(proposal);
       }
-      taskReply='Reply received';pendingTurn=null;status.textContent='Reply received. Proposed steps run only when you apply them.';
-    }catch(error){taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
+      activity.finish(false);taskReply='Reply received';pendingTurn=null;status.textContent='Reply received. Proposed steps run only when you apply them.';
+    }catch(error){activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
     finally{replyId=null;clearTimeout(replyPoll);cancelReply.hidden=true;busy=false;saveCurrent();refresh();transcript.lastElementChild?.scrollIntoView({block:'nearest'});}
   });
   historyPicker.addEventListener('change',()=>{if(busy)return;const id=historyPicker.value;if(!saveCurrent()){updateHistory();return;}restoreSaved(id||null);saveCurrent();refresh();});
@@ -357,7 +361,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     if(busy||pending||runtimeBusy){status.textContent='Wait for the current reply or connection to finish before switching bots.';return false;}
     if(!saveCurrent())return false;
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
-    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];bot=next;history=newHistory();preferences.clear();sessions.clear();
+    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];activity.reset();bot=next;history=newHistory();preferences.clear();sessions.clear();
     try{for(const [p,v] of JSON.parse(localStorage.getItem(storageKey('super-provider-preferences'))||'[]'))preferences.set(p,v);}catch{}
     let remembered=bot.provider;try{remembered=localStorage.getItem(storageKey('super-last-provider'))||remembered;}catch{}
     provider.value=[...provider.options].some(o=>o.value===remembered)?remembered:bot.provider;

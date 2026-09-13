@@ -1,0 +1,18 @@
+#!/usr/bin/python3
+import json,sys,time
+args=sys.argv[1:]
+def emit(x): print(json.dumps(x),flush=True)
+if args[:2]==['auth','status']:
+ emit({'loggedIn':True,'authMethod':'claude.ai'});sys.exit(0)
+if '--input-format' in args:
+ r=json.loads(sys.stdin.readline());emit({'type':'control_response','response':{'request_id':r['request_id'],'response':{'models':[{'value':'claude-fable-5-1[1m]','displayName':'Fable','resolvedModel':'claude-fable-5-1','supportedEffortLevels':['medium']}]}}});sys.exit(0)
+prompt=sys.stdin.read()
+if 'EXPIRED_FIXTURE' in prompt:
+ emit({'type':'result','is_error':True,'result':'Failed to authenticate: OAuth session expired and could not be refreshed'});sys.exit(1)
+emit({'type':'system','subtype':'init'})
+emit({'type':'stream_event','event':{'delta':{'type':'thinking_delta','thinking':'PRIVATE_FIXTURE_MUST_NOT_APPEAR'}}})
+for part in ['I am checking ', 'the requested labels.']:
+ emit({'type':'stream_event','event':{'delta':{'type':'text_delta','text':part}}});time.sleep(1)
+if 'CANCEL_FIXTURE' in prompt: time.sleep(15)
+time.sleep(1)
+emit({'type':'result','is_error':False,'structured_output':{'text':'I checked the shared files. The next step is to review the label plan.','actions':[{'name':'open_workspace','args':{'name':'Reviewed fixture workspace'}}] if 'PROPOSAL_FIXTURE' in prompt else []}})
