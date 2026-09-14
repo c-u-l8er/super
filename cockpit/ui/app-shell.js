@@ -33,6 +33,7 @@ export const screens = [
   ['edit-bot', 'Edit bot', 'Update this bot’s name and instructions.'],
 ];
 let selected = 'continue-work';
+export const selectedScreen=()=>selected;
 let routeRevision=0;
 export const navigationToken=()=>routeRevision;
 let workspace = '';

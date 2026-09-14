@@ -1,5 +1,7 @@
 # [&] Super — Rev W.2.3.3 bundle
 
+**Active desktop work:** [Schematics plan](docs/plans/SCHEMATICS.md) — app-wide wiring views, live state, tests and visual evidence.
+
 Open **site/index.html**. Best served over http so the proof fetch and the
 portfolio nav are live:
 

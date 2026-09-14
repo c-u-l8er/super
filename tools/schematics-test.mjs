@@ -1,0 +1,11 @@
+import test from 'node:test';import assert from 'node:assert/strict';
+import {schematic,screenKind,connections} from '../cockpit/ui/schematics-model.js';
+const screens=['continue-work','development-tasks','editor','bots','runtime','routines'].map(id=>[id,id,'Description']);
+const world='world',task={id:'t',title:'Polish Super',revision:1,status:'planned',bot_ref:'b',criteria:'Clear next step'},p={bots:{b:{name:'Fable',client_ref:'fable'}},development_tasks:{t:task},development_attempts:{}};
+const model=(extra={})=>schematic({screen:'continue-work',screens,p,world,chosen:'t',...extra});
+test('core nodes use record names and never infer a running bot',()=>{const m=model();assert.equal(m.nodes.find(n=>n.id==='task').label,'Polish Super');assert.equal(m.nodes.find(n=>n.id==='bot').state,'No observed task session');});
+test('only exact task, bot, revision and world sessions can report live activity',()=>{const session={world,botId:'fable',reply:'Waiting for reply',tasks:[{id:'t',revision:1,world}]};assert.equal(model({session}).nodes.find(n=>n.id==='bot').state,'Waiting for reply');for(const s of [{...session,world:'old'},{...session,botId:'other'},{...session,tasks:[{id:'t',revision:2,world}]}])assert.equal(model({session:s}).nodes.find(n=>n.id==='bot').state,'No observed task session');});
+test('withdrawal removes record titles and live states',()=>{const m=model({p:null});assert.ok(m.nodes.every(n=>n.state==='Unavailable'));assert.ok(!JSON.stringify(m).includes('Polish Super'));});
+test('app map includes every registered page; incomplete screens say so',()=>{const m=model({level:'app'});for(const [id] of screens)assert.ok(m.nodes.some(n=>n.id===id));assert.match(model({screen:'routines'}).coverage,/planned/);assert.equal(screenKind('bot:fable'),'bots');});
+test('different bot and workspace cannot inherit the focused task',()=>{for(const extra of [{screen:'bot:other'},{workspace:'different'}])assert.equal(model(extra).nodes.find(n=>n.id==='task').state,'No selected task');});
+test('all connection endpoints are named and links are explicitly structural',()=>{assert.ok(connections.every(e=>e.length===3&&e.every(Boolean)));assert.match(model({level:'connections'}).coverage,/not observed execution/);});

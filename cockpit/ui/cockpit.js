@@ -1,3 +1,4 @@
+import {initSchematics} from './schematics-view.js';
 import {initWorkFocus} from './work-focus-view.js';
 import { initDevelopmentTasks } from './development-tasks.js';
 import { initDevelopment } from './development.js';
@@ -1394,3 +1395,5 @@ bind();
 setInterval(leaseTick, 500);
 
 initWorkFocus({current:()=>window.cockpit});
+
+initSchematics({current:()=>window.cockpit});
