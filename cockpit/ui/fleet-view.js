@@ -6,7 +6,7 @@ export function fleetDiagram(fleet){
  for(const h of fleet?.hosts??[]){const id='host:'+h.id,i=h.inventory;nodes.push({id,label:h.label,state:fleetStatus(h.status),detail:[i?`${i.os} · ${i.hypervisor} · ${i.logicalCpus} logical CPUs`:'',h.reason,h.nextStep].filter(Boolean).join('\n'),route:'fleet',recordKey:machineKey(h.id)});edges.push({from:'observer',to:id,label:'observes host'});
   for(const g of i?.guests??[]){const gid=id+':guest:'+g.id;nodes.push({id:gid,label:g.label,state:h.status==='observed'?g.status:'Unknown',detail:'Guest reported by '+h.label+'. Guest state does not establish a Super worker assignment.',route:'fleet',recordKey:vmKey(h.id,g.id)});edges.push({from:id,to:gid,label:'hosts guest'});}
  }
- return {title:'Fleet & placement',coverage:'Observed hosts and guests · task placement is not enabled yet.',nodes,edges};
+ return {title:'Machines',coverage:'Observed hosts and guests · task placement is not enabled yet.',nodes,edges};
 }
 export function fleetPanel(fleet){
  const root=panel('fleet');root.dataset.fleetView='';
