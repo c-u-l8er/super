@@ -2,16 +2,18 @@ import { navigate, travel } from './app-shell.js';
 export function initDesktopChrome(invoke){
   const $=id=>document.getElementById(id),root=document.documentElement;
   let prefs={left:218,right:260,navHidden:false,activityHidden:false};try{Object.assign(prefs,JSON.parse(localStorage.getItem('super.desktop.layout')||'{}'));}catch{}
+  let mobileNavOpen=false;
   const save=()=>{try{localStorage.setItem('super.desktop.layout',JSON.stringify(prefs));}catch{}};
   function layout(){
     prefs.left=Math.max(160,Math.min(420,Number(prefs.left)||218));prefs.right=Math.max(200,Math.min(480,Number(prefs.right)||260));
     if(innerWidth>1050&&!prefs.activityHidden){const remaining=innerWidth-360-(prefs.navHidden?0:prefs.left);prefs.right=Math.min(prefs.right,Math.max(200,remaining));}
     root.style.setProperty('--rail-width',`${prefs.navHidden?0:prefs.left}px`);root.style.setProperty('--activity-width',`${prefs.activityHidden?0:prefs.right}px`);
-    document.body.classList.toggle('nav-collapsed',prefs.navHidden);document.body.classList.toggle('activity-collapsed',prefs.activityHidden);
-    $('toggle-sidebar').setAttribute('aria-expanded',String(!prefs.navHidden));
+    document.body.classList.toggle('nav-collapsed',innerWidth<=650?!mobileNavOpen:prefs.navHidden);document.body.classList.toggle('activity-collapsed',prefs.activityHidden);
+    $('toggle-sidebar').setAttribute('aria-expanded',String(innerWidth<=650?mobileNavOpen:!prefs.navHidden));
     for(const [id,key] of [['rail-resizer','left'],['activity-resizer','right']])$(id).setAttribute('aria-valuenow',prefs[key]);save();
   }
-  $('toggle-sidebar').onclick=()=>{prefs.navHidden=!prefs.navHidden;layout();};
+  $('toggle-sidebar').onclick=()=>{if(innerWidth<=650)mobileNavOpen=!mobileNavOpen;else prefs.navHidden=!prefs.navHidden;layout();};
+  document.addEventListener('page-selected',()=>{if(innerWidth<=650){mobileNavOpen=false;layout();$('app').scrollTop=0;}});
   $('history-back').onclick=()=>travel(-1);$('history-forward').onclick=()=>travel(1);
   document.addEventListener('navigation-history',e=>{$('history-back').disabled=!e.detail.back;$('history-forward').disabled=!e.detail.forward;});
   for(const [id,key,min,max,sign] of [['rail-resizer','left',160,420,1],['activity-resizer','right',200,480,-1]]){

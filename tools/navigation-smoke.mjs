@@ -31,6 +31,10 @@ try{
  await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:720,height:820})});
  check('Small window does not overflow horizontally',await app.page(`return document.documentElement.scrollWidth<=innerWidth+1`));await shot('04_Small_Fleet');
  await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:390,height:844})});
+ await app.until(()=>app.page(`return document.body.classList.contains('nav-collapsed')`),3000,'mobile navigation collapsed');
+ check('Phone page is visible without scrolling past navigation',await app.page(`return document.querySelector('[data-screen=fleet] h1').getBoundingClientRect().bottom<innerHeight&&document.querySelector('.machine-row').getBoundingClientRect().bottom<innerHeight`));
+ await app.page(`document.querySelector('#toggle-sidebar').click()`);check('Phone navigation can be opened',await app.page(`return document.querySelector('#toggle-sidebar').getAttribute('aria-expanded')==='true'`));
+ await app.page(`document.querySelector('[data-nav=fleet]').click()`);check('Choosing a phone page closes navigation',await app.page(`return document.body.classList.contains('nav-collapsed')`));
  check('Phone width does not overflow horizontally',await app.page(`return document.documentElement.scrollWidth<=innerWidth+1`));await shot('05_Phone_Fleet');
  save({schema:'invalid'});await app.until(()=>app.page(`return document.querySelector('.fleet-empty')?.textContent.includes('unavailable')`),8000,'bad snapshot');check('Invalid snapshot cannot preserve earlier host inventory',await app.page(`return !document.querySelector('[data-fleet-host]')`));
  writeFileSync(`${out}/checks.json`,JSON.stringify({passed:true,checks},null,2));
