@@ -452,6 +452,11 @@ fn decode_reply(ok: bool, v: Value) -> Result<Value, String> {
     if needs_signin(&v) {
         return Err("Claude sign-in has expired. Click Connect provider to sign in again. No app action was executed.".into());
     }
+    if v["is_error"] == true && v["result"].as_str().is_some_and(|s| {
+        s.contains("You've reached your") && s.contains("limit")
+    }) {
+        return Err("Claude's model usage limit has been reached. Your sign-in is still connected. Wait for capacity to reset, choose another available model, or manage usage in Claude. Your draft is restored; no app action was executed.".into());
+    }
     if !ok || v["is_error"] == true {
         return Err("Claude could not finish the reply. Check your Claude Code sign-in, model access, and usage limits. No app action was executed.".into());
     }
@@ -460,6 +465,19 @@ fn decode_reply(ok: bool, v: Value) -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn model_capacity_failure_is_not_expired_authentication() {
+        let reply = json!({"is_error":true,"result":"You've reached your Fable limit. Switch to another model, or manage usage credits at claude.ai/settings/usage?from=cc_cli_limit_message, to continue."});
+        assert!(!needs_signin(&reply));
+        let error = decode_reply(false, reply).unwrap_err();
+        assert!(error.contains("model usage limit"));
+        assert!(error.contains("sign-in is still connected"));
+        assert!(!error.contains("Connect provider"));
+        let success = json!({"is_error":false,"result":"You've reached your Fable limit","structured_output":{"text":"quoted example"}});
+        assert_eq!(decode_reply(true, success).unwrap()["text"], "quoted example");
+        let expired = json!({"is_error":true,"result":"Failed to authenticate: OAuth session expired"});
+        assert!(decode_reply(false, expired).unwrap_err().contains("sign-in has expired"));
+    }
     #[test]
     fn local_harness_disables_tools_and_uses_stdin() {
         let mut c = Command::new("claude");
