@@ -92,6 +92,6 @@ export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=fa
       notice.textContent='Local test run recorded. Progress and output appear below.';
     }catch(e){notice.textContent=String(e);}finally{busy=false;await refresh();}
   };
-  const timer=setInterval(()=>{if(!panel.isConnected){clearInterval(timer);return;}if(panel.closest('details')?.open)refresh();},600);
+  const timer=setInterval(()=>{if(!panel.isConnected){clearInterval(timer);return;}if(panel.closest('[data-attempt-id]')?.open)refresh();},600);
   setTimeout(refresh,0);return panel;
 }

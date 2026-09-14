@@ -17,10 +17,12 @@ try{
  const repo=await app.until(async()=>(await app.list('repositories'))[0],10000,'repository');
  await app.intent('open_lane',{goal_ref:goal.record.id,actor:bot.record.actor,repository_ref:repo.ref||repo.id,base_revision:'HEAD'});
  const lane=await app.until(async()=>(await app.list('lanes')).find(l=>l.actor===bot.record.actor),10000,'lane');
- for(const n of [1,2])await app.intent('create_development_task',{client_ref:'focus-'+n,lane_ref:lane.id,title:'Focused step '+n,criteria:'One reviewed change'});
+ for(const n of [1,2])await app.intent('create_development_task',{client_ref:'focus-'+n,lane_ref:lane.id,title:'Focused step '+n,criteria:'One reviewed change. '.repeat(30)});
  const tasks=await app.until(async()=>{const t=(await app.list('development_tasks')).filter(t=>t.client_ref?.startsWith('focus-'));return t.length===2&&t;},10000,'plans');
  await app.page(`document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:arguments[0]}}))`,[tasks[1].id]);
  check('Chosen plan has one primary next action and a collapsed queue',await app.page(`return document.querySelector('[data-focus-task]').dataset.focusTask===arguments[0] && document.querySelectorAll('#work-focus .focus-card .primary').length===1 && !document.querySelector('.focus-queue').open`,[tasks[1].id]));
+ await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:1080,height:620})});
+ check('Next action stays visible above long collapsed criteria',await app.page(`const b=document.querySelector('#focus-next').getBoundingClientRect();return b.top>=0 && b.bottom<=innerHeight && document.querySelector('.focus-criteria').tagName==='DETAILS' && !document.querySelector('.focus-criteria').open`));
  await app.page(`document.querySelector('#focus-next').click()`);
  check('Prepare action opens Editor with the selected plan',await app.page(`return !document.querySelector('[data-screen=editor]').hidden && document.querySelector('#editor-task-context').textContent.includes('Focused step 2')`));
  await app.page(`document.querySelector('#focus-home').click()`);

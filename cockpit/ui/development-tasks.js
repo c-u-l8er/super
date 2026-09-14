@@ -1,3 +1,4 @@
+import {guideReview} from './review-guide.js';
 import {acceptedBuildPanel} from './accepted-build-panel.js';
 import {acceptedResultCheck} from './accepted-result-check.js';
 import {taskEditorView} from './task-editor.js';
@@ -196,6 +197,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
           await send('updateAttempt',{attempt_ref:attempt.id,revision:attempt.revision,status:status.value,note:note.value},p=>p.development_attempts?.[attempt.id]?.revision===attempt.revision+1,()=>{show(heldProjection(current)?.development_tasks?.[task.id]);details.querySelector(`[data-attempt-id="${attempt.id}"]`).open=true;});
         };
       }else card.append(node('p',attempt.status==='accepted'?'Accepted result retained as read-only history. Record a fresh proposal for further changes.':'Dismissed review retained as read-only history. Record a fresh proposal to continue.','directory-note'));
+      guideReview({card,material,attempt,task,current});
       section.append(card);
     }
     details.append(section);

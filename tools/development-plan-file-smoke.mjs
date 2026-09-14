@@ -51,14 +51,17 @@ const script = (code, args = []) => wd('POST', `/session/${session}/execute/sync
 async function until(fn, ms = 60000) { const end = Date.now() + ms; while (Date.now() < end) { const v = await fn(); if (v) return v; await sleep(150); } throw new Error('Timed out waiting for product state'); }
 async function reloadPage(){const token=String(Date.now());await script('window.__planReloadToken=arguments[0];location.reload()',[token]);await until(()=>script('return window.__planReloadToken!==arguments[0]&&!!window.cockpit?.frame?.projection?.development_tasks&&!!document.querySelector("#development-task-list")',[token]));}
 async function element(selector) { const e = await wd('POST', `/session/${session}/element`, { using: 'css selector', value: selector }); return e['element-6066-11e4-a52e-4f735466cecf']; }
+// Legacy detailed-control checks explicitly expand the new disclosure.
+async function reveal(selector){await script(`let e=document.querySelector(arguments[0]);e=e?.tagName==='SUMMARY'?e.parentElement?.parentElement:e?.parentElement;while(e){if(e.tagName==='DETAILS')e.open=true;e=e.parentElement;}`,[selector]);}
 async function click(selector) {
+  await reveal(selector);
   for (let attempt = 0; attempt < 3; attempt++) {
     await script('document.querySelector(arguments[0]).scrollIntoView({block: "center", inline: "nearest"})', [selector]);
     try { return await wd('POST', `/session/${session}/element/${await element(selector)}/click`, {}); }
     catch (e) { if (!String(e).includes('stale element reference') || attempt === 2) throw e; }
   }
 }
-async function type(selector, text) { return wd('POST', `/session/${session}/element/${await element(selector)}/value`, { text }); }
+async function type(selector, text) { await reveal(selector); return wd('POST', `/session/${session}/element/${await element(selector)}/value`, { text }); }
 const evidence=visualEvidence('development-plan-file-smoke',root,driver,["New lane appears in its bot Work page", "Assigned worker is visible without inventing an available terminal", "task creation binds the selected lane and bot", "blocker update retains criteria and appends history", "page reload reopens durable plan and blocker history", "goal record links back to its development plan", "plan opens Editor with explicit file selection guidance", "a different native repository cannot be shared with the plan", "plan file request opens the assigned bot without sending", "review records exact source and result identities", "disk changes during review refuse staging and preserve external bytes", "a new commit during review requires a fresh source attachment", "an older plan proposal cannot be staged after the plan changes", "fresh plan proposal stages without writing disk", "explicit Save writes the reviewed plan proposal", "clearing Editor plan context preserves the durable plan", "reopened conversation retains source and result as read-only history"]);
 function check(label, value) { assert.ok(value, label); evidence.record(label); checks++; console.log(`held ${label}`); }
 async function screenshot(name) {
@@ -215,7 +218,7 @@ try {
   check('recording the same proposal again reuses its durable attempt',await script(`return Object.keys(window.cockpit.frame.projection.development_attempts).length===1&&window.cockpit.frame.projection.development_attempts[arguments[0]].revision===3`,[attempt.id]));
   await until(()=>script(`return !document.querySelector('#bot-file-use-draft').disabled`));await click('#bot-file-use-draft');await until(()=>script(`return !document.querySelector('#bot-file-review')`));
   check('fresh plan proposal stages without writing disk',readFileSync(testRepo+'/index.html','utf8')==='<h1>Before task</h1>\n'&&await script(`return !document.querySelector('#editor-save').disabled`));
-  await click('#editor-save');await until(()=>script(`return document.querySelector('#editor-save').disabled`));
+  await click('#editor-save');await until(()=>readFileSync(testRepo+'/index.html','utf8')===proposedText);
   check('explicit Save writes the reviewed plan proposal',readFileSync(testRepo+'/index.html','utf8')===proposedText);
   check('saving a proposal does not claim task acceptance',await script(`return window.cockpit.frame.projection.development_tasks[arguments[0]].status==='blocked'`,[task.id]));
   await click('#editor-clear-task');
