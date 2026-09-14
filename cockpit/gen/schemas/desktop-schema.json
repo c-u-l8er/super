@@ -387,6 +387,12 @@
           "markdownDescription": "Enables the road_status command without any pre-configured scope."
         },
         {
+          "description": "Enables the super_sign command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-super-sign",
+          "markdownDescription": "Enables the super_sign command without any pre-configured scope."
+        },
+        {
           "description": "Enables the surface_sessions command without any pre-configured scope.",
           "type": "string",
           "const": "allow-surface-sessions",
@@ -637,6 +643,12 @@
           "type": "string",
           "const": "deny-road-status",
           "markdownDescription": "Denies the road_status command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the super_sign command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-super-sign",
+          "markdownDescription": "Denies the super_sign command without any pre-configured scope."
         },
         {
           "description": "Denies the surface_sessions command without any pre-configured scope.",

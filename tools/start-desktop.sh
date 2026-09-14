@@ -8,4 +8,6 @@ export AMPD_DIR="$super_desktop_root/ampd"
 # Native Wayland first, with X11 fallback for X11 desktops. Explicit troubleshooting
 # overrides belong to this launcher; native-ui-test.sh continues to use Xvfb/X11.
 export GDK_BACKEND="${SUPER_DESKTOP_BACKEND:-wayland,x11}"
+# The road is the desktop shell; Super lives in its sign. Tests can opt out.
+export SUPER_ROAD="${SUPER_ROAD:-1}"
 exec "$super_desktop_binary" "$@"

@@ -24,6 +24,7 @@ export function initDesktopChrome(invoke){
   }
   function showMessage(title,text){let dialog=$('desktop-help');if(!dialog){dialog=document.createElement('dialog');dialog.id='desktop-help';document.body.append(dialog);}dialog.replaceChildren();const h=document.createElement('h2'),p=document.createElement('p'),b=document.createElement('button');h.textContent=title;p.textContent=text;b.textContent='Done';b.onclick=()=>dialog.close();dialog.append(h,p,b);dialog.showModal();}
   const windowAction=action=>invoke('desktop_window',{action}).catch(()=>showMessage('Window control unavailable','Please use your desktop window controls.'));
+  $('open-road').hidden=true;
   $('open-road').onclick=()=>invoke('open_road').catch(()=>showMessage('Road unavailable','The road could not open. Your cockpit is still available.'));
   document.querySelectorAll('[data-window-action]').forEach(b=>b.onclick=()=>windowAction(b.dataset.windowAction));
   for(const direction of ['North','South','East','West','NorthEast','NorthWest','SouthEast','SouthWest']){

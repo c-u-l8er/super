@@ -419,3 +419,8 @@ body:has(#bot-file-set-review[open]) .development-tree {overflow:hidden;}
 .focus-card button {margin-right:10px;}
 .focus-queue {margin:24px 0;}
 .focus-queue button {display:block;margin:12px 0;}
+
+/* Embedded app chrome belongs to the road's native window. */
+:root[data-road-embedded] [data-window-action],
+:root[data-road-embedded] .window-resize-edge,
+:root[data-road-embedded] #window-drag { display:none; }

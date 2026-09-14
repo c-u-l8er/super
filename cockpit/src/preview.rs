@@ -101,9 +101,9 @@ pub fn surface(
     } else {
         None
     };
-    let r = rect.ok_or("The browser area is unavailable.")?;
+    let mut r = rect.ok_or("The browser area is unavailable.")?;
     let main = app
-        .get_window("main")
+        .get_webview("main").map(|v|v.window())
         .ok_or("The app window is unavailable.")?;
     let size = main.inner_size().map_err(|e| e.to_string())?;
     let scale = main.scale_factor().map_err(|e| e.to_string())?;
@@ -117,15 +117,20 @@ pub fn surface(
     {
         return Err("The browser area is too small. Enlarge the app window.".into());
     }
+    let host = app.get_webview("main").ok_or("Super view is unavailable")?;
+    let origin = host.position().map_err(|e|e.to_string())?.to_logical::<f64>(scale);
+    r.x += origin.x; r.y += origin.y;
     if action == "worker_layout" {
         let w = app
             .get_webview("terminal")
             .ok_or("Worker terminal is not open.")?;
+        if w.window().label()!=main.label() { w.reparent(&main).map_err(|e|e.to_string())?; }
         position(&w, &r)?;
         w.show().map_err(|e| e.to_string())?;
         return Ok(json!({"visible":true}));
     }
     if let Some(w) = existing {
+        if w.window().label()!=main.label() { w.reparent(&main).map_err(|e|e.to_string())?; }
         position(&w, &r)?;
         if let Some(url) = location {
             w.navigate(url).map_err(|e| e.to_string())?;
@@ -143,10 +148,20 @@ pub fn surface(
                 tauri::LogicalSize::new(r.width, r.height),
             )
             .map_err(|e| e.to_string())?;
+        if w.window().label()!=main.label() { w.reparent(&main).map_err(|e|e.to_string())?; }
         position(&w, &r)?;
     }
     Ok(json!({"visible":app.get_webview(&label).is_some()}))
 }
+pub fn place_host(view: &tauri::Webview, x:f64, y:f64, width:f64, height:f64) -> Result<(),String> {
+    position(view, &Rect{x,y,width,height})
+}
+
+#[cfg(target_os = "linux")]
+thread_local! {
+    static OVERLAY_RECTS: std::cell::RefCell<std::collections::HashMap<usize,(i32,i32,i32,i32)>> = std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 // Tauri's Linux child WebViews are packed in a vertical GtkBox; their
 // set_position/set_size methods do not position them inside the cockpit.
 // Put the untrusted widget in a GTK overlay without changing its IPC label.
@@ -181,6 +196,9 @@ fn position(view: &tauri::Webview, r: &Rect) -> Result<(), String> {
                         .ok_or("The cockpit widget is unavailable.")?;
                     let overlay = gtk::Overlay::new();
                     overlay.set_widget_name("super-development-overlay");
+                    overlay.connect_get_child_position(|_, child| {
+                        OVERLAY_RECTS.with(|positions| positions.borrow().get(&(child.as_ptr() as usize)).map(|&(x,y,w,h)|gtk::Allocation::new(x,y,w,h)))
+                    });
                     overlay.set_hexpand(true);
                     overlay.set_vexpand(true);
                     container.remove(&main);
@@ -197,12 +215,15 @@ fn position(view: &tauri::Webview, r: &Rect) -> Result<(), String> {
             } else if parent.downcast::<gtk::Overlay>().is_err() {
                 return Err("The preview container is unsupported.");
             }
+            OVERLAY_RECTS.with(|positions| positions.borrow_mut().insert(widget.as_ptr() as usize,(x,y,width,height)));
+            widget.set_hexpand(false);widget.set_vexpand(false);
             widget.set_halign(gtk::Align::Start);
             widget.set_valign(gtk::Align::Start);
-            widget.set_margin_start(x);
-            widget.set_margin_top(y);
+            widget.set_margin_start(0);
+            widget.set_margin_top(0);
             widget.set_size_request(width, height);
             widget.show();
+            widget.queue_resize();if let Some(parent)=widget.parent(){parent.queue_resize();}
             Ok(())
         })()
         .map_err(str::to_owned);

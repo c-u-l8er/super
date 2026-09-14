@@ -31,6 +31,20 @@ fn main() {
     println!("cargo:rerun-if-changed=../../RRABBIT/m2/road-geometry.js");
     std::fs::copy("../../RRABBIT/m2/road-geometry.js", "ui/road/road-geometry.js")
         .expect("package shared T&R road geometry");
+    // Super owns its embedding adapter; shared road assets remain unchanged.
+    println!("cargo:rerun-if-changed=road-host/adapter.js");
+    let road = std::path::Path::new("ui/road/index.html");
+    let html = std::fs::read_to_string(road).expect("read road shell");
+    let html = html.replace("/* THE SIGN ARRIVES FROM THE COORDINATOR", &format!("{}\n/* THE SIGN ARRIVES FROM THE COORDINATOR", include_str!("road-host/adapter.js")));
+    let html = html.replace("CATALOGUE = r.result;", "CATALOGUE = superCatalogue(r.result);");
+    let html = html.replace("document.body.dataset.ready = '1';", "document.body.dataset.ready = '1'; await promote('super');");
+    let html = html.replace("resizeTimer=setTimeout(async () => { await demote();", "resizeTimer=setTimeout(async () => { if(navigation)await navigation; if(superVisible){await invoke('super_sign',{visible:true,rect:readRect()});return;} await demote();");
+    let html = html.replace("updateLaneSigns();\n  drawSigns(CATALOGUE);", "updateLaneSigns(); document.getElementById('enter').innerHTML='↖ SUPER (CD)<small>Enter your work window</small>';\n  drawSigns(CATALOGUE);");
+    let html = html.replace("</style>", "#readframe{transform:none;left:4%;top:5%;width:92%;height:76%} #road.reading #entrance,#road.reading #services,#road.reading #fullscreen{visibility:hidden} #handoff,#next{display:none}</style>");
+    std::fs::write(road, html).expect("write Super road adapter");
+    let scene = std::path::Path::new("ui/road/road-scene.js");
+    let source = std::fs::read_to_string(scene).expect("read road scene");
+    std::fs::write(scene, source.replace("z=DASH_0_Z-7*DASH_PITCH", "z=DASH_0_Z-(id==='super'?4:7)*DASH_PITCH")).expect("place Super sign");
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
             "bind_frame_stream",
@@ -62,6 +76,7 @@ fn main() {
             "terminal_close",
             "terminal_surface",
             "open_road",
+            "super_sign",
             "road_place",
             "road_fullscreen",
             "road_cockpit",

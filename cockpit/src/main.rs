@@ -129,6 +129,35 @@ async fn open_road(app: tauri::AppHandle) -> Result<(), String> {
     tier1_proof::open(&app)
 }
 
+#[derive(serde::Deserialize)]
+struct SuperSignRect { x:f64, y:f64, width:f64, height:f64 }
+
+/// The road can place only the existing trusted Super webview, never choose a URL or label.
+#[tauri::command]
+async fn super_sign(webview: tauri::Webview, app: tauri::AppHandle, visible: bool,
+    rect: Option<SuperSignRect>) -> Result<(), String> {
+    if webview.label() != tier1_proof::ROAD_LABEL { return Err("ROAD_SURFACE_REQUIRED".into()); }
+    let view = app.get_webview("main").ok_or("SUPER_NOT_AVAILABLE")?;
+    if !visible {
+        for (label, child) in app.webviews() { if label=="terminal" || label.starts_with("development-preview") { let _=child.hide(); } }
+        return view.hide().map_err(|e| e.to_string());
+    }
+    let road = app.get_window(tier1_proof::ROAD_LABEL).ok_or("ROAD_NOT_AVAILABLE")?;
+    let r = rect.ok_or("READ_RECT_REQUIRED")?;
+    let size = road.inner_size().map_err(|e| e.to_string())?;
+    let scale = road.scale_factor().map_err(|e| e.to_string())?;
+    if ![r.x,r.y,r.width,r.height].iter().all(|v| v.is_finite()) || r.x<0. || r.y<0.
+        || r.width<40. || r.height<40. || r.x+r.width>size.width as f64/scale+1.
+        || r.y+r.height>size.height as f64/scale+1. { return Err("BAD_READ_RECT".into()); }
+    if view.window().label() != tier1_proof::ROAD_LABEL { view.reparent(&road).map_err(|e| e.to_string())?; }
+    view.set_auto_resize(false).map_err(|e| e.to_string())?;
+    preview::place_host(&view,r.x,r.y,r.width,r.height)?;
+    view.eval("document.documentElement.dataset.roadEmbedded='true'").map_err(|e| e.to_string())?;
+    view.show().map_err(|e| e.to_string())?;
+    if let Some(home) = app.get_window("main") { home.hide().map_err(|e| e.to_string())?; }
+    view.set_focus().map_err(|e| e.to_string())
+}
+
 /// Hand the worker somewhere to send frames.
 ///
 /// **This is the ordering fix.** The frontend constructs the channel,
@@ -762,7 +791,7 @@ async fn terminal_surface(
 
     if app.get_webview(TERMINAL_LABEL).is_none() {
         let main = app
-            .get_window("main")
+            .get_webview("main").map(|v|v.window())
             .ok_or("no main window to host the terminal")?;
         // Sized from the window rather than pinned, so the surface is a
         // product pane and not a fixed rectangle chosen for a battery.
@@ -890,6 +919,7 @@ fn main() {
           let road = tier1_proof::handler();
           let cockpit: Box<dyn Fn(tauri::ipc::Invoke) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
             open_road,
+            super_sign,
             bind_frame_stream,
             unbind_frame_stream,
             intent,
@@ -925,6 +955,7 @@ fn main() {
           }
         })
         .on_window_event(|window, event| {
+            if window.label() == tier1_proof::ROAD_LABEL && matches!(event, tauri::WindowEvent::CloseRequested { .. }) { window.app_handle().exit(0); }
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 window
                     .app_handle()

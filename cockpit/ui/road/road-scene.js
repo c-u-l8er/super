@@ -150,7 +150,7 @@ export function createRoadScene(canvas) {
         };
         if(existing){existing.element=element;existing.mesh.material.map.image=element;existing.mesh.material.map.needsUpdate=true;focus(existing.mesh);return;}
         const cardLane=Math.max(0,lanes.findIndex(l=>l.package===id));
-        const side=-1,z=DASH_0_Z-7*DASH_PITCH,x=lanes[cardLane].x+side*STAND_X;
+        const side=-1,z=DASH_0_Z-(id==='super'?4:7)*DASH_PITCH,x=lanes[cardLane].x+side*STAND_X;
         const texture=new THREE.CanvasTexture(element);texture.colorSpace=THREE.SRGBColorSpace;
         const mesh=new THREE.Mesh(new THREE.PlaneGeometry(180,99),new THREE.MeshBasicMaterial({map:texture,side:THREE.DoubleSide}));
         mesh.position.set(x,110,z);mesh.rotation.y=-side*.42;scene.add(mesh);
