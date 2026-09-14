@@ -502,3 +502,9 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .fleet-task-check .directory-note {overflow-wrap:anywhere;}
 
 .fleet-task-check .availability-note:empty {display:none;}
+
+/* Keep identities readable in dense lists and narrow windows. */
+.record-row-copy { min-width: 0; }
+.record-row-title,.record-row-subtitle,.record-id { overflow-wrap: anywhere; }
+.fleet-host .record-trigger { width: 100%; }
+.fleet-guests { padding-left: 0; list-style: none; }

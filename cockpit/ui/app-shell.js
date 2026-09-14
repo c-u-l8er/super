@@ -1,7 +1,7 @@
 import {initRecordTabs} from './record-tabs.js';
 import { updateNavCounts } from './work-guidance.js';
 import { describeRecord, renderRecordPage } from './record-page.js';
-import { referenceText, readable, reference, referenceWorld } from './references.js';
+import { referenceText, readable, selectionText, reference, referenceWorld } from './references.js';
 /* Presentation state only. Runtime facts remain inside the frame-owned world. */
 export const screens = [
   ['continue-work', 'Continue work', 'One task and one next step.'],
@@ -48,11 +48,11 @@ export function syncWorkspacePicker(workspaces) {
   const picker = document.getElementById('workspace-picker');
   if (!workspaces.some(w => w.id === workspace)) workspace = '';
   const desired = [{id: '', name: 'All workspaces'}, ...workspaces];
-  const changed = picker.options.length !== desired.length || desired.some((w,i) => picker.options[i]?.value !== w.id || picker.options[i]?.textContent !== (w.name?.trim() || readable(w.id)));
+  const changed = picker.options.length !== desired.length || desired.some((w,i) => picker.options[i]?.value !== w.id || picker.options[i]?.textContent !== (w.id?`${w.name?.trim() || w.id} · ${w.id}`:w.name));
   if (changed) {
     picker.replaceChildren();
     for (const w of desired) {
-      const option = node('option', w.name?.trim() || readable(w.id)); option.value = w.id; picker.append(option);
+      const option = node('option', w.id?`${w.name?.trim() || w.id} · ${w.id}`:w.name); option.textContent=w.id?`${w.name?.trim() || w.id} · ${w.id}`:w.name; option.value = w.id; picker.append(option);
     }
   }
   picker.value = workspace; picker.disabled = false;
@@ -65,7 +65,7 @@ export function expectedHeadings() { return plannedHeadings; }
 export function node(tag, text, cls) {
   const n = document.createElement(tag);
   if (tag === 'h2') plannedHeadings += 1;
-  if (text !== undefined) {if (tag==='p') referenceText(n,text);else n.textContent=tag==='option'?readable(text):text;}
+  if (text !== undefined) {if (tag==='p') referenceText(n,text);else n.textContent=tag==='option'?selectionText(text):text;}
   if (cls) n.className = cls;
   return n;
 }
@@ -95,8 +95,8 @@ export function detail(record,key,label='View details') {
   recordRegistry.set(key,{record,key,label});const info=describeRecord(record,key,label);
   const row=node('section',undefined,'record-detail');row.dataset.detail=key;
   const button=node('button',undefined,'record-trigger');button.type='button';button.dataset.recordOpen=key;button.title=info.id??info.kind;
-  const copy=node('span',undefined,'record-row-copy');copy.append(node('span',info.title,'record-row-title'),node('span',[info.kind,info.status].filter(Boolean).join(' · '),'record-row-subtitle'));
-  button.append(copy,node('span','→','record-row-arrow'));button.setAttribute('aria-label',`Open ${info.kind.toLowerCase()}: ${info.title}`);row.append(button);return row;
+  const copy=node('span',undefined,'record-row-copy');copy.append(node('span',info.title,'record-row-title'),node('span',[info.kind,info.status,info.id,record.host_name,record.goal_ref?readable(record.goal_ref):null,record.repository_ref?readable(record.repository_ref):null].filter(Boolean).join(' · '),'record-row-subtitle'));
+  button.append(copy,node('span','→','record-row-arrow'));button.setAttribute('aria-label',`Open ${info.kind.toLowerCase()}: ${info.title}${info.id?", "+info.id:""}`);row.append(button);return row;
 }
 function snapshot(){return {screen:selected,record:currentRecord,workspace,scroll:document.getElementById('workspace-canvas').scrollTop};}
 function saveRoute(){if(historyIndex>=0)viewHistory[historyIndex]=snapshot();}

@@ -1,11 +1,12 @@
+import {fleetRecords} from './fleet-records.js';
 import {renderRecordGuidance} from './record-guidance.js';
 import {recordTab} from './record-tabs.js';
 import { reference, referenceText, readable } from './references.js';
 const names={id:'Record ID',ref:'Reference',actor:'Assigned actor',locus_ref:'Lane',workspace_ref:'Workspace',goal_ref:'Goal',repository_ref:'Repository',worker_ref:'Worker',purpose:'Purpose',occupancy:'Connection',world_ref:'World',schema:'Record format',created_at:'Created',public_message:'What happened',operator_detail:'Details',requires_human:'Needs your attention',ticket_id:'Attempt ID',authority_basis:'Authority basis',profile_basis:'Profile basis',terminal:'Terminal'};
 export const fieldName=k=>names[k]??k.replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase());
 export function describeRecord(record,key,label){
-  const id=record.id??record.ref;const known=id?reference(id):null;
-  const kind=known?.kind??({'runtime-identity':'Runtime identity','settings-runtime':'Connection',channel:'Channel',attempt:'Carrier start',seal:'Store seal',refusal:'Refusal',agent:'Connected peer',authority:'Grant',validations:'Validation',worktree:'Worktree establishment',receipts:'Effect receipt'}[key.split(':')[0]]??'Record');
+  const id=record.id??record.ref??record.ticket_id??key;const known=id?reference(id):null;
+  const kind=known?.kind??({machine:'Machine',vm:'Virtual machine','runtime-identity':'Runtime identity','settings-runtime':'Connection',channel:'Channel',attempt:'Carrier start',seal:'Store seal',refusal:'Refusal',agent:'Connected peer',authority:'Grant',validations:'Validation',worktree:'Worktree establishment',receipts:'Effect receipt'}[key.split(':')[0]]??'Record');
   const title=known?.label??record.name?.trim()??record.title?.trim()??record.public_message??record.code??(label==='View record details'?record.kind:label)??kind;
   return {id,kind,title:readable(title||kind),status:record.occupancy??record.state??record.status??record.verdict};
 }
@@ -26,7 +27,14 @@ export function renderRecordPage({node,entry,frame,backLabel,detail}){
   const values=k=>Object.values(p[k]??{});
   const goals=values('goals'),lanes=values('lanes'),workers=values('workers');
   let children=[],linked=[];
-  if(info.kind==='Workspace'){
+  if(info.kind==='Machine'||info.kind==='Virtual machine'){
+    const entries=fleetRecords(p.fleet);
+    const related=info.kind==='Machine'?entries.filter(e=>e.record.machine_id===r.id):entries.filter(e=>e.record.id===r.machine_id);
+    linked.push([info.kind==='Machine'?'Virtual machines':'Host machine',related.map(e=>[e.record,e.key,e.record.name])]);
+    if(info.kind==='Virtual machine'){const parent=node('button','Host: '+r.host_name,'subtle');parent.type='button';parent.dataset.recordOpen=r.machine_id;actions.append(parent);}
+    const browse=node('button','All machines','subtle');browse.type='button';browse.dataset.nav='fleet';actions.append(browse);
+    const checks=node('button','Open task checks','subtle');checks.type='button';checks.dataset.nav='continue-work';actions.append(checks);
+  }else if(info.kind==='Workspace'){
     children=goals.filter(g=>g.workspace_ref===r.id);const ids=new Set(children.map(g=>g.id));const activeLanes=lanes.filter(l=>ids.has(l.goal_ref));
     form('Add goal','goal_ws',r.id,'goal_title');
     const stats=node('div',undefined,'record-stats');for(const [label,count] of [['Goals',children.length],['Lanes',activeLanes.length],['Workers',workers.filter(w=>activeLanes.some(l=>l.id===w.locus_ref)).length]]){const card=node('div');card.append(node('strong',String(count)),node('span',label));stats.append(card);}page.append(stats);
@@ -47,7 +55,7 @@ export function renderRecordPage({node,entry,frame,backLabel,detail}){
   if(actions.children.length)page.append(actions);
   const tabKey=JSON.stringify([frame.world?.world_incarnation,frame.world?.world_generation,frame.world?.projection_epoch,key]),selectedTab=recordTab(tabKey);page.dataset.tabKey=tabKey;
   const tabs=node('nav',undefined,'record-tabs');tabs.setAttribute('aria-label','Record sections');tabs.setAttribute('role','tablist');
-  const views={};for(const [id,title] of [['overview','Overview'],['work','Related work'],['data','Record data']]){const b=node('button',title);b.type='button';b.dataset.recordTab=id;b.setAttribute('role','tab');b.id='record-tab-'+id;b.setAttribute('aria-controls','record-panel-'+id);b.tabIndex=selectedTab===id?0:-1;b.setAttribute('aria-selected',String(selectedTab===id));tabs.append(b);const view=node('div');view.dataset.recordView=id;view.id='record-panel-'+id;view.setAttribute('role','tabpanel');view.setAttribute('aria-labelledby',b.id);view.hidden=selectedTab!==id;views[id]=view;}
+  const views={};for(const [id,title] of [['overview','Overview'],['work',info.kind==='Machine'?'Virtual machines':info.kind==='Virtual machine'?'Host machine':'Related work'],['data','Record data']]){const b=node('button',title);b.type='button';b.dataset.recordTab=id;b.setAttribute('role','tab');b.id='record-tab-'+id;b.setAttribute('aria-controls','record-panel-'+id);b.tabIndex=selectedTab===id?0:-1;b.setAttribute('aria-selected',String(selectedTab===id));tabs.append(b);const view=node('div');view.dataset.recordView=id;view.id='record-panel-'+id;view.setAttribute('role','tabpanel');view.setAttribute('aria-labelledby',b.id);view.hidden=selectedTab!==id;views[id]=view;}
   page.append(tabs,views.overview,views.work,views.data);
   const guidance=renderRecordGuidance(node,p,info.kind,r);if(guidance)views.overview.append(guidance);
   const content=node('div',undefined,'record-content-grid');

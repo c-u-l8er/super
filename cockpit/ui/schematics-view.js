@@ -1,3 +1,4 @@
+import {openRecord} from './app-shell.js';
 import {initTaskActivity} from './task-activity-view.js';
 import {currentTaskEditor} from './task-editor.js';
 import {schematicLayout,adjacentNodes,clampZoom} from './schematics-layout.js';
@@ -44,7 +45,7 @@ export function initSchematics({current}){
   const close=node('button','×','schematic-inspector-close');close.type='button';close.setAttribute('aria-label','Hide component details');close.onclick=()=>{inspectorOpen=false;inspect();detailsToggle.focus({preventScroll:true});};inspector.append(close,node('h2',item.label),node('p',item.state,'schematic-state'));
   if(item.detail?.length>300){const more=node('details');more.append(node('summary','Full description'),node('p',item.detail));inspector.append(more);}else inspector.append(node('p',item.detail));
   for(const e of model.edges.filter(e=>e.from===item.id||e.to===item.id)){const from=model.nodes.find(n=>n.id===e.from),to=model.nodes.find(n=>n.id===e.to);const other=e.from===item.id?to:from;const follow=node('button',`${e.from===item.id?'To':'From'} ${other?.label} · ${e.label}`,'schematic-follow');follow.type='button';follow.dataset.schematicFollow=other.id;follow.onclick=()=>choose(other.id,true);inspector.append(follow);}
-  if(item.route&&!(item.route==='record'&&selectedScreen()!=='record')){const open=node('button','Open '+(screens.find(s=>s[0]===item.route)?.[1]||'conversation'),'primary');open.type='button';open.dataset.schematicOpen=item.id;open.onclick=()=>{setActive(false);if(item.taskId)document.dispatchEvent(new CustomEvent('continue-development-task',{detail:{taskId:item.taskId}}));else navigate(item.route,true);};inspector.append(open);}
+  if(item.route&&!(item.route==='record'&&selectedScreen()!=='record')){const open=node('button','Open '+(screens.find(s=>s[0]===item.route)?.[1]||'conversation'),'primary');open.type='button';open.dataset.schematicOpen=item.id;open.onclick=()=>{setActive(false);if(item.taskId)document.dispatchEvent(new CustomEvent('continue-development-task',{detail:{taskId:item.taskId}}));else if(item.recordKey)openRecord(item.recordKey);else navigate(item.route,true);};inspector.append(open);}
  }
  async function refresh(){if(!active)return;const world=runtimeWorld(current),p=heldProjection(current);const next=schematic({screen:selectedScreen(),level,screens,p,world,chosen:focusChoice(localStorage,world),session:currentTaskSession(),editor:currentTaskEditor(),workspace:selectedWorkspace()});const key=JSON.stringify([world,next,direction]);if(key===signature)return;signature=key;model=next;activity.panel.hidden=!model.taskId;activity.refresh();
   title.textContent='Schematics · '+model.title;note.textContent=model.coverage+(p?'':' Runtime unavailable — reconnect to inspect current state.');

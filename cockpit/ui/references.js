@@ -10,7 +10,7 @@ export function setReferenceFrame(frame){
   for(const [kind,prefix,key] of kinds)for(const r of Object.values(p[key]??{})){
     const id=r.id??r.ref;if(!id)continue;
     const title=[r.name,r.title,r.purpose,kind==='Lane'?r.actor:null].find(v=>typeof v==='string'&&v.trim());
-    records.set(id,{id,kind,record:r,label:title?.trim()||`${kind} ${id.split('_').at(-1).replace(/^0+/,'')||'0'}`,key:`${prefix==='ws'?'position-workspace':kind.toLowerCase()}:${id}`});
+    records.set(id,{id,kind,record:r,label:title?.trim()||id,key:`${prefix==='ws'?'position-workspace':kind.toLowerCase()}:${id}`});
   }
 }
 export function reference(id){return records.get(normalize(id));}
@@ -43,6 +43,7 @@ export function recordLabel(id,{projection=null,kind,withId=false}={}){
   if(!title)return stable;
   return withId?`${title} (${stable})`:title;
 }
+export function selectionText(text){return String(text??'').replace(pattern,id=>{const r=reference(id);return r&&r.label!==r.id?`${r.label} (${r.id})`:id;});}
 export function readable(text){return String(text??'').replace(pattern,id=>reference(id)?.label??id);}
 function signature(raw,origin,mode){return JSON.stringify([raw,origin,world,mode,[...raw.matchAll(pattern)].map(m=>reference(m[0])?.label)]);}
 function prepare(element,raw,origin,mode){const key=signature(raw,origin,mode);if(element.dataset.referenceRender===key)return false;element.dataset.referenceRender=key;element.dataset.rawText=raw;element.dataset.referenceWorld=origin??'';element.dataset.textFormat=mode;element.replaceChildren();return true;}
