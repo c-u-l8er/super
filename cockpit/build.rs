@@ -55,6 +55,7 @@ fn main() {
             "review_content",
             "development_request",
             "review_tests",
+            "fleet_checks",
             "browser_surface",
             "surface_sessions",
             "choose_attachments",

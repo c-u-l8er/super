@@ -1,3 +1,4 @@
+import {initFleetChecks} from './fleet-check-view.js';
 import {guideReview} from './review-guide.js';
 import {acceptedBuildPanel} from './accepted-build-panel.js';
 import {acceptedResultCheck} from './accepted-result-check.js';
@@ -62,6 +63,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     details.append(next);
     const editorPanel=node('section',undefined,'attempt-checks');editorPanel.id='task-editor-context';details.append(editorPanel);renderEditor();
     const sessionPanel=node('section',undefined,'attempt-checks');sessionPanel.id='task-provider-session';details.append(sessionPanel);renderSession();
+    initFleetChecks({root:details,invoke,context:()=>({world:runtimeWorld(current),task:heldProjection(current)?.development_tasks?.[task.id]})});
     details.append(node('h3','Plan history'));
     for(const event of task.history)details.append(node('p',`${event.at} · ${event.status} · ${event.note}`,'availability-note'));
     renderAttempts(task);

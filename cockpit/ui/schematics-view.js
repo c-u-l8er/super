@@ -66,7 +66,7 @@ export function initSchematics({current}){
   inspect();if(centerAfter){centerAfter=false;if(picked)choose(picked,true);else viewport.scrollTo(0,0);}
  }
  document.addEventListener('page-selected',()=>{scroll=0;picked=null;signature='';refresh();});
- for(const event of ['runtime-view-rendered','task-editor-changed','task-session-changed','workspace-view-change','focus-development-task'])document.addEventListener(event,refresh);
+ for(const event of ['fleet-checks-changed','runtime-view-rendered','task-editor-changed','task-session-changed','workspace-view-change','focus-development-task'])document.addEventListener(event,refresh);
  window.addEventListener('storage',refresh);window.addEventListener('resize',refresh);
  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&active&&!document.querySelector('dialog[open]')){e.preventDefault();setActive(false);}});
 }

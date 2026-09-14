@@ -491,3 +491,12 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .fleet-host h2{font-size:20px;margin:0 0 10px}.fleet-host h3{font-size:13px;margin-top:20px}.fleet-state{color:#9dcaf2;font-weight:600}.fleet-time{color:#8497ae;font-size:12px}
 .fleet-guests{padding-left:20px}.fleet-guests li{margin:10px 0}.fleet-next-step{padding-top:14px;border-top:1px solid #34465a;font-size:13px;color:#afc0d2}
 @media(max-width:650px){.fleet-grid{grid-template-columns:1fr}}
+/* Keep the desktop header controls on one line before the mobile layout takes over. */
+@media (min-width:651px) and (max-width:850px) {
+ #topbar {gap:8px;padding:0 12px;}
+ #topbar .workspace-label {font-size:0;padding-left:10px;}
+ #workspace-picker {font-size:12px;width:150px;}
+ #topbar button,#badge {white-space:nowrap;flex-shrink:0;}
+ #open-navigation kbd {display:none;}
+}
+.fleet-task-check .directory-note {overflow-wrap:anywhere;}

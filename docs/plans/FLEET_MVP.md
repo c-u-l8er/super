@@ -74,3 +74,55 @@ The desktop delivery adds observation only. Next: a task-bound remote check usin
 a durable request ID, current task revision and exact source snapshot, followed by
 lost-connection reconciliation. Then provision a separate Linux guest on bhyve,
 preserving the existing Wifibox guest and its network path.
+
+## Task-bound advisory check implementation, 2026-09-14
+
+Implemented `fleet_checks` as a native, main-WebView-only command. Continue work
+and development plans have a collapsed **Remote checks** panel; a matching result
+has its own Schematics node. Records remain device-local and advisory, outside
+runtime review tests and acceptance. This is not distributed scheduling.
+
+The first profile captures four named files from one concrete Git commit: task
+activity, fleet probing, and their two behavior-test files. Dirty edits, review
+proposals, other source, dependencies and credentials are excluded. The UI names
+that scope. Native code verifies the selected repository and current task revision
+against the runtime before and after capture. Each request binds the world,
+task revision, commit, file-content digest, Proxmox host and VM 100.
+
+The proposed guest endpoint durably reserves a request before execution. It runs
+one profile as `super` with bubblewrap filesystem/network isolation, a 512 MiB
+systemd memory limit, 128 tasks and a 35-second runtime limit. Receipts are private
+and outside the test namespace. The same request ID is never executed twice;
+status retrieval reconciles uncertain results. An interrupted reservation stays
+unknown. Unknown requests block new dispatch on the device; explicit abandonment
+and retention management are future work. Tests do not grant worker readiness.
+
+**Activation is pending explicit approval.** Automatic approval review rejected
+installing a separate Proxmox root authorized key and privileged fixed-command
+bridge. Neither the bridge/key nor the guest endpoint was installed by this
+increment. The running inventory observer is unchanged. The desktop is shipped
+without `SUPER_FLEET_CHECK_CONFIG`, so execution controls stay disabled.
+
+The reviewable endpoint sources are `tools/fleet/worker.py` and
+`tools/fleet/proxmox-bridge.py`; transport and durable local request handling are
+in `tools/fleet/check-client.mjs`. The proposed key is restricted to this laptop,
+no PTY or forwarding, and this fixed endpoint in VM 100. It does not authorize
+arbitrary host commands. Enabling it still changes root SSH authorization, which
+is why explicit approval is required.
+
+Validation evidence: development workspace `outputs/fleet-checks/`. Native UI
+screenshots are labeled simulation fixtures, not remote execution evidence.
+After approval: install the endpoint/key, run a real task-bound check through the
+app, test lost-response reconciliation and inspect actual result screenshots.
+Then provision a separate bhyve Linux guest without disturbing Wifibox.
+
+Transport research: [QEMU guest agent reference](https://www.qemu.org/docs/master/interop/qemu-ga-ref.html#command-guest-exec-status)
+explains that process status retrieval reaps completed metadata. Therefore the
+worker's durable receipt, rather than a guest-agent PID, is the reconciliation key.
+
+This increment passed 191 JavaScript behavior tests, eight guest-ledger tests,
+two native request-boundary tests, nine native UI checks with simulated outcomes,
+and the 42 existing native Continue work / Schematics checks. Static permission
+checks also passed. A narrow desktop header wrap found during screenshot review
+was fixed and verified. Actual remote execution remains untested for this new
+endpoint until its installation is approved.

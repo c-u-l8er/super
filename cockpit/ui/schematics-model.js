@@ -1,3 +1,4 @@
+import {remoteChecksFor,remoteLabel} from './fleet-check-view.js';
 import {fleetDiagram} from './fleet-view.js';
 import {internalSchematic} from './schematics-internals.js';
 import {workFocus} from './work-focus.js';
@@ -41,6 +42,8 @@ export function schematic({screen,level='screen',screens,p,world,chosen,session,
  {id:'proposal',label:'Review proposal',state:state(attempt?.status||'Not recorded'),detail:attempt?`${all.length} review(s) for this plan revision. Open the plan to inspect retained text.`:'No retained review for this plan revision.',route:'development-tasks',taskId:task?.id},
  {id:'checks',label:'Checks',state:state(!attempt?'Awaiting proposal':!Object.keys(attempt.test_runs??{}).length?'Not run':coverage.ready?'Passed on one snapshot':coverage.rows.some(r=>r.status==='running')?'Running':coverage.rows.length?'Needs attention':'Not run'),detail:coverage.rows.map(r=>`${r.profile}: ${r.status}`).join('\n')||'No test result recorded. Checks run on a captured proposal.',route:'development-tasks',taskId:task?.id},
  {id:'decision',label:'Your next step',state:state(focus.label),detail:focus.detail||'Choose a plan to continue.',route:'continue-work'}];
- const internal=internalSchematic(kind,{nodes,task,p,world,editor,session,live});if(internal)return {title:entry.label,taskId:task?.id,...internal,nodes:internal.nodes.map(n=>p?n:{...n,state:'Unavailable'})};
- return {title:entry.label,taskId:task?.id,coverage:task?'Core task path · saved runtime state and matching session observations.':'Core task path · choose an unfinished task to populate it.',nodes,edges:[['task','bot','assignment'],['provider','bot','connection'],['source','bot','source request'],['bot','proposal','proposed changes'],['proposal','checks','test snapshot'],['checks','decision','result'],['decision','source','review and save']].map(([from,to,label])=>({from,to,label}))};
+ const remote=remoteChecksFor(task,world).at(-1);
+ if(remote)nodes.push({id:'remote-check',label:'super-worker-01 · remote check',state:remoteLabel(remote),detail:'Advisory check of committed task activity and fleet files. Snapshot: '+remote.snapshot,route:'continue-work'});
+ const internal=internalSchematic(kind,{nodes,task,p,world,editor,session,live});if(internal&&remote){internal.nodes.push(nodes.find(n=>n.id==='remote-check'));internal.edges.push({from:'task',to:'remote-check',label:'requested advisory check'});}if(internal)return {title:entry.label,taskId:task?.id,...internal,nodes:internal.nodes.map(n=>p?n:{...n,state:'Unavailable'})};
+ return {title:entry.label,taskId:task?.id,coverage:task?'Core task path · saved runtime state and matching session observations.':'Core task path · choose an unfinished task to populate it.',nodes,edges:[...(remote?[['task','remote-check','requested advisory check']]:[]),['task','bot','assignment'],['provider','bot','connection'],['source','bot','source request'],['bot','proposal','proposed changes'],['proposal','checks','test snapshot'],['checks','decision','result'],['decision','source','review and save']].map(([from,to,label])=>({from,to,label}))};
 }

@@ -103,6 +103,7 @@ mod mobile_gateway;
 mod preview;
 mod repository;
 mod review_tests;
+mod fleet_checks;
 mod surface_sessions;
 mod terminal;
 mod workbench;
@@ -459,6 +460,22 @@ async fn review_tests(
             runs.start(&data,world,path,attempt,report,profile)
         }else{runs.request(&data,request,report)}
     }).await.map_err(|_|"The local test operation could not finish.")?
+}
+#[tauri::command]
+async fn fleet_checks(request:fleet_checks::Request,app:tauri::AppHandle,state:State<'_,fleet_checks::Checks>,work:State<'_,workbench::Workbench>,queue:State<'_,Queues>)->Result<Value,String>{
+ use tauri::Manager;
+ let checks=state.inner().clone();let work=work.inner().clone();let q=queue.inner().clone();let data=app.path().app_data_dir().map_err(|_|"Local check history is unavailable.")?;
+ tauri::async_runtime::spawn_blocking(move||{
+  if let fleet_checks::Request::Start{generation,task_ref,revision,world}=request {
+   let path=work.matching_root(generation)?;
+   let verify=||->Result<Value,String>{let(reply,wait)=sync_channel(1);q.intent(Msg::MatchPlanRepository{path:path.clone(),task_ref:task_ref.clone(),revision,world:world.clone(),reply})?;wait.recv().map_err(|_|"Task verification was interrupted.")?};
+   verify()?;
+   let dir=checks.prepare(&data,world.clone(),&path,&task_ref,revision)?;
+   verify()?;
+   if work.matching_root(generation)?!=path{return Err("The repository changed before dispatch.".into());}
+   checks.launch(dir,"start")
+  }else{checks.request(&data,request)}
+ }).await.map_err(|_|"The remote check operation could not finish.")?
 }
 #[tauri::command]
 async fn surface_sessions(
@@ -908,6 +925,7 @@ fn main() {
             control: ctl_tx,
         })
         .manage(review_tests::Runs::default())
+        .manage(fleet_checks::Checks::default())
         .manage(accepted_builds::Builds::default())
         .manage(accepted_preview::Previews::default())
         .manage(workbench::Workbench::default())
@@ -928,6 +946,7 @@ fn main() {
             review_content,
             development_request,
             review_tests,
+            fleet_checks,
             browser_surface,
             surface_sessions,
             choose_attachments,

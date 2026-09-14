@@ -261,6 +261,12 @@
           "markdownDescription": "Enables the development_request command without any pre-configured scope."
         },
         {
+          "description": "Enables the fleet_checks command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-fleet-checks",
+          "markdownDescription": "Enables the fleet_checks command without any pre-configured scope."
+        },
+        {
           "description": "Enables the frame_ack command without any pre-configured scope.",
           "type": "string",
           "const": "allow-frame-ack",
@@ -517,6 +523,12 @@
           "type": "string",
           "const": "deny-development-request",
           "markdownDescription": "Denies the development_request command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the fleet_checks command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-fleet-checks",
+          "markdownDescription": "Denies the fleet_checks command without any pre-configured scope."
         },
         {
           "description": "Denies the frame_ack command without any pre-configured scope.",

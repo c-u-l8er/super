@@ -36,3 +36,12 @@ The task-activity increment uses `outputs/task-activity/`. The detailed graph pl
 remains in [SCHEMATICS.md](SCHEMATICS.md).
 
 Task-activity validation: 175 behavior tests and 42 native app checks passed. Native provider fixtures cover pending, complete, failure, task isolation and reload; a real Fable request remains a separate gate.
+
+### Fleet advisory checks — latest delivery
+
+Continue work, plan details and Schematics now have task-bound remote-check
+controls and device-local history. Execution remains disabled pending approval of
+the dedicated Proxmox check key and fixed VM-100 bridge. See
+[FLEET_MVP.md](FLEET_MVP.md#task-bound-advisory-check-implementation-2026-09-14).
+Next gate: real app dispatch and interrupted-connection reconciliation, then the
+separate bhyve guest. Simulated UI screenshots are not remote test evidence.

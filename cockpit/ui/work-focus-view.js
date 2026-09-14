@@ -1,3 +1,4 @@
+import {initFleetChecks} from './fleet-check-view.js';
 import {initTaskActivity} from './task-activity-view.js';
 import {node,navigate} from './app-shell.js';
 import {heldProjection,runtimeWorld} from './runtime-bots.js';
@@ -30,6 +31,7 @@ export function initWorkFocus({current}){
     for(const t of view.queue.filter(t=>t.id!==task.id)){const pick=node('button',t.title,'subtle');pick.type='button';pick.dataset.focusChoose=t.id;pick.onclick=()=>choose(t.id);other.append(pick);}
     if(view.queue.length===1)other.append(node('p','Finish this task, then choose the next one.'));
   }
+  initFleetChecks({root,invoke:window.__TAURI__.core.invoke,context:()=>{const p=heldProjection(current),world=runtimeWorld(current);return {world,task:workFocus(p,world,chosen,currentTaskSession()).task};}});
   const taskActivity=initTaskActivity({root,context:()=>{const p=heldProjection(current),world=runtimeWorld(current);return {p,world,task:workFocus(p,world,chosen,currentTaskSession()).task};},open:id=>{navigate('bot:'+id,true);document.dispatchEvent(new CustomEvent('open-task-conversation',{detail:{botId:id}}));}});
   root.insertBefore(taskActivity.panel,card);
   function choose(id){const p=heldProjection(current),world=runtimeWorld(current);if(!p?.development_tasks?.[id])return;try{saveFocus(localStorage,world,id);chosen=id;notice.textContent='';}catch{notice.textContent='Could not remember this choice. Free local storage and try again.';return;}signature='';refresh();navigate('continue-work',true);}

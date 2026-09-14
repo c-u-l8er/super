@@ -30,6 +30,7 @@
     "allow-review-content",
     "allow-browser-surface",
     "allow-surface-sessions",
-    "allow-review-tests"
+    "allow-review-tests",
+    "allow-fleet-checks"
   ]
 }

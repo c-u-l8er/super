@@ -1,0 +1,3 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {remoteLabel,remoteChecksFor} from '../cockpit/ui/fleet-check-view.js';
+test('remote UI names completed, active, unsent and uncertain outcomes distinctly',()=>{assert.match(remoteLabel({active:true}),/Checking/);assert.match(remoteLabel({state:'completed',verdict:'pass'}),/passed/);assert.match(remoteLabel({state:'completed',verdict:'fail'}),/failed/);assert.match(remoteLabel({state:'prepared'}),/not sent/);assert.match(remoteLabel({state:'unknown'}),/unconfirmed/);});
+test('unobserved or malformed world cannot borrow remote observations',()=>{assert.deepEqual(remoteChecksFor({id:'task',revision:1},'bad'),[]);assert.deepEqual(remoteChecksFor(null,null),[]);});
