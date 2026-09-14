@@ -97,7 +97,7 @@ status retrieval reconciles uncertain results. An interrupted reservation stays
 unknown. Unknown requests block new dispatch on the device; explicit abandonment
 and retention management are future work. Tests do not grant worker readiness.
 
-**Activation is pending explicit approval.** Automatic approval review rejected
+**Historical activation gate (approval received in the next turn).** Automatic approval review rejected
 installing a separate Proxmox root authorized key and privileged fixed-command
 bridge. Neither the bridge/key nor the guest endpoint was installed by this
 increment. The running inventory observer is unchanged. The desktop is shipped
@@ -126,3 +126,52 @@ and the 42 existing native Continue work / Schematics checks. Static permission
 checks also passed. A narrow desktop header wrap found during screenshot review
 was fixed and verified. Actual remote execution remains untested for this new
 endpoint until its installation is approved.
+
+## Approved activation and real app checks, 2026-09-14
+
+The user explicitly approved the restricted Proxmox key, fixed bridge and VM-100
+runner. Installed those endpoints and bubblewrap. Verified that requesting an
+alternate shell command with this key still returns only the fixed endpoint's
+status response. No provider credentials were copied to the guest.
+
+Super dispatched the current saved plan `dt_0039`, revision 1, from the native
+Continue work control. Eleven real tests passed on committed source `f157d419`.
+The four-file snapshot digest is
+`6e80550427ee941d6e76c9630cb99d8bf8bc86257460d62910f119b730c6e7bb`.
+First request: `fc-7fa4c0256e9bfd70fb11cb33b265f9d1`.
+
+A second real request, `fc-1f75428d6d9bbefc16aa5197402c9e82`, had its local
+result receiver deliberately stopped and killed after dispatch. The app showed
+an unconfirmed outcome and disabled new starts. **Check remote status** recovered
+the original passing receipt; no second start was submitted. This tests a real
+receiver interruption, not a simulated result or a physical network outage.
+Accepted review `da_0038` and the task revision were unchanged.
+
+Fixed guest source-directory permissions for a restrictive agent umask while
+keeping receipts private. Added a direct Fleet → Continue work route and removed
+empty status boxes. Evidence and actual screenshots: `outputs/fleet-active/` in
+the development workspace. Startup uses `SUPER_FLEET_CHECK_CONFIG` pointing to
+`work/fleet-checks/config.json`; the separate observation service is unchanged.
+
+During restart verification, guest kernel 6.12.107 faulted in ftrace/BPF teardown
+while systemd was shutting down. A full VM stop/start recovered the agent; both
+receipt hashes survived unchanged. A 743 MB VM backup was retained at
+`/var/lib/vz/dump/vzdump-qemu-100-2026_09_14-15_14_33.vma.zst` (guest freeze was
+unavailable). Debian's existing backports repository supplied kernel 7.1.8; the
+old kernel remains installed. Kernel-only replacement did not resolve shutdown,
+so the virtual CPU configuration is being tested separately. Do not describe this
+as a confirmed upstream kernel fix. Consult the final verification below.
+
+### Verified worker configuration
+
+VM 100 now uses the standard `x86-64-v3` CPU profile with Debian kernel
+`7.1.8+deb13-amd64`. A normal Proxmox reboot succeeded and the guest agent returned;
+the two prior receipts were byte-for-byte unchanged. The exact upstream cause is
+not isolated: kernel replacement alone failed, while this CPU/kernel combination
+passed. Original CPU configuration and kernel are retained for rollback.
+
+The app then ran eleven tests successfully again on this configuration, request
+`fc-2bf78cdca1e3a10e9eb30e6c5bea9f31`. All three runs are advisory checks for the
+same saved task revision and committed snapshot. General worker placement,
+proposal acceptance using remote evidence, a physical network-outage drill,
+and a separate FreeBSD bhyve Linux guest remain future gates.

@@ -80,6 +80,7 @@ def handle(msg, root=ROOT, runner=execute):
     ident = r['id'] if start else msg['id']
     assert isinstance(ident,str) and re.fullmatch(r'fc-[a-f0-9]{32}',ident), 'Invalid request ID'
     root.mkdir(mode=0o755, parents=True, exist_ok=True)
+    root.chmod(0o755)  # The unprivileged sandbox must be able to reach its source.
     receipt = root / (ident+'.json')
     # One global lock bounds concurrency and keeps receipt reservation atomic.
     with (root/'lock').open('a') as lock:
@@ -99,9 +100,13 @@ def handle(msg, root=ROOT, runner=execute):
         record = {'schema':'super-fleet-receipt@1','id':ident,'binding':r['binding'],'snapshot':r['snapshot'],'requestSha256':digest(canonical(r)),'state':'reserved','startedAt':int(time.time()*1000),'advisory':True}
         save(receipt,record)  # Before staging or process launch. Never reuse this ID.
         try:
-            source = root/ident; source.mkdir(mode=0o755)
+            source = root/ident; source.mkdir(mode=0o755); source.chmod(0o755)
             for f,data in zip(r['files'],contents):
-                p = source/f['path']; p.parent.mkdir(parents=True,exist_ok=True); p.write_bytes(data); p.chmod(0o444)
+                p = source/f['path']; p.parent.mkdir(parents=True,exist_ok=True)
+                for parent in p.parents:
+                    if parent == source: break
+                    parent.chmod(0o755)
+                p.write_bytes(data); p.chmod(0o444)
             (source/'package.json').write_text('{"type":"module"}\n'); (source/'package.json').chmod(0o444)
             record.update(runner(source))
         except Exception:

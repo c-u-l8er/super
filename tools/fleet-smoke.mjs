@@ -9,6 +9,7 @@ try{
  await app.page(`document.querySelector('[data-nav=fleet]').click()`);
  check('Fleet has one frame-owned screen',await app.page(`return document.querySelectorAll('[data-screen=fleet]').length===1&&!document.querySelector('[data-screen=fleet]').hidden`));
  check('Named hosts, bhyve and the actual guest relationship are visible',await app.page(`const s=document.querySelector('[data-screen=fleet]').textContent;return s.includes('bhyve hypervisor')&&s.includes('super-worker-01')&&s.includes('Wifibox')`));await shot('01_Fleet');
+ await app.page(`document.querySelector('.fleet-next button').click()`);check('Fleet offers a direct route to task checks',await app.page(`return !document.querySelector('#work-focus').hidden`));await app.page(`document.querySelector('[data-nav=fleet]').click()`);
  const before=await app.page(`return window.cockpit.frames`);await new Promise(r=>setTimeout(r,2200));const after=await app.page(`return window.cockpit.frames`);check('Unchanged inventory does not create idle frame traffic',after-before<=2);
  await app.page(`document.querySelector('#toggle-schematics').click()`);await app.until(()=>app.page(`return !!document.querySelector('[data-schematic-node="host:proxmox:guest:100"]')&&!document.querySelector('.schematic-note').hasAttribute('aria-busy')`),20000,'fleet layout');
  check('Schematic contains distinct hosts and guests',await app.page(`return document.querySelectorAll('[data-schematic-node]').length===5`));await shot('02_Fleet_Schematic');

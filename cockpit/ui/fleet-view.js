@@ -1,4 +1,4 @@
-import {node,panel} from './app-shell.js';
+import {node,panel,navigate} from './app-shell.js';
 export const fleetStatus=status=>({observed:'Recently observed',unavailable:'Connection needs attention',stale:'Observation expired'})[status]||'Not observed';
 export function fleetDiagram(fleet){
  const nodes=[{id:'observer',label:'Fleet observer',state:fleet?.status==='configured'?'Inventory connected':'Not connected',detail:'Verified host observations reach this page through the runtime. They do not grant permission to execute work.',route:'fleet'}],edges=[];
@@ -9,7 +9,7 @@ export function fleetDiagram(fleet){
 }
 export function fleetPanel(fleet){
  const root=panel('fleet');root.dataset.fleetView='';
- const intro=node('section',undefined,'fleet-next');intro.append(node('h2','Next: connect a task to a remote check'),node('p','Your machines can be inspected here. Assigning work and reviewing remote results is the next step; a running guest is not yet an assigned Super worker.'));root.append(intro);
+ const intro=node('section',undefined,'fleet-next');intro.append(node('h2','Inspect machines, then check your task'),node('p','Open Continue work to run configured remote checks and read their results. Each check keeps its task revision and committed source; guest inventory alone does not establish worker readiness.'));const check=node('button','Open task checks','subtle');check.type='button';check.onclick=()=>navigate('continue-work',true);intro.append(check);root.append(intro);
  if(fleet?.status!=='configured'){root.append(node('p',fleet?.status==='unconfigured'?'No fleet observer is configured yet.':'Fleet observations are unavailable. Check the local observer connection.','fleet-empty'));return root;}
  const grid=node('div',undefined,'fleet-grid');for(const h of fleet.hosts??[]){const card=node('section',undefined,'fleet-host'),i=h.inventory;card.dataset.fleetHost=h.id;card.append(node('h2',h.label),node('p',fleetStatus(h.status),'fleet-state'));
   if(i){card.append(node('p',`${i.os} ${i.release} · ${i.hypervisor==='none'?'Host':i.hypervisor==='bhyve'?'bhyve hypervisor':'Proxmox hypervisor'}`),node('p',`${i.logicalCpus} logical CPUs · ${(i.memoryBytes/2**30).toFixed(1)} GiB RAM${h.status==='observed'?'':' · last observed capacity'}`));}

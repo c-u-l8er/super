@@ -40,8 +40,10 @@ Task-activity validation: 175 behavior tests and 42 native app checks passed. Na
 ### Fleet advisory checks — latest delivery
 
 Continue work, plan details and Schematics now have task-bound remote-check
-controls and device-local history. Execution remains disabled pending approval of
-the dedicated Proxmox check key and fixed VM-100 bridge. See
+controls and device-local history. Execution is enabled through the approved restricted Proxmox check key and
+fixed VM-100 bridge. Three real task-bound checks passed; an interrupted local
+result receiver recovered the original receipt without resubmission. See
 [FLEET_MVP.md](FLEET_MVP.md#task-bound-advisory-check-implementation-2026-09-14).
-Next gate: real app dispatch and interrupted-connection reconciliation, then the
-separate bhyve guest. Simulated UI screenshots are not remote test evidence.
+Next: the separate bhyve guest and a physical network-outage drill. Actual app
+screenshots and recovery evidence are in `outputs/fleet-active/`. Earlier
+simulation screenshots remain labeled separately.

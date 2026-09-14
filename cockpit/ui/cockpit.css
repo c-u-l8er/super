@@ -500,3 +500,5 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
  #open-navigation kbd {display:none;}
 }
 .fleet-task-check .directory-note {overflow-wrap:anywhere;}
+
+.fleet-task-check .availability-note:empty {display:none;}

@@ -46,6 +46,16 @@ class Tests(unittest.TestCase):
    self.assertEqual(json.loads(p.read_text())['state'],'reserved')
    return self.runner(source)
   w.handle({'operation':'start','request':r},self.root,run)
+ def test_restrictive_agent_umask_does_not_hide_the_source(self):
+  import os
+  old=os.umask(0o077)
+  try:
+   def run(source):
+    for p in [self.root,source,source/'tools',source/'cockpit',source/'cockpit/ui']:
+     self.assertEqual(p.stat().st_mode & 0o777,0o755)
+    return self.runner(source)
+   w.handle({'operation':'start','request':request()},self.root,run)
+  finally:os.umask(old)
  def test_receipt_outside_source(self):
   r=request()
   def run(source):
