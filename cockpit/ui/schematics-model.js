@@ -1,8 +1,10 @@
+import {fleetDiagram} from './fleet-view.js';
 import {internalSchematic} from './schematics-internals.js';
 import {workFocus} from './work-focus.js';
 import {taskSessionView} from './task-session.js';
 import {reviewTestCoverage} from './review-test-coverage.js';
 export const connections=[
+ ['runtime','fleet','reports host observations'],
  ['positions','goals','contains goals'],['goals','lanes','assigns work'],['lanes','repositories','uses source'],['lanes','development-tasks','organizes plans'],
  ['continue-work','development-tasks','focuses a plan'],['development-tasks','bots','assigns a bot'],['development-tasks','editor','shares source'],['bots','editor','proposes changes'],
  ['development-tasks','evidence','retains outcomes'],['editor','terminal','local commands'],['editor','browser','preview'],['runtime','runtime-assignments','reports assignments'],
@@ -12,7 +14,7 @@ export const connections=[
 ];
 const collections={positions:'workspaces',goals:'goals',lanes:'lanes',repositories:'repositories',bots:'bots',agents:'agents','development-tasks':'development_tasks','runtime-assignments':'workers'};
 const detailed=new Set(['continue-work','development-tasks','editor','bots']);
-const unavailable=new Set(['fleet','gates','rulings','routines']);
+const unavailable=new Set(['gates','rulings','routines']);
 export const screenKind=id=>id.startsWith('bot:')?'bots':id;
 export function schematic({screen,level='screen',screens,p,world,chosen,session,editor,workspace=''}){
  const kind=screenKind(screen),catalog=[...screens.map(([id,label,description])=>({id,label,description})),{id:'record',label:'Record details',description:'Inspect the selected record and its references.'}];
@@ -22,6 +24,7 @@ export function schematic({screen,level='screen',screens,p,world,chosen,session,
   const links=connections.filter(([a,b])=>level==='app'||a===kind||b===kind),ids=new Set([kind,...links.flatMap(([a,b])=>[a,b])]);
   return {title:level==='app'?'Whole app':'Connections · '+entry.label,coverage:'Screen relationships · these links describe app structure, not observed execution.',nodes:catalog.filter(s=>level==='app'||ids.has(s.id)).map(pageNode),edges:links.map(([from,to,label])=>({from,to,label}))};
  }
+ if(kind==='fleet')return fleetDiagram(p?.fleet);
  if(!detailed.has(kind))return {title:entry.label,coverage:'Screen overview · detailed internal wiring is planned.',nodes:[{id:'input',label:'Screen context',state:p?'Available':'Unavailable',detail:'The selected workspace and page determine what this screen displays.'},pageNode(entry),{id:'output',label:'Connected screens',state:'Explore connections',detail:'Use Connections to follow this screen into other areas. Links describe structure; event tracing is planned.'}],edges:[{from:'input',to:entry.id,label:'provides context'},{from:entry.id,to:'output',label:'follow connections'}]};
  const scoped=p?{...p,development_tasks:Object.fromEntries(Object.entries(p.development_tasks??{}).filter(([,t])=>(!workspace||t.workspace_ref===workspace)&&(!screen.startsWith('bot:')||p.bots?.[t.bot_ref]?.client_ref===screen.slice(4))))}:null;
  const editorTask=kind==='editor'&&editor?.task?.world===world&&scoped?.development_tasks?.[editor.task.id]?.revision===editor.task.revision?editor.task.id:null;

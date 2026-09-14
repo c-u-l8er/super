@@ -1,3 +1,4 @@
+import {fleetPanel} from './fleet-view.js';
 import {initSchematics} from './schematics-view.js';
 import {initWorkFocus} from './work-focus-view.js';
 import { initDevelopmentTasks } from './development-tasks.js';
@@ -565,7 +566,8 @@ export function render(frame) {
     section('Recent refusals', (p.recent_refusals ?? []).map((r, i) => detail(r, `refusal:${r.id ?? i}`, r.code ?? r.refusal?.code ?? 'Refusal')), 'No recent refusals.'),
     detail({ world: frame.world, runtime: p.runtime, manifest: p.world }, 'runtime-identity', 'World & frame identity'));
 
-  const extra = screens.filter(([id]) => !['continue-work','mission','positions','capabilities','evidence','runtime','bots','new-bot','edit-bot','new-workspace','manage-work','repositories','goals','lanes','runtime-assignments','editor','terminal','browser','development-tasks','mobile'].includes(id)).map(([id]) => {
+  const fleet = fleetPanel(p.fleet);
+  const extra = screens.filter(([id]) => !['continue-work','mission','positions','capabilities','evidence','runtime','bots','new-bot','edit-bot','new-workspace','manage-work','repositories','goals','lanes','runtime-assignments','editor','terminal','browser','development-tasks','mobile','fleet'].includes(id)).map(([id]) => {
     const page = panel(id);
     if (id === 'agents') page.append(section('Connected peers', (p.peers ?? []).map(peer => detail(peer, `agent:${peer.peer_id ?? peer.actor}`, peer.actor ?? peer.peer_id ?? 'Peer')), 'No peers are connected.'));
     else if (id === 'authority') page.append(section('Current grants', liveGrants.map(g => detail(g, `authority:${g.id}`, `${g.capability} · ${g.actor}`)), 'No authority is currently granted.'));
@@ -577,7 +579,7 @@ export function render(frame) {
   for (const page of [mission, positions, goalsPage, lanesPage]) page.insertBefore(node('p', `Workspace view: ${scopeName}`, 'scope-note'), page.children[3] ?? null);
   for (const page of [capabilities, evidence, runtime, ...extra]) page.append(node('p', 'Scope: whole runtime', 'scope-note'));
   mission.append(node('p', 'Requests, approvals, and active grant totals cover the whole runtime.', 'availability-note'));
-  presentFrame(el.main, [mission, positions, goalsPage, lanesPage, assignments, newWorkspace, manageWork, repositories, capabilities, evidence, runtime, mobile, ...extra, recordPage(frame)]);
+  presentFrame(el.main, [mission, positions, goalsPage, lanesPage, assignments, newWorkspace, manageWork, repositories, capabilities, evidence, runtime, mobile, fleet, ...extra, recordPage(frame)]);
   if (focusedDraft) {
     const replacement = [...el.main.querySelectorAll('[data-draft]')].find(n => n.dataset.draft === focusedDraft);
     if (replacement && !replacement.disabled) {

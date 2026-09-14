@@ -88,6 +88,7 @@ defmodule Ampd.Projection do
       "reconcile_queue" => Enum.map(Effects.reconcile_queue(), & &1["id"]),
       "peers" => Ampd.Peer.list(),
       "channels" => Ampd.Bridge.list(),
+      "fleet" => Ampd.Fleet.projection(),
 
       # --- the positions authority is held FROM -------------------------
       #

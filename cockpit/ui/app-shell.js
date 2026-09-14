@@ -22,7 +22,7 @@ export const screens = [
   ['browser', 'Browser', 'Preview the app running on your machine.'],
   ['agents', 'Agents', 'Peers connected to the runtime.'],
   ['routines', 'Routines', 'Scheduled routines are not projected by this runtime yet.'],
-  ['fleet', 'Fleet & placement', 'Compute placement is not projected by this runtime yet.'],
+  ['fleet', 'Fleet & placement', 'Your hosts, hypervisors and guests. Connection observations stay separate from work assignment.'],
   ['gates', 'Gates', 'Build-gate measurements are not delivered to this app yet.'],
   ['rulings', 'Rulings', 'An obligation and ruling directory is not connected yet.'],
   ['authority', 'Authority', 'Authority records supplied by the current runtime.'],

@@ -40,6 +40,7 @@ defmodule Ampd.Application do
       # coordinator because the coordinator notifies it, and a notification
       # to a process that is not up yet is checked for rather than assumed.
       Ampd.Subscriptions,
+      Ampd.Fleet,
       Ampd.Session,
       Ampd.CapabilityRegistry,
       Ampd.GrantRegistry,

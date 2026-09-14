@@ -19,11 +19,16 @@ esac
 for tool in git node elixir erl cargo; do
  if command -v "$tool" >/dev/null 2>&1; then printf 'tool_%s=yes\n' "$tool"; else printf 'tool_%s=no\n' "$tool"; fi
 done
+if command -v bhyve >/dev/null 2>&1; then
+ printf 'hypervisor=bhyve\\n'
+ printf 'guest_names=%s\\n' "$(ls /dev/vmm 2>/dev/null | paste -sd, - || true)"
+fi
 printf 'end=super-host-probe@1\n'
 `;
-export function sshArguments(target){
+export function sshArguments(target,options={}){
  if(typeof target!=='string'||target.length>253||! /^(?:[a-zA-Z0-9_][a-zA-Z0-9_.-]*@)?[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(target))throw Error('Use a configured SSH alias or user@hostname.');
- return ['-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=6','-o','ConnectionAttempts=1','-o','ForwardAgent=no','-o','ForwardX11=no','-o','ClearAllForwardings=yes','-o','ControlMaster=no','-o','ControlPath=none',target,'sh -c '+"'"+script.replaceAll("'","'\\''")+"'"];
+ const extra=[];for(const [key,flag] of [['identityFile','-i'],['knownHosts','-o']])if(options[key]){if(typeof options[key]!=='string'||!options[key].startsWith('/')||/[\r\n\0]/.test(options[key]))throw Error('SSH identity paths must be absolute.');extra.push(flag,key==='knownHosts'?'UserKnownHostsFile='+options[key]:options[key]);}
+ return [...extra,'-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','ConnectTimeout=6','-o','ConnectionAttempts=1','-o','ForwardAgent=no','-o','ForwardX11=no','-o','ClearAllForwardings=yes','-o','ControlMaster=no','-o','ControlPath=none',target,'sh -c '+"'"+script.replaceAll("'","'\\''")+"'"];
 }
 export function parseInventory(output){
  if(typeof output!=='string'||output.length>16384)throw Error('Host response is too large.');
@@ -38,10 +43,13 @@ export function parseInventory(output){
  for(const key of ['hostname','release','arch','user'])if(!fields[key]||fields[key].length>255)throw Error('Missing host identity.');
  for(const key of ['cpus','memory_bytes'])if(!/^\d+$/.test(fields[key]??'')||!Number.isSafeInteger(Number(fields[key]))||Number(fields[key])<=0)throw Error('Invalid host capacity.');
  const tools={};for(const name of ['git','node','elixir','erl','cargo']){const v=fields['tool_'+name];if(!['yes','no'].includes(v))throw Error('Missing tool observation.');tools[name]=v==='yes';}
- return {hostname:fields.hostname,os:fields.os,release:fields.release,arch:fields.arch,user:fields.user,logicalCpus:Number(fields.cpus),memoryBytes:Number(fields.memory_bytes),tools};
+ const hypervisor=fields.hypervisor||'none';if(!['none','bhyve','proxmox'].includes(hypervisor))throw Error('Unknown hypervisor.');
+ const guests=fields.guests_json?JSON.parse(fields.guests_json):(fields.guest_names||'').split(',').filter(Boolean).map(name=>({id:name,label:name,status:'present'}));
+ if(!Array.isArray(guests)||guests.length>24||guests.some(g=>!g||typeof g.id!=='string'||g.id.length>64||typeof g.label!=='string'||g.label.length>100||!['running','stopped','present','unknown'].includes(g.status)))throw Error('Invalid guests.');
+ return {hypervisor,guests,hostname:fields.hostname,os:fields.os,release:fields.release,arch:fields.arch,user:fields.user,logicalCpus:Number(fields.cpus),memoryBytes:Number(fields.memory_bytes),tools};
 }
-export async function probe(target,run=execute){
- const args=sshArguments(target),started=Date.now();
+export async function probe(target,run=execute,options={}){
+ const args=sshArguments(target,options),started=Date.now();
  try{
   const {stdout}=await run('ssh',args,{timeout:12000,killSignal:'SIGKILL',maxBuffer:16384,encoding:'utf8'});
   return {schema:'super-host-observation@1',target,observedAt:new Date().toISOString(),durationMs:Date.now()-started,status:'observed',inventory:parseInventory(stdout),workerReady:false};

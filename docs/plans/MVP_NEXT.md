@@ -20,7 +20,7 @@ restore the same work after restart.
 
 ## Delivery order
 
-**New hardware track:** [Two-machine fleet MVP](FLEET_MVP.md). Start with measured inventory and a Linux execution guest on Proxmox; keep FreeBSD observation separate from worker readiness. This runs alongside provider recovery and feeds the real Super-on-Super cycle.
+**New hardware track:** [Two-machine fleet MVP](FLEET_MVP.md). Measured host/guest inventory and its Fleet screen are implemented, and the Proxmox Linux guest passed bootstrap checks. Next connect a task-bound remote check, then provision a separate Linux check guest under FreeBSD bhyve. This runs alongside provider recovery and feeds the real Super-on-Super cycle.
 
 1. **Task activity across work surfaces — implemented and tested.** Show actual request lifecycle, bounded assistant-text preview and request events in Continue work and Schematics. Match bot, task revision and runtime session. Keep graph nodes stable while text arrives. Older saved replies remain history after reload.
 2. **Connection and interruption recovery.** Make an unavailable provider an actionable next step for the assigned bot. Verify expired sign-in, cancellation, restored drafts and reconnect behavior; do not claim configured credentials prove a successful request.
