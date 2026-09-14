@@ -465,3 +465,7 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .schematic-zoom {display:flex;gap:6px;align-items:center;margin:-8px 0 12px;}
 .schematic-zoom span {color:var(--dim);font:12px var(--mono);margin-left:8px;}
 .schematic-node.schematic-muted {opacity:.6;}
+.schematic-board path {stroke-linecap:round;stroke-linejoin:round;}
+.schematic-board .schematic-port {fill:#8ec5f2;stroke:#0b1421;stroke-width:1;}
+.schematic-zoom {flex-wrap:wrap;}
+.schematic-zoom [aria-pressed=true] {border-color:var(--ice);color:var(--ice);}

@@ -59,3 +59,12 @@ in `CODE_EDITOR_LICENSES.txt`. This is a build-time dependency decision.
 local PTYs. Those shells have their own bounded output buffers and input path;
 the runtime worker observation pane retains its read-only acknowledgement
 protocol. Local terminal sizing uses the pinned renderer's measured cell size.
+
+## ELK graph layout
+
+`elk.bundled.js` is the unmodified `lib/elk.bundled.js` from npm `elkjs@0.10.0`, fetched 2026-09-14 with `npm pack --ignore-scripts`. It runs locally without a CDN or runtime download. Source: https://github.com/kieler/elkjs/tree/0.10.0 ; registry artifact: https://registry.npmjs.org/elkjs/-/elkjs-0.10.0.tgz . License: EPL-2.0, retained in `ELK_LICENSE.md`.
+
+- Bundle SHA-256: `48d338d5aeddd9503ccf1d12661c11b5d7d43c6afc5f66c7ddb2ea4170c0f6bf`
+- Package archive SHA-256: `04f7f7031b7a46c91d24556888cdb53163cb4ced07c7fdb5aa640357fd9798bd`
+
+The wrapper in `schematics-layout.js` requests deterministic layered placement, separate fixed-side ports and orthogonal routing. It caches geometry by topology; render generations prevent stale asynchronous layouts from replacing newer screen/world state. Algorithm reference: https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html .

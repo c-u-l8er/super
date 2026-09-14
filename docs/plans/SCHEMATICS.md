@@ -45,3 +45,11 @@ Selecting a node highlights its direct connections. The inspector's connection b
 Validation: 167 behavior tests and 23 native checks, including a real folder selection and open Editor file, tracing, zoom, clearing selection, all screen overviews, small windows, draft retention and native browser coverage. Screenshots were visually inspected; reduced contrast for unselected nodes was adjusted to keep labels readable. Evidence: `outputs/schematics-2/` in the development workspace.
 
 Next: internal diagrams for the remaining screens; per-edge event instrumentation and bounded event history; follow-active behavior. Wire actual WRL execution only when corresponding runtime evidence is available.
+
+### Third increment — automatic placement and routed connections
+
+User feedback: improve the connection lines and replace the grid arrangement with an algorithmic layout. Replaced the grid/gutter implementation with locally bundled ELK 0.10.0 layered placement and orthogonal routing. Separate fixed-side ports distinguish connections; corners are rounded. Added Flow down / Flow right, Fit diagram and selection centering on direction changes. Layout is cached by graph structure rather than status text, and asynchronous render generations discard stale results after navigation or world changes.
+
+Validation: 169 behavior tests and 26 native checks passed. Geometry checks exercise actual work-screen flows in both directions, the app connection graph, cycles, self-loops, duplicate edges and disconnected nodes. Node rectangles do not overlap; routed orthogonal segments do not cross node interiors. Duplicate connections have distinct ports. Native checks include direction changes with retained selection, fitting the full graph, rapid toggles, every screen, Editor file state and browser surface coverage. Screenshots in `outputs/schematics-3/` were visually inspected. A whole-app fit is an overview; zoom and the inspector provide readable detail.
+
+Dependency provenance, SHA-256 and EPL-2.0 license are retained under `cockpit/ui/vendor/`. Primary algorithm reference: https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html . No library download is needed at runtime. Remaining screen internals and actual event instrumentation continue as the next plan work.

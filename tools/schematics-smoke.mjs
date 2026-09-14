@@ -3,8 +3,9 @@ import {open} from './lib/cockpit-control.mjs';
 import assert from 'node:assert/strict';
 import {mkdirSync,writeFileSync,mkdtempSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
-const port=Number(process.env.APP_SMOKE_PORT||4797),out=process.env.SUPER_VISUAL_EVIDENCE_DIR||'/home/travis/Documents/Codex/2026-09-12/le/outputs/schematics-2';
+const port=Number(process.env.APP_SMOKE_PORT||4797),out=process.env.SUPER_VISUAL_EVIDENCE_DIR||'/home/travis/Documents/Codex/2026-09-12/le/outputs/schematics-3';
 mkdirSync(out,{recursive:true});let app;const checks=[];
+const ready=()=>app.until(()=>app.page(`return !document.querySelector('#schematics').hidden&&!document.querySelector('.schematic-note').hasAttribute('aria-busy')&&!!document.querySelector('[data-schematic-node]')`),20000,'layout ready');
 const check=(name,value)=>{assert.ok(value,name);checks.push(name);console.log(name);};
 try{
  app=await open({port,fixture:true});
@@ -39,23 +40,37 @@ try{
  check('Reload restores the chosen task without sending a request',await app.page(`return !document.querySelector('#work-focus').hidden && document.querySelector('#focus-current').textContent==='Prepare source files'`));
  const shot=async(name)=>{const response=await fetch(`http://127.0.0.1:${port}/session/${app.session()}/screenshot`);writeFileSync(`${out}/${name}.png`,Buffer.from((await response.json()).value,'base64'));};
  await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:1440,height:980})});
- await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('[data-schematic-node=task]').click()`);
+ await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();await app.page(`document.querySelector('[data-schematic-node=task]').click()`);
  check('Schematics toggles into the selected task with a pinned inspector',await app.page(`return !document.querySelector('#schematics').hidden && document.querySelector('.schematic-inspector').textContent.includes('Focused step 2') && document.querySelector('#toggle-schematics').getAttribute('aria-pressed')==='true'`));
  await shot('01_Current_Task');
  await app.page(`document.querySelector('[data-schematic-follow=bot]').click();document.querySelector('[data-schematic-zoom=out]').click();document.querySelector('[data-schematic-zoom=out]').click()`);
  check('Following a connection selects its node and highlights only neighboring wires',await app.page(`return document.querySelector('[data-schematic-node=bot]').getAttribute('aria-pressed')==='true'&&document.querySelectorAll('path.schematic-traced').length===4 && !!document.querySelector('path.schematic-muted')`));
  check('Zoom scales the diagram without changing the selected component',await app.page(`return document.querySelector('#schematic-zoom-label').textContent==='80%' && document.querySelector('.schematic-inspector h2').textContent==='Focus builder'`));
  await shot('07_Trace_And_Zoom');
+ await app.page(`document.querySelector('[data-schematic-direction=RIGHT]').click()`);await ready();
+ check('Flow direction changes while preserving the selected component',await app.page(`return document.querySelector('[data-schematic-direction=RIGHT]').getAttribute('aria-pressed')==='true'&&document.querySelector('[data-schematic-node=bot]').getAttribute('aria-pressed')==='true'`));
+ await app.page(`document.querySelector('[data-schematic-zoom=all]').click()`);
+ check('Fit diagram keeps the whole routed graph inside the viewport',await app.page(`const b=document.querySelector('.schematic-board').getBoundingClientRect(),v=document.querySelector('.schematic-viewport').getBoundingClientRect();return b.width<=v.width+2&&b.height<=v.height+2`));
+ await shot('11_Rightward_Flow');
+ await app.page(`document.querySelector('[data-schematic-zoom=reset]').click()`);
+
+ await app.page(`document.querySelector('[data-schematic-direction=DOWN]').click();document.querySelector('#toggle-schematics').click();document.querySelector('#toggle-schematics').click()`);await ready();
+ check('Rapid direction changes and toggles cannot restore a stale layout',await app.page(`return document.querySelector('[data-schematic-direction=DOWN]').getAttribute('aria-pressed')==='true'&&document.querySelector('[data-schematic-node=bot]').getAttribute('aria-pressed')==='true'`));
+
+ await app.page(`document.querySelector('[data-schematic-direction=DOWN]').click()`);await ready();
+
  await app.page(`document.querySelector('#schematic-clear-trace').click()`);
  check('Clear trace restores every node and connection',await app.page(`return !document.querySelector('.schematic-traced')&&!document.querySelector('.schematic-muted')`));
  await app.page(`document.querySelector('[data-schematic-zoom=fit]').click();document.querySelector('[data-schematic-zoom=reset]').click()`);
 
- await app.page(`document.querySelector('[data-schematic-level=connections]').click();document.querySelector('[data-schematic-node=development-tasks]').click()`);
+ await app.page(`document.querySelector('[data-schematic-level=connections]').click()`);await ready();await app.page(`document.querySelector('[data-schematic-node=development-tasks]').click()`);
  check('Connections offer a real destination and describe the link',await app.page(`return !!document.querySelector('[data-schematic-open=development-tasks]') && document.querySelector('.schematic-inspector').textContent.includes('focuses a plan')`));
  await shot('02_Screen_Connections');
- await app.page(`document.querySelector('[data-schematic-level=app]').click()`);
+ await app.page(`document.querySelector('[data-schematic-level=app]').click()`);await ready();
  check('Whole app includes all registered screens',await app.page(`return document.querySelectorAll('[data-schematic-node]').length===28`));
+ await app.page(`document.querySelector('[data-schematic-zoom=all]').click()`);
  await shot('03_Whole_App');
+ await app.page(`document.querySelector('[data-schematic-zoom=reset]').click()`);
  await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('[data-nav=new-workspace]').click();const input=document.querySelector('[data-draft=workspace_name]');input.value='Keep this unsaved draft';input.dispatchEvent(new Event('input',{bubbles:true}));document.querySelector('#toggle-schematics').click();document.querySelector('[data-schematic-level=screen]').click();document.querySelector('#toggle-schematics').click()`);
  check('Toggling preserves the current page and unsaved input',await app.page(`return !document.querySelector('[data-screen=new-workspace]').hidden && document.querySelector('[data-draft=workspace_name]').value==='Keep this unsaved draft'`));
  await app.page(`document.querySelector('#focus-home').click();document.querySelector('#toggle-schematics').click()`);
@@ -67,7 +82,7 @@ try{
  check('Escape returns to the same selected task',await app.page(`return document.querySelector('#schematics').hidden && document.querySelector('[data-focus-task]').dataset.focusTask===arguments[0]`,[tasks[1].id]));
  await app.page(`import('./app-shell.js').then(m=>{window.schematicPages=m.screens.map(s=>s[0]);window.schematicNavigate=m.navigate;})`);
  await app.until(()=>app.page(`return !!window.schematicPages`),10000,'screen registry');
- for(const id of await app.page(`return window.schematicPages`)){await app.page(`window.schematicNavigate(arguments[0]);if(document.querySelector('#schematics').hidden)document.querySelector('#toggle-schematics').click()`,[id]);assert.ok(await app.page(`return !document.querySelector('#schematics').hidden && !!document.querySelector('[data-schematic-node]')`),id);}
+ for(const id of await app.page(`return window.schematicPages`)){await app.page(`window.schematicNavigate(arguments[0]);if(document.querySelector('#schematics').hidden)document.querySelector('#toggle-schematics').click()`,[id]);await ready();assert.ok(await app.page(`return !document.querySelector('#schematics').hidden && !!document.querySelector('[data-schematic-node]')`),id);}
  check('Every registered screen has a schematic counterpart',true);
  await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:1440,height:980})});
  await app.page(`document.querySelector('#toggle-schematics').click();document.dispatchEvent(new CustomEvent('continue-development-task',{detail:{taskId:arguments[0]}}));document.querySelector('#development-choose-editor').click()`,[tasks[1].id]);
@@ -75,21 +90,22 @@ try{
  await app.until(()=>app.page(`return !!document.querySelector('[data-file-path="sample.txt"]')`),10000,'Editor file');
  await app.page(`document.querySelector('[data-file-path="sample.txt"]').click()`);
  await app.until(()=>app.page(`return !document.querySelector('#editor-discuss').disabled`),10000,'file loaded');
- await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('[data-schematic-node=tabs]').click()`);
+ await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();await app.page(`document.querySelector('[data-schematic-node=tabs]').click()`);
  check('Editor schematic shows the real linked file session',await app.page(`return document.querySelector('[data-schematic-node=tabs] span').textContent==='1 open'&&document.querySelector('.schematic-inspector').textContent.includes('sample.txt')&&document.querySelector('[data-schematic-node=drafts] span').textContent==='No unsaved drafts'`));
  await app.page(`document.querySelector('[data-schematic-zoom=out]').click();document.querySelector('[data-schematic-zoom=out]').click()`);
+ await app.page(`document.querySelector('[data-schematic-zoom=all]').click()`);
  await shot('08_Editor_Internals');
- await app.page(`window.schematicNavigate('bots');document.querySelector('[data-schematic-node=request]').click()`);
+ await app.page(`window.schematicNavigate('bots')`);await ready();await app.page(`document.querySelector('[data-schematic-node=request]').click()`);
  check('Bot schematic exposes request and reply internals',await app.page(`return !!document.querySelector('[data-schematic-node=request]')&&!!document.querySelector('[data-schematic-node=reply]')`));
  await shot('09_Bot_Internals');
- await app.page(`window.schematicNavigate('development-tasks');document.querySelector('[data-schematic-node=acceptance]').click()`);
+ await app.page(`window.schematicNavigate('development-tasks')`);await ready();await app.page(`document.querySelector('[data-schematic-node=acceptance]').click()`);
  check('Review schematic separates applying files from acceptance',await app.page(`return !!document.querySelector('[data-schematic-node=apply]')&&document.querySelector('[data-schematic-node=acceptance] span').textContent==='Human decision required'`));
  await shot('10_Review_Internals');
  const server=createServer((req,res)=>res.end('<body style="background:red"><h1>Native preview fixture</h1></body>'));await new Promise(r=>server.listen(0,'127.0.0.1',r));
  try{
  await app.page(`document.querySelector('#toggle-schematics').click();window.schematicNavigate('browser');document.querySelector('#browser-url').value=arguments[0];document.querySelector('#browser-go').click()`,['http://127.0.0.1:'+server.address().port]);
  await app.until(async()=>((await app.native('browser_surface',{action:'status'})).tabs??[]).length>0,10000,'native preview');
- await app.page(`document.querySelector('#toggle-schematics').click()`);await new Promise(r=>setTimeout(r,500));
+ await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();await new Promise(r=>setTimeout(r,500));
  execFileSync('/usr/bin/python3',['tools/development-capture-window.py',String(process.pid),`${out}/05_Browser_Cover.png`]);
  check('Browser schematic opens while the native preview remains retained',await app.page(`return !document.querySelector('#schematics').hidden && document.querySelector('#schematics h1').textContent.includes('Browser')`));
  await app.page(`document.querySelector('#toggle-schematics').click()`);
