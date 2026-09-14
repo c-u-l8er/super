@@ -20,6 +20,8 @@ restore the same work after restart.
 
 ## Delivery order
 
+**New hardware track:** [Two-machine fleet MVP](FLEET_MVP.md). Start with measured inventory and a Linux execution guest on Proxmox; keep FreeBSD observation separate from worker readiness. This runs alongside provider recovery and feeds the real Super-on-Super cycle.
+
 1. **Task activity across work surfaces — implemented and tested.** Show actual request lifecycle, bounded assistant-text preview and request events in Continue work and Schematics. Match bot, task revision and runtime session. Keep graph nodes stable while text arrives. Older saved replies remain history after reload.
 2. **Connection and interruption recovery.** Make an unavailable provider an actionable next step for the assigned bot. Verify expired sign-in, cancellation, restored drafts and reconnect behavior; do not claim configured credentials prove a successful request.
 3. **Repeat the full Super-on-Super cycle.** Use the assigned Fable bot with a working provider connection. Produce and inspect a real change, run required checks, explicitly accept and verify restart recovery. Provider fixture tests do not satisfy this gate.

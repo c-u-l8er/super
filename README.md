@@ -2,6 +2,8 @@
 
 **MVP delivery order:** [Current MVP plan](docs/plans/MVP_NEXT.md) — next steps and acceptance gates.
 
+**New hardware:** [Two-machine fleet plan](docs/plans/FLEET_MVP.md) — FreeBSD observation, Proxmox guest execution, enrollment and reconnect gates.
+
 **Active desktop work:** [Schematics plan](docs/plans/SCHEMATICS.md) — app-wide wiring views, live state, tests and visual evidence.
 
 Open **site/index.html**. Best served over http so the proof fetch and the
