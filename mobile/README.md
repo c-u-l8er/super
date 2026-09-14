@@ -21,3 +21,9 @@ The web companion accepts the grouped code displayed by desktop Super and marks 
 Run `tools/mobile-android-smoke.mjs` with `ADB` set to the Android platform-tools executable and `SUPER_VISUAL_EVIDENCE_DIR` for screenshots. It requires a booted Android emulator with Chrome first-run setup completed. It owns a fixture gateway on loopback 4342 and a Chrome debugging forward on 9223. Those ports are for this test only. It creates two distinctly identified tasks with the same title, uses test pairing codes, interrupts the forwarded connection and existing sockets, backgrounds/resumes Chrome, changes the fixture world, and checks logout and code renewal. It does not pair with real user records.
 
 Measured on Android 15 with Chrome 124: 14 checks passed. This is Android browser validation of the web companion, not Expo/native-package, physical-phone, private-HTTPS or real-provider validation.
+
+## Existing private HTTPS connector
+
+`mobile/private-connector.mjs` supports the current companion at `/mobile` while retaining the older `/api/observer/snapshot|pair|logout` API paths. Current `/api/snapshot|pair|logout` paths reach the same paired gateway. Exact private origin, Tailscale owner identity, loopback backends and read-only route checks remain required. UI asset requests do not forward session cookies to the UI backend; private response cookies receive Secure. The connector does not mint codes or expose a renewal/control endpoint.
+
+The private network and Serve configuration must already exist. This connector listens only on loopback port 4320 with `SUPER_MOBILE_PRIVATE_ORIGIN` and `SUPER_MOBILE_TAILSCALE_LOGIN` explicitly configured. The prototype UI remains the fallback for older non-companion routes. Verify with `node --test mobile/test/private-connector.test.mjs mobile/test/gateway.test.mjs`.
