@@ -2,17 +2,47 @@
 let records=new Map(), world=null;
 const pattern=/\b(?:ws|gl|ln|wk|rp|bt)\\?_\d+\b/g;
 const normalize=id=>id.replace('\\_','_');
+const kinds=[['Bot','bt','bots'],['Workspace','ws','workspaces'],['Goal','gl','goals'],['Lane','ln','lanes'],['Worker','wk','workers'],['Repository','rp','repositories']];
 export function referenceWorld(){return world;}
 export function setReferenceFrame(frame){
   world=frame?.world?JSON.stringify([frame.world.world_incarnation,frame.world.world_generation,frame.world.projection_epoch]):null;
   records=new Map();const p=frame?.projection??{};
-  for(const [kind,prefix,key] of [['Bot','bt','bots'],['Workspace','ws','workspaces'],['Goal','gl','goals'],['Lane','ln','lanes'],['Worker','wk','workers'],['Repository','rp','repositories']])for(const r of Object.values(p[key]??{})){
+  for(const [kind,prefix,key] of kinds)for(const r of Object.values(p[key]??{})){
     const id=r.id??r.ref;if(!id)continue;
     const title=[r.name,r.title,r.purpose,kind==='Lane'?r.actor:null].find(v=>typeof v==='string'&&v.trim());
     records.set(id,{id,kind,record:r,label:title?.trim()||`${kind} ${id.split('_').at(-1).replace(/^0+/,'')||'0'}`,key:`${prefix==='ws'?'position-workspace':kind.toLowerCase()}:${id}`});
   }
 }
 export function reference(id){return records.get(normalize(id));}
+// Shared display labels. Actor values are opaque identifiers, never names.
+const kindOf=id=>kinds.find(([,prefix])=>id.startsWith(prefix+'_'))?.[0]??null;
+const nameOf=r=>(r&&typeof r==='object'?[r.name,r.title,r.purpose].find(v=>typeof v==='string'&&v.trim())?.trim():null)||null;
+function projected(projection,kind,id){
+  const key=kinds.find(k=>k[0]===kind)?.[2];const bucket=key?projection?.[key]:null;if(!bucket||typeof bucket!=='object')return null;
+  const direct=Array.isArray(bucket)?null:bucket[id];if(direct&&typeof direct==='object')return direct;
+  return Object.values(bucket).find(r=>r&&typeof r==='object'&&(r.id??r.ref)===id)??null;
+}
+// recordLabel(id,{projection,kind,withId}): actual name/title when known, otherwise the stable ID.
+// When a projection is supplied, only that projection is consulted, so labels never mix worlds;
+// without one, the current reference frame is used. withId appends the ID for disambiguation.
+// Lane labels combine the goal title with the bot registered for the lane actor.
+export function recordLabel(id,{projection=null,kind,withId=false}={}){
+  const stable=normalize(String(id??''));if(!stable)return '';
+  const type=kind??kindOf(stable)??'Record';
+  const find=(k,ref)=>projection?projected(projection,k,ref):(reference(ref)?.record??null);
+  const record=find(type,stable);let title=null;
+  if(type==='Lane'){
+    if(record&&typeof record==='object'){
+      const goal=typeof record.goal_ref==='string'?nameOf(find('Goal',record.goal_ref)):null;
+      const actor=typeof record.actor==='string'&&record.actor?record.actor:null;
+      const bots=projection?Object.values(projection.bots??{}):[...records.values()].filter(r=>r.kind==='Bot').map(r=>r.record);
+      const bot=actor?bots.find(b=>b&&typeof b==='object'&&b.actor===actor):null;
+      title=[goal,nameOf(bot)].filter(Boolean).join(' · ')||null;
+    }
+  }else title=nameOf(record);
+  if(!title)return stable;
+  return withId?`${title} (${stable})`:title;
+}
 export function readable(text){return String(text??'').replace(pattern,id=>reference(id)?.label??id);}
 function signature(raw,origin,mode){return JSON.stringify([raw,origin,world,mode,[...raw.matchAll(pattern)].map(m=>reference(m[0])?.label)]);}
 function prepare(element,raw,origin,mode){const key=signature(raw,origin,mode);if(element.dataset.referenceRender===key)return false;element.dataset.referenceRender=key;element.dataset.rawText=raw;element.dataset.referenceWorld=origin??'';element.dataset.textFormat=mode;element.replaceChildren();return true;}

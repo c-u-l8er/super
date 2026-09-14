@@ -130,7 +130,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     const workers=Object.values(p.workers??{}).filter(w=>!ws||laneIds.has(w.locus_ref)).map(({id,locus_ref,purpose,status,occupancy})=>({id,locus_ref,purpose,status,occupancy}));
     return {available:true,world:f.world,workspace_view:ws||'all',workspaces,goals,lanes,workers,repositories:Object.values(p.repositories??{}).map(({ref})=>({ref}))};
   }
-  function publishSession(){publishTaskSession({botId:bot.id,world:runtimeWorld(current),ready:!!active,reply:taskReply,tasks:taskReplyRefs,message:status.textContent});}
+  function publishSession(){publishTaskSession({botId:bot.id,world:runtimeWorld(current),ready:!!active,reply:taskReply,tasks:taskReplyRefs.length?taskReplyRefs:files.map(f=>editReferences.get(f)?.task).filter(Boolean),prepared:!busy&&files.some(f=>editReferences.get(f)?.task),message:status.textContent});}
   new MutationObserver(publishSession).observe(status,{childList:true});
   function refresh() {
     activity.refresh({id:bot.id,name:bot.name,model:active?.model,ready:!!active,pending,busy,hasProposals:proposals.some(p=>p.state==='proposed')});

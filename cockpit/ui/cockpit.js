@@ -1,3 +1,4 @@
+import {initWorkFocus} from './work-focus-view.js';
 import { initDevelopmentTasks } from './development-tasks.js';
 import { initDevelopment } from './development.js';
 import { guidance, updateNavCounts } from './work-guidance.js';
@@ -563,7 +564,7 @@ export function render(frame) {
     section('Recent refusals', (p.recent_refusals ?? []).map((r, i) => detail(r, `refusal:${r.id ?? i}`, r.code ?? r.refusal?.code ?? 'Refusal')), 'No recent refusals.'),
     detail({ world: frame.world, runtime: p.runtime, manifest: p.world }, 'runtime-identity', 'World & frame identity'));
 
-  const extra = screens.filter(([id]) => !['mission','positions','capabilities','evidence','runtime','bots','new-bot','edit-bot','new-workspace','manage-work','repositories','goals','lanes','runtime-assignments','editor','terminal','browser','development-tasks','mobile'].includes(id)).map(([id]) => {
+  const extra = screens.filter(([id]) => !['continue-work','mission','positions','capabilities','evidence','runtime','bots','new-bot','edit-bot','new-workspace','manage-work','repositories','goals','lanes','runtime-assignments','editor','terminal','browser','development-tasks','mobile'].includes(id)).map(([id]) => {
     const page = panel(id);
     if (id === 'agents') page.append(section('Connected peers', (p.peers ?? []).map(peer => detail(peer, `agent:${peer.peer_id ?? peer.actor}`, peer.actor ?? peer.peer_id ?? 'Peer')), 'No peers are connected.'));
     else if (id === 'authority') page.append(section('Current grants', liveGrants.map(g => detail(g, `authority:${g.id}`, `${g.capability} · ${g.actor}`)), 'No authority is currently granted.'));
@@ -1391,3 +1392,5 @@ initMobileDevice(invoke, node);
 initDesktopChrome(invoke);
 bind();
 setInterval(leaseTick, 500);
+
+initWorkFocus({current:()=>window.cockpit});

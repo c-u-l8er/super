@@ -7,3 +7,5 @@ export function taskSessionView(p,task,world,value=session){
   const linked=value.tasks?.some(t=>t.id===task.id&&t.revision===task.revision&&t.world===world);
   return {available:true,label:linked&&value.reply?value.reply:value.ready?'Provider connected':'Provider needs connection',detail:linked&&value.reply?value.message:'Current bot session · connection status applies to the bot. This does not establish that this task is running.'};
 }
+
+export function currentTaskSession(){return session;}

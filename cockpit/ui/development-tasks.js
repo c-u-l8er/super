@@ -46,6 +46,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
   const record=(label,kind,id)=>{const b=node('button',label,'subtle');b.type='button';b.dataset.recordOpen=kind+':'+id;return b;};
   function show(task){
     selection=task?{id:task.id,revision:task.revision,world:runtimeWorld(current)}:null;form.hidden=!!task;list.hidden=!!task;details.replaceChildren();if(!task)return;details.append(button('← All development plans',()=>show(null)));
+    const focus=button('Focus on this task',()=>document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:task.id}})));focus.id='task-focus';details.append(focus);
     const p=heldProjection(current);details.append(node('h2',task.title),node('span',task.status,'status-chip'),node('p',task.criteria),node('p',`Plan ${task.id} · revision ${task.revision} · lane base: ${task.base_revision||'not selected'} (not a validated result)`,'availability-note'));
     details.append(node('p',task.required_checks?'Required checks: '+task.required_checks.profiles.map(p=>p.includes('javascript')?'JavaScript':p.includes('elixir')?'Elixir':'Rust').join(', '):'Legacy plan: no required checks selected. Every profile run must pass.','directory-note'));
     details.append(record('Open goal' ,'goal',task.goal_ref),record('Open lane','lane',task.lane_ref),record('Open repository','repository',task.repository_ref));
@@ -238,6 +239,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     }
     if(selection&&!rows.some(t=>t.id===selection.id)){show(null);}
   }
+  document.addEventListener('continue-development-task',e=>{const task=heldProjection(current)?.development_tasks?.[e.detail.taskId];if(!task)return;botFilter='';signature='';refresh();show(task);navigate('development-tasks',true);details.querySelector('[data-task-next-action] button')?.click();});
   all.onclick=()=>{botFilter='';signature='';refresh();};
   document.addEventListener('click',e=>{const b=e.target.closest('[data-development-task]');if(!b)return;const task=heldProjection(current)?.development_tasks?.[b.dataset.developmentTask];if(!task)return;botFilter='';signature='';refresh();show(task);navigate('development-tasks',true);});
   document.addEventListener('open-development-tasks',e=>{botFilter=e.detail?.bot||'';signature='';refresh();navigate('development-tasks',true);});

@@ -4,6 +4,7 @@ import { describeRecord, renderRecordPage } from './record-page.js';
 import { referenceText, readable, reference, referenceWorld } from './references.js';
 /* Presentation state only. Runtime facts remain inside the frame-owned world. */
 export const screens = [
+  ['continue-work', 'Continue work', 'One task and one next step.'],
   ['development-tasks', 'Development tasks', 'Plan reviewable work and keep its acceptance criteria with the assigned bot.'],
   ['mission', 'Mission Control', 'Your work, and what needs your attention.'],
   ['new-workspace', 'New workspace', 'Give your workspace a name. You can add goals and assign work afterward.'],
@@ -31,7 +32,7 @@ export const screens = [
   ['new-bot', 'Create bot', 'Give a bot a name, role, and provider.'],
   ['edit-bot', 'Edit bot', 'Update this bot’s name and instructions.'],
 ];
-let selected = 'mission';
+let selected = 'continue-work';
 let routeRevision=0;
 export const navigationToken=()=>routeRevision;
 let workspace = '';
@@ -178,7 +179,7 @@ export function initShell() {
   });
   const nav = document.getElementById('app-navigation');
   const groups = [
-    ['WORK', [['mission','Mission'],['positions','Workspaces'],['goals','Goals'],['development-tasks','Development tasks'],['lanes','Lanes'],['repositories','Repositories'],['editor','Editor'],['terminal','Terminal'],['browser','Browser']]],
+    ['WORK', [['continue-work','Continue work'],['mission','Mission'],['positions','Workspaces'],['goals','Goals'],['development-tasks','Development tasks'],['lanes','Lanes'],['repositories','Repositories'],['editor','Editor'],['terminal','Terminal'],['browser','Browser']]],
     ['SOCIETY', [['agents','Agents'],['capabilities','Capabilities'],['routines','Routines']]],
     ['COMPUTE', [['fleet','Fleet & placement']]],
     ['TRUTH', [['evidence','Evidence'],['gates','Gates'],['rulings','Rulings']]],

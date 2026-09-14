@@ -2,6 +2,7 @@ import {taskAttentionPanel} from './task-attention.js';
 import {taskProgressRows} from './task-progress.js';
 import {initLinkedSessions} from './linked-sessions.js';
 import {node} from './app-shell.js';
+import {recordLabel} from './references.js';
 import {heldProjection,runtimeWorld} from './runtime-bots.js';
 import {botWork,watchable} from './bot-work.js';
 export function initBotWork({root,conversation,current,invoke}){
@@ -15,7 +16,8 @@ export function initBotWork({root,conversation,current,invoke}){
   }
   conversation.before(tabs);root.append(work);const assignments=node('div');work.append(assignments);const linked=initLinkedSessions({parent:work,invoke});
   function select(id){selected.set(botId,id);conversation.hidden=id!=='conversation';work.hidden=id!=='work';for(const [key,b] of Object.entries(buttons)){b.setAttribute('aria-selected',String(id===key));b.tabIndex=id===key?0:-1;}}
-  function link(title,kind,id){const b=node('button',title,'subtle');b.type='button';b.dataset.recordOpen=kind+':'+id;return b;}
+  // Button text is the shared display label; the navigation key keeps the stable record ID.
+  function link(title,kind,id){const b=node('button',title,'subtle');b.type='button';b.dataset.recordOpen=kind+':'+id;b.title=`${kind[0].toUpperCase()+kind.slice(1)}: ${id}`;return b;}
   function form(title,field,value,focus){const b=node('button',title,'subtle');b.type='button';Object.assign(b.dataset,{recordForm:field,recordValue:value,recordFocus:focus});return b;}
   function refresh(id){
     botId=id;linked.setBot(id);select(selected.get(id)||'conversation');const p=heldProjection(current),data=botWork(p,id),world=runtimeWorld(current);
@@ -28,11 +30,15 @@ export function initBotWork({root,conversation,current,invoke}){
     assignments.append(taskAttentionPanel({node,p,botRef:data.bot.id,title:'Development task attention'}));
     assignments.append(stats,node('p','Assignments and availability reported by the runtime. Open workers may be idle or offline.','availability-note'),form('Create lane for this bot','lane_actor',data.bot.actor,'lane_goal'));
     if(!data.lanes.length)assignments.append(node('p','No lanes assigned yet. Create a lane, choose its goal and repository, then assign a worker.','bot-work-empty'));
+    // Labels resolve only from the held projection `p` so they never mix worlds; IDs stay in navigation keys.
     for(const lane of data.lanes){
-      const section=node('section',undefined,'bot-work-lane');section.append(link(lane.id,'lane',lane.id),node('span',lane.status||'Status not reported','status-chip'),link(p.goals[lane.goal_ref].title||lane.goal_ref,'goal',lane.goal_ref));
+      const section=node('section',undefined,'bot-work-lane');
+      section.append(link(recordLabel(lane.id,{projection:p,kind:'Lane',withId:true}),'lane',lane.id),node('span',lane.status||'Status not reported','status-chip'));
+      if(lane.goal_ref)section.append(link(recordLabel(lane.goal_ref,{projection:p,kind:'Goal'}),'goal',lane.goal_ref));
+      if(lane.repository_ref)section.append(link(recordLabel(lane.repository_ref,{projection:p,kind:'Repository',withId:true}),'repository',lane.repository_ref));
       const workers=data.workers.filter(w=>w.locus_ref===lane.id);
       if(!workers.some(w=>w.status==='open'))section.append(node('p','No open worker assigned.','availability-note'),form('Assign worker','worker_lane',lane.id,'worker_purpose'));
-      for(const worker of workers){const row=node('div',undefined,'bot-work-worker');row.append(link(worker.purpose||worker.id,'worker',worker.id),node('span',[worker.status,worker.occupancy,'Terminal: '+(worker.terminal||'not reported')].filter(Boolean).join(' · '),'availability-note'));
+      for(const worker of workers){const row=node('div',undefined,'bot-work-worker');row.append(link(recordLabel(worker.id,{projection:p,kind:'Worker'}),'worker',worker.id),node('span',[worker.status,worker.occupancy,'Terminal: '+(worker.terminal||'not reported')].filter(Boolean).join(' · '),'availability-note'));
         if(watchable(worker)){const b=node('button','Watch terminal');b.type='button';b.dataset.watchWorker=worker.id;b.dataset.generation=String(worker.generation??1);b.dataset.world=world;row.append(b);}section.append(row);}
       assignments.append(section);
     }
