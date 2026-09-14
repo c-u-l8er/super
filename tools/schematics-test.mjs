@@ -9,3 +9,5 @@ test('withdrawal removes record titles and live states',()=>{const m=model({p:nu
 test('app map includes every registered page; incomplete screens say so',()=>{const m=model({level:'app'});for(const [id] of screens)assert.ok(m.nodes.some(n=>n.id===id));assert.match(model({screen:'routines'}).coverage,/planned/);assert.equal(screenKind('bot:fable'),'bots');});
 test('different bot and workspace cannot inherit the focused task',()=>{for(const extra of [{screen:'bot:other'},{workspace:'different'}])assert.equal(model(extra).nodes.find(n=>n.id==='task').state,'No selected task');});
 test('all connection endpoints are named and links are explicitly structural',()=>{assert.ok(connections.every(e=>e.length===3&&e.every(Boolean)));assert.match(model({level:'connections'}).coverage,/not observed execution/);});
+
+test('required checks do not imply a problem before a proposal exists',()=>{const q={...p,development_tasks:{t:{...task,required_checks:{profiles:['super-javascript-behavior@1']}}}};assert.equal(model({p:q}).nodes.find(n=>n.id==='checks').state,'Awaiting proposal');});

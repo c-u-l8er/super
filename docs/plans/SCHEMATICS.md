@@ -30,6 +30,8 @@ Implementation and validation evidence are recorded below as work completes. Rem
 
 Implemented the app-wide toggle, three schematic levels, all 27 registered screens plus the record-details overview, core task path, descriptions and inspector navigation. Long descriptions collapse to keep the destination action accessible. Native browser surfaces are covered during inspection. No diagram action submits a mutation directly.
 
-Validation completed: 160 JavaScript behavior tests; 17 native checks, including all registered screens, task focus, draft retention, Escape, 1080 × 620 layout, and a native browser preview. Captured and visually inspected task, connection, whole-app, small-window and browser-cover screenshots. Diagram scroll is deliberate; the whole-app graph is not fitted into one unreadably small image. Zoom/follow and edge-event instrumentation remain next work.
+Validation completed: 161 JavaScript behavior tests; 17 native checks, including all registered screens, task focus, draft retention, Escape, 1080 × 620 layout, and a native browser preview. Captured and visually inspected task, connection, whole-app, small-window and browser-cover screenshots. Diagram scroll is deliberate; the whole-app graph is not fitted into one unreadably small image. Zoom/follow and edge-event instrumentation remain next work.
 
 Evidence folder in the development workspace: `outputs/schematics/`, containing the screenshots and `checks.json`. Installed-world verification is recorded separately as `installed-check.json` after installation.
+
+Installed-world visual inspection caught premature “Needs attention” wording before any proposal exists; corrected to “Awaiting proposal” with a regression test.
