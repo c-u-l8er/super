@@ -13,3 +13,11 @@ The host sends selected runtime observations to the gateway over inherited pipes
 Run `node --test mobile/test/gateway.test.mjs` and `cargo test --manifest-path cockpit/Cargo.toml mobile_gateway::tests`. See `docs/app/MOBILE_OBSERVER_2026_09_10.md` for measured results and limitations, and `docs/app/MOBILE_RESEARCH_2026_09_10.md` for next milestones.
 
 This requires the desktop to stay open. Native packages, remote actions, device scope management, push notifications, daemon ownership and real-phone validation remain open. The gateway is a trusted same-user local component, not process isolation against that user.
+
+## Android browser recovery regression
+
+The web companion accepts the grouped code displayed by desktop Super and marks the input as a one-time code rather than a password. Pairing invalidates earlier unauthenticated refreshes so they cannot overwrite the new session. Task lists and details include stable task IDs. Temporary observation/network loss removes live task content while retaining the selected task for the same runtime world; a replacement world clears that selection. Successful reconnect clears stale warnings. Failed logout is reported as unconfirmed, and successful logout points to New pairing code instead of requiring a host restart.
+
+Run `tools/mobile-android-smoke.mjs` with `ADB` set to the Android platform-tools executable and `SUPER_VISUAL_EVIDENCE_DIR` for screenshots. It requires a booted Android emulator with Chrome first-run setup completed. It owns a fixture gateway on loopback 4342 and a Chrome debugging forward on 9223. Those ports are for this test only. It creates two distinctly identified tasks with the same title, uses test pairing codes, interrupts the forwarded connection and existing sockets, backgrounds/resumes Chrome, changes the fixture world, and checks logout and code renewal. It does not pair with real user records.
+
+Measured on Android 15 with Chrome 124: 14 checks passed. This is Android browser validation of the web companion, not Expo/native-package, physical-phone, private-HTTPS or real-provider validation.

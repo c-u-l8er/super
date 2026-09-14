@@ -1,0 +1,45 @@
+// Requires a booted Android emulator with Chrome first-run setup completed.
+// Test records only; no real host pairing or account is used.
+import {execFileSync} from 'node:child_process';
+import {writeFileSync,mkdtempSync,mkdirSync} from 'node:fs';
+import {createGateway} from '../mobile/server.mjs';
+import assert from 'node:assert/strict';
+const out=process.env.SUPER_VISUAL_EVIDENCE_DIR||mkdtempSync('/tmp/super-mobile-android-'),adb=process.env.ADB||'adb';mkdirSync(out,{recursive:true});
+let available=true,generation=1;
+const task=id=>({id,title:'Review the mobile connection',criteria:'Keep the same task through a temporary disconnection.',revision:1,status:'planned',bot_ref:'bot1',history:[]});
+const server=createGateway({origin:'http://127.0.0.1:4342',pairingCode:'a'.repeat(48),snapshot:async()=>({available,world:{world_incarnation:'android-fixture',world_generation:generation,projection_epoch:'one'},projection:available?{development_tasks:{dt_one:task('dt_one'),dt_two:task('dt_two')},development_attempts:{},bots:{bot1:{id:'bot1',name:'Android fixture bot',actor:'fixture-agent'}},workspaces:{},goals:{},lanes:{},workers:{}}:undefined})});
+// Fixed, test-only ports. An occupied fixture port fails rather than replacing a service.
+await new Promise((r,j)=>{server.once('error',j);server.listen(4342,'127.0.0.1',r)});
+const command=(...args)=>execFileSync(adb,args,{encoding:'utf8'});
+command('reverse','tcp:4342','tcp:4342');command('forward','tcp:9223','localabstract:chrome_devtools_remote');command('shell','am','start','-a','android.intent.action.VIEW','-d','http://127.0.0.1:4342/','com.android.chrome');
+const pages=await (await fetch('http://127.0.0.1:9223/json/list')).json(),tab=pages.find(t=>t.url.startsWith('http://127.0.0.1:4342/'));assert.ok(tab);
+const ws=new WebSocket(tab.webSocketDebuggerUrl);await new Promise((r,j)=>{ws.onopen=r;ws.onerror=j;});let seq=0;const pending=new Map();ws.onmessage=e=>{const m=JSON.parse(e.data),p=pending.get(m.id);if(p){pending.delete(m.id);m.error?p.reject(Error(m.error.message)):p.resolve(m.result)}};
+const call=(method,params={})=>new Promise((resolve,reject)=>{const id=++seq;pending.set(id,{resolve,reject});ws.send(JSON.stringify({id,method,params}));});
+const page=async expression=>{const r=await call('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});if(r.exceptionDetails)throw Error(JSON.stringify(r.exceptionDetails));return r.result.value};
+const sleep=ms=>new Promise(r=>setTimeout(r,ms));const until=async(fn,label)=>{const end=Date.now()+16000;while(Date.now()<end){if(await fn())return;await sleep(250)}throw Error('Timed out: '+label)};
+const checks=[];const check=(name,yes)=>{assert.ok(yes,name);checks.push(name);console.log(name)};
+const shot=name=>writeFileSync(out+'/'+name+'.png',execFileSync(adb,['exec-out','screencap','-p']));
+try{
+ await call('Page.bringToFront');
+ await call('Network.deleteCookies',{name:'super_mobile',url:'http://127.0.0.1:4342/'});const previous=await page('performance.timeOrigin');await call('Page.navigate',{url:'http://127.0.0.1:4342/'});await until(()=>page(`performance.timeOrigin>${previous}&&!!document.querySelector('#pair-form')?.onsubmit`),'pairing form ready');
+ await page(`document.querySelector('#code').value='aaaa '.repeat(12).trim();document.querySelector('#pair-form').requestSubmit()`);
+ await until(()=>page(`!document.querySelector('#app').hidden`),'grouped pair');check('Grouped pairing code works on Android Chrome',true);
+ await page(`document.querySelector('[data-view=tasks]').click()`);
+ check('Duplicate task names have distinct stable IDs',await page(`const c=document.querySelector('#content');c.textContent.includes('dt_one')&&c.textContent.includes('dt_two')&&c.querySelectorAll('.open').length===2`));shot('01_Android_Tasks');
+ await page(`document.querySelectorAll('.open')[1].click()`);check('The selected task detail retains its exact ID',await page(`document.querySelector('#content').textContent.includes('dt_two · Revision 1')`));
+ available=!available;await until(()=>page(`document.querySelector('#content h1').textContent==='Host unavailable'`),'withdrawal');check('Host withdrawal removes task contents',await page(`!document.querySelector('#content').textContent.includes('dt_two')`));
+ available=!available;await until(()=>page(`document.querySelector('#content').textContent.includes('dt_two · Revision 1')`),'same task recovery');check('Same-world recovery returns to the selected task',true);
+ command('reverse','--remove','tcp:4342');server.closeAllConnections();await until(()=>page(`document.querySelector('#status').textContent==='Disconnected'`),'network disconnect');shot('02_Android_Disconnected');
+ check('Actual connection loss withdraws task content',await page(`!document.querySelector('#content').textContent.includes('dt_two')`));
+ command('reverse','tcp:4342','tcp:4342');await until(()=>page(`document.querySelector('#status').textContent.includes('Connected')&&document.querySelector('#content').textContent.includes('dt_two · Revision 1')`),'network return');
+ check('Connection recovery clears the stale warning',await page(`document.querySelector('#notice').textContent===''`));shot('03_Android_Recovered');
+ command('shell','input','keyevent','3');await until(()=>page(`document.hidden`),'background');check('Backgrounding withdraws the task view',await page(`!document.querySelector('#content').textContent.includes('dt_two')`));
+ command('shell','am','start','-a','android.intent.action.MAIN','-c','android.intent.category.LAUNCHER','com.android.chrome');await until(()=>page(`!document.hidden&&document.querySelector('#content').textContent.includes('dt_two · Revision 1')`),'resume');check('Android resume restores the current task',true);
+ available=!available;await until(()=>page(`document.querySelector('#content h1').textContent==='Host unavailable'`),'second withdrawal');generation++;available=!available;await until(()=>page(`document.querySelectorAll('#content .open').length===2`),'new world');check('World replacement clears the old task selection',await page(`!document.querySelector('#content .back')`));
+ await page(`document.querySelector('[data-view=stack]').click()`);command('reverse','--remove','tcp:4342');server.closeAllConnections();await page(`Array.from(document.querySelectorAll('#content button')).find(b=>b.textContent==='Disconnect this device').click()`);await until(()=>page(`document.querySelector('#notice').textContent.includes('Could not confirm disconnection')`),'failed logout');check('Failed logout does not claim that the device disconnected',await page(`!document.querySelector('#app').hidden`));
+ command('reverse','tcp:4342','tcp:4342');await until(()=>page(`document.querySelector('#status').textContent.includes('Connected')&&!!document.querySelector('#content button')`),'restore before logout');
+ await page(`Array.from(document.querySelectorAll('#content button')).find(b=>b.textContent==='Disconnect this device').click()`);await until(()=>page(`!document.querySelector('#pair').hidden`),'logout');check('Logout clears task contents and offers code renewal',await page(`document.querySelector('#content').textContent===''&&document.querySelector('#notice').textContent.includes('New pairing code')`));shot('04_Android_Logged_Out');
+ server.renewPairing('b'.repeat(48));await page(`document.querySelector('#code').value='bbbb '.repeat(12).trim();document.querySelector('#pair-form').requestSubmit()`);await until(()=>page(`!document.querySelector('#app').hidden`),'renewed pair');check('Fresh code pairs again without host restart',true);
+ check('Phone layout has no horizontal overflow',await page(`document.documentElement.scrollWidth<=innerWidth+1`));
+ writeFileSync(out+'/android-checks.json',JSON.stringify({passed:true,device:command('shell','getprop','ro.product.model').trim(),android:command('shell','getprop','ro.build.version.release').trim(),browser:(await call('Browser.getVersion')).product,checks},null,2));
+}catch(error){shot('failure');console.log(await page(`({notice:document.querySelector('#notice')?.textContent,status:document.querySelector('#status')?.textContent,url:location.href,hidden:document.hidden})`));throw error;}finally{server.closeAllConnections();server.close();command('reverse','--remove','tcp:4342');command('forward','--remove','tcp:9223');ws.close();}
