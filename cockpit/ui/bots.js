@@ -1,4 +1,4 @@
-import {beginTaskActivity,observeTaskActivity} from './task-activity.js';
+import {beginTaskActivity,observeTaskActivity,replyFailure} from './task-activity.js';
 import {initBotActivity} from './bot-activity.js';
 import {REVIEW_FILE_BYTES,REVIEW_FILE_LABEL} from './review-limits.js';
 import {worldLineage,taskHistoryLinks} from './task-conversations.js';
@@ -69,7 +69,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const activity=initBotActivity({root:conversation,connect,input,cancel:cancelReply});
   conversation.append(connection,settings,status,historyRow,historyStatus,sharing,transcript,composer);root.append(conversation);
   const workView=initBotWork({root,conversation,current,invoke});
-  let taskReply=null,taskReplyRefs=[];
+  let taskReply=null,taskReplyRefs=[],taskRecovery=null;
   let active=null, busy=false, messages=[], proposals=[], pending=false, poll=null;
   const preferences=new Map(), sessions=new Map();let selected=provider.value,catalog=[],files=[];
   const newHistory=()=>createConversationStore({getItem:key=>localStorage.getItem(storageKey(key)),setItem:(key,value)=>localStorage.setItem(storageKey(key),value)});
@@ -97,7 +97,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     catch(error){historyStatus.textContent=String(error);return false;}
   }
   function restoreSaved(id){
-    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];activity.reset();
+    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];taskRecovery=null;activity.reset();
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
     restoring=true;conversationId=id;lastSaved='';messages=[];proposals=[];files=[];pendingTurn=null;input.value='';transcript.replaceChildren();
     const saved=id?history.get(selected,id):null;
@@ -131,7 +131,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     const workers=Object.values(p.workers??{}).filter(w=>!ws||laneIds.has(w.locus_ref)).map(({id,locus_ref,purpose,status,occupancy})=>({id,locus_ref,purpose,status,occupancy}));
     return {available:true,world:f.world,workspace_view:ws||'all',workspaces,goals,lanes,workers,repositories:Object.values(p.repositories??{}).map(({ref})=>({ref}))};
   }
-  function publishSession(){publishTaskSession({botId:bot.id,world:runtimeWorld(current),ready:!!active,reply:taskReply,tasks:taskReplyRefs.length?taskReplyRefs:files.map(f=>editReferences.get(f)?.task).filter(Boolean),prepared:!busy&&files.some(f=>editReferences.get(f)?.task),message:taskReply==='Waiting for reply'?'Request in progress. Task activity shows observed assistant output.':status.textContent});}
+  function publishSession(){publishTaskSession({botId:bot.id,world:runtimeWorld(current),ready:!!active,reply:taskReply,recovery:taskRecovery,tasks:taskReplyRefs.length?taskReplyRefs:files.map(f=>editReferences.get(f)?.task).filter(Boolean),prepared:!busy&&files.some(f=>editReferences.get(f)?.task),message:taskReply==='Waiting for reply'?'Request in progress. Task activity shows observed assistant output.':status.textContent});}
   new MutationObserver(publishSession).observe(status,{childList:true});
   function refresh() {
     activity.refresh({id:bot.id,name:bot.name,model:active?.model,ready:!!active,pending,busy,hasProposals:proposals.some(p=>p.state==='proposed')});
@@ -162,7 +162,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   let changingBot=false,loadingProvider=false;
   provider.addEventListener('change',async()=>{
     if(!changingBot&&!saveCurrent()){provider.value=selected;return;}
-    taskReply=null;taskReplyRefs=[];root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
+    taskReply=null;taskReplyRefs=[];taskRecovery=null;root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
     if(!changingBot)stash();changingBot=false;selected=provider.value;const saved=preferences.get(selected),session=sessions.get(selected);model.value=saved?.model??'';endpoint.value=saved?.endpoint??'http://127.0.0.1:11434';key.value='';
     active=session?.active??null;messages=session?.messages??[];proposals=session?.proposals??[];catalog=session?.catalog??[];files=session?.files??[];input.value=session?.draft??'';transcript.replaceChildren(...session?.children??[]);
     conversationTaskLinks=session?.taskLinks??[];
@@ -255,7 +255,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     if(messages.length>=44){status.textContent='Start a new conversation to continue.';return;}
     const frame=live(),origin=worldKey(frame),workspace=selectedWorkspace();
     const turnContext=context();
-    taskReplyRefs=sentReferences.map(r=>r.task).filter(Boolean);taskReply='Waiting for reply';
+    taskReplyRefs=sentReferences.map(r=>r.task).filter(Boolean);taskReply='Waiting for reply';taskRecovery=null;
     const activityId=crypto.randomUUID();beginTaskActivity({id:activityId,botId:bot.id,world:runtimeWorld(current),tasks:taskReplyRefs,provider:active.provider,model:active.model});
     pendingTurn={draft,files:sentFiles,messageCount:messages.length};
     messages.push({role:'user',content:text,attachments:sentFiles});line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();busy=true;refresh();status.textContent=active.provider==='codex'?'Waiting for Codex… Large file replies can take up to five minutes.':`Waiting for ${active.provider}… Replies can take up to ${active.provider==='claude'?'five':'two'} minutes.`;saveCurrent();
@@ -299,7 +299,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
         proposal.append(result,button,dismiss);entry.append(proposal);
       }
       observeTaskActivity(activityId,{type:'finish',text:reply.text||''});activity.finish(false);taskReply='Reply received';pendingTurn=null;status.textContent='Reply received. Proposed steps run only when you apply them.';
-    }catch(error){observeTaskActivity(activityId,{type:'finish',error:true});activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
+    }catch(error){taskRecovery=replyFailure(error);observeTaskActivity(activityId,{type:'finish',error:true,failure:String(error)});activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
     finally{replyId=null;clearTimeout(replyPoll);cancelReply.hidden=true;busy=false;saveCurrent();refresh();transcript.lastElementChild?.scrollIntoView({block:'nearest'});}
   });
   historyPicker.addEventListener('change',()=>{if(busy)return;const id=historyPicker.value;if(!saveCurrent()){updateHistory();return;}restoreSaved(id||null);saveCurrent();refresh();});
@@ -363,7 +363,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     if(busy||pending||runtimeBusy){status.textContent='Wait for the current reply or connection to finish before switching bots.';return false;}
     if(!saveCurrent())return false;
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
-    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];activity.reset();bot=next;history=newHistory();preferences.clear();sessions.clear();
+    conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];taskRecovery=null;activity.reset();bot=next;history=newHistory();preferences.clear();sessions.clear();
     try{for(const [p,v] of JSON.parse(localStorage.getItem(storageKey('super-provider-preferences'))||'[]'))preferences.set(p,v);}catch{}
     let remembered=bot.provider;try{remembered=localStorage.getItem(storageKey('super-last-provider'))||remembered;}catch{}
     provider.value=[...provider.options].some(o=>o.value===remembered)?remembered:bot.provider;

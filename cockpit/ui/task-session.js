@@ -1,3 +1,4 @@
+import {replyRecovery} from './task-activity.js';
 let session=null,signature='';
 export function publishTaskSession(value){const next=JSON.stringify(value);if(next===signature)return;signature=next;session=value;document.dispatchEvent(new Event('task-session-changed'));}
 export function taskSessionView(p,task,world,value=session){
@@ -5,6 +6,7 @@ export function taskSessionView(p,task,world,value=session){
   if(!p||!task||!bot||!world)return {label:'Session unavailable',detail:'Reconnect to inspect the assigned bot.',available:false};
   if(!value||value.botId!==bot.client_ref||value.world!==world)return {label:'Connection not checked in this view',detail:'Open the assigned bot’s conversation to inspect its current connection. Live reply state is not restored after reload.',available:true};
   const linked=value.tasks?.some(t=>t.id===task.id&&t.revision===task.revision&&t.world===world);
+  if(linked&&value.reply==='Reply did not complete'){const r=replyRecovery(value.recovery);return {available:true,label:r.phase,detail:r.detail};}
   return {available:true,label:linked&&value.reply?value.reply:value.ready?'Provider connected':'Provider needs connection',detail:linked&&value.reply?value.message:'Current bot session · connection status applies to the bot. This does not establish that this task is running.'};
 }
 

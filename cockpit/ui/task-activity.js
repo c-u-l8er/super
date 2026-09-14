@@ -1,6 +1,28 @@
 // Session-only observations. No provider credentials, runtime mutations or timers.
 export const ACTIVITY_TEXT_LIMIT=8000;
 export const ACTIVITY_EVENT_LIMIT=8;
+// Only known categories cross into task guidance; raw provider errors stay in the conversation.
+export function replyFailure(error){
+ const message=String(error??'');
+ if(/sign-in has expired|not authenticated|unauthorized|HTTP 401/i.test(message))return 'sign_in';
+ if(/usage limit has been reached|reached your .*limit|rate.?limit|HTTP 429/i.test(message))return 'capacity';
+ if(/reply cancelled|request cancelled|request canceled/i.test(message))return 'cancelled';
+ if(/timed out|timeout/i.test(message))return 'timeout';
+ if(/HTTP 50[234]|connection refused|connection reset|failed to connect|error sending request/i.test(message))return 'connection';
+ return 'unknown';
+}
+export function replyRecovery(kind){
+ const rows={
+  sign_in:['Sign-in required','Reconnect the assigned bot','Open the conversation and connect the provider again.'],
+  capacity:['Provider capacity reached','Review model availability','Wait for capacity to reset or choose another available model in the conversation.'],
+  cancelled:['Reply cancelled','Review the cancelled draft','Open the conversation to revise or send the draft when you are ready.'],
+  timeout:['Reply timed out','Review the timed-out request','Open the conversation and check provider availability before sending again.'],
+  connection:['Provider unavailable','Check the provider connection','Open the conversation and check that the provider is reachable before sending again.'],
+  unknown:['Reply stopped','Inspect the stopped request','Open the conversation to inspect the error and restored draft.']
+ };
+ const [phase,label,detail]=Object.hasOwn(rows,kind)?rows[kind]:rows.unknown;
+ return {phase,label,detail:detail+' Nothing is resent automatically.'};
+}
 const requests=new Map();
 const changed=()=>document.dispatchEvent(new Event('task-activity-changed'));
 const text=value=>typeof value==='string'?value:'';
@@ -12,7 +34,7 @@ export function activityUpdate(previous,update,at=Date.now()){
  if(!previous||previous.status!=='running'||update.id!==previous.id)return previous;
  const next={...previous,events:[...previous.events]},bytes=Number.isFinite(update.received_bytes)?Math.max(previous.bytes,update.received_bytes):previous.bytes;
  if(update.type==='finish'){
-  next.status=update.error?'stopped':'complete';next.phase=update.error?'Reply stopped':'Reply complete';
+  next.status=update.error?'stopped':'complete';next.recovery=update.error?replyFailure(update.failure??(previous.phase==='Cancelling reply'?'Reply cancelled':'')):null;next.phase=update.error?replyRecovery(next.recovery).phase:'Reply complete';
   if(typeof update.text==='string')next.text=update.text.slice(-ACTIVITY_TEXT_LIMIT);
   event(next,next.phase,at);
  }else{

@@ -160,7 +160,27 @@ try{
  await app.until(async()=>!!heldReply,10000,'second request');heldReply.statusCode=503;heldReply.end('{}');heldReply=null;
  await app.until(()=>app.page(`return document.querySelector('#work-focus [data-task-activity]').dataset.phase==='stopped'`),10000,'stopped request');
  check('Provider failure stops activity and restores the message without retrying',chatCalls===2&&await app.page(`return document.querySelector('#bot-message').value==='Retryable fixture request'&&document.querySelector('#work-focus [data-task-activity]').textContent.includes('Nothing is resent automatically')`));
+ check('Restored attachments retain connection recovery as the primary action',await app.page(`return document.querySelector('#focus-next').textContent==='Check the provider connection'&&document.querySelector('#work-focus [data-task-activity]').textContent.includes('Provider unavailable')`));
+ await shot('16_Connection_Recovery');
  await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();
+ check('Schematic activity explains the same connection failure',await app.page(`return document.querySelector('#schematics [data-task-activity]').textContent.includes('Provider unavailable')`));
+ await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('#focus-next').click()`);
+ check('Recovery opens the assigned conversation with the draft and attachment intact',await app.page(`return !document.querySelector('#bot-surface').hidden&&document.querySelector('#bot-message').value==='Retryable fixture request'&&document.querySelector('#bot-attachment-list').textContent.includes('sample.txt')`));
+ await app.page(`document.querySelector('#bot-send').click();document.querySelector('#focus-home').click()`);
+ await app.until(async()=>!!heldReply,10000,'explicit retry');heldReply.statusCode=429;heldReply.end('{}');heldReply=null;
+ await app.until(()=>app.page(`return document.querySelector('#focus-next').textContent==='Review model availability'`),10000,'capacity guidance');
+ check('Capacity failure has a distinct next step and does not disconnect the provider',chatCalls===3&&await app.page(`return document.querySelector('#work-focus [data-task-activity]').textContent.includes('Provider capacity reached')&&!document.querySelector('#bot-send').disabled`));
+ await shot('17_Capacity_Recovery');
+ await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();
+ await shot('18_Schematic_Recovery');
+ await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('#focus-next').click();document.querySelector('#bot-send').click();document.querySelector('#focus-home').click()`);
+ await app.until(async()=>!!heldReply,10000,'user requested retry');
+ check('An explicit retry clears the old capacity guidance while running',chatCalls===4&&await app.page(`return document.querySelector('#focus-next').textContent==='Watch bot'&&!document.querySelector('#work-focus [data-task-activity]').textContent.includes('Provider capacity reached')`));
+ heldReply.setHeader('content-type','application/json');heldReply.end(JSON.stringify({message:{role:'assistant',content:'Fixture recovered reply; inspect before applying.'},done:true}));heldReply=null;
+ await app.until(()=>app.page(`return document.querySelector('#focus-next').textContent==='Review the bot’s reply'`),10000,'recovered reply');
+ check('Successful retry moves to review and leaves the task unaccepted',await app.page(`return window.cockpit.frame.projection.development_tasks[arguments[0]].status==='planned'&&document.querySelector('#work-focus [data-task-activity]').dataset.phase==='complete'`,[tasks[1].id]));
+ await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();
+
  }finally{if(heldReply){heldReply.statusCode=503;heldReply.end('{}');}providerFixture.close();}
  await app.page(`window.schematicNavigate('bots')`);await ready();await app.page(`document.querySelector('[data-schematic-node=request]').click()`);
  check('Bot schematic exposes request and reply internals',await app.page(`return !!document.querySelector('[data-schematic-node=request]')&&!!document.querySelector('[data-schematic-node=reply]')`));

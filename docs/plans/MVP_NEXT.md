@@ -20,10 +20,10 @@ restore the same work after restart.
 
 ## Delivery order
 
-**New hardware track:** [Two-machine fleet MVP](FLEET_MVP.md). Measured host/guest inventory and its Fleet screen are implemented, and the Proxmox Linux guest passed bootstrap checks. Next connect a task-bound remote check, then provision a separate Linux check guest under FreeBSD bhyve. This runs alongside provider recovery and feeds the real Super-on-Super cycle.
+**Hardware track:** [Two-machine fleet MVP](FLEET_MVP.md). Both hosts have machine and guest detail pages, a compact Machines directory, and consistent schematic naming. Separate Proxmox and bhyve Linux guests have passed restricted task-bound checks and interrupted-receiver recovery. Wifibox remains separate. Physical network-outage and whole-host reboot drills remain open.
 
 1. **Task activity across work surfaces — implemented and tested.** Show actual request lifecycle, bounded assistant-text preview and request events in Continue work and Schematics. Match bot, task revision and runtime session. Keep graph nodes stable while text arrives. Older saved replies remain history after reload.
-2. **Connection and interruption recovery.** Make an unavailable provider an actionable next step for the assigned bot. Verify expired sign-in, cancellation, restored drafts and reconnect behavior; do not claim configured credentials prove a successful request.
+2. **Connection and interruption recovery — current increment.** Continue work, task status and schematic activity distinguish capacity limits, expired sign-in, cancellation, timeout and unavailable-provider replies. Restored task attachments no longer hide failure guidance behind a Send action. Recovery opens the assigned conversation, preserves drafts and requires an explicit retry. Live recovery observations remain session-only; saved conversation history remains separate. Controlled native provider checks cover connection failure, capacity failure, restored files and successful explicit retry. A real provider reply remains a separate gate.
 3. **Repeat the full Super-on-Super cycle.** Use the assigned Fable bot with a working provider connection. Produce and inspect a real change, run required checks, explicitly accept and verify restart recovery. Provider fixture tests do not satisfy this gate.
 4. **Mobile observation gate.** Verify pairing, active-task visibility, disconnect/reconnect and navigation on Android. Document what is tested on an emulator and what still needs a device.
 5. **Expand internal diagrams and observed execution.** Add remaining screen internals, evidence-linked events and follow-active behavior. Per-edge execution and WRL integration require corresponding runtime observations.
@@ -44,6 +44,6 @@ controls and device-local history. Execution is enabled through the approved res
 fixed VM-100 bridge. Three real task-bound checks passed; an interrupted local
 result receiver recovered the original receipt without resubmission. See
 [FLEET_MVP.md](FLEET_MVP.md#task-bound-advisory-check-implementation-2026-09-14).
-Next: the separate bhyve guest and a physical network-outage drill. Actual app
+The separate bhyve guest is now enrolled with destination-bound receipts and a restricted SSH bridge. Next: a physical network-outage drill. Actual app
 screenshots and recovery evidence are in `outputs/fleet-active/`. Earlier
 simulation screenshots remain labeled separately.

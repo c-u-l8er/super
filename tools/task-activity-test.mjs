@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {activityStart,activityUpdate,taskActivityFor,ACTIVITY_TEXT_LIMIT,ACTIVITY_EVENT_LIMIT} from '../cockpit/ui/task-activity.js';
+import {activityStart,activityUpdate,taskActivityFor,replyFailure,replyRecovery,ACTIVITY_TEXT_LIMIT,ACTIVITY_EVENT_LIMIT} from '../cockpit/ui/task-activity.js';
 const world='world',task={id:'task',revision:3,bot_ref:'bot',status:'planned'},p={bots:{bot:{client_ref:'profile'}}};
 const start=()=>activityStart({id:'request',botId:'profile',world,tasks:[{id:'task',revision:3,world}],provider:'claude',model:'test'},10);
 test('activity matches exact task revision, assigned bot, and runtime session',()=>{
@@ -27,4 +27,15 @@ test('byte observations never go backwards or become non-finite',()=>{
 test('a new request starts empty; the latest matching request wins',()=>{
  const old=activityUpdate(start(),{id:'request',type:'finish',text:'Old reply'},20),next=activityStart({...start(),id:'next'},30);
  assert.equal(next.text,'');assert.equal(next.events.length,1);assert.equal(taskActivityFor(p,task,world,[old,next]),next);assert.ok(next.events.length<=ACTIVITY_EVENT_LIMIT);
+});
+
+test('failure guidance distinguishes actionable causes without retaining raw errors',()=>{
+ for(const [error,kind] of [["Claude's model usage limit has been reached.",'capacity'],['Provider returned HTTP 429.','capacity'],['Claude sign-in has expired.','sign_in'],['Reply cancelled.','cancelled'],['Request timed out','timeout'],['Provider returned HTTP 503.','connection'],['Check model access and usage limits','unknown']]){
+  assert.equal(replyFailure(error),kind);const ended=activityUpdate(start(),{id:'request',type:'finish',error:true,failure:error+' secret-example'},20);
+  assert.equal(ended.recovery,kind);assert.equal(ended.phase,replyRecovery(kind).phase);assert.ok(!JSON.stringify(ended).includes('secret-example'));assert.match(replyRecovery(kind).detail,/Nothing is resent automatically/);assert.equal(replyRecovery('constructor').phase,'Reply stopped');
+ }
+});
+test('cancellation observation survives a generic final error and new requests clear recovery',()=>{
+ const cancelled=activityUpdate(start(),{id:'request',cancelled:true},20),ended=activityUpdate(cancelled,{id:'request',type:'finish',error:true},30);
+ assert.equal(ended.phase,'Reply cancelled');assert.equal(activityStart({...ended,id:'new'},40).recovery,undefined);
 });

@@ -1,3 +1,4 @@
+import {replyRecovery} from './task-activity.js';
 import {taskProgress} from './task-progress.js';
 export const FOCUS_KEY='super-work-focus-v1';
 // A chosen task survives a runtime restart; live session checks still use the full epoch.
@@ -15,9 +16,9 @@ export function workFocus(p,world,chosen,session){
   const linked=session?.botId===bot?.client_ref&&session?.world===world&&session?.tasks?.some(t=>t.id===task.id&&t.revision===task.revision&&t.world===world);
   let step=1,label='Prepare source files',detail=progress.reason,target=progress.target;
   if(linked&&session.reply==='Waiting for reply'){step=2;label='Bot is working';detail='Watch its progress. You can open the conversation to cancel.';target='conversation';}
+  else if(progress.state==='prepare'&&linked&&session.reply==='Reply did not complete'){step=2;({label,detail}=replyRecovery(session.recovery));target='conversation';}
   else if(progress.state==='prepare'&&linked&&session.prepared){step=2;label='Send the file request';detail='Your source files are attached. Review the message and send it to the bot.';target='conversation';}
   else if(progress.state==='prepare'&&linked&&session.reply==='Reply received'){step=3;label='Review the bot’s reply';detail='Open the reply and review its proposed changes before applying them.';target='conversation';}
-  else if(progress.state==='prepare'&&linked&&session.reply==='Reply did not complete'){step=2;label='Resume the interrupted request';detail='Open the conversation to inspect the error and restored draft. Nothing is resent automatically.';target='conversation';}
   else if(['checks_missing','checks_attention','waiting'].includes(progress.state)){step=4;label=progress.label;}
   else if(['decision','needs_changes'].includes(progress.state)){step=3;label=progress.label;}
   else if(progress.state==='finish'){step=5;label='Confirm this task is finished';}

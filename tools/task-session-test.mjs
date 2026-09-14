@@ -7,4 +7,4 @@ test('only matching task revision, bot and world receive task reply status',()=>
  for(const change of [{botId:'other'},{world:'old'}])assert.equal(taskSessionView(p,task,'w',{...value,...change}).label,'Connection not checked in this view');
 });
 test('withdrawal and reload never restore a live reply or connection',()=>{assert.equal(taskSessionView(null,task,'w',value).available,false);assert.equal(taskSessionView(p,task,'w',null).label,'Connection not checked in this view');assert.equal(taskSessionView(p,task,null,value).available,false);});
-test('disconnected bot and failed task reply remain distinguishable',()=>{assert.equal(taskSessionView(p,task,'w',{...value,ready:false,reply:null}).label,'Provider needs connection');assert.equal(taskSessionView(p,task,'w',{...value,reply:'Reply did not complete'}).label,'Reply did not complete');});
+test('disconnected bot and failed task reply remain distinguishable',()=>{assert.equal(taskSessionView(p,task,'w',{...value,ready:false,reply:null}).label,'Provider needs connection');assert.equal(taskSessionView(p,task,'w',{...value,reply:'Reply did not complete'}).label,'Reply stopped');});
