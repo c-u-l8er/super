@@ -3,7 +3,7 @@ import {open} from './lib/cockpit-control.mjs';
 import assert from 'node:assert/strict';
 import {mkdirSync,writeFileSync,mkdtempSync} from 'node:fs';
 import {execFileSync} from 'node:child_process';
-const port=Number(process.env.APP_SMOKE_PORT||4797),out=process.env.SUPER_VISUAL_EVIDENCE_DIR||'/home/travis/Documents/Codex/2026-09-12/le/outputs/schematics';
+const port=Number(process.env.APP_SMOKE_PORT||4797),out=process.env.SUPER_VISUAL_EVIDENCE_DIR||'/home/travis/Documents/Codex/2026-09-12/le/outputs/schematics-2';
 mkdirSync(out,{recursive:true});let app;const checks=[];
 const check=(name,value)=>{assert.ok(value,name);checks.push(name);console.log(name);};
 try{
@@ -12,7 +12,7 @@ try{
  const ws=await app.create('open_workspace',{name:'Focus fixture'},{kind:'workspaces',field:'name',value:'Focus fixture'});
  const goal=await app.create('open_goal',{workspace_ref:ws.record.id,title:'Finish a clear next step'},{kind:'goals',field:'title',value:'Finish a clear next step'});
  const bot=await app.create('register_bot',{client_ref:'focus-fixture',workspace_ref:ws.record.id,name:'Focus builder',role:'Builder',group:'Tests',provider:'claude',instructions:'Fixture'},{kind:'bots',field:'client_ref',value:'focus-fixture'});
- const folder=mkdtempSync((process.env.DEVELOPMENT_TEST_ROOT||'/tmp')+'/focus-repo-');execFileSync('git',['init','-q',folder]);
+ const folder=mkdtempSync((process.env.DEVELOPMENT_TEST_ROOT||'/tmp')+'/focus-repo-');execFileSync('git',['init','-q',folder]);writeFileSync(folder+'/sample.txt','A real Editor fixture.');
  await app.page(`document.querySelector('[data-nav="repositories"]').click();document.querySelector('[data-host-action="choose-repository"]').click()`);
  await new Promise(r=>setTimeout(r,800));execFileSync('/usr/bin/python3',['tools/development-confirm-folder.py',String(process.pid),folder],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});
  const repo=await app.until(async()=>(await app.list('repositories'))[0],10000,'repository');
@@ -42,6 +42,14 @@ try{
  await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('[data-schematic-node=task]').click()`);
  check('Schematics toggles into the selected task with a pinned inspector',await app.page(`return !document.querySelector('#schematics').hidden && document.querySelector('.schematic-inspector').textContent.includes('Focused step 2') && document.querySelector('#toggle-schematics').getAttribute('aria-pressed')==='true'`));
  await shot('01_Current_Task');
+ await app.page(`document.querySelector('[data-schematic-follow=bot]').click();document.querySelector('[data-schematic-zoom=out]').click();document.querySelector('[data-schematic-zoom=out]').click()`);
+ check('Following a connection selects its node and highlights only neighboring wires',await app.page(`return document.querySelector('[data-schematic-node=bot]').getAttribute('aria-pressed')==='true'&&document.querySelectorAll('path.schematic-traced').length===4 && !!document.querySelector('path.schematic-muted')`));
+ check('Zoom scales the diagram without changing the selected component',await app.page(`return document.querySelector('#schematic-zoom-label').textContent==='80%' && document.querySelector('.schematic-inspector h2').textContent==='Focus builder'`));
+ await shot('07_Trace_And_Zoom');
+ await app.page(`document.querySelector('#schematic-clear-trace').click()`);
+ check('Clear trace restores every node and connection',await app.page(`return !document.querySelector('.schematic-traced')&&!document.querySelector('.schematic-muted')`));
+ await app.page(`document.querySelector('[data-schematic-zoom=fit]').click();document.querySelector('[data-schematic-zoom=reset]').click()`);
+
  await app.page(`document.querySelector('[data-schematic-level=connections]').click();document.querySelector('[data-schematic-node=development-tasks]').click()`);
  check('Connections offer a real destination and describe the link',await app.page(`return !!document.querySelector('[data-schematic-open=development-tasks]') && document.querySelector('.schematic-inspector').textContent.includes('focuses a plan')`));
  await shot('02_Screen_Connections');
@@ -61,6 +69,22 @@ try{
  await app.until(()=>app.page(`return !!window.schematicPages`),10000,'screen registry');
  for(const id of await app.page(`return window.schematicPages`)){await app.page(`window.schematicNavigate(arguments[0]);if(document.querySelector('#schematics').hidden)document.querySelector('#toggle-schematics').click()`,[id]);assert.ok(await app.page(`return !document.querySelector('#schematics').hidden && !!document.querySelector('[data-schematic-node]')`),id);}
  check('Every registered screen has a schematic counterpart',true);
+ await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:1440,height:980})});
+ await app.page(`document.querySelector('#toggle-schematics').click();document.dispatchEvent(new CustomEvent('continue-development-task',{detail:{taskId:arguments[0]}}));document.querySelector('#development-choose-editor').click()`,[tasks[1].id]);
+ await new Promise(r=>setTimeout(r,800));execFileSync('/usr/bin/python3',['tools/development-confirm-folder.py',String(process.pid),folder]);
+ await app.until(()=>app.page(`return !!document.querySelector('[data-file-path="sample.txt"]')`),10000,'Editor file');
+ await app.page(`document.querySelector('[data-file-path="sample.txt"]').click()`);
+ await app.until(()=>app.page(`return !document.querySelector('#editor-discuss').disabled`),10000,'file loaded');
+ await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('[data-schematic-node=tabs]').click()`);
+ check('Editor schematic shows the real linked file session',await app.page(`return document.querySelector('[data-schematic-node=tabs] span').textContent==='1 open'&&document.querySelector('.schematic-inspector').textContent.includes('sample.txt')&&document.querySelector('[data-schematic-node=drafts] span').textContent==='No unsaved drafts'`));
+ await app.page(`document.querySelector('[data-schematic-zoom=out]').click();document.querySelector('[data-schematic-zoom=out]').click()`);
+ await shot('08_Editor_Internals');
+ await app.page(`window.schematicNavigate('bots');document.querySelector('[data-schematic-node=request]').click()`);
+ check('Bot schematic exposes request and reply internals',await app.page(`return !!document.querySelector('[data-schematic-node=request]')&&!!document.querySelector('[data-schematic-node=reply]')`));
+ await shot('09_Bot_Internals');
+ await app.page(`window.schematicNavigate('development-tasks');document.querySelector('[data-schematic-node=acceptance]').click()`);
+ check('Review schematic separates applying files from acceptance',await app.page(`return !!document.querySelector('[data-schematic-node=apply]')&&document.querySelector('[data-schematic-node=acceptance] span').textContent==='Human decision required'`));
+ await shot('10_Review_Internals');
  const server=createServer((req,res)=>res.end('<body style="background:red"><h1>Native preview fixture</h1></body>'));await new Promise(r=>server.listen(0,'127.0.0.1',r));
  try{
  await app.page(`document.querySelector('#toggle-schematics').click();window.schematicNavigate('browser');document.querySelector('#browser-url').value=arguments[0];document.querySelector('#browser-go').click()`,['http://127.0.0.1:'+server.address().port]);

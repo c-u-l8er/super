@@ -1,3 +1,4 @@
+import {internalSchematic} from './schematics-internals.js';
 import {workFocus} from './work-focus.js';
 import {taskSessionView} from './task-session.js';
 import {reviewTestCoverage} from './review-test-coverage.js';
@@ -13,7 +14,7 @@ const collections={positions:'workspaces',goals:'goals',lanes:'lanes',repositori
 const detailed=new Set(['continue-work','development-tasks','editor','bots']);
 const unavailable=new Set(['fleet','gates','rulings','routines']);
 export const screenKind=id=>id.startsWith('bot:')?'bots':id;
-export function schematic({screen,level='screen',screens,p,world,chosen,session,workspace=''}){
+export function schematic({screen,level='screen',screens,p,world,chosen,session,editor,workspace=''}){
  const kind=screenKind(screen),catalog=[...screens.map(([id,label,description])=>({id,label,description})),{id:'record',label:'Record details',description:'Inspect the selected record and its references.'}];
  const entry=catalog.find(s=>s.id===kind)??{id:kind,label:'Current screen',description:'Internal wiring is not mapped yet.'};
  const pageNode=s=>({id:s.id,label:s.label,state:!p?'Unavailable':unavailable.has(s.id)?'Not connected':collections[s.id]?`${Object.values(p[collections[s.id]]??{}).length} records`:'Screen',detail:s.description+' '+(detailed.has(s.id)?'Core work path available.':'Detailed internal wiring is planned.'),route:s.id});
@@ -23,7 +24,8 @@ export function schematic({screen,level='screen',screens,p,world,chosen,session,
  }
  if(!detailed.has(kind))return {title:entry.label,coverage:'Screen overview · detailed internal wiring is planned.',nodes:[{id:'input',label:'Screen context',state:p?'Available':'Unavailable',detail:'The selected workspace and page determine what this screen displays.'},pageNode(entry),{id:'output',label:'Connected screens',state:'Explore connections',detail:'Use Connections to follow this screen into other areas. Links describe structure; event tracing is planned.'}],edges:[{from:'input',to:entry.id,label:'provides context'},{from:entry.id,to:'output',label:'follow connections'}]};
  const scoped=p?{...p,development_tasks:Object.fromEntries(Object.entries(p.development_tasks??{}).filter(([,t])=>(!workspace||t.workspace_ref===workspace)&&(!screen.startsWith('bot:')||p.bots?.[t.bot_ref]?.client_ref===screen.slice(4))))}:null;
- const focus=workFocus(scoped,world,chosen,session),task=focus.task,bot=task?p?.bots?.[task.bot_ref]:null;
+ const editorTask=kind==='editor'&&editor?.task?.world===world&&scoped?.development_tasks?.[editor.task.id]?.revision===editor.task.revision?editor.task.id:null;
+ const focus=workFocus(scoped,world,editorTask||chosen,session),task=focus.task,bot=task?p?.bots?.[task.bot_ref]:null;
  const all=task?Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id&&a.task_revision===task.revision):[];
  const attempt=all.find(a=>a.id===focus.attempt)||all.at(-1),coverage=reviewTestCoverage(attempt?.test_runs,task?.required_checks?.profiles??[]);
  const sv=taskSessionView(p,task,world,session),live=!!task&&session?.world===world&&session.botId===bot?.client_ref&&session.tasks?.some(t=>t.id===task.id&&t.revision===task.revision&&t.world===world);
@@ -36,5 +38,6 @@ export function schematic({screen,level='screen',screens,p,world,chosen,session,
  {id:'proposal',label:'Review proposal',state:state(attempt?.status||'Not recorded'),detail:attempt?`${all.length} review(s) for this plan revision. Open the plan to inspect retained text.`:'No retained review for this plan revision.',route:'development-tasks',taskId:task?.id},
  {id:'checks',label:'Checks',state:state(!attempt?'Awaiting proposal':!Object.keys(attempt.test_runs??{}).length?'Not run':coverage.ready?'Passed on one snapshot':coverage.rows.some(r=>r.status==='running')?'Running':coverage.rows.length?'Needs attention':'Not run'),detail:coverage.rows.map(r=>`${r.profile}: ${r.status}`).join('\n')||'No test result recorded. Checks run on a captured proposal.',route:'development-tasks',taskId:task?.id},
  {id:'decision',label:'Your next step',state:state(focus.label),detail:focus.detail||'Choose a plan to continue.',route:'continue-work'}];
+ const internal=internalSchematic(kind,{nodes,task,p,world,editor,session,live});if(internal)return {title:entry.label,...internal,nodes:internal.nodes.map(n=>p?n:{...n,state:'Unavailable'})};
  return {title:entry.label,coverage:task?'Core task path · saved runtime state and matching session observations.':'Core task path · choose an unfinished task to populate it.',nodes,edges:[['task','bot','assignment'],['provider','bot','connection'],['source','bot','source request'],['bot','proposal','proposed changes'],['proposal','checks','test snapshot'],['checks','decision','result'],['decision','source','review and save']].map(([from,to,label])=>({from,to,label}))};
 }

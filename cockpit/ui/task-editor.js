@@ -8,3 +8,4 @@ export function taskEditorView(p,task,world,value=context){
   return {state:'linked',message:'Open tabs in this Editor session. Repository matching is checked separately when sharing. Draft status does not certify current disk contents, tests or acceptance.',root:value.root,files:value.files,session:value.session,generation:value.generation,task:value.task,busy:value.busy};
 }
 export function canOpenTaskEditor(p,task,world,current,request){const view=taskEditorView(p,task,world,current);return view.state==='linked'&&!view.busy&&request.session===view.session&&request.generation===view.generation&&request.task?.id===view.task.id&&request.task?.revision===view.task.revision&&request.task?.world===world&&view.files.some(f=>f.path===request.path);}
+export function currentTaskEditor(){return context;}

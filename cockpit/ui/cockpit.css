@@ -455,3 +455,13 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .schematic-body {max-width:1120px;}
 .schematic-inspector h2 {letter-spacing:0;font-family:system-ui;color:var(--ink);}
 .schematic-inspector details {margin:12px 0;}
+.schematic-extent {position:relative;}
+.schematic-board {transform-origin:top left;}
+.schematic-node {height:104px;overflow:hidden;}
+.schematic-node strong {display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
+.schematic-muted {opacity:.28;}
+.schematic-board path.schematic-traced {stroke:#9bd0fa;stroke-width:3;}
+.schematic-follow {display:block;width:100%;margin:8px 0;text-align:left;font-size:12px;}
+.schematic-zoom {display:flex;gap:6px;align-items:center;margin:-8px 0 12px;}
+.schematic-zoom span {color:var(--dim);font:12px var(--mono);margin-left:8px;}
+.schematic-node.schematic-muted {opacity:.6;}

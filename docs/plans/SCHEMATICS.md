@@ -35,3 +35,13 @@ Validation completed: 161 JavaScript behavior tests; 17 native checks, including
 Evidence folder in the development workspace: `outputs/schematics/`, containing the screenshots and `checks.json`. Installed-world verification is recorded separately as `installed-check.json` after installation.
 
 Installed-world visual inspection caught premature “Needs attention” wording before any proposal exists; corrected to “Awaiting proposal” with a regression test.
+
+### Second increment — tracing and internal diagrams
+
+Completed distinct internal diagrams for Editor, Bots and Development tasks. Editor reads exact plan-linked session metadata for open tabs, selection and unsaved drafts; stale task revisions and world changes do not reuse those files. Bot request and reply observations retain exact task/session matching. Review diagrams distinguish applying files, acceptance and completion.
+
+Selecting a node highlights its direct connections. The inspector's connection buttons follow and center the neighboring component within the diagram; Clear trace restores all components. Zoom out/in, reset and Fit width preserve the selected component. Routes use gutters between rows and columns, with stable positions across state changes. Highlights indicate selection, not event traffic.
+
+Validation: 167 behavior tests and 23 native checks, including a real folder selection and open Editor file, tracing, zoom, clearing selection, all screen overviews, small windows, draft retention and native browser coverage. Screenshots were visually inspected; reduced contrast for unselected nodes was adjusted to keep labels readable. Evidence: `outputs/schematics-2/` in the development workspace.
+
+Next: internal diagrams for the remaining screens; per-edge event instrumentation and bounded event history; follow-active behavior. Wire actual WRL execution only when corresponding runtime evidence is available.
