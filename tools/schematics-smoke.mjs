@@ -20,6 +20,7 @@ try{
  await app.intent('open_lane',{goal_ref:goal.record.id,actor:bot.record.actor,repository_ref:repo.ref||repo.id,base_revision:'HEAD'});
  const lane=await app.until(async()=>(await app.list('lanes')).find(l=>l.actor===bot.record.actor),10000,'lane');
  for(const n of [1,2])await app.intent('create_development_task',{client_ref:'focus-'+n,lane_ref:lane.id,title:'Focused step '+n,criteria:'One reviewed change. '.repeat(30)});
+ await app.intent('open_worker',{locus_ref:lane.id,purpose:'Idle worker for responsiveness'});
  const tasks=await app.until(async()=>{const t=(await app.list('development_tasks')).filter(t=>t.client_ref?.startsWith('focus-'));return t.length===2&&t;},10000,'plans');
  await app.page(`document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:arguments[0]}}))`,[tasks[1].id]);
  check('Chosen plan has one primary next action and a collapsed queue',await app.page(`return document.querySelector('[data-focus-task]').dataset.focusTask===arguments[0] && document.querySelectorAll('#work-focus .focus-card .primary').length===1 && !document.querySelector('.focus-queue').open`,[tasks[1].id]));
@@ -40,7 +41,14 @@ try{
  check('Reload restores the chosen task without sending a request',await app.page(`return !document.querySelector('#work-focus').hidden && document.querySelector('#focus-current').textContent==='Prepare source files'`));
  const shot=async(name)=>{const response=await fetch(`http://127.0.0.1:${port}/session/${app.session()}/screenshot`);writeFileSync(`${out}/${name}.png`,Buffer.from((await response.json()).value,'base64'));};
  await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:1440,height:980})});
- await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();await app.page(`document.querySelector('[data-schematic-node=task]').click()`);
+ const idleBefore=await app.page(`return {frames:window.cockpit.frames,refusals:window.cockpit.frame.projection.recent_refusals}`);
+ await new Promise(r=>setTimeout(r,2000));
+ check('Idle workers do not generate refusal or full-frame refresh loops',await app.page(`return window.cockpit.frames-arguments[0].frames<=2&&JSON.stringify(window.cockpit.frame.projection.recent_refusals)===JSON.stringify(arguments[0].refusals)`,[idleBefore]));
+ const toggleRect=await app.page(`const b=document.querySelector('#toggle-schematics').getBoundingClientRect();return {x:Math.round(b.x+b.width/2),y:Math.round(b.y+b.height/2)}`);
+ const realClick=await fetch(`http://127.0.0.1:${port}/session/${app.session()}/actions`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({actions:[{type:'pointer',id:'mouse',parameters:{pointerType:'mouse'},actions:[{type:'pointerMove',duration:0,...toggleRect},{type:'pointerDown',button:0},{type:'pause',duration:150},{type:'pointerUp',button:0}]}]})});
+ assert.ok(realClick.ok,await realClick.text());await ready();
+ check('A normal-duration pointer click opens Schematics',await app.page(`return !document.querySelector('#schematics').hidden`));
+ await app.page(`document.querySelector('[data-schematic-node=task]').click()`);
  check('Schematics toggles into the selected task with a pinned inspector',await app.page(`return !document.querySelector('#schematics').hidden && document.querySelector('.schematic-inspector').textContent.includes('Focused step 2') && document.querySelector('#toggle-schematics').getAttribute('aria-pressed')==='true'`));
  check('Graph fills the entire workspace below the app header',await app.page(`const v=document.querySelector('.schematic-viewport').getBoundingClientRect(),c=document.querySelector('#workspace-canvas').getBoundingClientRect(),h=document.querySelector('#topbar').getBoundingClientRect();return Math.abs(v.left)<2&&Math.abs(v.right-innerWidth)<2&&Math.abs(v.top-h.bottom)<2&&Math.abs(v.bottom-innerHeight)<2&&v.width===c.width&&v.height===c.height`));
  await app.page(`document.querySelector('[data-schematic-zoom=all]').click()`);

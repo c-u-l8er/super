@@ -61,3 +61,10 @@ Schematics now occupies the entire width and height below Super's existing heade
 Fit diagram reserves the floating panels' footprints while the canvas itself retains its full bounds. Resizing recalculates placement and keeps a wrapping toolbar clear of the inspector. Normal zoom supports reading and exploring individual components; fitting a large graph is an overview.
 
 Validation: 169 behavior tests and 33 native checks passed. Large, small and narrow window screenshots were visually inspected. Evidence is saved in `outputs/schematics-4/` in the development workspace: behavior test output, native geometry/navigation/panning checks, large and small window screenshots, and saved-world installation verification. The remaining internals and observed event tracing in steps 4–5 remain future work.
+
+
+### Responsiveness repair — passive status must remain passive
+
+Investigating the frozen desktop exposed an idle feedback loop below the UI: terminal status derivation recorded worker-not-open / worker-not-occupied refusals, which advanced the projection clock and retriggered the same reads. Status and current-binding checks now derive reasons without logging; actual resolution still records refusals. Worker status shares its occupancy conditions with the action decision without producing an event on failure.
+
+A saved-world copy went from 39 frames in a 1.5-second idle interval to no changes. Validation: 39 terminal tests, 17 authority source checks and 35 native checks passed, including idle workers and a normal-duration pointer click. Ten older worker/worktree test failures were reproduced unchanged on the baseline and are documented separately. Evidence: `outputs/freeze-fix/` in the development workspace.

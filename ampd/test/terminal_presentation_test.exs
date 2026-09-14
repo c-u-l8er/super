@@ -518,4 +518,39 @@ defmodule Ampd.TerminalPresentationTest do
            "the refusal did not name the Worker it is about: " <>
              inspect(r["operator_detail"])
   end
+  test "passive terminal and worker status reads do not generate refusal traffic", ctx do
+    presentation = possess!(ctx)
+    ref = ctx.worker["id"]
+    {:ok, basis} = P.resolve(bound(ctx.control), ref, gen(ref))
+    assert presentation
+    peer = Peer.resolve(ctx.agent)
+    attachment = Peer.attachment(peer["id"])
+    lane = Loci.lane(ctx.lane["id"])
+    stale = Map.put(attachment, "worker_generation", -1)
+    before = Ampd.RefusalLog.recent(200)
+    for _ <- 1..10 do
+      assert P.status_of(Loci.worker(ref)) == "PRESENT"
+      assert P.current?(basis)
+      refute Worker.occupancy_matches?(stale, peer, lane)
+    end
+    assert Ampd.RefusalLog.recent(200) == before
+
+    ok!(Control.command(ctx.agent, :detach_worker, []), "occupancy")
+    for state <- [:unoccupied, :closed] do
+      if state == :closed, do: ok!(Control.command(ctx.control, :close_worker, [ref]), "worker")
+      before = Ampd.RefusalLog.recent(200)
+      for _ <- 1..10 do
+        assert P.status_of(Loci.worker(ref)) == "NONE"
+        refute P.current?(basis)
+        assert Worker.projected(Loci.workers())[ref]["occupancy"] == "OFFLINE"
+        Ampd.Projection.operator()
+      end
+      assert Ampd.RefusalLog.recent(200) == before
+      # An actual request still records the named refusal exactly once.
+      assert {:refused, refusal} = P.resolve(bound(ctx.control), ref, gen(ref))
+      assert refusal["code"] == if(state == :closed, do: "worker-not-open", else: "worker-not-occupied")
+      assert Ampd.RefusalLog.recent(200) == Enum.take([refusal | before], 200)
+    end
+  end
+
 end

@@ -160,6 +160,8 @@ defmodule Ampd.Terminal.Presentation do
          "control_peer_ref" => peer["id"],
          "control_owner" => Peer.owner_pid(peer["id"])
        })}
+    else
+      {:refused, {code, detail}} -> {:refused, refuse(code, detail)}
     end
   end
 
@@ -224,7 +226,7 @@ defmodule Ampd.Terminal.Presentation do
 
   defp human_control(peer) do
     {:refused,
-     refuse("terminal-presentation-not-human-control", %{
+     reason("terminal-presentation-not-human-control", %{
        "channel" => peer && peer["channel"],
        "hint" =>
          "observing a Worker's terminal is an operator disclosure, and the operator " <>
@@ -234,7 +236,7 @@ defmodule Ampd.Terminal.Presentation do
 
   defp worker(ref) do
     case Loci.worker(ref) do
-      nil -> {:refused, refuse("worker-unknown", %{"worker_ref" => ref})}
+      nil -> {:refused, reason("worker-unknown", %{"worker_ref" => ref})}
       w -> {:ok, w}
     end
   end
@@ -251,7 +253,7 @@ defmodule Ampd.Terminal.Presentation do
       :ok
     else
       {:refused,
-       refuse("worker-generation-stale", %{
+       reason("worker-generation-stale", %{
          "worker_ref" => w["id"],
          "expected" => expected,
          "current" => current,
@@ -265,7 +267,7 @@ defmodule Ampd.Terminal.Presentation do
   defp open(%{"status" => "open"}), do: :ok
 
   defp open(w),
-    do: {:refused, refuse("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
+    do: {:refused, reason("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
 
   # The occupant is found the way `Ampd.Worker.status_of/1` finds it — by
   # asking `occupancy_of/3` rather than by trusting the attachment table,
@@ -281,7 +283,7 @@ defmodule Ampd.Terminal.Presentation do
         Enum.find_value(Peer.attachments(), fn att ->
           with true <- att["worker_ref"] == w["id"],
                occupant when is_map(occupant) <- Peer.resolve(att["peer_ref"]),
-               :ok <- Worker.occupancy_of(att, occupant, lane) do
+               true <- Worker.occupancy_matches?(att, occupant, lane) do
             {att, occupant}
           else
             _ -> nil
@@ -295,7 +297,7 @@ defmodule Ampd.Terminal.Presentation do
 
       nil ->
         {:refused,
-         refuse("worker-not-occupied", %{
+         reason("worker-not-occupied", %{
            "worker_ref" => w["id"],
            "hint" =>
              "this Worker is open and nothing stands at it, so there is no execution " <>
@@ -314,7 +316,7 @@ defmodule Ampd.Terminal.Presentation do
     case Peer.carrier(occupant["id"]) do
       nil ->
         {:refused,
-         refuse("carrier-not-present", %{
+         reason("carrier-not-present", %{
            "worker_ref" => w["id"],
            "hint" => "the occupant holds no Carrier, so nothing is embodying this position"
          })}
@@ -328,7 +330,7 @@ defmodule Ampd.Terminal.Presentation do
     case Peer.terminal_attachment(occupant["id"]) do
       nil ->
         {:refused,
-         refuse("terminal-not-attached", %{
+         reason("terminal-not-attached", %{
            "worker_ref" => w["id"],
            "hint" => "this Carrier possesses no terminal, so there is no output to observe"
          })}
@@ -338,7 +340,7 @@ defmodule Ampd.Terminal.Presentation do
 
       record ->
         {:refused,
-         refuse("terminal-not-possessed", %{
+         reason("terminal-not-possessed", %{
            "worker_ref" => w["id"],
            "status" => record["status"],
            "hint" =>
@@ -368,7 +370,7 @@ defmodule Ampd.Terminal.Presentation do
 
       phase ->
         {:refused,
-         refuse("terminal-stream-not-active", %{
+         reason("terminal-stream-not-active", %{
            "worker_ref" => p["worker_ref"],
            "phase" => to_string(phase),
            "hint" =>
@@ -482,6 +484,9 @@ defmodule Ampd.Terminal.Presentation do
   end
 
   defp generation(w), do: w["generation"] || 1
+
+  # Status reads must not change the projection by logging their own absence.
+  defp reason(code, detail), do: {code, detail}
 
   defp refuse(code, detail),
     do:

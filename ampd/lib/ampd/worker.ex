@@ -461,18 +461,28 @@ defmodule Ampd.Worker do
   attachment tests the clause instead of the cleanup.
   """
   def occupancy_of(att, peer, lane) do
+    case occupancy_reason(att, peer, lane) do
+      :ok -> :ok
+      {:refused, {code, detail}} -> {:refused, refuse(code, detail)}
+    end
+  end
+
+  @doc "Revalidate occupancy for a status read without recording a refused action."
+  def occupancy_matches?(att, peer, lane), do: occupancy_reason(att, peer, lane) == :ok
+
+  defp occupancy_reason(att, peer, lane) do
     cond do
       not is_map(peer) or peer["actor"] == nil ->
-        {:refused, no_actor(peer)}
+        {:refused, no_actor(peer, &reason/2)}
 
       # Identity remains **necessary**. The hypothesis under test is that it
       # is not sufficient, not that it is irrelevant.
       peer["actor"] != lane["actor"] ->
-        {:refused, not_occupied(peer, lane, nil)}
+        {:refused, not_occupied(peer, lane, nil, &reason/2)}
 
       att == nil ->
         {:refused,
-         refuse("carrier-not-attached", %{
+         reason("carrier-not-attached", %{
            "locus_ref" => lane["id"],
            "bound_actor" => peer["actor"],
            "hint" =>
@@ -482,7 +492,7 @@ defmodule Ampd.Worker do
 
       att["locus_ref"] != lane["id"] ->
         {:refused,
-         refuse("carrier-attached-elsewhere", %{
+         reason("carrier-attached-elsewhere", %{
            "locus_ref" => lane["id"],
            "occupies_instead" => att["locus_ref"],
            "hint" =>
@@ -506,13 +516,13 @@ defmodule Ampd.Worker do
     cond do
       att["peer_epoch"] != Peer.epoch() ->
         {:refused,
-         stale("attachment-epoch-stale", %{
+         reason("attachment-epoch-stale", %{
            "hint" => "the channel incarnation that took up this assignment has ended"
          })}
 
       att["world_ref"] != World.lineage() ->
         {:refused,
-         stale("attachment-generation-stale", %{
+         reason("attachment-generation-stale", %{
            "attached_in" => att["world_ref"],
            "current" => World.lineage(),
            "hint" =>
@@ -520,15 +530,15 @@ defmodule Ampd.Worker do
          })}
 
       w == nil ->
-        {:refused, stale("worker-unknown", %{"worker_ref" => att["worker_ref"]})}
+        {:refused, reason("worker-unknown", %{"worker_ref" => att["worker_ref"]})}
 
       w["status"] != "open" ->
         {:refused,
-         stale("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
+         reason("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
 
       (w["generation"] || 1) != att["worker_generation"] ->
         {:refused,
-         stale("attachment-worker-generation-stale", %{
+         reason("attachment-worker-generation-stale", %{
            "worker_ref" => w["id"],
            "attached_under" => att["worker_generation"],
            "current" => w["generation"],
@@ -539,7 +549,7 @@ defmodule Ampd.Worker do
 
       w["locus_ref"] != lane["id"] or w["actor"] != lane["actor"] ->
         {:refused,
-         stale("worker-lane-actor-drift", %{
+         reason("worker-lane-actor-drift", %{
            "worker_ref" => w["id"],
            "locus_ref" => lane["id"]
          })}
@@ -566,7 +576,7 @@ defmodule Ampd.Worker do
       lane != nil and
         Enum.any?(Peer.attachments(), fn att ->
           att["worker_ref"] == worker["id"] and
-            occupancy(Peer.resolve(att["peer_ref"]) || %{}, lane) == :ok
+            occupancy_matches?(att, Peer.resolve(att["peer_ref"]) || %{}, lane)
         end)
 
     if live?, do: "OCCUPIED", else: "OFFLINE"
@@ -605,8 +615,8 @@ defmodule Ampd.Worker do
       end)
 
   # ------------------------------------------------------------ refusals
-  defp no_actor(peer) do
-    refuse("carrier-has-no-actor", %{
+  defp no_actor(peer, build \\ &refuse/2) do
+    build.("carrier-has-no-actor", %{
       "channel" => peer && peer["channel"],
       "hint" =>
         "the human control channel holds no actor and occupies nothing — " <>
@@ -617,14 +627,14 @@ defmodule Ampd.Worker do
   # Keeps D.1.1's code word for the stranger case, so a caller that could
   # already handle `locus-not-occupied` still can, and the D.1.1 falsifiers
   # that assert it still hold. What changed is only *when* it is produced.
-  defp not_occupied(peer, lane, _detail) do
-    refuse("locus-not-occupied", %{
+  defp not_occupied(peer, lane, _detail, build \\ &refuse/2) do
+    build.("locus-not-occupied", %{
       "locus_ref" => lane["id"],
       "bound_actor" => peer && peer["actor"]
     })
   end
 
-  defp stale(code, detail), do: refuse(code, detail)
+  defp reason(code, detail), do: {code, detail}
 
   defp refuse(code, detail) do
     Refusal.new(code,
