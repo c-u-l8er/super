@@ -466,11 +466,11 @@ async fn fleet_checks(request:fleet_checks::Request,app:tauri::AppHandle,state:S
  use tauri::Manager;
  let checks=state.inner().clone();let work=work.inner().clone();let q=queue.inner().clone();let data=app.path().app_data_dir().map_err(|_|"Local check history is unavailable.")?;
  tauri::async_runtime::spawn_blocking(move||{
-  if let fleet_checks::Request::Start{generation,task_ref,revision,world}=request {
+  if let fleet_checks::Request::Start{generation,task_ref,revision,world,worker}=request {
    let path=work.matching_root(generation)?;
    let verify=||->Result<Value,String>{let(reply,wait)=sync_channel(1);q.intent(Msg::MatchPlanRepository{path:path.clone(),task_ref:task_ref.clone(),revision,world:world.clone(),reply})?;wait.recv().map_err(|_|"Task verification was interrupted.")?};
    verify()?;
-   let dir=checks.prepare(&data,world.clone(),&path,&task_ref,revision)?;
+   let dir=checks.prepare(&data,world.clone(),&path,&task_ref,revision,worker.as_deref())?;
    verify()?;
    if work.matching_root(generation)?!=path{return Err("The repository changed before dispatch.".into());}
    checks.launch(dir,"start")

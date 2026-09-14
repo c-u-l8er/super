@@ -8,6 +8,13 @@ class Tests(unittest.TestCase):
  def setUp(self): self.tmp=tempfile.TemporaryDirectory();self.root=Path(self.tmp.name);self.calls=0
  def tearDown(self): self.tmp.cleanup()
  def runner(self,source): self.calls+=1;return {'state':'completed','verdict':'pass','exitCode':0,'output':'passed'}
+ def test_installed_destination_refuses_cross_host_requests(self):
+  old=w.DESTINATION
+  try:
+   w.DESTINATION=('cd-floor-01','super-worker-02');r=request()
+   with self.assertRaises(AssertionError):w.validate(r)
+   r['binding'].update(host='cd-floor-01',guest='super-worker-02');w.validate(r)
+  finally:w.DESTINATION=old
  def test_repeat_reconciles_without_second_execution(self):
   r=request();one=w.handle({'operation':'start','request':r},self.root,self.runner);two=w.handle({'operation':'start','request':r},self.root,self.runner);three=w.handle({'operation':'status','id':r['id']},self.root,self.runner)
   self.assertEqual(one,two);self.assertEqual(one,three);self.assertEqual(self.calls,1)

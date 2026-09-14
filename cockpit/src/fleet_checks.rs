@@ -18,6 +18,8 @@ pub struct Checks(Arc<Mutex<BTreeSet<String>>>);
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Request {
     Start {
+        #[serde(default)]
+        worker: Option<String>,
         generation: u64,
         task_ref: String,
         revision: u64,
@@ -94,13 +96,26 @@ fn config_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathB
     saved["checksConfigPath"].as_str().map(PathBuf::from).filter(|p| p.is_absolute())
         .ok_or("Remote checks are not configured on this device.".into())
 }
-fn config() -> Result<Value, String> {
-    let path = config_path(|key| std::env::var_os(key))?;
-    let v = read(Path::new(&path))?;
-    if v["host"] != "locuchest" || v["guest"] != "100" || v["target"] != "root@192.168.1.69" {
-        return Err("The configured worker is not supported.".into());
+fn worker_id(v: &Value) -> String { format!("{}/{}", v["host"].as_str().unwrap_or(""), v["guest"].as_str().unwrap_or("")) }
+fn configurations(v: Value) -> Result<Vec<Value>, String> {
+    let rows = if let Some(rows) = v.get("workers") { rows.as_array().ok_or("Invalid worker list.")?.clone() } else { vec![v] };
+    if rows.is_empty() || rows.len() > 2 { return Err("Configure one or two supported workers.".into()); }
+    let mut seen = BTreeSet::new();
+    for r in &rows {
+        let supported = (r["host"] == "locuchest" && r["guest"] == "100" && r["target"] == "root@192.168.1.69") ||
+            (r["host"] == "cd-floor-01" && r["guest"] == "super-worker-02" && r["target"] == "root@192.168.1.71");
+        if !supported || !seen.insert(worker_id(r)) { return Err("The configured worker is unsupported or duplicated.".into()); }
+        for field in ["identityFile", "knownHosts"] {
+            if !r[field].as_str().is_some_and(|s| Path::new(s).is_absolute() && !s.contains('\0')) { return Err("Invalid worker transport identity.".into()); }
+        }
     }
-    Ok(v)
+    Ok(rows)
+}
+fn configs() -> Result<Vec<Value>, String> {
+    configurations(read(&config_path(|key| std::env::var_os(key))?)?)
+}
+fn worker_label(v: &Value) -> &'static str {
+    if v["host"] == "cd-floor-01" { "super-worker-02 · FreeBSD / bhyve" } else { "super-worker-01 · Proxmox" }
 }
 impl Checks {
     pub fn prepare(
@@ -110,12 +125,13 @@ impl Checks {
         root: &Path,
         task: &str,
         revision: u64,
+        worker: Option<&str>,
     ) -> Result<PathBuf, String> {
         let active = self.0.lock().map_err(|_| "Checks are busy.")?;
         if !active.is_empty() {
             return Err("Wait for the current remote operation.".into());
         }
-        let cfg = config()?;
+        let cfg = configs()?.into_iter().find(|r| worker_id(r) == worker.unwrap_or("locuchest/100")).ok_or("Choose a configured check worker.")?;
         let base = directory(data, &world)?;
         let dirs = fs::read_dir(&base)
             .map_err(err)?
@@ -157,7 +173,7 @@ impl Checks {
         .map_err(err)?;
         save(
             &dir.join("spec.json"),
-            &json!({"id":id,"binding":{"world":[world[0],world[1]],"task":task,"revision":revision}}),
+            &json!({"id":id,"binding":{"world":[world[0],world[1]],"task":task,"revision":revision},"destination":{"host":cfg["host"],"guest":cfg["guest"]}}),
         )?;
         save(&dir.join("transport.json"), &cfg)?;
         let out = Command::new("node")
@@ -230,7 +246,8 @@ impl Checks {
                     }
                 }
                 records.sort_by_key(|r| r["createdAt"].as_u64().unwrap_or(0));
-                Ok(json!({"configured":config().is_ok(),"runs":records}))
+                let workers = configs().unwrap_or_default().iter().map(|v| json!({"id":worker_id(v),"label":worker_label(v)})).collect::<Vec<_>>();
+                Ok(json!({"configured":!workers.is_empty(),"workers":workers,"runs":records}))
             }
             Request::Reconcile { world, id } => {
                 if !valid_id(&id) {
@@ -250,6 +267,15 @@ impl Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn worker_configuration_is_bounded_and_preserves_legacy_destination() {
+        let a=json!({"host":"locuchest","guest":"100","target":"root@192.168.1.69","identityFile":"/private/a","knownHosts":"/private/hosts"});
+        let b=json!({"host":"cd-floor-01","guest":"super-worker-02","target":"root@192.168.1.71","identityFile":"/private/b","knownHosts":"/private/hosts"});
+        assert_eq!(worker_id(&configurations(a.clone()).unwrap()[0]), "locuchest/100");
+        assert_eq!(configurations(json!({"workers":[a.clone(),b]})).unwrap().len(),2);
+        assert!(configurations(json!({"workers":[a.clone(),a.clone()]})).is_err());
+        let mut bad=a;bad["guest"]=json!("super-worker-02");assert!(configurations(bad).is_err());
+    }
     #[test]
     fn saved_settings_and_overrides_are_separate() {
         let dir = std::env::temp_dir().join(format!("fleet-settings-{}", std::process::id()));

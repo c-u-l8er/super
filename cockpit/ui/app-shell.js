@@ -22,7 +22,7 @@ export const screens = [
   ['browser', 'Browser', 'Preview the app running on your machine.'],
   ['agents', 'Agents', 'Peers connected to the runtime.'],
   ['routines', 'Routines', 'Scheduled routines are not projected by this runtime yet.'],
-  ['fleet', 'Fleet & placement', 'Your hosts, hypervisors and guests. Connection observations stay separate from work assignment.'],
+  ['fleet', 'Machines', 'Your connected machines and virtual machines.'],
   ['gates', 'Gates', 'Build-gate measurements are not delivered to this app yet.'],
   ['rulings', 'Rulings', 'An obligation and ruling directory is not connected yet.'],
   ['authority', 'Authority', 'Authority records supplied by the current runtime.'],
@@ -91,8 +91,9 @@ export function bindDisclosure(element, changed = () => {}) {
     summary.setAttribute('aria-expanded', String(open));
   });
 }
+export function registerRecord(record,key,label='View details'){recordRegistry.set(key,{record,key,label});}
 export function detail(record,key,label='View details') {
-  recordRegistry.set(key,{record,key,label});const info=describeRecord(record,key,label);
+  registerRecord(record,key,label);const info=describeRecord(record,key,label);
   const row=node('section',undefined,'record-detail');row.dataset.detail=key;
   const button=node('button',undefined,'record-trigger');button.type='button';button.dataset.recordOpen=key;button.title=info.id??info.kind;
   const copy=node('span',undefined,'record-row-copy');copy.append(node('span',info.title,'record-row-title'),node('span',[info.kind,info.status,info.id,record.host_name,record.goal_ref?readable(record.goal_ref):null,record.repository_ref?readable(record.repository_ref):null].filter(Boolean).join(' · '),'record-row-subtitle'));
@@ -182,7 +183,7 @@ export function initShell() {
   const groups = [
     ['WORK', [['continue-work','Continue work'],['mission','Mission'],['positions','Workspaces'],['goals','Goals'],['development-tasks','Development tasks'],['lanes','Lanes'],['repositories','Repositories'],['editor','Editor'],['terminal','Terminal'],['browser','Browser']]],
     ['SOCIETY', [['agents','Agents'],['capabilities','Capabilities'],['routines','Routines']]],
-    ['COMPUTE', [['fleet','Fleet & placement']]],
+    ['COMPUTE', [['fleet','Machines']]],
     ['TRUTH', [['evidence','Evidence'],['gates','Gates'],['rulings','Rulings']]],
     ['SYSTEM', [['authority','Authority'],['settings','Settings']]],
   ];

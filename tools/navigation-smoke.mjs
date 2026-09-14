@@ -8,7 +8,7 @@ try{
  app=await open({port});await app.until(async()=>(await app.projection()).fleet?.hosts?.length===2,10000,'fleet projection');
  await app.page(`document.querySelector('[data-nav=fleet]').click()`);
  check('Fleet has one frame-owned screen',await app.page(`return document.querySelectorAll('[data-screen=fleet]').length===1&&!document.querySelector('[data-screen=fleet]').hidden`));
- check('Named hosts, bhyve and the actual guest relationship are visible',await app.page(`const s=document.querySelector('[data-screen=fleet]').textContent;return s.includes('bhyve hypervisor')&&s.includes('super-worker-01')&&s.includes('Wifibox')`));await shot('01_Fleet');
+ check('Named hosts and hypervisors are visible',await app.page(`const s=document.querySelector('[data-screen=fleet]').textContent;return s.includes('bhyve')&&s.includes('cd-floor-01')&&s.includes('locuchest')`));await shot('01_Fleet');
  await app.page(`document.querySelector('[data-record-open="machine:proxmox"]').click()`);
  check('Machine opens a dedicated detail page',await app.page(`return document.querySelector('[data-screen=record] h1')?.textContent==='Locuchest'`));await shot('05_Machine');
  await app.page(`document.querySelector('[data-record-tab=work]').click();document.querySelector('[data-record-open="vm:proxmox:100"]').click()`);
@@ -22,14 +22,16 @@ try{
  await app.page(`document.querySelector('#toggle-schematics').click()`);await app.until(()=>app.page(`return !!document.querySelector('[data-schematic-node="host:proxmox:guest:100"]')&&!document.querySelector('.schematic-note').hasAttribute('aria-busy')`),20000,'fleet layout');
  check('Schematic contains distinct hosts and guests',await app.page(`return document.querySelectorAll('[data-schematic-node]').length===5`));await shot('02_Fleet_Schematic');
  await app.page(`document.querySelector('#toggle-schematics').click()`);
- rows[0].observedAt=Date.now()-100000;save();await app.until(()=>app.page(`return document.querySelector('[data-fleet-host=freebsd]').textContent.includes('Observation expired')`),8000,'expiry');
- check('Expired observations withdraw guest state',await app.page(`return document.querySelector('[data-fleet-host=freebsd] .fleet-guests').textContent.includes('unknown')`));
- rows[1].status='unavailable';rows[1].reason='Connection check failed.';rows[1].observedAt=Date.now();save();await app.until(()=>app.page(`return document.querySelector('[data-fleet-host=proxmox]').textContent.includes('Connection needs attention')`),8000,'failure');
- check('Failed host no longer displays prior guest as running',await app.page(`return !document.querySelector('[data-fleet-host=proxmox]').textContent.includes('super-worker-01')`));await shot('03_Connection_Recovery');
- rows[0].observedAt=Date.now();rows[1].status='observed';rows[1].reason='';save();await app.until(()=>app.page(`return document.querySelector('[data-fleet-host=proxmox]').textContent.includes('super-worker-01')`),8000,'recovery');
- check('A new successful observation restores the guest',true);
+ rows[0].observedAt=Date.now()-100000;save();await app.until(()=>app.page(`return document.querySelector('[data-fleet-host=freebsd]').textContent.includes('Out of date')`),8000,'expiry');
+ check('Expired observations are clearly marked',await app.page(`return document.querySelector('[data-fleet-host=freebsd]').textContent.includes('Out of date')`));
+ rows[1].status='unavailable';rows[1].reason='Connection check failed.';rows[1].observedAt=Date.now();save();await app.until(()=>app.page(`return document.querySelector('[data-fleet-host=proxmox]').textContent.includes('Unavailable')`),8000,'failure');
+ check('Failed host no longer displays prior guest as running',await app.page(`return !document.querySelector('[data-fleet-host=proxmox]').textContent.includes('Observed')`));await shot('03_Connection_Recovery');
+ rows[0].observedAt=Date.now();rows[1].status='observed';rows[1].reason='';save();await app.until(()=>app.page(`return document.querySelector('[data-fleet-host=proxmox]').textContent.includes('Observed')`),8000,'recovery');
+ check('A new successful observation restores the host',true);
  await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:720,height:820})});
  check('Small window does not overflow horizontally',await app.page(`return document.documentElement.scrollWidth<=innerWidth+1`));await shot('04_Small_Fleet');
+ await fetch(`http://127.0.0.1:${port}/session/${app.session()}/window/rect`,{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({width:390,height:844})});
+ check('Phone width does not overflow horizontally',await app.page(`return document.documentElement.scrollWidth<=innerWidth+1`));await shot('05_Phone_Fleet');
  save({schema:'invalid'});await app.until(()=>app.page(`return document.querySelector('.fleet-empty')?.textContent.includes('unavailable')`),8000,'bad snapshot');check('Invalid snapshot cannot preserve earlier host inventory',await app.page(`return !document.querySelector('[data-fleet-host]')`));
  writeFileSync(`${out}/checks.json`,JSON.stringify({passed:true,checks},null,2));
 }finally{await app?.close();}

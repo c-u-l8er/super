@@ -9,6 +9,7 @@ ROOT = Path('/var/lib/super-fleet-checks')
 FILES = ['cockpit/ui/task-activity.js', 'tools/fleet-probe.mjs', 'tools/fleet-probe-test.mjs', 'tools/task-activity-test.mjs']
 PROFILE = 'super-fleet-behavior@1'
 LIMIT = 196608
+DESTINATION = ('locuchest', '100')
 
 def digest(b): return hashlib.sha256(b).hexdigest()
 def canonical(v): return json.dumps(v, separators=(',', ':'), ensure_ascii=False).encode()
@@ -28,7 +29,7 @@ def validate(r):
     assert set(b) == {'world','task','revision','head','host','guest','profile'}, 'Invalid binding'
     assert isinstance(b['world'], list) and len(b['world']) == 2 and isinstance(b['world'][0], str) and 0 < len(b['world'][0]) <= 100 and type(b['world'][1]) is int, 'Invalid world'
     assert isinstance(b['task'], str) and re.fullmatch(r'[A-Za-z0-9_-]{1,100}',b['task']) and type(b['revision']) is int and b['revision'] > 0, 'Invalid task'
-    assert re.fullmatch(r'[a-f0-9]{40,64}',b['head']) and b['host'] == 'locuchest' and b['guest'] == '100' and b['profile'] == PROFILE, 'Unsupported destination/profile'
+    assert re.fullmatch(r'[a-f0-9]{40,64}',b['head']) and (b['host'], b['guest']) == DESTINATION and b['profile'] == PROFILE, 'Unsupported destination/profile'
     assert isinstance(r['files'], list) and [f['path'] for f in r['files']] == FILES, 'Unexpected source paths'
     rows = []; contents = []
     for f in r['files']:
@@ -115,6 +116,10 @@ def handle(msg, root=ROOT, runner=execute):
 
 if __name__ == '__main__':
     try:
+        config=Path('/etc/super-fleet-worker.json')
+        if config.exists():
+            c=json.loads(config.read_text()); DESTINATION=(c['host'],c['guest'])
+            assert DESTINATION in [('locuchest','100'),('cd-floor-01','super-worker-02')], 'Invalid installed destination'
         raw=sys.stdin.buffer.read(LIMIT+1); assert len(raw)<=LIMIT, 'Request too large'
         print(json.dumps(handle(json.loads(raw)), ensure_ascii=False))
     except Exception as e:

@@ -11,12 +11,16 @@ export async function atomic(path,value){
  const tmp=path+'.pending';const f=await open(tmp,'w',0o600);try{await f.writeFile(JSON.stringify(value));await f.sync();}finally{await f.close();}await rename(tmp,path);
  const dir=await open(join(path,'..'),'r');try{await dir.sync();}finally{await dir.close();}
 }
-export function capture(repository,binding,id){
+export function destination(value){
+ assert(value&&(value.host==='locuchest'&&value.guest==='100'||value.host==='cd-floor-01'&&value.guest==='super-worker-02'),'Unsupported check destination.');return {host:value.host,guest:value.guest};
+}
+export function capture(repository,binding,id,target={host:'locuchest',guest:'100'}){
+ const selected=destination(target);
  const env={PATH:'/usr/bin:/bin',LANG:'C.UTF-8',GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null',GIT_OPTIONAL_LOCKS:'0'};
  const git=args=>execFileSync('/usr/bin/git',['-c','core.fsmonitor=false','-c','core.hooksPath=/dev/null',...args],{cwd:repository,env,timeout:10000,maxBuffer:65536});
  const head=git(['rev-parse','--verify','HEAD']).toString().trim();assert(/^[a-f0-9]{40,64}$/.test(head),'A saved source commit is required.');
  const files=FILES.map(path=>{const entry=git(['ls-tree',head,'--',path]).toString();assert(/^100(644|755) blob /.test(entry),'The check requires regular committed source files: '+path);const body=git(['show',head+':'+path]);assert(body.length<=32768,'A check file exceeds 32 KiB.');return {path,body:body.toString('base64'),sha256:hash(body)};});
- return {schema:'super-fleet-request@1',id,binding:{...binding,head,host:'locuchest',guest:'100',profile:'super-fleet-behavior@1'},files,snapshot:hash(JSON.stringify(files.map(f=>[f.path,f.sha256])))};
+ return {schema:'super-fleet-request@1',id,binding:{...binding,head,host:selected.host,guest:selected.guest,profile:'super-fleet-behavior@1'},files,snapshot:hash(JSON.stringify(files.map(f=>[f.path,f.sha256])))};
 }
 export function checkedReceipt(value,request){
  assert(value&&value.id===request.id,'Remote request identity did not match.');
@@ -27,7 +31,7 @@ export function checkedReceipt(value,request){
  return {state:value.state==='reserved'?'unknown':value.state,...(value.state==='completed'?{verdict:value.verdict,output:value.output,exitCode:value.exitCode,timedOut:value.timedOut,omittedBytes:value.omittedBytes,nodeSha256:value.nodeSha256}:{}),reason:value.state==='reserved'?'The worker reserved this request; a completed result is not available yet.':value.state==='unknown'?'The worker has no confirmed outcome. This request will not be rerun.':'',startedAt:value.startedAt,finishedAt:value.finishedAt};
 }
 export async function transport(config,message){
- assert(config.host==='locuchest'&&config.guest==='100'&&config.target==='root@192.168.1.69','Unsupported worker configuration.');
+ const selected=destination(config);assert(config.target===(selected.host==='locuchest'?'root@192.168.1.69':'root@192.168.1.71'),'Unsupported worker configuration.');
  for(const key of ['identityFile','knownHosts'])assert(typeof config[key]==='string'&&isAbsolute(config[key])&&!config[key].includes('\0'),'Invalid transport identity.');
  return new Promise((resolve,reject)=>{
  const child=execFile('/usr/bin/ssh',['-F','/dev/null','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o','ForwardAgent=no','-o','ForwardX11=no','-o','ClearAllForwardings=yes','-o','ControlMaster=no','-o','ControlPath=none','-o','ConnectTimeout=6','-o','ConnectionAttempts=1','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','-o','UserKnownHostsFile='+config.knownHosts,'-i',config.identityFile,config.target,'super-fleet-check'],{timeout:60000,killSignal:'SIGKILL',maxBuffer:98304},(error,stdout)=>{if(error)reject(Error('Remote response was lost. Check the saved request status.'));else{try{resolve(JSON.parse(stdout));}catch{reject(Error('Remote response was incomplete. Check the saved request status.'));}}});
@@ -52,7 +56,7 @@ async function main(){
  const [operation,dir,repository]=process.argv.slice(2);
  if(operation==='prepare'){
   const spec=JSON.parse(await readFile(join(dir,'spec.json'),'utf8'));
-  const request=capture(repository,spec.binding,spec.id);await atomic(join(dir,'request.json'),request);
+  const request=capture(repository,spec.binding,spec.id,spec.destination);await atomic(join(dir,'request.json'),request);
   const record={schema:'device-fleet-check@1',createdAt:Date.now(),id:request.id,binding:request.binding,snapshot:request.snapshot,files:FILES,advisory:true,state:'prepared',reason:'Prepared; no remote execution started.'};await atomic(join(dir,'record.json'),record);return record;
  }
  return run(operation,dir);

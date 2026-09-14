@@ -1,5 +1,5 @@
 import {fleetRecords,machineKey,vmKey} from './fleet-records.js';
-import {node,panel,navigate,detail} from './app-shell.js';
+import {node,panel,navigate,registerRecord} from './app-shell.js';
 export const fleetStatus=status=>({observed:'Recently observed',unavailable:'Connection needs attention',stale:'Observation expired'})[status]||'Not observed';
 export function fleetDiagram(fleet){
  const nodes=[{id:'observer',label:'Fleet observer',state:fleet?.status==='configured'?'Inventory connected':'Not connected',detail:'Verified host observations reach this page through the runtime. They do not grant permission to execute work.',route:'fleet'}],edges=[];
@@ -10,13 +10,21 @@ export function fleetDiagram(fleet){
 }
 export function fleetPanel(fleet){
  const root=panel('fleet');root.dataset.fleetView='';
- const intro=node('section',undefined,'fleet-next');intro.append(node('h2','Inspect machines, then check your task'),node('p','Open Continue work to run configured remote checks and read their results. Each check keeps its task revision and committed source; guest inventory alone does not establish worker readiness.'));const check=node('button','Open task checks','subtle');check.type='button';check.onclick=()=>navigate('continue-work',true);intro.append(check);root.append(intro);
- if(fleet?.status!=='configured'){root.append(node('p',fleet?.status==='unconfigured'?'No fleet observer is configured yet.':'Fleet observations are unavailable. Check the local observer connection.','fleet-empty'));return root;}
- const entries=fleetRecords(fleet),byKey=new Map(entries.map(e=>[e.key,e.record]));
- const grid=node('div',undefined,'fleet-grid');for(const h of fleet.hosts??[]){const card=node('section',undefined,'fleet-host'),i=h.inventory;card.dataset.fleetHost=h.id;card.append(detail(byKey.get(machineKey(h.id)),machineKey(h.id),h.label));card.append(node('p',fleetStatus(h.status),'fleet-state'));
-  if(i){card.append(node('p',`${i.os} ${i.release} · ${i.hypervisor==='none'?'Host':i.hypervisor==='bhyve'?'bhyve hypervisor':'Proxmox hypervisor'}`),node('p',`${i.logicalCpus} logical CPUs · ${(i.memoryBytes/2**30).toFixed(1)} GiB RAM${h.status==='observed'?'':' · last observed capacity'}`));}
-  card.append(node('p',`Last check ${new Date(h.observedAt).toLocaleString()}`,'fleet-time'));if(h.reason)card.append(node('p',h.reason));
-  const guests=node('ul',undefined,'fleet-guests');for(const g of i?.guests??[]){const li=node('li');li.append(detail(byKey.get(vmKey(h.id,g.id)),vmKey(h.id,g.id),g.label));guests.append(li);}if(guests.children.length)card.append(node('h3','Guests'),guests);else card.append(node('p',h.status==='observed'?'No guests reported.':'Guest state is unavailable.'));
-  card.append(node('p',h.nextStep,'fleet-next-step'));grid.append(card);
- }root.append(grid);return root;
+ const hosts=fleet?.hosts??[],toolbar=node('div',undefined,'machine-toolbar fleet-next');
+ const count=node('span',`${hosts.length} machine${hosts.length===1?'':'s'}`,'machine-count');
+ const check=node('button','Task checks','subtle');check.type='button';check.onclick=()=>navigate('continue-work',true);toolbar.append(count,check);root.append(toolbar);
+ if(fleet?.status!=='configured'){root.append(node('p',fleet?.status==='unconfigured'?'No machines connected yet. Configure a Fleet observer to add your machines.':'Machine observations are unavailable. Check the observer connection.','fleet-empty'));return root;}
+ for(const e of fleetRecords(fleet))registerRecord(e.record,e.key,e.record.name);
+ const headings=node('div',undefined,'machine-columns');for(const label of ['Machine','Connection','Capacity','VMs',''])headings.append(node('span',label));headings.setAttribute('aria-hidden','true');root.append(headings);
+ const list=node('ul',undefined,'machine-list');
+ for(const h of hosts){
+  const i=h.inventory,observed=h.status==='observed',row=node('li',undefined,'machine-row');row.dataset.fleetHost=h.id;
+  const button=node('button',undefined,'machine-open');button.type='button';button.dataset.recordOpen=machineKey(h.id);button.setAttribute('aria-label',`Open machine ${h.label}, ${h.id}`);
+  const identity=node('span',undefined,'machine-identity');identity.append(node('strong',i?.hostname||h.label),node('span',i?`${i.os} · ${i.hypervisor==='none'?'Physical host':i.hypervisor}`:h.id,'machine-secondary'));
+  const connection=node('span',undefined,'machine-connection');connection.append(node('span',observed?'Observed':h.status==='stale'?'Out of date':'Unavailable','machine-status '+(observed?'is-observed':'needs-attention')),node('span',new Date(h.observedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'}),'machine-secondary'));connection.title=fleetStatus(h.status)+' · '+new Date(h.observedAt).toLocaleString();
+  const capacity=node('span',undefined,'machine-capacity');capacity.append(node('span',i?`${i.logicalCpus} CPUs`:'Not reported'),node('span',i?`${(i.memoryBytes/2**30).toFixed(1)} GiB RAM`:'','machine-secondary'));if(!observed&&i)capacity.title='Last observed capacity';
+  const guests=node('span',i?String(i.guests?.length??0):'—','machine-vm-count');guests.dataset.unit=i?.guests?.length===1?'VM':'VMs';guests.setAttribute('aria-label',i?`${i.guests?.length??0} virtual machines`:'Virtual machine count unavailable');
+  button.append(identity,connection,capacity,guests,node('span','→','machine-arrow'));row.append(button);list.append(row);
+ }
+ root.append(list,node('p','Select a machine to view its details and virtual machines.','machine-help'));return root;
 }
