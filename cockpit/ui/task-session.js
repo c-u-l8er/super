@@ -1,5 +1,5 @@
-let session=null;
-export function publishTaskSession(value){session=value;document.dispatchEvent(new Event('task-session-changed'));}
+let session=null,signature='';
+export function publishTaskSession(value){const next=JSON.stringify(value);if(next===signature)return;signature=next;session=value;document.dispatchEvent(new Event('task-session-changed'));}
 export function taskSessionView(p,task,world,value=session){
   const bot=p?.bots?.[task?.bot_ref];
   if(!p||!task||!bot||!world)return {label:'Session unavailable',detail:'Reconnect to inspect the assigned bot.',available:false};

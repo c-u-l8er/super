@@ -1,3 +1,4 @@
+import {beginTaskActivity,observeTaskActivity} from './task-activity.js';
 import {initBotActivity} from './bot-activity.js';
 import {REVIEW_FILE_BYTES,REVIEW_FILE_LABEL} from './review-limits.js';
 import {worldLineage,taskHistoryLinks} from './task-conversations.js';
@@ -130,7 +131,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     const workers=Object.values(p.workers??{}).filter(w=>!ws||laneIds.has(w.locus_ref)).map(({id,locus_ref,purpose,status,occupancy})=>({id,locus_ref,purpose,status,occupancy}));
     return {available:true,world:f.world,workspace_view:ws||'all',workspaces,goals,lanes,workers,repositories:Object.values(p.repositories??{}).map(({ref})=>({ref}))};
   }
-  function publishSession(){publishTaskSession({botId:bot.id,world:runtimeWorld(current),ready:!!active,reply:taskReply,tasks:taskReplyRefs.length?taskReplyRefs:files.map(f=>editReferences.get(f)?.task).filter(Boolean),prepared:!busy&&files.some(f=>editReferences.get(f)?.task),message:status.textContent});}
+  function publishSession(){publishTaskSession({botId:bot.id,world:runtimeWorld(current),ready:!!active,reply:taskReply,tasks:taskReplyRefs.length?taskReplyRefs:files.map(f=>editReferences.get(f)?.task).filter(Boolean),prepared:!busy&&files.some(f=>editReferences.get(f)?.task),message:taskReply==='Waiting for reply'?'Request in progress. Task activity shows observed assistant output.':status.textContent});}
   new MutationObserver(publishSession).observe(status,{childList:true});
   function refresh() {
     activity.refresh({id:bot.id,name:bot.name,model:active?.model,ready:!!active,pending,busy,hasProposals:proposals.some(p=>p.state==='proposed')});
@@ -255,11 +256,12 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     const frame=live(),origin=worldKey(frame),workspace=selectedWorkspace();
     const turnContext=context();
     taskReplyRefs=sentReferences.map(r=>r.task).filter(Boolean);taskReply='Waiting for reply';
+    const activityId=crypto.randomUUID();beginTaskActivity({id:activityId,botId:bot.id,world:runtimeWorld(current),tasks:taskReplyRefs,provider:active.provider,model:active.model});
     pendingTurn={draft,files:sentFiles,messageCount:messages.length};
     messages.push({role:'user',content:text,attachments:sentFiles});line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();busy=true;refresh();status.textContent=active.provider==='codex'?'Waiting for Codex… Large file replies can take up to five minutes.':`Waiting for ${active.provider}… Replies can take up to ${active.provider==='claude'?'five':'two'} minutes.`;saveCurrent();
     activity.start(['codex','claude'].includes(active.provider));
     replyId=['codex','claude'].includes(active.provider)?crypto.randomUUID():null;
-    if(replyId){const id=replyId,p=active.provider;const poll=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;activity.observe(r);if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
+    if(replyId){const id=replyId,p=active.provider;const poll=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;activity.observe(r);observeTaskActivity(activityId,r);if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
     try {
       const reply=await invoke('bot_chat' ,{turn:{request_id:replyId,provider:active.provider,messages,context:turnContext,bot_instructions:`Name: ${bot.name}\nRole: ${bot.role}\n${bot.instructions}`,effort:effort.value||null}});
       const entry=line('assistant',reply.text||'Review the proposed step below.');
@@ -296,8 +298,8 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
         dismiss.addEventListener('click',()=>{if(busy||a.state!=='proposed')return;a.state='dismissed';result.textContent='Dismissed · no change made';dismiss.disabled=true;messages.push({role:'user',content:`I dismissed the proposed ${a.name} action. It was not executed.`});refresh();});
         proposal.append(result,button,dismiss);entry.append(proposal);
       }
-      activity.finish(false);taskReply='Reply received';pendingTurn=null;status.textContent='Reply received. Proposed steps run only when you apply them.';
-    }catch(error){activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
+      observeTaskActivity(activityId,{type:'finish',text:reply.text||''});activity.finish(false);taskReply='Reply received';pendingTurn=null;status.textContent='Reply received. Proposed steps run only when you apply them.';
+    }catch(error){observeTaskActivity(activityId,{type:'finish',error:true});activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
     finally{replyId=null;clearTimeout(replyPoll);cancelReply.hidden=true;busy=false;saveCurrent();refresh();transcript.lastElementChild?.scrollIntoView({block:'nearest'});}
   });
   historyPicker.addEventListener('change',()=>{if(busy)return;const id=historyPicker.value;if(!saveCurrent()){updateHistory();return;}restoreSaved(id||null);saveCurrent();refresh();});

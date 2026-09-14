@@ -1,5 +1,7 @@
 # [&] Super — Rev W.2.3.3 bundle
 
+**MVP delivery order:** [Current MVP plan](docs/plans/MVP_NEXT.md) — next steps and acceptance gates.
+
 **Active desktop work:** [Schematics plan](docs/plans/SCHEMATICS.md) — app-wide wiring views, live state, tests and visual evidence.
 
 Open **site/index.html**. Best served over http so the proof fetch and the

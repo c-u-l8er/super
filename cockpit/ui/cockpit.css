@@ -466,3 +466,19 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .schematic-zoom span {color:var(--dim);font:12px var(--mono);margin:0 6px;}
 @media(max-width:760px){body.schematics-active #topbar {gap:8px;}.schematic-heading {width:calc(100% - 304px);padding:12px;}.schematic-heading h1 {font-size:16px;}.schematic-inspector {width:260px;}.schematic-levels {gap:4px;}.schematic-levels button {padding:6px;}}
 @media(max-width:560px){.schematic-heading {width:calc(100% - 32px);}.schematic-inspector {top:166px;max-height:calc(100% - var(--schematic-toolbar-height,90px) - 198px);width:260px;}.schematic-zoom {gap:4px;padding:6px;}.schematic-zoom button {padding:5px;}}
+
+.task-activity {margin:18px 0;border:1px solid var(--line);border-radius:10px;background:#142031;padding:12px 14px;}
+.task-activity > summary {cursor:pointer;font:600 13px/1.4 system-ui;color:var(--ink);}
+.task-activity[data-phase=running] {border-color:#73bca3;}
+.task-activity-body {padding-top:6px;}
+.task-activity-body p {font-size:12px;line-height:1.5;margin:10px 0;}
+.task-activity-meta {color:var(--dim);overflow-wrap:anywhere;}
+.task-activity-output {height:160px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;background:#0b1421;border-radius:6px;padding:10px;font:12px/1.5 var(--mono);}
+.task-activity-follow {font-size:12px;color:var(--dim);}
+.task-activity-body details {margin:12px 0;font-size:12px;}
+.task-activity-body ol {padding-left:20px;line-height:1.7;}
+.schematic-task-activity {position:absolute;z-index:3;top:16px;right:16px;width:300px;margin:0;max-height:calc(100% - var(--schematic-toolbar-height,60px) - 48px);overflow:auto;box-shadow:0 8px 28px #0006;}
+.schematic-task-activity .task-activity-output {height:150px;}
+.schematic-inspector {top:var(--schematic-inspector-top,16px);max-height:calc(100% - var(--schematic-inspector-top,16px) - var(--schematic-toolbar-height,60px) - 32px);}
+@media(max-width:760px){.schematic-task-activity {width:260px;}}
+@media(max-width:560px){.schematic-task-activity {top:166px;max-height:calc(100% - var(--schematic-toolbar-height,90px) - 198px);}}

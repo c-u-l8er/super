@@ -1,0 +1,33 @@
+// Session-only observations. No provider credentials, runtime mutations or timers.
+export const ACTIVITY_TEXT_LIMIT=8000;
+export const ACTIVITY_EVENT_LIMIT=8;
+const requests=new Map();
+const changed=()=>document.dispatchEvent(new Event('task-activity-changed'));
+const text=value=>typeof value==='string'?value:'';
+function event(state,label,at){if(state.events.at(-1)?.label!==label)state.events=[...state.events,{label,at}].slice(-ACTIVITY_EVENT_LIMIT);}
+export function activityStart(value,at=Date.now()){
+ return {id:value.id,botId:value.botId,world:value.world,tasks:(value.tasks??[]).map(t=>({...t})),provider:text(value.provider),model:text(value.model),status:'running',phase:'Waiting for provider',text:'',bytes:0,started:at,updated:at,events:[{label:'Request sent',at}]};
+}
+export function activityUpdate(previous,update,at=Date.now()){
+ if(!previous||previous.status!=='running'||update.id!==previous.id)return previous;
+ const next={...previous,events:[...previous.events]},bytes=Number.isFinite(update.received_bytes)?Math.max(previous.bytes,update.received_bytes):previous.bytes;
+ if(update.type==='finish'){
+  next.status=update.error?'stopped':'complete';next.phase=update.error?'Reply stopped':'Reply complete';
+  if(typeof update.text==='string')next.text=update.text.slice(-ACTIVITY_TEXT_LIMIT);
+  event(next,next.phase,at);
+ }else{
+  if(update.cancelled){next.phase='Cancelling reply';event(next,next.phase,at);}
+  else if(bytes>previous.bytes||text(update.text)!==''&&text(update.text).slice(-ACTIVITY_TEXT_LIMIT)!==previous.text){next.phase='Receiving reply';if(!previous.text&&!previous.bytes)event(next,'Assistant text received',at);}
+  else if(update.active&&next.phase==='Waiting for provider'){next.phase='Provider working';event(next,'Provider started',at);}
+  next.bytes=bytes;if(typeof update.text==='string'&&update.text)next.text=update.text.slice(-ACTIVITY_TEXT_LIMIT);
+ }
+ if(next.phase===previous.phase&&next.bytes===previous.bytes&&next.text===previous.text&&next.status===previous.status)return previous;
+ next.updated=at;return next;
+}
+export function beginTaskActivity(value){if(!value.id||requests.has(value.id))return;requests.set(value.id,activityStart(value));while(requests.size>8)requests.delete(requests.keys().next().value);changed();}
+export function observeTaskActivity(id,value){const before=requests.get(id),next=activityUpdate(before,{...value,id});if(next&&next!==before){requests.set(id,next);changed();}}
+export function taskActivityFor(p,task,world,values=[...requests.values()]){
+ if(!p||!task||!world||['completed','cancelled'].includes(task.status))return null;
+ const bot=p.bots?.[task.bot_ref];if(!bot)return null;
+ return [...values].reverse().find(v=>v.world===world&&v.botId===bot.client_ref&&v.tasks.some(t=>t.id===task.id&&t.revision===task.revision&&t.world===world))??null;
+}

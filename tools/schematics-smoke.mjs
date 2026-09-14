@@ -13,7 +13,7 @@ try{
  const ws=await app.create('open_workspace',{name:'Focus fixture'},{kind:'workspaces',field:'name',value:'Focus fixture'});
  const goal=await app.create('open_goal',{workspace_ref:ws.record.id,title:'Finish a clear next step'},{kind:'goals',field:'title',value:'Finish a clear next step'});
  const bot=await app.create('register_bot',{client_ref:'focus-fixture',workspace_ref:ws.record.id,name:'Focus builder',role:'Builder',group:'Tests',provider:'claude',instructions:'Fixture'},{kind:'bots',field:'client_ref',value:'focus-fixture'});
- const folder=mkdtempSync((process.env.DEVELOPMENT_TEST_ROOT||'/tmp')+'/focus-repo-');execFileSync('git',['init','-q',folder]);writeFileSync(folder+'/sample.txt','A real Editor fixture.');
+ const folder=mkdtempSync((process.env.DEVELOPMENT_TEST_ROOT||'/tmp')+'/focus-repo-');execFileSync('git',['init','-q',folder]);writeFileSync(folder+'/sample.txt','A real Editor fixture.');execFileSync('git',['-C',folder,'add','sample.txt']);execFileSync('git',['-C',folder,'-c','user.name=Super fixture','-c','user.email=fixture@example.invalid','commit','-qm','Initial source']);
  await app.page(`document.querySelector('[data-nav="repositories"]').click();document.querySelector('[data-host-action="choose-repository"]').click()`);
  await new Promise(r=>setTimeout(r,800));execFileSync('/usr/bin/python3',['tools/development-confirm-folder.py',String(process.pid),folder],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});
  const repo=await app.until(async()=>(await app.list('repositories'))[0],10000,'repository');
@@ -122,6 +122,46 @@ try{
  await app.page(`document.querySelector('[data-schematic-zoom=out]').click();document.querySelector('[data-schematic-zoom=out]').click()`);
  await app.page(`document.querySelector('[data-schematic-zoom=all]').click()`);
  await shot('08_Editor_Internals');
+ // A local provider fixture exercises actual send/completion wiring. Its
+ // controlled observation below stands in for the managed-provider polling payload.
+ let heldReply=null,chatCalls=0;
+ const providerFixture=createServer((req,res)=>{if(req.url==='/api/tags'){res.setHeader('content-type','application/json');res.end(JSON.stringify({models:[{name:'activity-fixture'}]}));return;}req.resume();req.on('end',()=>{chatCalls++;heldReply=res;});});
+ await new Promise(r=>providerFixture.listen(0,'127.0.0.1',r));
+ try{
+ await app.page(`document.querySelector('#toggle-schematics').click();document.querySelector('#editor-discuss').click()`);
+ await app.until(()=>app.page(`return !document.querySelector('#bot-provider').disabled&&document.querySelector('#bot-surface').dataset.screen==='bot:focus-fixture'`),15000,'assigned bot').catch(async e=>{console.log(await app.page(`return {editor:document.querySelector('#editor-status').textContent,bot:document.querySelector('#bot-status').textContent,route:document.querySelector('#bot-surface').dataset.screen}`));throw e;});
+ await app.page(`const p=document.querySelector('#bot-provider');p.value='ollama';p.dispatchEvent(new Event('change'))`);
+ await app.until(()=>app.page(`return !document.querySelector('#bot-provider').disabled`),15000,'provider selection');
+ await app.page(`document.querySelector('#bot-endpoint').value=arguments[0];document.querySelector('#bot-connect').click()`,['http://127.0.0.1:'+providerFixture.address().port]);
+ await app.until(()=>app.page(`return !document.querySelector('#bot-send').disabled`),15000,'local fixture ready');
+ await app.page(`window.schematicNavigate('editor');document.querySelector('#editor-discuss').click()`);
+ await app.until(()=>app.page(`return document.querySelector('#bot-attachment-list').textContent.includes('sample.txt')`),10000,'task file attached');
+ await app.page(`document.querySelector('#bot-message').value='Describe this fixture file';document.querySelector('#bot-send').click();document.querySelector('#focus-home').click()`);
+ await app.until(async()=>heldReply&&await app.page(`return document.querySelector('#work-focus [data-task-activity]').dataset.phase==='running'`),10000,'request observed');
+ check('A real app request appears in Continue work while the provider is still pending',chatCalls===1&&await app.page(`return document.querySelector('#work-focus [data-task-activity]').open&&document.querySelector('#work-focus [data-task-activity]').textContent.includes('Request sent')`));
+ await app.page(`import('./task-activity.js').then(m=>{window.taskActivityModule=m;const w=window.cockpit.frame.world,world=JSON.stringify([w.world_incarnation,w.world_generation,w.projection_epoch]),p=window.cockpit.frame.projection;const value=m.taskActivityFor(p,p.development_tasks[arguments[0]],world);window.observedRequest=value.id;m.observeTaskActivity(value.id,{active:true,received_bytes:94,text:'Test provider observation: inspecting sample.txt. A reviewed change will need your approval.'});})`,[tasks[1].id]);
+ await app.until(()=>app.page(`return document.querySelector('#work-focus .task-activity-output').textContent.includes('Test provider observation')`),10000,'observed text');
+ await shot('13_Task_Activity');
+ await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();
+ check('Schematics shows matching request text and events without opening the conversation',await app.page(`return document.querySelector('#schematics .task-activity-output').textContent.includes('Test provider observation')&&document.querySelector('#schematics [data-task-activity]').textContent.includes('Assistant text received')`));
+ await shot('14_Schematic_Activity');
+ await app.page(`window.activityNode=document.querySelector('[data-schematic-node=bot]');window.taskActivityModule.observeTaskActivity(window.observedRequest,{active:true,received_bytes:120,text:'Test provider observation: inspection complete; preparing the answer.'})`);
+ check('Incoming text updates keep graph nodes mounted',await app.page(`return window.activityNode===document.querySelector('[data-schematic-node=bot]')&&document.querySelector('#schematics .task-activity-output').textContent.includes('preparing the answer')`));
+ heldReply.setHeader('content-type','application/json');heldReply.end(JSON.stringify({message:{role:'assistant',content:'Fixture reply: sample.txt is ready for a reviewed change.'},done:true}));heldReply=null;
+ await app.until(()=>app.page(`return document.querySelector('#schematics [data-task-activity]').dataset.phase==='complete'`),10000,'reply complete');
+ check('Provider completion updates task activity without applying files',await app.page(`return document.querySelector('#schematics .task-activity-output').textContent.includes('Fixture reply:')&&window.cockpit.frame.projection.development_tasks[arguments[0]].status==='planned'`,[tasks[1].id]));
+ await shot('15_Reply_Complete');
+ await app.page(`document.querySelector('#toggle-schematics').click();document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:arguments[0]}}))`,[tasks[0].id]);
+ check('A different task cannot display this request or its text',await app.page(`return document.querySelector('#work-focus .task-activity-output').hidden&&document.querySelector('#work-focus [data-task-activity]').textContent.includes('No request observed')`));
+ await app.page(`document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:arguments[0]}}));document.querySelector('#toggle-schematics').click()`,[tasks[1].id]);await ready();
+ await app.page(`document.querySelector('#toggle-schematics').click();window.schematicNavigate('editor');document.querySelector('#editor-discuss').click()`);
+ await app.until(()=>app.page(`return document.querySelector('#bot-attachment-list').textContent.includes('sample.txt')&&!document.querySelector('#bot-send').disabled`),10000,'fresh task attachment');
+ await app.page(`document.querySelector('#bot-message').value='Retryable fixture request';document.querySelector('#bot-send').click();document.querySelector('#focus-home').click()`);
+ await app.until(async()=>!!heldReply,10000,'second request');heldReply.statusCode=503;heldReply.end('{}');heldReply=null;
+ await app.until(()=>app.page(`return document.querySelector('#work-focus [data-task-activity]').dataset.phase==='stopped'`),10000,'stopped request');
+ check('Provider failure stops activity and restores the message without retrying',chatCalls===2&&await app.page(`return document.querySelector('#bot-message').value==='Retryable fixture request'&&document.querySelector('#work-focus [data-task-activity]').textContent.includes('Nothing is resent automatically')`));
+ await app.page(`document.querySelector('#toggle-schematics').click()`);await ready();
+ }finally{if(heldReply){heldReply.statusCode=503;heldReply.end('{}');}providerFixture.close();}
  await app.page(`window.schematicNavigate('bots')`);await ready();await app.page(`document.querySelector('[data-schematic-node=request]').click()`);
  check('Bot schematic exposes request and reply internals',await app.page(`return !!document.querySelector('[data-schematic-node=request]')&&!!document.querySelector('[data-schematic-node=reply]')`));
  await shot('09_Bot_Internals');
@@ -139,5 +179,7 @@ try{
  check('Leaving the schematic restores the Browser page',await app.page(`return !document.querySelector('[data-screen=browser]').hidden`));
  await app.native('browser_surface',{action:'close'});
  }finally{server.close();}
+ await app.page(`location.reload()`);await app.until(()=>app.page(`return !!document.querySelector('#work-focus [data-task-activity]')&&!!window.cockpit?.frame?.projection`),15000,'reloaded activity');
+ check('Reload does not resurrect old output as a live request',await app.page(`return document.querySelector('#work-focus [data-task-activity]').dataset.phase==='none'&&document.querySelector('#work-focus .task-activity-output').hidden`));
  writeFileSync(`${out}/checks.json`,JSON.stringify({passed:true,checks},null,2));
 }finally{if(app)await app.close();}

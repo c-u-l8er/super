@@ -68,3 +68,19 @@ Validation: 169 behavior tests and 33 native checks passed. Large, small and nar
 Investigating the frozen desktop exposed an idle feedback loop below the UI: terminal status derivation recorded worker-not-open / worker-not-occupied refusals, which advanced the projection clock and retriggered the same reads. Status and current-binding checks now derive reasons without logging; actual resolution still records refusals. Worker status shares its occupancy conditions with the action decision without producing an event on failure.
 
 A saved-world copy went from 39 frames in a 1.5-second idle interval to no changes. Validation: 39 terminal tests, 17 authority source checks and 35 native checks passed, including idle workers and a normal-duration pointer click. Ten older worker/worktree test failures were reproduced unchanged on the baseline and are documented separately. Evidence: `outputs/freeze-fix/` in the development workspace.
+
+
+### Task activity — request observations across work surfaces
+
+Continue work and detailed task schematics now show the matching request's status,
+last observed assistant text, and bounded lifecycle events. The activity panel floats
+separately from graph controls; opening it does not push the graph down. It keeps
+at most eight recent requests, eight events per request and the last 8,000 text
+characters in memory. Nothing is restored as live activity after reload.
+
+Managed-provider polling feeds observed output into the view; providers that return
+only a final reply show waiting then completion. Counts describe received assistant
+text bytes, not tokens. Repeated identical observations produce no activity event.
+Task revision, assigned bot and complete runtime-session identity must match, and
+late callbacks cannot revive a finished request. This is request observation, not
+per-edge execution proof or WRL tracing. Next deliveries are ordered in MVP_NEXT.md.
