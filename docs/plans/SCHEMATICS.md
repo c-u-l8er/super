@@ -53,3 +53,11 @@ User feedback: improve the connection lines and replace the grid arrangement wit
 Validation: 169 behavior tests and 26 native checks passed. Geometry checks exercise actual work-screen flows in both directions, the app connection graph, cycles, self-loops, duplicate edges and disconnected nodes. Node rectangles do not overlap; routed orthogonal segments do not cross node interiors. Duplicate connections have distinct ports. Native checks include direction changes with retained selection, fitting the full graph, rapid toggles, every screen, Editor file state and browser surface coverage. Screenshots in `outputs/schematics-3/` were visually inspected. A whole-app fit is an overview; zoom and the inspector provide readable detail.
 
 Dependency provenance, SHA-256 and EPL-2.0 license are retained under `cockpit/ui/vendor/`. Primary algorithm reference: https://eclipse.dev/elk/reference/algorithms/org-eclipse-elk-layered.html . No library download is needed at runtime. Remaining screen internals and actual event instrumentation continue as the next plan work.
+
+### Fourth increment — full-canvas editor workspace
+
+Schematics now occupies the entire width and height below Super's existing header. View selection and the diagram description float at the top left, selected-component details float at the top right, and zoom/flow controls float along the bottom. The plan remains discoverable under About this diagram. Details can be hidden and reopened without clearing the selected component. Dragging empty canvas pans the graph; scrollbars and keyboard navigation remain available.
+
+Fit diagram reserves the floating panels' footprints while the canvas itself retains its full bounds. Resizing recalculates placement and keeps a wrapping toolbar clear of the inspector. Normal zoom supports reading and exploring individual components; fitting a large graph is an overview.
+
+Validation: 169 behavior tests and 33 native checks passed. Large, small and narrow window screenshots were visually inspected. Evidence is saved in `outputs/schematics-4/` in the development workspace: behavior test output, native geometry/navigation/panning checks, large and small window screenshots, and saved-world installation verification. The remaining internals and observed event tracing in steps 4–5 remain future work.
