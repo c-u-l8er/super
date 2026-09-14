@@ -175,3 +175,11 @@ The app then ran eleven tests successfully again on this configuration, request
 same saved task revision and committed snapshot. General worker placement,
 proposal acceptance using remote evidence, a physical network-outage drill,
 and a separate FreeBSD bhyve Linux guest remain future gates.
+
+### Standalone launch persistence
+
+Fleet now supports saved local settings as well as explicit launch overrides.
+See [device settings and the FreeBSD next gate](FLEET_DEVICE_SETTINGS.md).
+The native fixture harness isolates its configuration directory. Verification
+must prove the installed app restores observations and retained check receipts
+with both temporary Fleet environment variables removed.

@@ -1,6 +1,23 @@
 defmodule Ampd.FleetTest do
   use ExUnit.Case, async: false
   alias Ampd.Fleet
+  test "saved device settings survive launches and explicit overrides win" do
+    dir = Path.join(System.tmp_dir!(), "fleet-settings-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(Path.join(dir, "super"))
+    on_exit(fn -> File.rm_rf!(dir) end)
+    env = %{"XDG_CONFIG_HOME" => dir}
+    path = Path.join(dir, "super/fleet.json")
+    assert Fleet.snapshot_path(env) == nil
+    File.write!(path, JSON.encode!(%{"schema" => "super-device-fleet@1", "snapshotPath" => "/device/snapshot.json"}))
+    assert Fleet.snapshot_path(env) == "/device/snapshot.json"
+    assert Fleet.snapshot_path(Map.put(env, "SUPER_FLEET_SNAPSHOT", "")) == nil
+    assert Fleet.snapshot_path(Map.put(env, "SUPER_FLEET_SNAPSHOT", "/override")) == "/override"
+    for bytes <- ["{", JSON.encode!(%{"schema" => "wrong", "snapshotPath" => "/device/snapshot.json"}), JSON.encode!(%{"schema" => "super-device-fleet@1", "snapshotPath" => "relative"}), String.duplicate("x", 65_537)] do
+      File.write!(path, bytes)
+      assert Fleet.snapshot_path(env) == nil
+    end
+    assert Fleet.snapshot_path(%{"XDG_CONFIG_HOME" => "relative"}) == nil
+  end
   defp host do
     %{"id" => "freebsd", "label" => "FreeBSD research", "status" => "observed", "observedAt" => 100_000,
       "reason" => "", "nextStep" => "Prepare a bhyve guest", "inventory" => %{"hostname" => "cd-floor-01", "os" => "FreeBSD", "release" => "15.1", "hypervisor" => "bhyve", "logicalCpus" => 16, "memoryBytes" => 30_000_000_000, "guests" => [%{"id" => "wifibox", "label" => "Wifibox", "status" => "present"}]}}

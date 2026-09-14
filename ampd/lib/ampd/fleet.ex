@@ -10,10 +10,38 @@ defmodule Ampd.Fleet do
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
   def projection, do: GenServer.call(__MODULE__, :projection)
   def init(_) do
-    path = System.get_env("SUPER_FLEET_SNAPSHOT")
+    path = snapshot_path()
     send(self(), :refresh)
     {:ok, %{path: path, view: empty(if(path, do: "unavailable", else: "unconfigured"))}}
   end
+  # Device settings are local operator input, never part of the world projection.
+  # An explicit empty override disables observation, even when settings are saved.
+  def snapshot_path(env \\ System.get_env()) do
+    case Map.fetch(env, "SUPER_FLEET_SNAPSHOT") do
+      {:ok, ""} -> nil
+      {:ok, path} -> path
+      :error -> saved_snapshot_path(env)
+    end
+  end
+  defp saved_snapshot_path(env) do
+    base = absolute(env["XDG_CONFIG_HOME"]) ||
+      case absolute(env["HOME"]) do
+        nil -> nil
+        home -> Path.join(home, ".config")
+      end
+    with base when is_binary(base) <- base,
+         {:ok, bytes} when is_binary(bytes) and byte_size(bytes) <= @limit <-
+           File.open(Path.join(base, "super/fleet.json"), [:read, :binary], &IO.binread(&1, @limit + 1)),
+         {:ok, %{"schema" => "super-device-fleet@1", "snapshotPath" => path}} <- JSON.decode(bytes) do
+      absolute(path)
+    else
+      _ -> nil
+    end
+  rescue
+    _ -> nil
+  end
+  defp absolute(path) when is_binary(path), do: if(Path.type(path) == :absolute, do: path)
+  defp absolute(_), do: nil
   def handle_call(:projection, _, state), do: {:reply, state.view, state}
   def handle_info(:refresh, state) do
     view = if state.path, do: read(state.path), else: empty("unconfigured")

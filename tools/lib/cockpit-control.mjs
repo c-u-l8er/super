@@ -91,7 +91,7 @@ export async function open({
   mkdirSync(temp, {recursive: true});
   const world = real
     ? {AMPD_DIR: `${ROOT}/ampd`}
-    : {AMPD_DIR: `${ROOT}/ampd`, XDG_DATA_HOME: `${temp}/data`, XDG_STATE_HOME: `${temp}/state`,
+    : {AMPD_DIR: `${ROOT}/ampd`, XDG_DATA_HOME: `${temp}/data`, XDG_CONFIG_HOME: `${temp}/config`, XDG_STATE_HOME: `${temp}/state`,
        SUPER_WORLD_MODE: 'ephemeral'};
 
   const driver = spawn('tauri-driver',

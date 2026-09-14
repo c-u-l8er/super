@@ -77,9 +77,25 @@ fn valid_id(id: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
-fn config() -> Result<Value, String> {
-    let path = std::env::var_os("SUPER_FLEET_CHECK_CONFIG")
+// Explicit overrides (including empty = disabled) never fall back to saved settings.
+fn config_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathBuf, String> {
+    if let Some(path) = env("SUPER_FLEET_CHECK_CONFIG") {
+        return if path.is_empty() {
+            Err("Remote checks are disabled for this launch.".into())
+        } else { Ok(PathBuf::from(path)) };
+    }
+    let base = env("XDG_CONFIG_HOME").map(PathBuf::from).filter(|p| p.is_absolute())
+        .or_else(|| env("HOME").map(PathBuf::from).filter(|p| p.is_absolute()).map(|p| p.join(".config")))
         .ok_or("Remote checks are not configured on this device.")?;
+    let saved = read(&base.join("super/fleet.json"))?;
+    if saved["schema"] != "super-device-fleet@1" {
+        return Err("Unsupported saved fleet settings.".into());
+    }
+    saved["checksConfigPath"].as_str().map(PathBuf::from).filter(|p| p.is_absolute())
+        .ok_or("Remote checks are not configured on this device.".into())
+}
+fn config() -> Result<Value, String> {
+    let path = config_path(|key| std::env::var_os(key))?;
     let v = read(Path::new(&path))?;
     if v["host"] != "locuchest" || v["guest"] != "100" || v["target"] != "root@192.168.1.69" {
         return Err("The configured worker is not supported.".into());
@@ -234,6 +250,23 @@ impl Checks {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_settings_and_overrides_are_separate() {
+        let dir = std::env::temp_dir().join(format!("fleet-settings-{}", std::process::id()));
+        fs::create_dir_all(dir.join("super")).unwrap();
+        let path = dir.join("super/fleet.json");
+        fs::write(&path, br#"{"schema":"super-device-fleet@1","checksConfigPath":"/device/checks.json"}"#).unwrap();
+        let env = |key: &str| if key == "XDG_CONFIG_HOME" { Some(dir.clone().into_os_string()) } else { None };
+        assert_eq!(config_path(env).unwrap(), PathBuf::from("/device/checks.json"));
+        assert!(config_path(|key| if key == "SUPER_FLEET_CHECK_CONFIG" { Some("".into()) } else { env(key) }).is_err());
+        assert_eq!(config_path(|key| if key == "SUPER_FLEET_CHECK_CONFIG" { Some("/override".into()) } else { env(key) }).unwrap(), PathBuf::from("/override"));
+        for bytes in [r#"{"schema":"wrong","checksConfigPath":"/device/checks.json"}"#, r#"{"schema":"super-device-fleet@1","checksConfigPath":"relative"}"#, "{"] {
+            fs::write(&path, bytes).unwrap(); assert!(config_path(env).is_err());
+        }
+        fs::remove_file(&path).unwrap(); assert!(config_path(env).is_err());
+        fs::remove_dir_all(dir).unwrap();
+        assert!(config_path(|key| if key == "XDG_CONFIG_HOME" { Some("relative".into()) } else { None }).is_err());
+    }
     #[test]
     fn request_ids_never_supply_paths() {
         for s in [
