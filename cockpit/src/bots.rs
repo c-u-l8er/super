@@ -46,6 +46,8 @@ pub struct Attachment {
 #[derive(Deserialize)]
 pub struct Turn {
     #[serde(default)]
+    pub expected_model: Option<String>,
+    #[serde(default)]
     pub visual_review: Option<Value>,
     #[serde(default)]
     pub request_id: Option<String>,
@@ -546,6 +548,7 @@ pub async fn chat(
         .get(&turn.provider)
         .cloned()
         .ok_or("Configure this provider first.")?;
+    if turn.expected_model.as_ref().is_some_and(|model|model.is_empty()||model!=&config.model){return Err("The connected model changed. Select it again before sending.".into());}
     let used_model = config.model.clone();
     if ["codex", "claude"].contains(&turn.provider.as_str()) {
         let schema = json!({"type":"object","properties":{"text":{"type":"string"},"actions":{"type":"array","maxItems":8,"items":{"anyOf":definitions().iter().map(|d|json!({"type":"object","properties":{"name":{"const":d["name"],"type":"string"},"args":d["parameters"]},"required":["name","args"],"additionalProperties":false})).collect::<Vec<_>>()}}},"required":["text","actions"],"additionalProperties":false});
@@ -732,6 +735,7 @@ mod tests {
         };
         for p in ["openai", "anthropic", "ollama"] {
             let t = Turn {
+                expected_model: None,
                 visual_review: None,
                 request_id: None,
                 provider: p.into(),

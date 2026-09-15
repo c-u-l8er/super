@@ -1,9 +1,10 @@
 import http from 'node:http';
+import {sessionStore} from './session-store.mjs';
 import {createHash, randomBytes, randomUUID, timingSafeEqual} from 'node:crypto';
 import {readFile, rename, writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {createInterface} from 'node:readline';
-const assets = new Map([['/', ['ui/index.html','text/html']], ['/app.js',['ui/app.js','text/javascript']], ['/style.css',['ui/style.css','text/css']], ['/task-progress.js',['../cockpit/ui/task-progress.js','text/javascript']], ['/review-test-coverage.js',['../cockpit/ui/review-test-coverage.js','text/javascript']]]);
+const assets = new Map([['/conversations.js',['ui/conversations.js','text/javascript']],['/', ['ui/index.html','text/html']], ['/app.js',['ui/app.js','text/javascript']], ['/style.css',['ui/style.css','text/css']], ['/task-progress.js',['../cockpit/ui/task-progress.js','text/javascript']], ['/review-test-coverage.js',['../cockpit/ui/review-test-coverage.js','text/javascript']]]);
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 // App or browser, and nothing finer. The two hold separate sessions and each
 // needs its own code, which is the only distinction worth reporting; the raw
@@ -11,11 +12,12 @@ const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength
 const kindOf=ua=>!ua?'unknown':/Expo|okhttp|CFNetwork/i.test(ua)?'app':/Mozilla/i.test(ua)?'browser':'other';
 // Distinguishes two devices without exposing either session. One way, truncated.
 const deviceId=token=>createHash('sha256').update('super-mobile-device:'+token).digest('hex').slice(0,6);
-export function createGateway({snapshot, screenshots=async()=>({available:false}), pairingCode, origin, now=Date.now, onDevices}) {
+export function createGateway({snapshot, conversations=async()=>({available:false}), conversation=async()=>({error:"Conversation channel unavailable."}), screenshots=async()=>({available:false}), pairingCode, origin, now=Date.now, onDevices, sessionFile}) {
   const publicURL=new URL(origin);
   if(publicURL.origin!==origin || (publicURL.protocol!=='https:' && !(publicURL.protocol==='http:'&&['localhost','127.0.0.1'].includes(publicURL.hostname)))) throw Error('Use HTTPS, or loopback HTTP for development.');
   let pairUntil=now()+600_000, used=false, failures=0, windowEnd=now()+60_000;
-  const sessions=new Map(), secure=publicURL.protocol==='https:';
+  const persistence=sessionFile?sessionStore(sessionFile,origin,now):null;
+  const sessions=new Map(persistence?.load()??[]), secure=publicURL.protocol==='https:';
   // Who is reading, for the desktop to show. Identifiers are derived from the
   // session one way; no token, cookie or user agent leaves this map.
   let published='';
@@ -51,13 +53,25 @@ export function createGateway({snapshot, screenshots=async()=>({available:false}
         if(used||now()>pairUntil||!equal(body.code,pairingCode)){failures++;return send(401,{error:'Pairing code invalid, used, or expired. Ask the desktop for a fresh code.'});}
         used=true;const token=randomBytes(32).toString('hex');const at=now();
         sessions.set(token,{expires:at+28_800_000,pairedAt:at,lastSeen:at,kind:kindOf(req.headers['user-agent'])});
+        try{persistence?.save(sessions);}catch{sessions.delete(token);used=false;throw Error('Pairing could not be retained.');}
         publish();
         return send(200,{paired:true},{'Set-Cookie':cookie(token)});
       }
       if(!sessions.has(sid))return send(401,{error:'Pair this device to view Super.'});
       sessions.get(sid).lastSeen=now();publish();
-      if(req.url==='/api/logout'&&req.method==='POST'){sessions.delete(sid);publish();return send(200,{paired:false},{'Set-Cookie':cookie('',0)});}
+      if(req.url==='/api/logout'&&req.method==='POST'){const previous=sessions.get(sid);sessions.delete(sid);try{persistence?.save(sessions)}catch{sessions.set(sid,previous);throw Error('Disconnect could not be retained.');}publish();return send(200,{paired:false},{'Set-Cookie':cookie('',0)});}
       if(req.method==='GET'&&/^\/api\/screenshots\?task=[A-Za-z0-9_-]{1,100}$/.test(req.url)){const value=await screenshots(new URL(req.url,origin).searchParams.get('task'));if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});return send(200,value);}
+      if(req.url==='/api/conversations'&&req.method==='GET'){
+        const value=await conversations();if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});return send(200,value);
+      }
+      if(req.url==='/api/conversation'&&req.method==='POST'){
+        if(req.headers['content-type']!=='application/json')return send(415,{error:'JSON required.'});
+        const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>12000)return send(413,{error:'Conversation request too large.'});chunks.push(chunk);}
+        let request;try{request=JSON.parse(Buffer.concat(chunks).toString('utf8'))}catch{return send(400,{error:'Invalid JSON.'})}
+        if(!request||Array.isArray(request)||typeof request!=='object')return send(400,{error:'Conversation request required.'});
+        if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});
+        return send(200,await conversation(request));
+      }
       if(req.url==='/api/snapshot'&&req.method==='GET'){
         let timer;try{const value=await Promise.race([snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('timeout')),2500);})]);
           // Recheck revocation and expiry after waiting for the host.
@@ -107,13 +121,13 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
     if(r.operation==='renew'){void renew();return;}
     const held=pending.get(r.id);if(held){held.resolve(r.snapshot);clearTimeout(held.timer);pending.delete(r.id);}
   }catch{}});
-  const ask=(operation,task)=>{
+  const ask=(operation,task,request)=>{
     if(pending.size>=8)return Promise.reject(Error('Host busy'));
     const id=randomUUID();let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});
     const timer=setTimeout(()=>{pending.delete(id);reject(Error('Host timeout'));},2000);
-    pending.set(id,{resolve,reject,timer});process.stdout.write(JSON.stringify({operation,id,...(task?{task}:{})})+'\n');return promise;
+    pending.set(id,{resolve,reject,timer});process.stdout.write(JSON.stringify({operation,id,...(task?{task}:{}),...(request?{request}:{})})+'\n');return promise;
   };
-  const snapshot=()=>ask('snapshot'),screenshots=task=>ask('screenshots',task);
+  const snapshot=()=>ask('snapshot'),screenshots=task=>ask('screenshots',task),conversations=()=>ask('conversations'),conversation=request=>ask('conversation',null,request);
   // Who is paired, for the desktop to show. A sibling of the pairing file, so
   // it inherits that directory's privacy and lifetime; written then renamed so
   // a reader never sees half of one. It carries derived identifiers only — no
@@ -127,7 +141,7 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
       await rename(devicesFile+'.new',devicesFile);
     }).catch(()=>{});
   };
-  const server=createGateway({snapshot,screenshots,pairingCode:code,origin,onDevices});
+  const server=createGateway({snapshot,screenshots,conversations,conversation,pairingCode:code,origin,onDevices,sessionFile:process.env.SUPER_MOBILE_SESSION_FILE});
   // Exclusive creation refuses old files and symlinks; never log the code.
   await writeFile(pairFile,code+'\n',{mode:0o600,flag:'wx'});
   // Written then renamed, like the devices file beside it, so a desktop

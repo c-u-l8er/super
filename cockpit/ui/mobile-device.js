@@ -54,7 +54,7 @@ function devicesNode(node, list) {
     rows.append(row);
   }
   section.append(rows);
-  section.append(node('p', 'Each holds a read-only session. Restarting the observer ends every one of them.', 'mobile-code-note'));
+  section.append(node('p', 'Each holds a paired session for task observation and shared conversations. Sessions expire after eight hours. Hosts with session persistence keep them through restarts.', 'mobile-code-note'));
   return section;
 }
 
@@ -292,7 +292,7 @@ export function mobileDevice({node, panel, card}) {
      'Nothing older than three seconds — a stale observation is withdrawn, not shown'],
     'mobile-list');
 
-  list('What it can never do',
+  list('Operations not available on the phone',
     'Not a setting, and not a permission you can grant it. These operations are absent from the companion:',
     ['Approve, merge or deploy anything',
      'Run a command or open a terminal',
@@ -301,7 +301,7 @@ export function mobileDevice({node, panel, card}) {
     'mobile-list');
 
   page.append(node('p',
-    'The code above is read from the observer\u2019s own file each second and is never stored by this page. A phone that pairs with it receives a read-only projection and no control channel.',
+    'The code above is read from the observer\u2019s own file each second and is never stored by this page. A paired phone can view tasks and use shared conversations, including sending through an explicitly selected connected model. Runtime commands and provider credentials are not exposed.',
     'availability-note'));
   return page;
 }

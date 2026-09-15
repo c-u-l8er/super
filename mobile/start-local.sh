@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Start the opt-in, read-only companion with the existing desktop build.
+# Start the opt-in companion with the existing desktop build.
 set -euo pipefail
 super_mobile_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 super_mobile_binary="$super_mobile_dir/../cockpit/target/release/super-cockpit"
@@ -14,6 +14,10 @@ super_mobile_node="${SUPER_MOBILE_NODE:-$(command -v node || true)}"
 [[ -x "$super_mobile_node" ]] || { echo 'No executable node found; set SUPER_MOBILE_NODE to an absolute path.' >&2; exit 1; }
 export SUPER_MOBILE_NODE="$(readlink -f "$super_mobile_node")"
 export SUPER_MOBILE_GATEWAY="$super_mobile_dir/server.mjs"
+super_mobile_state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/super/mobile"
+mkdir -p "$super_mobile_state_dir"
+chmod 700 "$super_mobile_state_dir"
+export SUPER_MOBILE_SESSION_FILE="$super_mobile_state_dir/sessions.json"
 super_mobile_pair_dir=$(mktemp -d "${TMPDIR:-/tmp}/super-mobile-pair.XXXXXX")
 export SUPER_MOBILE_PAIR_FILE="$super_mobile_pair_dir/code"
 echo "Mobile pairing file: $SUPER_MOBILE_PAIR_FILE (one use, expires after 10 minutes)." >&2

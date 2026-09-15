@@ -1,6 +1,6 @@
-# Super mobile observer
+# Super mobile companion
 
-Opt-in, read-only developer alpha. Run `./mobile/start-local.sh` from the Super repository after closing the existing desktop instance. It uses the existing release build and Node 22+. Pair at http://127.0.0.1:4318 with the code in the file printed at launch. Code: one use / ten minutes. Session: eight hours. Restarting revokes all sessions.
+Opt-in developer alpha with task observation and shared bot conversations. Run `./mobile/start-local.sh` from the Super repository after closing the existing desktop instance. It uses the existing release build and Node 22+. Pair at http://127.0.0.1:4318 with the code in the file printed at launch. Code: one use / ten minutes. Session: eight hours. The launcher persists unexpired sessions privately across restarts; logout revokes the current session. Upgrading from a gateway without persistence requires a fresh pairing code once.
 
 The desktop shows that code itself: **Runtime → Mobile device** in the sidebar, or **File → Pair a phone…**. That page reports whether the companion is running, shows the code in four-character groups with the time left, and states what a paired phone can and can never do.
 
@@ -8,11 +8,11 @@ The desktop shows that code itself: **Runtime → Mobile device** in the sidebar
 
 For private phone access, put a trusted HTTPS proxy in front of the loopback listener and set `SUPER_MOBILE_ORIGIN` to its exact origin. Do not publish it publicly. No Tailscale setup is performed automatically.
 
-The host sends selected runtime observations to the gateway over inherited pipes. The gateway receives no runtime/control descriptor and exposes no mutation operation. Invalid, expired or unavailable observations withdraw the current view. The shared task-progress code is guidance, never authority.
+The host sends selected runtime observations to the gateway over inherited pipes. The gateway receives no runtime/control descriptor and exposes only a bounded conversation mailbox to the existing desktop chat UI; it cannot execute runtime intents. Invalid, expired or unavailable observations withdraw the current view. The shared task-progress code is guidance, never authority.
 
 Run `node --test mobile/test/gateway.test.mjs` and `cargo test --manifest-path cockpit/Cargo.toml mobile_gateway::tests`. See `docs/app/MOBILE_OBSERVER_2026_09_10.md` for measured results and limitations, and `docs/app/MOBILE_RESEARCH_2026_09_10.md` for next milestones.
 
-This requires the desktop to stay open. Native packages, remote actions, device scope management, push notifications, daemon ownership and real-phone validation remain open. The gateway is a trusted same-user local component, not process isolation against that user.
+This requires the desktop to stay open. Native packages, task execution and review actions, device scope management, push notifications, daemon ownership and real-phone validation remain open. The gateway is a trusted same-user local component, not process isolation against that user.
 
 ## Android browser recovery regression
 
@@ -24,6 +24,18 @@ Measured on Android 15 with Chrome 124: 14 checks passed. This is Android browse
 
 ## Existing private HTTPS connector
 
-`mobile/private-connector.mjs` supports the current companion at `/mobile` while retaining the older `/api/observer/snapshot|pair|logout` API paths. Current `/api/snapshot|pair|logout` paths reach the same paired gateway. Exact private origin, Tailscale owner identity, loopback backends and read-only route checks remain required. UI asset requests do not forward session cookies to the UI backend; private response cookies receive Secure. The connector does not mint codes or expose a renewal/control endpoint.
+`mobile/private-connector.mjs` supports the current companion at `/mobile` while retaining the older `/api/observer/snapshot|pair|logout` API paths. Current `/api/snapshot|pair|logout` paths reach the same paired gateway. Exact private origin, Tailscale owner identity, loopback backends and strict route checks remain required. UI asset requests do not forward session cookies to the UI backend; private response cookies receive Secure. The connector does not mint codes or expose a renewal/control endpoint.
 
 The private network and Serve configuration must already exist. This connector listens only on loopback port 4320 with `SUPER_MOBILE_PRIVATE_ORIGIN` and `SUPER_MOBILE_TAILSCALE_LOGIN` explicitly configured. The prototype UI remains the fallback for older non-companion routes. Verify with `node --test mobile/test/private-connector.test.mjs mobile/test/gateway.test.mjs`.
+
+## Shared conversations (desktop must remain open)
+
+Expo and the browser companion show the desktop’s existing bot identities and conversation history, pinned/recent lists, editable titles, shared drafts, task links in Expo, and public reply progress. Opening a conversation on the phone also selects it on desktop. This is one shared active conversation, not independent concurrent provider sessions. Choose/connect a provider on desktop; enter its exact connected model on the phone before sending. Model drift refuses the send. Attachments and proposal application remain on desktop.
+
+The desktop retains sole ownership of history and inference. Phone operations are limited to open, create, title/pin update, draft save and send. Revision checks prevent silently overwriting a newer desktop draft. Clients retain local drafts and pending request identities; retry is explicit. A durable desktop receipt is written before dispatch so an interrupted send is never replayed automatically. An uncertain receipt means inspect the conversation before sending again. Requests expire after two minutes; public history/progress is refreshed roughly once a second and withdrawn on connection loss. Views larger than 4 MB are refused.
+
+The installed Expo Go delivery is a separate repository/service on port 8081. Open `exp://super-mobile.tail988e95.ts.net:8081` in Expo Go (SDK 57), then pair on Host. Browser access remains `https://super-mobile.tail988e95.ts.net/mobile`. Updating this repository alone does not update Expo. The native implementation lives in the existing `super-native` checkout.
+
+Session files are scoped to the configured origin, private mode 0600, atomically replaced, and retain only unexpired eight-hour sessions. They contain credentials and must never be published. The launcher uses `$XDG_STATE_HOME/super/mobile/sessions.json` (default `~/.local/state/super/mobile/sessions.json`). This does not change private network routing.
+
+Verification: `node --test mobile/test/*.test.mjs`, `node --test tools/mobile-conversation-ledger-test.mjs`, and `tools/mobile-conversation-smoke.mjs` with a built cockpit under the native test display. The smoke uses an explicit local fixture model, never an external default model. Real provider authentication, physical-phone validation, mobile proposal approval/application, and automatic source-bound build/launch/capture remain unfinished.

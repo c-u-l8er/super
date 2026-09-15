@@ -1,3 +1,4 @@
+import {initMobileConversationBridge} from './mobile-conversation-bridge.js';
 import {conversationReply,titleInstruction} from './conversation-title.js';
 import {beginTaskActivity,observeTaskActivity,replyFailure} from './task-activity.js';
 import {initBotActivity} from './bot-activity.js';
@@ -10,7 +11,7 @@ import { heldProjection, registeredBot, registrationUnavailable, runtimeWorld, p
 import { referenceText, renderMessage, referenceWorld, refreshReferenceText } from './references.js';
 /* Conversation state is separate from runtime projection state. Model output
  * supplies proposals only; an explicit Apply click uses existing human controls. */
-import { node, selectedWorkspace, bindDisclosure } from './app-shell.js';
+import { node, selectedWorkspace, bindDisclosure, navigate } from './app-shell.js';
 import { initBotDirectory } from './bot-directory.js';
 import {initConversationSidebar} from './conversation-sidebar.js';
 import { createConversationStore } from './conversation-store.js';
@@ -272,7 +273,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     replyId=['codex','claude'].includes(active.provider)?crypto.randomUUID():null;
     if(replyId){const id=replyId,p=active.provider;const poll=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;activity.observe(r);observeTaskActivity(activityId,r);if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
     try {
-      const reply=await invoke('bot_chat' ,{turn:{request_id:replyId,provider:active.provider,messages,context:turnContext,bot_instructions:`Name: ${bot.name}\nRole: ${bot.role}\n${bot.instructions}\n${wantsTitle?titleInstruction:''}`,effort:effort.value||null}});
+      const reply=await invoke('bot_chat' ,{turn:{expected_model:active.model,request_id:replyId,provider:active.provider,messages,context:turnContext,bot_instructions:`Name: ${bot.name}\nRole: ${bot.role}\n${bot.instructions}\n${wantsTitle?titleInstruction:''}`,effort:effort.value||null}});
       const titled=conversationReply(reply.text,wantsTitle);reply.text=titled.text;
       const entry=line('assistant',reply.text||'Review the proposed step below.');
       messages.push({role:'assistant',content:[reply.text,reply.actions.length?`Proposed only, not executed: ${JSON.stringify(reply.actions)}`:''].filter(Boolean).join('\n')});
@@ -373,7 +374,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     }
     const edit=node('button','Edit bot','subtle');edit.type='button';edit.disabled=!!registrationUnavailable(current,bot.id);edit.dataset.nav='edit-bot';board.append(edit);
   }
-  initBotDirectory({runtimeCurrent:current,runtimeBotActions,canSave:()=>!busy&&!runtimeBusy&&!pending,current:()=>bot,select:next=>{
+  const roster=initBotDirectory({runtimeCurrent:current,runtimeBotActions,canSave:()=>!busy&&!runtimeBusy&&!pending,current:()=>bot,select:next=>{
     if(next.id===bot.id){bot=next;showIdentity();return true;}
     if(busy||pending||runtimeBusy){status.textContent='Wait for the current reply or connection to finish before switching bots.';return false;}
     if(!saveCurrent())return false;
@@ -430,5 +431,53 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     composer.before(group);status.textContent=items.length===1?'Surface snapshot attached. Add a message and Send when ready.':items.length+' file snapshots attached. Review the attachments, then Send when ready.';input.focus();
   });
   document.addEventListener('page-selected',()=>{const link=root.querySelector('.linked-surface');if(link)link.hidden=link.dataset.botId!==bot.id;});
+  const storeFor=id=>id===bot.id?history:createConversationStore({getItem:key=>localStorage.getItem(id==='assistant'?key:`${key}:bot:${id}`),setItem:(key,value)=>localStorage.setItem(id==='assistant'?key:`${key}:bot:${id}`,value)});
+  initMobileConversationBridge({invoke,view:()=>({
+    bots:roster.list().map(b=>({id:b.id,name:b.name,provider:b.provider})),
+    conversations:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),
+    active:{botId:bot.id,provider:selected,id:conversationId,model:active?.model??null,effort:effort.value,efforts:[...effort.options].map(o=>o.value),busy:busy||pending||runtimeBusy,status:status.textContent,
+      revision:history.list(selected).find(c=>c.id===conversationId)?.revision??null,
+      data:conversationId?history.get(selected,conversationId):null,
+      liveText:busy?document.querySelector('#bot-live-output')?.textContent?.slice(-20000)||'':''}
+  }),perform:async request=>{
+    if(busy||pending||runtimeBusy||loadingProvider)throw Error('A desktop conversation operation is in progress. Wait for it to finish.');
+    if(!roster.get(request.botId))throw Error('That bot is unavailable.');
+    if(!['codex','claude','ollama','openai','anthropic'].includes(request.provider))throw Error('Unknown conversation provider.');
+    if(request.operation==='open'){
+      const candidate=storeFor(request.botId).list(request.provider).find(c=>c.id===request.conversationId);
+      if(request.conversationId&&!candidate)throw Error('That conversation is unavailable.');
+      navigate('bot:'+request.botId,true);
+      for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));
+      if(bot.id!==request.botId||busy||loadingProvider)throw Error('Desktop connection setup is still busy. Try opening again after it finishes.');
+      if(selected!==request.provider){provider.value=request.provider;provider.dispatchEvent(new Event('change'));for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));}
+      if(bot.id!==request.botId||selected!==request.provider||busy||loadingProvider)throw Error('The selected conversation changed during connection setup.');
+      if(request.conversationId&&!history.get(selected,request.conversationId))throw Error('This conversation was removed while opening.');if(!saveCurrent())throw Error('Could not save the desktop draft.');restoreSaved(request.conversationId);saveCurrent();refresh();workView.conversation();return {message:'Conversation opened on phone and desktop.'};
+    }
+    if(request.botId!==bot.id||request.provider!==selected)throw Error('Open this bot and provider on the desktop before changing its conversation.');
+    if(request.operation==='create'){
+      if(!saveCurrent())throw Error('Could not save the desktop draft.');reset();input.value=typeof request.text==='string'?request.text.slice(0,8000):'';
+      if(!input.value)input.value='';
+      conversationId=history.save(selected,null,snapshot());lastSaved=JSON.stringify(snapshot());updateHistory();refresh();return {message:'Conversation created.',conversationId};
+    }
+    const record=history.list(selected).find(c=>c.id===request.conversationId);
+    if(!record||record.revision!==request.revision)throw Error('This conversation changed on another screen. Refresh before editing.');
+    if(request.operation==='update'){
+      history.update(selected,record.id,{...(typeof request.title==='string'?{title:request.title}:{}),...(typeof request.pinned==='boolean'?{pinned:request.pinned}:{})});updateHistory();return {message:'Conversation updated.'};
+    }
+    if(conversationId!==request.conversationId)throw Error('Open this conversation before editing or sending.');
+    if(typeof request.text!=='string'||request.text.length>8000)throw Error('Enter a message of at most 8,000 characters.');
+    if(request.operation==='send'){
+      if(!active||typeof request.model!=='string'||!request.model.trim()||request.model!==active.model)throw Error('Select the exact connected model before sending. No default model will be used.');
+      if(![...effort.options].some(o=>o.value===(request.effort??'')))throw Error('The requested thinking level is unavailable.');
+      if(!request.text.trim())throw Error('Enter a message before sending.');
+      if(messages.length>=44)throw Error('Start a new conversation to continue.');
+      if(files.length)throw Error('This desktop draft has attachments. Review and send them from desktop.');
+      effort.value=request.effort??'';
+    }
+    input.value=request.text;if(!saveCurrent())throw Error('Could not save the shared draft.');
+    if(request.operation==='send'){composer.requestSubmit();return {message:'Message dispatched. Follow its progress in this conversation.'};}
+    if(request.operation!=='draft')throw Error('Unsupported conversation operation.');
+    return {message:'Draft saved on desktop.'};
+  }});
 
 }

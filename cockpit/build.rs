@@ -61,6 +61,7 @@ fn main() {
             "choose_attachments",
             "desktop_window",
             "mobile_status",
+            "conversation_exchange",
             "task_screenshots",
             "mobile_new_code",
             "bot_configure",

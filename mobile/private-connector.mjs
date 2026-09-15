@@ -13,7 +13,8 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
  if(front.origin!==origin||front.username||front.password||(!secure&&!(front.protocol==='http:'&&['localhost','127.0.0.1'].includes(front.hostname))))throw Error('Invalid connector origin.');
  if(secure&&(!front.hostname.endsWith('.ts.net')||!allowedTailscaleLogin))throw Error('Private HTTPS requires an exact Tailscale origin and owner login.');
  const routes=new Map([['/api/observer/snapshot',['GET','/api/snapshot']],['/api/observer/pair',['POST','/api/pair']],['/api/observer/logout',['POST','/api/logout']]]);
- const companionAssets=new Map([['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js']]);
+ routes.set('/api/conversations',['GET','/api/conversations']);routes.set('/api/conversation',['POST','/api/conversation']);
+ const companionAssets=new Map([['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js']]);
  for(const operation of ['snapshot','pair','logout'])routes.set('/api/'+operation,[operation==='snapshot'?'GET':'POST','/api/'+operation]);
  return http.createServer((req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503);res.end()})});
  async function handle(req,res){
@@ -42,7 +43,7 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
   }
   if(isApi){if(req.headers.cookie)headers.cookie=req.headers.cookie;if(req.method==='POST'){headers.origin=observer.origin;headers['content-type']=req.headers['content-type']??''}}
   let body=Buffer.alloc(0);
-  if(req.method==='POST'){for await(const chunk of req){body=Buffer.concat([body,chunk]);if(body.length>1024)return reject(413,'Request too large.')}headers['content-length']=String(body.length)}
+  if(req.method==='POST'){for await(const chunk of req){body=Buffer.concat([body,chunk]);if(body.length>(req.url==='/api/conversation'?12000:1024))return reject(413,'Request too large.')}headers['content-length']=String(body.length)}
   const upstream=http.request({hostname:target.hostname,port:target.port||80,path:route?route[1]:asset||req.url,method:req.method,headers,timeout:5000},reply=>{const outgoing={...reply.headers,'cache-control':'no-store'};if(secure&&outgoing['set-cookie'])outgoing['set-cookie']=outgoing['set-cookie'].map(value=>/;\s*Secure(?:;|$)/i.test(value)?value:value+'; Secure');delete outgoing['transfer-encoding'];res.writeHead(reply.statusCode??502,outgoing);reply.pipe(res)});
   upstream.on('timeout',()=>upstream.destroy());upstream.on('error',()=>{if(!res.headersSent)reject(503,'Local host connection unavailable.');else res.destroy()});
   upstream.end(body);

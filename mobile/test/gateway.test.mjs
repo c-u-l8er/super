@@ -1,6 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';
+import {mkdtempSync,rmSync} from 'node:fs';import {tmpdir} from 'node:os';import {join} from 'node:path';
 import {createGateway} from '../server.mjs';
-async function setup(t){let clock=0;const server=createGateway({origin:'http://127.0.0.1:4318',pairingCode:'fixture-code',now:()=>clock,snapshot:async()=>({available:true,projection:{development_tasks:{}}})});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close();});
+async function setup(t,options={}){let clock=0;const server=createGateway({origin:'http://127.0.0.1:4318',pairingCode:'fixture-code',now:()=>clock,snapshot:async()=>({available:true,projection:{development_tasks:{}}}),...options});await new Promise(r=>server.listen(0,'127.0.0.1',r));t.after(()=>{server.closeAllConnections();server.close();});
  const request=(path,{method='GET',cookie,body,origin='http://127.0.0.1:4318',host='127.0.0.1:4318'}={})=>new Promise((resolve,reject)=>{const req=http.request({host:'127.0.0.1',port:server.address().port,path,method,headers:{Host:host,...(origin?{Origin:origin}:{}),...(cookie?{Cookie:cookie}:{}),...(body?{'Content-Type':'application/json'}:{})}},res=>{let text='';res.on('data',c=>text+=c);res.on('end',()=>resolve({status:res.statusCode,headers:res.headers,text}));});req.on('error',reject);req.end(body?JSON.stringify(body):undefined);});
  const pair=async(code='fixture-code')=>{const r=await request('/api/pair',{method:'POST',body:{code}});assert.equal(r.status,200);return r.headers['set-cookie'][0].split(';')[0];};return {request,pair,server,advance:n=>clock+=n};}
 test('unauthenticated observation and mutation are refused',async t=>{const {request}=await setup(t);assert.equal((await request('/api/snapshot')).status,401);assert.equal((await request('/api/intent',{method:'POST',body:{}})).status,401);});
@@ -57,3 +58,20 @@ test('renewal is not reachable over HTTP',async t=>{
 });
 
 test('screenshot reads require pairing and cannot become uploads or arbitrary paths',async t=>{const {request,pair}=await setup(t);assert.equal((await request('/api/screenshots?task=dt_1')).status,401);const cookie=await pair();assert.equal((await request('/api/screenshots?task=dt_1',{cookie})).status,200);for(const path of ['/api/screenshots?task=../secret','/api/screenshots?task=dt_1&path=secret'])assert.equal((await request(path,{cookie})).status,405);assert.equal((await request('/api/screenshots?task=dt_1',{method:'POST',cookie,body:{data:'fake'}})).status,405);});
+test('conversation route retains pairing, write-origin and body limits',async t=>{
+ const {request,pair}=await setup(t);
+ assert.equal((await request('/api/conversations')).status,401);
+ const cookie=await pair();
+ assert.equal((await request('/api/conversation',{method:'POST',cookie,origin:null,body:{}})).status,403);
+ assert.equal((await request('/api/conversation',{method:'POST',cookie,body:{text:'x'.repeat(13000)}})).status,413);
+ assert.equal((await request('/api/conversation',{cookie})).status,405);
+ assert.equal((await request('/api/conversations',{cookie})).status,200);
+ assert.equal((await request('/api/intent',{method:'POST',cookie,body:{}})).status,405);
+});
+
+test('paired cookie survives gateway restart and logout stays revoked',async t=>{
+ const dir=mkdtempSync(join(tmpdir(),'gateway-session-'));t.after(()=>rmSync(dir,{recursive:true,force:true}));const sessionFile=join(dir,'sessions.json');
+ const first=await setup(t,{sessionFile}),cookie=await first.pair();first.server.closeAllConnections();await new Promise(r=>first.server.close(r));
+ const second=await setup(t,{sessionFile});assert.equal((await second.request('/api/snapshot',{cookie})).status,200);assert.equal((await second.request('/api/logout',{method:'POST',cookie,body:{}})).status,200);second.server.closeAllConnections();await new Promise(r=>second.server.close(r));
+ const third=await setup(t,{sessionFile});assert.equal((await third.request('/api/snapshot',{cookie})).status,401);
+});

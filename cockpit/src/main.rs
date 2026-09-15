@@ -100,6 +100,7 @@ mod claude_connection;
 mod codex_connection;
 mod keychain;
 mod mobile_gateway;
+mod mobile_conversations;
 mod screenshots;
 mod emulator_capture;
 mod preview;
@@ -625,6 +626,9 @@ async fn task_screenshots(request:Value,app:tauri::AppHandle)->Result<Value,Stri
 }
 
 #[tauri::command]
+fn conversation_exchange(request:Value)->Result<Value,String>{ mobile_conversations::exchange(request) }
+
+#[tauri::command]
 fn mobile_status() -> Value {
     crate::mobile_gateway::status()
 }
@@ -969,6 +973,7 @@ fn main() {
             choose_attachments,
             desktop_window,
             mobile_status,
+            conversation_exchange,
             task_screenshots,
             mobile_new_code,
             bot_configure,

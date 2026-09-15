@@ -1,5 +1,5 @@
-//! Opt-in observation bridge. The child gets a projection reader, never a
-//! runtime/control descriptor, queue, terminal, filesystem command or credential.
+//! Opt-in task observation and conversation mailbox. The child never gets a
+//! runtime/control descriptor, terminal, filesystem command or credential.
 use serde_json::{json, Value};
 use std::{
     io::{BufRead, BufReader, Write},
@@ -295,6 +295,7 @@ pub fn start() {
         "SUPER_MOBILE_PORT",
         "SUPER_MOBILE_ORIGIN",
         "SUPER_MOBILE_PAIR_FILE",
+        "SUPER_MOBILE_SESSION_FILE",
     ] {
         if let Ok(v) = std::env::var(key) {
             command.env(key, v);
@@ -316,16 +317,16 @@ pub fn start() {
     std::thread::spawn(move || {
         let mut output = BufReader::new(child.stdout.take().unwrap());
         loop {
-            // Bound the line before allocation; the only recognized operation is read.
+            // Bound the line before allocation; only named observation/conversation operations are accepted.
             let mut line = Vec::new();
-            let mut limited = std::io::Read::take(&mut output, 512);
+            let mut limited = std::io::Read::take(&mut output, 16_000);
             if limited.read_until(b'\n', &mut line).is_err() || line.last() != Some(&b'\n') {
                 break;
             }
             let Ok(request) = serde_json::from_slice::<Value>(&line) else {
                 break;
             };
-            if (request["operation"] != "snapshot" && request["operation"] != "screenshots")
+            if (request["operation"] != "snapshot" && request["operation"] != "screenshots" && request["operation"] != "conversations" && request["operation"] != "conversation")
                 || request["id"].as_str().map_or(true, |s| s.len() > 64)
             {
                 break;
@@ -334,7 +335,7 @@ pub fn start() {
                 .lock()
                 .map(|held| snapshot(&held))
                 .unwrap_or(json!({"available":false}));
-            let result=if request["operation"]=="screenshots"{crate::screenshots::observed(&result,request["task"].as_str().unwrap_or(""))}else{result};
+            let result=if request["operation"]=="conversations"{crate::mobile_conversations::view()}else if request["operation"]=="conversation"{crate::mobile_conversations::enqueue(request["request"].clone())}else if request["operation"]=="screenshots"{crate::screenshots::observed(&result,request["task"].as_str().unwrap_or(""))}else{result};
             let sent = input
                 .lock()
                 .map(|mut writer| writeln!(writer, "{}", json!({"id":request["id"],"snapshot":result})).is_ok())
