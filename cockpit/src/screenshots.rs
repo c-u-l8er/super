@@ -57,7 +57,7 @@ pub fn request(r: Value) -> Result<Value, String> {
         if !value["outputs"].is_object() { value["outputs"] = json!({}); }
         if r["operation"] == "remove_output" {
             value["outputs"].as_object_mut().unwrap().remove(side);
-            if value["outputs"].as_object().unwrap().is_empty() && value["images"].as_object().is_none_or(|o| o.is_empty()) {
+            if value["comparison"].is_null() && value["outputs"].as_object().unwrap().is_empty() && value["images"].as_object().is_none_or(|o| o.is_empty()) {
                 match std::fs::remove_file(&path) { Ok(()) => {VERSION.fetch_add(1, std::sync::atomic::Ordering::Release);}, Err(e) if e.kind()==std::io::ErrorKind::NotFound => {}, Err(_) => return Err("Could not remove log.".into()) }
                 return Ok(value);
             }
@@ -99,7 +99,7 @@ pub fn request(r: Value) -> Result<Value, String> {
             .as_object_mut()
             .ok_or("Screenshot record is unreadable.")?;
         images.remove(side);
-        if images.is_empty() && value["outputs"].as_object().is_none_or(|o| o.is_empty()) {
+        if images.is_empty() && value["comparison"].is_null() && value["outputs"].as_object().is_none_or(|o| o.is_empty()) {
             match std::fs::remove_file(&path) {
                 Ok(()) => { VERSION.fetch_add(1, std::sync::atomic::Ordering::Release); }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -317,4 +317,61 @@ mod storage_tests {
         log["operation"] = json!("list");assert!(request(log).unwrap()["outputs"].is_null());
         let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// Capture only a selected local preview, never an unrelated window or screen.
+#[cfg(target_os="linux")]
+pub async fn capture_preview(mut r: Value, app: tauri::AppHandle) -> Result<Value,String> {
+    use tauri::Manager;
+    use webkit2gtk::WebViewExt;
+    let tab=r["tab"].as_u64().filter(|t| *t<8).ok_or("Choose an open local preview tab.")?;
+    key(&r["world"],r["task"].as_str().ok_or("Missing task.")?,r["revision"].as_u64().ok_or("Missing revision.")?)?;
+    if !["before","after"].contains(&r["side"].as_str().unwrap_or("")) {return Err("Choose Before or After.".into());}
+    let label=if tab==0 {"development-preview".to_string()} else {format!("development-preview-{tab}")};
+    let view=app.get_webview(&label).ok_or("Open the local app in Browser first.")?;
+    let expected=view.url().map_err(|e|e.to_string())?;
+    if !matches!(expected.scheme(),"http"|"https") || !matches!(expected.host_str(),Some("localhost"|"127.0.0.1"|"[::1]")) {return Err("Capture is limited to a local app preview.".into());}
+    let url=expected.to_string();let target=url.clone();let (send,recv)=std::sync::mpsc::sync_channel(1);
+    view.with_webview(move |platform|{
+        let webview=platform.inner();let check=webview.clone();
+        if webview.is_loading(){let _=send.send(Err("The preview is still loading. Wait for it to finish.".into()));return;}
+        webview.snapshot(webkit2gtk::SnapshotRegion::Visible,webkit2gtk::SnapshotOptions::NONE,None::<&gtk::gio::Cancellable>,move |result|{
+            let result=(||->Result<Vec<u8>,String>{
+                if check.uri().as_deref()!=Some(target.as_str()) {return Err("The preview navigated during capture. Try again.".into());}
+                let original=gtk::cairo::ImageSurface::try_from(result.map_err(|e|e.to_string())?).map_err(|_|"Preview did not produce a raster image.")?;
+                let (w,h)=(original.width(),original.height());if w<=0||h<=0||w>4096||h>4096{return Err("Preview dimensions must be at most 4096 pixels.".into());}
+                let mut surface=gtk::cairo::ImageSurface::create(gtk::cairo::Format::Rgb24,w,h).map_err(|e|e.to_string())?;
+                {let ctx=gtk::cairo::Context::new(&surface).map_err(|e|e.to_string())?;ctx.set_source_rgb(1.,1.,1.);ctx.paint().map_err(|e|e.to_string())?;ctx.set_source_surface(&original,0.,0.).map_err(|e|e.to_string())?;ctx.paint().map_err(|e|e.to_string())?;}
+                let stride=surface.stride() as usize;let pixels=surface.data().map_err(|e|e.to_string())?;let mut rgb=Vec::with_capacity((w*h*3) as usize);
+                for y in 0..h as usize {for x in 0..w as usize {let i=y*stride+x*4;let pixel=u32::from_ne_bytes(pixels[i..i+4].try_into().unwrap());rgb.extend_from_slice(&[(pixel>>16)as u8,(pixel>>8)as u8,pixel as u8]);}}
+                let mut bytes=Vec::new();{let mut encoder=png::Encoder::new(&mut bytes,w as u32,h as u32);encoder.set_color(png::ColorType::Rgb);encoder.set_depth(png::BitDepth::Eight);let mut writer=encoder.write_header().map_err(|e|e.to_string())?;writer.write_image_data(&rgb).map_err(|e|e.to_string())?;}
+                if bytes.len()>2_000_000{return Err("Captured image exceeds 2 MB. Reduce the preview size.".into());}Ok(bytes)
+            })();let _=send.send(result);
+        });
+    }).map_err(|e|e.to_string())?;
+    let bytes=tauri::async_runtime::spawn_blocking(move||recv.recv_timeout(std::time::Duration::from_secs(10)).map_err(|_|"Preview capture timed out.".to_string())?).await.map_err(|e|e.to_string())??;
+    r["operation"]=json!("save");r["data"]=json!(format!("data:image/png;base64,{}",base64::engine::general_purpose::STANDARD.encode(bytes)));
+    // Metadata originates here; ordinary uploads cannot assert a native capture.
+    save_captured(r,json!({"kind":"local-preview","url":url,"tab":tab}))
+}
+fn save_captured(r:Value,origin:Value)->Result<Value,String>{
+    let mut value=request(r.clone())?;
+    let _guard=WRITE.lock().map_err(|_|"Evidence storage is busy.")?;
+    let id=key(&r["world"],r["task"].as_str().unwrap(),r["revision"].as_u64().unwrap())?;
+    // Reload to prevent replacing an intervening edit with an older record.
+    let path=ROOT.get().unwrap().join(format!("{id}.json"));
+    let current:Value=serde_json::from_slice(&std::fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
+    let side=r["side"].as_str().unwrap();if current["images"][side]["sha256"]!=value["images"][side]["sha256"] {return Err("Screenshot changed during capture storage.".into());}value=current;
+    value["images"][side]["capture"]=origin;retain(ROOT.get().unwrap(),&id,&value)?;Ok(value)
+}
+
+// Runner-owned comparison is separate from manually supplied logs.
+pub fn retain_comparison(world:&Value,task:&str,revision:u64,run_id:&str,result:&Value)->Result<(),String>{
+    let query=json!({"operation":"list","world":world,"task":task,"revision":revision});
+    request(query)?;
+    let _guard=WRITE.lock().map_err(|_|"Evidence storage is busy.")?;
+    let id=key(world,task,revision)?;let root=ROOT.get().ok_or("Evidence storage unavailable.")?;
+    let path=root.join(format!("{id}.json"));let mut value=match std::fs::read(&path){Ok(bytes)=>serde_json::from_slice::<Value>(&bytes).map_err(|e|e.to_string())?,Err(e) if e.kind()==std::io::ErrorKind::NotFound=>json!({"world":world,"task":task,"revision":revision,"images":{}}),Err(e)=>return Err(e.to_string())};
+    let side=|r:&Value|{let full=r["output"].as_str().unwrap_or("");let output=full.chars().take(20000).collect::<String>();json!({"snapshot":r["snapshot_sha256"],"state":r["state"],"verdict":r["verdict"],"exit_code":r["exit_code"],"output":output,"truncated":output.len()<full.len()||r["omitted_bytes"].as_u64().unwrap_or(0)>0})};
+    value["comparison"]=json!({"origin":"isolated-proposal-runner","run_id":run_id,"profile":result["profile"],"before":side(&result["baseline"]),"after":side(result),"benchmark":result["benchmark"]});retain(root,&id,&value)
 }

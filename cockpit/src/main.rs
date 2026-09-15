@@ -452,13 +452,13 @@ async fn review_tests(
             let result=wait.recv().map_err(|_|"Acceptance was interrupted. Reopen the review to check its decision.")??;
             if result["allow"]!=true{return Err("The runtime refused acceptance. Reopen the review and check its latest state.".into());}
             Ok(json!({"accepted":true}))
-        }else if let review_tests::Request::Start{generation,attempt_ref,revision,world,profile}=request {
+        }else if let review_tests::Request::Start{generation,attempt_ref,revision,world,profile,compare}=request {
             let path=work.matching_root(generation)?;let (reply,wait)=sync_channel(1);
             q.intent(Msg::ResolveReviewTest{path:path.clone(),attempt_ref,revision,world:world.clone(),reply})?;
             let attempt=wait.recv().map_err(|_|"Review lookup was interrupted.")??;
             if work.matching_root(generation)?!=path{return Err("The repository changed.".into());}
 
-            runs.start(&data,world,path,attempt,report,profile)
+            runs.start(&data,world,path,attempt,report,profile,compare)
         }else{runs.request(&data,request,report)}
     }).await.map_err(|_|"The local test operation could not finish.")?
 }
@@ -609,7 +609,13 @@ async fn bot_chat(
 /// projection and no control channel, so nothing here widens what a paired
 /// phone can do.
 #[tauri::command]
-fn task_screenshots(request:Value)->Result<Value,String>{screenshots::request(request)}
+async fn task_screenshots(request:Value,app:tauri::AppHandle)->Result<Value,String>{
+    if request["operation"]=="capture_preview" {
+        #[cfg(target_os="linux")] {return screenshots::capture_preview(request,app).await;}
+        #[cfg(not(target_os="linux"))] {return Err("Native preview capture is currently supported on Linux.".into());}
+    }
+    screenshots::request(request)
+}
 
 #[tauri::command]
 fn mobile_status() -> Value {

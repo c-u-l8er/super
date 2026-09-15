@@ -183,3 +183,10 @@ test('deletion identity rejects empty replacements, missing originals and forged
  const f=await deletionFixture(t);
  for(const change of [a=>a.files[1].proposed_text='',a=>a.files[1].source.schema='selected-file-basis@1',a=>a.files[1].source.disk_sha256=null,a=>a.files[1].source.result_sha256=hash('')]){const a=structuredClone(f.attempt);change(a);await assert.rejects(runProposalTests({...f,attempt:a}));}
 });
+
+test('paired execution retains the unchanged baseline and three benchmark samples per side',async t=>{
+ const f=await fixture(t);await writeFile(join(f.repository,'tools/task-benchmark.mjs'),"import {value} from '../value.mjs';console.log(JSON.stringify({metrics:[{name:'fixture value',value,unit:'count',direction:'higher'}]}));");
+ const r=await runProposalTests({...f,compare:true});assert.equal(r.record.baseline.verdict,'fail');assert.equal(r.record.verdict,'pass');assert.notEqual(r.record.baseline.snapshot_sha256,r.record.snapshot_sha256);assert.equal(await readFile(join(r.directory,'baseline/value.mjs'),'utf8'),f.attempt.shared_draft);assert.equal(r.record.benchmark.state,'completed');assert.equal(r.record.benchmark.samples.before.length,3);assert.equal(r.record.benchmark.metrics[0].before.median,1);assert.equal(r.record.benchmark.metrics[0].after.median,2);assert.equal(r.record.benchmark.metrics[0].change_percent,100);
+});
+test('baseline comparison reports missing benchmark explicitly',async t=>{const f=await fixture(t);const r=await runProposalTests({...f,compare:true});assert.equal(r.record.benchmark.state,'not-configured');assert.equal(r.record.verdict,'pass');});
+test('incompatible metric units never produce a benchmark delta',async t=>{const f=await fixture(t);await writeFile(join(f.repository,'tools/task-benchmark.mjs'),"import {value} from '../value.mjs';console.log(JSON.stringify({metrics:[{name:'latency',value,unit:value===1?'ms':'s',direction:'lower'}]}));");const r=await runProposalTests({...f,compare:true});assert.equal(r.record.benchmark.state,'failed');assert.equal(r.record.benchmark.metrics,undefined);assert.match(r.record.benchmark.reason,/units/);});

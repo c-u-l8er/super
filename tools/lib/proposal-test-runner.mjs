@@ -1,5 +1,6 @@
 // Local human-operated runner; not a Carrier job or an acceptance receipt.
 import {createHash} from 'node:crypto';
+import {hostname,arch,platform,cpus} from 'node:os';
 import {spawn,execFileSync} from 'node:child_process';
 import {constants as F} from 'node:fs';
 import {mkdir,mkdtemp,readFile,writeFile,rename,rm,realpath,open,lstat,cp,readdir,readlink} from 'node:fs/promises';
@@ -129,7 +130,7 @@ async function pinRustTools(run){
   return {binds:['--ro-bind',rust,'/rust','--ro-bind',registry,'/registry'],sha256:hash(JSON.stringify(identities))};
 }
 
-export async function runProposalTests({repository,attempt,runRoot,nodePath=process.execPath,timeoutMs=30000,signal,profile=profiles[0]}){
+export async function runProposalTests({repository,attempt,runRoot,nodePath=process.execPath,timeoutMs=30000,signal,profile=profiles[0],compare=false}){
   attempt=structuredClone(attempt);
   assert(profiles.includes(profile),'Unsupported test profile.');
   assert(Number.isInteger(timeoutMs)&&timeoutMs>=100&&timeoutMs<=120000,'Test timeout must be 100–120000 ms.');
@@ -147,6 +148,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   }
   const before=digest(files),second=await capture(root),afterRoot=await lstat(root);
   assert(before===digest(second)&&rootIdentity.dev===afterRoot.dev&&rootIdentity.ino===afterRoot.ino&&git(root,['rev-parse','--verify','HEAD^{commit}']).trim()===source.head,'Source changed during capture. Retry with a fresh review.');
+  const baselineFiles=new Map(files);
   for(const member of members){if(member.proposed_text===null)files.delete(member.source.path);else files.set(member.source.path,{data:Buffer.from(member.proposed_text),mode:files.get(member.source.path)?.mode??0o644});}
   const entries=manifest(files),snapshotDigest=digest(files);
   assert(entries.length<=maxFiles&&entries.reduce((n,f)=>n+f.bytes,0)<=maxBytes,'Proposed snapshot exceeds its bounds.');
@@ -160,6 +162,8 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   await atomic(join(run,'manifest.json'),{schema:'proposal-test-snapshot@1',sha256:snapshotDigest,files:entries});
   try{
     for(const [path,f] of files){const target=join(snapshot,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}
+    const baselineSnapshot=join(run,'baseline');
+    if(compare){await mkdir(baselineSnapshot,{mode:0o700});for(const [path,f] of baselineFiles){const target=join(baselineSnapshot,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}await atomic(join(run,'baseline-manifest.json'),{sha256:before,files:manifest(baselineFiles)});}
     // Pin the executable bytes too; do not run a mutable installation path.
     const runtime=join(run,'node');await writeFile(runtime,node,{flag:'wx',mode:0o700});
     const toolchain=profile===profiles[1]?await pinElixirTools(run):profile===profiles[2]?await pinRustTools(run):null;if(toolchain)record.toolchain_sha256=toolchain.sha256;
@@ -173,6 +177,15 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
       args.splice(args.indexOf('--'));
       args.push('--symlink','usr/bin','/bin',...toolchain.binds,'--setenv','PATH','/rust/bin:/usr/bin','--setenv','CARGO_HOME','/tmp/cargo','--setenv','CARGO_TARGET_DIR','/tmp/target','--setenv','CARGO_BUILD_JOBS','2','--setenv','RUSTUP_TOOLCHAIN','stable','--','/bin/sh','-c','mkdir -p /tmp/cargo && cp -a /registry /tmp/cargo/registry && cp -a /snapshot /tmp/source && cd /tmp/source && exec cargo test --offline --locked --manifest-path tools/native-review/Cargo.toml --lib -- --test-threads=1');
     }
+    if(compare){
+      const baselineArgs=args.map(a=>a===snapshot?baselineSnapshot:a),baselineTests=profile===profiles[0]?manifest(baselineFiles).map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):tests;
+      if(profile===profiles[0])baselineArgs.splice(baselineArgs.indexOf('--test-reporter=tap')+1,tests.length,...baselineTests);
+      const b=signal?.aborted?{code:null,output:'',omitted_bytes:0}:baselineTests.length?await execute(baselineArgs,timeoutMs,signal):{code:null,output:'No baseline test suites found.',omitted_bytes:0};
+      const complete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(b.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(b.output):/# tests \d+\r?\n/.test(b.output)&&/# fail \d+\r?\n/.test(b.output);
+      const completed=complete&&!signal?.aborted&&!b.timedOut&&!b.launchError&&!b.signal;
+      record.baseline={snapshot_sha256:before,tests:baselineTests,same_suites:JSON.stringify(baselineTests)===JSON.stringify(tests),state:completed?'completed':'failed',verdict:completed?(b.code===0?'pass':'fail'):null,exit_code:b.code,output:b.output,omitted_bytes:b.omitted_bytes,finished_at:new Date().toISOString()};
+      await atomic(join(run,'baseline-outcome.json'),record.baseline);
+    }
     const result=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:null,output:'',omitted_bytes:0}:await execute(args,timeoutMs,signal);
     const unchanged=await Promise.all(entries.map(async e=>{const f=await exactFile(snapshot,e.path);return hash(f.data)===e.sha256&&f.mode===e.mode;})).then(xs=>xs.every(Boolean));
     const tapComplete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(result.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(result.output):/# tests \d+\r?\n/.test(result.output)&&/# fail \d+\r?\n/.test(result.output);
@@ -181,6 +194,8 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     Object.assign(record,{state,finished_at:new Date().toISOString(),exit_code:result.code,signal:result.signal,output:result.output,omitted_bytes:result.omitted_bytes});
     if(state==='completed')record.verdict=result.code===0?'pass':'fail';
     else record.reason=signal?.aborted?'cancelled':!unchanged?'snapshot-changed':result.timedOut?'timeout':result.launchError?'launcher-unavailable':result.signal?'terminated':'runner-did-not-complete';
+    if(compare&&profile===profiles[0]&&!signal?.aborted)record.benchmark=await pairedBenchmark({files,baselineFiles,args,snapshot,baselineSnapshot,signal,before,after:snapshotDigest,nodeHash:record.node_sha256});
+    if(signal?.aborted){record.state='failed';record.reason='cancelled';delete record.verdict;}
     await atomic(join(run,'outcome.json'),record);return {directory:run,record};
   }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await atomic(join(run,'outcome.json'),record);throw e;}
   finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});}
@@ -206,3 +221,27 @@ export async function verifyTestedCheckout({repository,attempt,run}){
 
 // Shared bounded capture and isolation primitives for accepted-source builds.
 export {capture,manifest,digest,execute,pinRustTools,atomic};
+
+// Fixed benchmark protocol, executed only by the isolated proposal runner.
+export function benchmarkMetrics(text){
+ const value=JSON.parse(text);assert(Array.isArray(value.metrics)&&value.metrics.length>0&&value.metrics.length<=20,'Emit 1–20 benchmark metrics.');const names=new Set();
+ for(const m of value.metrics){assert(typeof m.name==='string'&&m.name.length>0&&m.name.length<=80&&!names.has(m.name)&&Number.isFinite(m.value)&&m.value>=0&&['ns','us','ms','s','bytes','ops/s','items/s','count'].includes(m.unit)&&['lower','higher'].includes(m.direction),'Invalid or duplicate benchmark metric.');names.add(m.name);}
+ return value.metrics.map(({name,value,unit,direction})=>({name,value,unit,direction}));
+}
+async function pairedBenchmark({files,baselineFiles,args,snapshot,baselineSnapshot,signal,before,after,nodeHash}){
+ const path='tools/task-benchmark.mjs',a=baselineFiles.get(path),b=files.get(path);
+ if(!a||!b)return {state:'not-configured',reason:'Add the same tools/task-benchmark.mjs to both source versions to compare performance.'};
+ if(hash(a.data)!==hash(b.data))return {state:'incomparable',reason:'The benchmark entry point changed. Retain the same benchmark on both sides.'};
+ const result={state:'running',command:['node',path],script_sha256:hash(a.data),before_snapshot:before,after_snapshot:after,node_sha256:nodeHash,environment:{host:hostname(),platform:platform(),arch:arch(),cpu:cpus()[0]?.model},warmup_runs:1,repetitions:3,samples:{before:[],after:[]},outputs:{before:[],after:[]}};
+ try{
+  let expected=null;
+  for(let round=-1;round<3;round++)for(const side of (round%2===0?['before','after']:['after','before'])){
+   assert(!signal?.aborted,'Benchmark cancelled.');const command=args.slice(0,args.indexOf('--')) .map(v=>v===snapshot?(side==='before'?baselineSnapshot:snapshot):v);command.push('--','/runtime/node',path);
+   const run=await execute(command,5000,signal);assert(run.code===0&&!run.signal&&!run.timedOut&&!run.launchError&&!run.omitted_bytes,'Benchmark did not finish successfully.');
+   const metrics=benchmarkMetrics(run.output),identity=JSON.stringify(metrics.map(m=>[m.name,m.unit,m.direction]));if(expected===null)expected=identity;assert(expected===identity,'Metric names, order, units or direction changed across samples.');
+   if(round>=0){result.samples[side].push(metrics);result.outputs[side].push(run.output.slice(0,12000));}
+  }
+  result.metrics=result.samples.before[0].map((m,i)=>{const stats=side=>{const xs=result.samples[side].map(row=>row[i].value).sort((a,b)=>a-b);return {median:xs[1],min:xs[0],max:xs[2]};};const a=stats('before'),b=stats('after');return {name:m.name,unit:m.unit,direction:m.direction,before:a,after:b,change_percent:a.median===0?null:(b.median-a.median)/a.median*100};});result.state='completed';
+ }catch(e){result.state=signal?.aborted?'cancelled':'failed';result.reason=String(e.message).slice(0,1000);}
+ return result;
+}

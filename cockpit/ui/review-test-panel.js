@@ -7,16 +7,17 @@ export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=fa
   panel.append(node('h4','Local test runs'),node('p','Runs the captured source with every file in this review applied together. Ignored files and installed dependencies are excluded. Elixir tests cover the runtime’s plan and review workflow and require Elixir and Erlang installed with asdf. Rust tests cover review recovery and reply controls, require rustup and cached Cargo dependencies, and run offline. The runtime records the start and outcome; full output stays on this device. Tests do not accept the plan.','directory-note'));
   const controls=node('div',undefined,'connection-row'),start=node('button','Run JavaScript tests','subtle');start.type='button';start.id='attempt-run-'+attempt.id;
   const profile=node('select');profile.id='attempt-test-profile-'+attempt.id;profile.setAttribute('aria-label','Test profile');for(const [value,label] of [['super-javascript-behavior@1','JavaScript behavior tests'],['super-elixir-review@1','Elixir plan and review tests'],['super-rust-review@1','Rust review and reply tests']]){const option=node('option',label);option.value=value;profile.append(option);}start.textContent='Run selected tests';
+  const comparison=node('label',undefined,'field'),compare=node('input');compare.type='checkbox';compare.checked=true;compare.setAttribute('aria-label','Capture baseline and benchmark comparison');comparison.append(compare,node('span','Also run the starting source and compare benchmarks when configured'));
   const profileLabel=node('label','Test profile','field');profileLabel.append(profile);
   const notice=node('p','','availability-note');notice.setAttribute('role','status');notice.hidden=true;new MutationObserver(()=>{notice.hidden=!notice.textContent;}).observe(notice,{childList:true});const history=node('div');history.id='attempt-test-history-'+attempt.id;
-  if(!readOnly&&!['dismissed','accepted'].includes(attempt.status))controls.append(profileLabel,start);panel.append(controls,notice,history);
+  if(!readOnly&&!['dismissed','accepted'].includes(attempt.status))controls.append(profileLabel,comparison,start);panel.append(controls,notice,history);
   const origin=runtimeWorld(current),world=JSON.parse(origin);let busy=false,signature='',polling=false;
   async function refresh(){
     if(polling||runtimeWorld(current)!==origin)return;polling=true;
     try{
       const result=await invoke('review_tests',{request:{operation:'list',world,attempt_ref:attempt.id}});
       if(!panel.isConnected||runtimeWorld(current)!==origin)return;
-      const running=result.runs.some(r=>['running','starting'].includes(r.state));start.disabled=busy||running;profile.disabled=busy||running;
+      const running=result.runs.some(r=>['running','starting'].includes(r.state));start.disabled=busy||running;profile.disabled=busy||running;compare.disabled=busy||running;
       if(!running&&notice.textContent==='Cancellation requested. Waiting for the final outcome…')notice.textContent='Cancellation recorded. The outcome is saved below.';
       const latestAttempt=heldProjection(current)?.development_attempts?.[attempt.id];
       const saved=latestAttempt?.test_runs??{};
@@ -88,7 +89,7 @@ export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=fa
     try{
       const selected=await invoke('development_request',{request:{operation:'status'}});
       if(runtimeWorld(current)!==origin)throw Error('The runtime changed. Reopen the review.');
-      await invoke('review_tests',{request:{operation:'start',world,attempt_ref:attempt.id,revision:attempt.revision,generation:selected.generation,profile:profile.value}});
+      await invoke('review_tests',{request:{operation:'start',world,attempt_ref:attempt.id,revision:attempt.revision,generation:selected.generation,profile:profile.value,compare:compare.checked}});
       notice.textContent='Local test run recorded. Progress and output appear below.';
     }catch(e){notice.textContent=String(e);}finally{busy=false;await refresh();}
   };

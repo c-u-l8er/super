@@ -73,6 +73,8 @@ pub enum Request {
         note: String,
     },
     Start {
+        #[serde(default)]
+        compare: bool,
         generation: u64,
         attempt_ref: String,
         revision: u64,
@@ -198,6 +200,7 @@ impl Runs {
         attempt: Value,
         report: Report,
         profile: String,
+        compare: bool,
     ) -> Result<Value, String> {
         if ![
             "super-javascript-behavior@1",
@@ -278,6 +281,7 @@ impl Runs {
             .arg(dir.join("attempt.json"))
             .arg(&dir)
             .arg(&profile)
+            .arg(if compare { "compare" } else { "candidate-only" })
             .stdin(Stdio::null())
             .stdout(output)
             .stderr(errors)
@@ -340,6 +344,9 @@ impl Runs {
                         message.chars().take(1200).collect::<String>()
                     });
                 }
+            }
+            if finished["result"]["baseline"].is_object() {
+                if let Err(message)=crate::screenshots::retain_comparison(&json!([world[0],world[1]]),attempt["task_ref"].as_str().unwrap_or(""),attempt["task_revision"].as_u64().unwrap_or(0),&id,&finished["result"]) {finished["evidence_error"]=json!(message);}
             }
             let outcome = runtime_outcome(&finished, &attempt);
             state.finish(

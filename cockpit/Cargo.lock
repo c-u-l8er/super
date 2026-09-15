@@ -3299,6 +3299,7 @@ dependencies = [
  "tauri",
  "tauri-build",
  "tier1-proof",
+ "webkit2gtk",
 ]
 
 [[package]]

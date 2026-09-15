@@ -595,3 +595,7 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .task-output-attachments .field {display:flex;flex-direction:column;gap:6px;margin:10px 0;}
 .task-output-attachments .screenshot-pair > section {min-width:0;}
 .task-output-attachments pre {max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}
+
+.task-screenshots .field {display:flex;flex-direction:column;gap:6px;margin:8px 0;min-width:0;}
+.task-screenshots .directory-note {overflow-wrap:anywhere;}
+.attempt-checks input[type=checkbox] {width:16px;height:16px;flex:none;}
