@@ -1,5 +1,5 @@
 import {initMobileConversationBridge} from './mobile-conversation-bridge.js';
-import {conversationReply,titleInstruction} from './conversation-title.js';
+import {conversationReply,titleInstruction,streamingReply} from './conversation-title.js';
 import {beginTaskActivity,observeTaskActivity,replyFailure} from './task-activity.js';
 import {initBotActivity} from './bot-activity.js';
 import {REVIEW_FILE_BYTES,REVIEW_FILE_LABEL} from './review-limits.js';
@@ -17,7 +17,7 @@ import {initConversationSidebar} from './conversation-sidebar.js';
 import { createConversationStore } from './conversation-store.js';
 export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const root = document.getElementById('bot-surface');
-  let conversationSidebar=null;
+  let conversationSidebar=null,liveReply=null,streamText='';
   root.dataset.screen='bot:assistant';
   let bot={id:'assistant',name:'Workspace assistant',group:'General',role:'Planning',instructions:'Help organize work into clear, reviewable steps.',provider:'codex'};
   const editReferences=new WeakMap();
@@ -92,7 +92,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   }
   function snapshot(){
     return {...(conversationTaskLinks.length?{taskLinks:conversationTaskLinks}:{}),messages:pendingTurn?messages.slice(0,pendingTurn.messageCount):messages,
-      entries:[...transcript.children].map(e=>({role:e.classList.contains('bot-user')?'user':e.classList.contains('bot-assistant')?'assistant':'result',label:e.querySelector('.eyebrow')?.textContent??'',text:e.querySelector('.bot-message-text')?.dataset.rawText??e.querySelector('.bot-message-text')?.textContent??'',referenceWorld:e.querySelector('.bot-message-text')?.dataset.referenceWorld||null,proposals:[...e.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].map(p=>p.dataset.savedText??[...p.children].filter(c=>c.tagName!=='BUTTON').map(c=>c.dataset.rawText??c.textContent).join('\n'))})),
+      entries:[...transcript.children].filter(e=>!e.classList.contains('live-reply')).map(e=>({role:e.classList.contains('bot-user')?'user':e.classList.contains('bot-assistant')?'assistant':'result',label:e.querySelector('.eyebrow')?.textContent??'',text:e.querySelector('.bot-message-text')?.dataset.rawText??e.querySelector('.bot-message-text')?.textContent??'',referenceWorld:e.querySelector('.bot-message-text')?.dataset.referenceWorld||null,proposals:[...e.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].map(p=>p.dataset.savedText??[...p.children].filter(c=>c.tagName!=='BUTTON').map(c=>c.dataset.rawText??c.textContent).join('\n'))})),
       draft:pendingTurn?.draft??input.value,files:pendingTurn?.files??files,includeContext:include.checked,replyPending:!!pendingTurn};
   }
   function saveCurrent(){
@@ -270,11 +270,15 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     pendingTurn={draft,files:sentFiles,messageCount:messages.length};transcript.dataset.follow='true';requestAnimationFrame(()=>{transcript.scrollTop=transcript.scrollHeight;});
     messages.push({role:'user',content:text,attachments:sentFiles});line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();busy=true;refresh();status.textContent=active.provider==='codex'?'Waiting for Codex… Large file replies can take up to five minutes.':`Waiting for ${active.provider}… Replies can take up to ${active.provider==='claude'?'five':'two'} minutes.`;saveCurrent();
     activity.start(['codex','claude'].includes(active.provider));
+    streamText='';liveReply=node('article',undefined,'bot-assistant live-reply');liveReply.append(node('p','Generating…','eyebrow'),node('div','','bot-message-text'));transcript.append(liveReply);
+    const observeLive=r=>{if(!pendingTurn)return;activity.observe(r);if(typeof r.text==='string'){streamText=streamingReply(r.text,['codex','claude'].includes(active.provider));liveReply.querySelector('.bot-message-text').textContent=streamText||'Waiting for reply…';if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}conversationSidebar?.render();};
+    const onEvent=new window.__TAURI__.core.Channel();onEvent.onmessage=observeLive;
     replyId=['codex','claude'].includes(active.provider)?crypto.randomUUID():null;
-    if(replyId){const id=replyId,p=active.provider;const poll=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;activity.observe(r);observeTaskActivity(activityId,r);if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
+    if(replyId){const id=replyId,p=active.provider;const poll=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;observeLive(r);observeTaskActivity(activityId,r);if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
     try {
-      const reply=await invoke('bot_chat' ,{turn:{expected_model:active.model,request_id:replyId,provider:active.provider,messages,context:turnContext,bot_instructions:`Name: ${bot.name}\nRole: ${bot.role}\n${bot.instructions}\n${wantsTitle?titleInstruction:''}`,effort:effort.value||null}});
+      const reply=await invoke('bot_chat' ,{onEvent,turn:{expected_model:active.model,request_id:replyId,provider:active.provider,messages,context:turnContext,bot_instructions:`Name: ${bot.name}\nRole: ${bot.role}\n${bot.instructions}\n${wantsTitle?titleInstruction:''}`,effort:effort.value||null}});
       const titled=conversationReply(reply.text,wantsTitle);reply.text=titled.text;
+      liveReply?.remove();liveReply=null;
       const entry=line('assistant',reply.text||'Review the proposed step below.');
       messages.push({role:'assistant',content:[reply.text,reply.actions.length?`Proposed only, not executed: ${JSON.stringify(reply.actions)}`:''].filter(Boolean).join('\n')});
       const fileEdits=reply.actions.filter(a=>a.name==='propose_file_edit');
@@ -314,8 +318,8 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
       saveCurrent();
       if(conversationId&&wantsTitle){try{history.update(selected,conversationId,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* Reply remains usable if local title storage is full. */}}
 
-    }catch(error){taskRecovery=replyFailure(error);observeTaskActivity(activityId,{type:'finish',error:true,failure:String(error)});activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
-    finally{replyId=null;clearTimeout(replyPoll);cancelReply.hidden=true;busy=false;saveCurrent();refresh();if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}
+    }catch(error){if(streamText)line('result','Interrupted reply (partial):\n'+streamText);taskRecovery=replyFailure(error);observeTaskActivity(activityId,{type:'finish',error:true,failure:String(error)});activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
+    finally{liveReply?.remove();liveReply=null;streamText='';replyId=null;clearTimeout(replyPoll);cancelReply.hidden=true;busy=false;saveCurrent();refresh();if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}
   });
   historyPicker.addEventListener('change',()=>{if(busy)return;historyNavigation++;const id=historyPicker.value;if(!saveCurrent()){updateHistory();return;}restoreSaved(id||null);saveCurrent();refresh();});
   deleteConversation.addEventListener('click',()=>{if(busy||!conversationId)return;if(!confirm('Delete this saved conversation and its locally saved attachments?'))return;try{history.remove(selected,conversationId);sessions.delete(selected);reset();historyStatus.textContent='Conversation deleted from this device.';refresh();}catch(error){historyStatus.textContent=String(error);}});
@@ -389,10 +393,11 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   document.addEventListener('runtime-view-rendered',showIdentity);
   new MutationObserver(showIdentity).observe(document.getElementById('world'),{childList:true});
   showIdentity();
-  conversationSidebar=initConversationSidebar({root,fresh,get:()=>({bot,items:history.list(),selected:conversationId,provider:selected,busy:busy||pending}),
-    update:(p,id,patch)=>{history.update(p,id,patch);updateHistory();},
-    remove:(p,id)=>{if(!confirm('Delete this conversation and its saved attachments?'))return;history.remove(p,id);sessions.delete(p);if(conversationId===id)reset();updateHistory();},
-    open:async(p,id)=>{if(busy||pending||!saveCurrent())return;let token=++historyNavigation;if(p!==selected){provider.value=p;provider.dispatchEvent(new Event('change'));token=historyNavigation;for(let i=0;(loadingProvider||busy)&&i<300&&token===historyNavigation;i++)await new Promise(r=>setTimeout(r,100));}if(token!==historyNavigation||selected!==p)return;if(busy||loadingProvider){status.textContent='Connection setup is still busy. Reopen this conversation when it finishes.';return;}restoreSaved(id);saveCurrent();refresh();workView.conversation();}
+  const storeFor=id=>id===bot.id?history:createConversationStore({getItem:key=>localStorage.getItem(id==='assistant'?key:`${key}:bot:${id}`),setItem:(key,value)=>localStorage.setItem(id==='assistant'?key:`${key}:bot:${id}`,value)});
+  conversationSidebar=initConversationSidebar({root,fresh,get:()=>({bot,items:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),bots:roster.list(),active:{id:conversationId,botId:bot.id,provider:selected,generating:!!pendingTurn,liveText:streamText},selected:conversationId,provider:selected,busy:busy||pending}),
+    update:(b,p,id,patch)=>{storeFor(b).update(p,id,patch);updateHistory();},
+    remove:(b,p,id)=>{if(!confirm('Delete this conversation and its saved attachments?'))return;storeFor(b).remove(p,id);sessions.delete(p);if(bot.id===b&&conversationId===id)reset();updateHistory();},
+    open:async(b,p,id)=>{if(busy||pending||!saveCurrent())return;if(b!==bot.id){navigate('bot:'+b,true);for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));if(bot.id!==b||busy||loadingProvider)throw Error('Connection setup is still busy. Try again shortly.');}let token=++historyNavigation;if(p!==selected){provider.value=p;provider.dispatchEvent(new Event('change'));token=historyNavigation;for(let i=0;(loadingProvider||busy)&&i<300&&token===historyNavigation;i++)await new Promise(r=>setTimeout(r,100));}if(token!==historyNavigation||selected!==p)return;if(busy||loadingProvider){status.textContent='Connection setup is still busy. Reopen this conversation when it finishes.';return;}restoreSaved(id);saveCurrent();refresh();workView.conversation();}
   });conversationSidebar.render();
 
   document.addEventListener('open-saved-task-conversation',e=>{
@@ -431,14 +436,13 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     composer.before(group);status.textContent=items.length===1?'Surface snapshot attached. Add a message and Send when ready.':items.length+' file snapshots attached. Review the attachments, then Send when ready.';input.focus();
   });
   document.addEventListener('page-selected',()=>{const link=root.querySelector('.linked-surface');if(link)link.hidden=link.dataset.botId!==bot.id;});
-  const storeFor=id=>id===bot.id?history:createConversationStore({getItem:key=>localStorage.getItem(id==='assistant'?key:`${key}:bot:${id}`),setItem:(key,value)=>localStorage.setItem(id==='assistant'?key:`${key}:bot:${id}`,value)});
   initMobileConversationBridge({invoke,view:()=>({
     bots:roster.list().map(b=>({id:b.id,name:b.name,provider:b.provider})),
     conversations:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),
-    active:{botId:bot.id,provider:selected,id:conversationId,model:active?.model??null,effort:effort.value,efforts:[...effort.options].map(o=>o.value),busy:busy||pending||runtimeBusy,status:status.textContent,
+    active:{botId:bot.id,provider:selected,id:conversationId,model:active?.model??null,effort:effort.value,efforts:[...effort.options].map(o=>o.value),busy:busy||pending||runtimeBusy,generating:!!pendingTurn,status:status.textContent,
       revision:history.list(selected).find(c=>c.id===conversationId)?.revision??null,
       data:conversationId?history.get(selected,conversationId):null,
-      liveText:busy?document.querySelector('#bot-live-output')?.textContent?.slice(-20000)||'':''}
+      liveText:pendingTurn?streamText:''}
   }),perform:async request=>{
     if(busy||pending||runtimeBusy||loadingProvider)throw Error('A desktop conversation operation is in progress. Wait for it to finish.');
     if(!roster.get(request.botId))throw Error('That bot is unavailable.');

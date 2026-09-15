@@ -96,6 +96,7 @@ mod accepted_builds;
 mod accepted_preview;
 mod attachments;
 mod bots;
+mod bot_stream;
 mod claude_connection;
 mod codex_connection;
 mod keychain;
@@ -583,6 +584,8 @@ async fn bot_claude_connection(
 #[tauri::command]
 async fn bot_chat(
     turn: bots::Turn,
+    on_event: Option<tauri::ipc::JavaScriptChannelId>,
+    webview: tauri::Webview,
     app: tauri::AppHandle,
     state: State<'_, bots::Bots>,
     codex: State<'_, codex_connection::Connection>,
@@ -599,6 +602,7 @@ async fn bot_chat(
         codex.inner().clone(),
         claude.inner().clone(),
         home,
+        on_event.map(|id|id.channel_on(webview)),
     )
     .await
 }

@@ -26,7 +26,7 @@ export function initMobileConversationBridge({invoke,view,perform,storage=localS
    const reply=await invoke('conversation_exchange',{request});previous=raw;receipts=[];
    for(const command of reply.requests??[]){try{receipts.push(await ledger.run(command,perform));}catch(error){receipts.push({id:command.id,state:'error',message:String(error.message||error)});}}
   }catch{previous='';}
-  setTimeout(tick,750);
+  setTimeout(tick,300);
  }
  tick();
 }

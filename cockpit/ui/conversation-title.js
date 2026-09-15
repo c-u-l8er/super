@@ -6,3 +6,17 @@ export function conversationReply(text,requested){
  if(!match)return {text:raw};const title=match[1].trim().replace(/\s+/g,' ').slice(0,80);
  return title?{title,text:raw.slice(match[0].length)}:{text:raw};
 }
+
+// Extract only the public text field from an unfinished structured reply.
+export function streamingReply(raw,structured=true){
+ let text=String(raw??'');
+ if(structured&&text.trimStart().startsWith('{')){
+  const match=text.match(/^\s*\{\s*"text"\s*:\s*"/);if(!match)return '';
+  const rest=text.slice(match[0].length);let encoded='';
+  for(let i=0;i<rest.length;i++){const c=rest[i];if(c==='"')break;if(c==='\\'){const size=rest[i+1]==='u'?6:2;if(i+size>rest.length)break;encoded+=rest.slice(i,i+size);i+=size-1;}else encoded+=c;}
+  try{text=JSON.parse('"'+encoded+'"')}catch{return '';}
+ }
+ if(text.trimStart().startsWith('<')&&'<conversation-title>'.startsWith(text.trimStart()))return '';
+ if(/^\s*<conversation-title>/.test(text)&&!text.includes('</conversation-title>'))return '';
+ return conversationReply(text,true).text;
+}

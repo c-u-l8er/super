@@ -463,6 +463,7 @@ pub async fn chat(
     codex: crate::codex_connection::Connection,
     claude: crate::claude_connection::Connection,
     home: std::path::PathBuf,
+    on_event: Option<tauri::ipc::Channel<Value>>,
 ) -> Result<Value, String> {
     provider(&turn.provider)?;
     let images = if let Some(identity) = &turn.visual_review {
@@ -608,7 +609,8 @@ pub async fn chat(
     } else {
         config.endpoint.clone()
     };
-    let mut req = client.post(url).json(&request(&config, &turn, &images));
+    let mut body=request(&config, &turn, &images);body["stream"]=json!(true);
+    let mut req = client.post(url).json(&body);
     if turn.provider == "openai" {
         req = req.bearer_auth(&config.key);
     }
@@ -627,6 +629,8 @@ pub async fn chat(
     if !reply.status().is_success() {
         return Err(format!("Provider returned HTTP {}. Check the model, API key, and account availability. No app action was executed.",reply.status().as_u16()));
     }
+    let streaming=reply.headers().get("content-type").and_then(|v|v.to_str().ok()).is_some_and(|s|s.contains("event-stream")||s.contains("ndjson"));
+    let mut stream=crate::bot_stream::Stream::default();let mut published=0;let mut emitted=std::time::Instant::now();
     let mut bytes = Vec::new();
     while let Some(chunk) = reply
         .chunk()
@@ -637,10 +641,9 @@ pub async fn chat(
         if bytes.len() + chunk.len() > 4 * 1_048_576 {
             return Err("The provider reply exceeded the size limit.".into());
         }
-        bytes.extend_from_slice(&chunk);
+        if streaming{stream.feed(&turn.provider,&chunk)?;if stream.text.len()!=published&&(published==0||emitted.elapsed()>=Duration::from_millis(50)){published=stream.text.len();emitted=std::time::Instant::now();if let Some(channel)=&on_event{let _=channel.send(json!({"text":stream.text,"received_bytes":published,"phase":"Receiving reply"}));}}}else{bytes.extend_from_slice(&chunk);}
     }
-    let parsed =
-        serde_json::from_slice(&bytes).map_err(|_| "The provider returned an unreadable reply.")?;
+    let parsed = if streaming{stream.finish(&turn.provider)?}else{serde_json::from_slice(&bytes).map_err(|_| "The provider returned an unreadable reply.")?};
     let mut result = response(&turn.provider, parsed)?;
     result["model"] = json!(used_model);
     Ok(result)

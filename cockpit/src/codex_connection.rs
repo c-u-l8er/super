@@ -17,6 +17,7 @@ struct ReplyState {
     active: bool,
     cancelled: bool,
     bytes: usize,
+    text: String,
 }
 struct Rpc {
     child: Child,
@@ -350,6 +351,7 @@ impl Connection {
                 active: true,
                 cancelled: false,
                 bytes: 0,
+                text:String::new(),
             };
         }
         let result=self.with(home,|r|{
@@ -362,7 +364,7 @@ impl Connection {
             r.call("turn/start",json!({"threadId":id,"input":[{"type":"text","text":prompt}],"outputSchema":schema,"effort":effort}),20)?;
             let mut budget=ReplyDeadline::new(Instant::now());let mut answer=String::new();
             loop {let v=match r.events.pop_front(){Some(v)=>v,None=>r.receive(budget.deadline())?};budget.observe(Instant::now(),&v,&id);if v["params"]["threadId"]!=id{continue;}
-                if v["method"]=="item/agentMessage/delta" { if let Some(text)=v["params"]["delta"].as_str() {if let Some(control)=&r.reply {if let Ok(mut state)=control.lock(){state.bytes=state.bytes.saturating_add(text.len());}}} }
+                if v["method"]=="item/agentMessage/delta" { if let Some(text)=v["params"]["delta"].as_str() {if let Some(control)=&r.reply {if let Ok(mut state)=control.lock(){state.bytes=state.bytes.saturating_add(text.len());if state.text.len()+text.len()<=160000{state.text.push_str(text);}}}} }
                 if v["method"]=="item/completed" && v["params"]["item"]["type"]=="agentMessage" { answer=v["params"]["item"]["text"].as_str().unwrap_or("").into(); }
                 if v["method"]=="turn/completed" {
                     if v["params"]["turn"]["status"]!="completed"{return Err("Codex could not finish this reply. Check your account availability and try again.".into());}
@@ -387,7 +389,7 @@ impl Connection {
     pub fn reply_status(&self, id: &str) -> Result<Value, String> {
         let s = self.1.lock().map_err(|_| "Reply state unavailable.")?;
         Ok(
-            json!({"active":s.id==id&&s.active,"cancelled":s.id==id&&s.cancelled,"received_bytes":if s.id==id{s.bytes}else{0}}),
+            json!({"active":s.id==id&&s.active,"cancelled":s.id==id&&s.cancelled,"received_bytes":if s.id==id{s.bytes}else{0},"text":if s.id==id{s.text.as_str()}else{""}}),
         )
     }
     pub fn cancel_reply(&self, id: &str) -> Result<Value, String> {

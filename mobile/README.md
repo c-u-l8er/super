@@ -49,3 +49,13 @@ The browser companion separates Chats and conversation settings into panels, lea
 Open a task review, choose **Discuss task**, then **Start discussion**. The selected chat bot is named before creation; use Chats to select another bot first if needed. Desktop validates the task's world lineage and revision and prepares a separate shared draft from its current title, status and criteria. The existing conversation stays saved. Opening or preparing a discussion does not call a provider: review the draft, select the exact connected model, then Send. The task link returns to the same current revision. This prepares a discussion, not task execution, source capture or approval.
 
 Validation: `node --test tools/mobile-task-discussion-test.mjs`; the native desktop flow is `tools/native-ui-test.sh node tools/mobile-task-discussion-smoke.mjs`, using only an explicit local fixture model.
+
+### Conversation navigation and live replies
+
+The desktop, browser companion and Expo chat lists can filter by bot and group by bot or recency. Pins stay first within a group. Lists distinguish Waiting, Generating, Interrupted, Needs attention, Needs review, Draft and Ready. Read markers are local to each device; opening a list does not mark the active thread read. A reply is marked read when its conversation is visible at the latest messages. Existing history is initially treated as read; later replies and new threads can show New reply.
+
+Direct Ollama NDJSON and OpenAI/Anthropic SSE replies are decoded incrementally, with text sent through a Tauri channel. Managed Codex/Claude public assistant text feeds the same live transcript. Mobile mirrors the text through the private gateway, polling more frequently during generation. Updates are batched rather than sent once per token. No partial tool arguments become proposals; completion and normal action validation are required. Interrupted streams retain the original draft and a labeled partial result.
+
+Super still has one active provider turn at a time; changing the selected conversation while it runs remains disabled. Lists and other work screens can be inspected while waiting. External provider/account behavior must be checked with an explicitly selected model; the automated streaming smoke uses a delayed local fixture only.
+
+Checks: `node --test tools/conversation-list-test.mjs`, `cargo test --manifest-path cockpit/Cargo.toml bot_stream`, and `tools/native-ui-test.sh node tools/mobile-streaming-smoke.mjs`.

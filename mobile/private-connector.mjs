@@ -14,7 +14,7 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
  if(secure&&(!front.hostname.endsWith('.ts.net')||!allowedTailscaleLogin))throw Error('Private HTTPS requires an exact Tailscale origin and owner login.');
  const routes=new Map([['/api/observer/snapshot',['GET','/api/snapshot']],['/api/observer/pair',['POST','/api/pair']],['/api/observer/logout',['POST','/api/logout']]]);
  routes.set('/api/conversations',['GET','/api/conversations']);routes.set('/api/conversation',['POST','/api/conversation']);
- const companionAssets=new Map([['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js']]);
+ const companionAssets=new Map([['/conversation-list.js','/conversation-list.js'],['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js']]);
  for(const operation of ['snapshot','pair','logout'])routes.set('/api/'+operation,[operation==='snapshot'?'GET':'POST','/api/'+operation]);
  return http.createServer((req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503);res.end()})});
  async function handle(req,res){

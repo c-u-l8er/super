@@ -65,7 +65,7 @@ export function createConversationStore(storage) {
   }
   return {
     error,
-    list: provider => state.conversations.filter(c => !provider || c.provider === provider).map(c => ({ id: c.id, revision:c.revision??1, provider:c.provider, title: c.title, pinned:c.pinned===true, titleSource:c.titleSource??'fallback', updated: c.updated })).sort((a, b) => b.updated.localeCompare(a.updated)),
+    list: provider => state.conversations.filter(c => !provider || c.provider === provider).map(c => ({ id: c.id, revision:c.revision??1, provider:c.provider, title: c.title, pinned:c.pinned===true, titleSource:c.titleSource??'fallback', updated: c.updated, messageCount:c.data.entries.filter(e=>e.role==='assistant'||e.role==='result').length, state:c.data.replyPending?'Interrupted':c.data.entries.at(-1)?.role==='result'?'Needs attention':c.data.entries.at(-1)?.proposals?.length?'Needs review':c.data.draft?'Draft':'Ready' })).sort((a, b) => b.updated.localeCompare(a.updated)),
     selected: provider => state.selected[provider] ?? null,
     get: (provider, id) => {
       const c = state.conversations.find(c => c.provider === provider && c.id === id);
