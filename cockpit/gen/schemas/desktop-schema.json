@@ -405,6 +405,12 @@
           "markdownDescription": "Enables the surface_sessions command without any pre-configured scope."
         },
         {
+          "description": "Enables the task_screenshots command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-task-screenshots",
+          "markdownDescription": "Enables the task_screenshots command without any pre-configured scope."
+        },
+        {
           "description": "Enables the terminal_ack command without any pre-configured scope.",
           "type": "string",
           "const": "allow-terminal-ack",
@@ -667,6 +673,12 @@
           "type": "string",
           "const": "deny-surface-sessions",
           "markdownDescription": "Denies the surface_sessions command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the task_screenshots command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-task-screenshots",
+          "markdownDescription": "Denies the task_screenshots command without any pre-configured scope."
         },
         {
           "description": "Denies the terminal_ack command without any pre-configured scope.",

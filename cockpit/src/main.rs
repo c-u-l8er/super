@@ -100,6 +100,7 @@ mod claude_connection;
 mod codex_connection;
 mod keychain;
 mod mobile_gateway;
+mod screenshots;
 mod preview;
 mod repository;
 mod review_tests;
@@ -608,6 +609,9 @@ async fn bot_chat(
 /// projection and no control channel, so nothing here widens what a paired
 /// phone can do.
 #[tauri::command]
+fn task_screenshots(request:Value)->Result<Value,String>{screenshots::request(request)}
+
+#[tauri::command]
 fn mobile_status() -> Value {
     crate::mobile_gateway::status()
 }
@@ -952,6 +956,7 @@ fn main() {
             choose_attachments,
             desktop_window,
             mobile_status,
+            task_screenshots,
             mobile_new_code,
             bot_configure,
             bot_forget_key,
@@ -987,6 +992,7 @@ fn main() {
             }
         })
         .setup(move |app| {
+            screenshots::init(app.path().app_data_dir()?);
             tier1_proof::install(app.handle());
             if std::env::var("SUPER_ROAD").as_deref() == Ok("1") {
                 tier1_proof::open(app.handle()).map_err(std::io::Error::other)?;

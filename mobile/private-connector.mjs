@@ -28,7 +28,7 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
   const reject=(status,message)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({error:message}))};
   if(req.headers.host!==front.host||(req.headers.origin&&req.headers.origin!==front.origin))return reject(403,'Origin refused.');
   if(secure&&req.headers['tailscale-user-login']!==allowedTailscaleLogin)return reject(403,'Owner access required.');
-  const isApi=req.url.startsWith('/api/');const route=routes.get(req.url);
+  const isApi=req.url.startsWith('/api/');const route=routes.get(req.url)??(/^\/api\/screenshots\?task=[A-Za-z0-9_-]{1,100}$/.test(req.url)?['GET',req.url]:null);
   if(isApi&&(!route||req.method!==route[0]))return reject(405,'Observation only.');
   if(req.method==='POST'&&req.headers.origin!==front.origin)return reject(403,'Same-origin request required.');
   if(!isApi&&!['GET','HEAD'].includes(req.method))return reject(405,'Read-only interface.');

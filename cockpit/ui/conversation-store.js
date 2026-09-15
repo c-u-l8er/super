@@ -48,7 +48,7 @@ export function createConversationStore(storage) {
       state.conversations = loaded.conversations.map(c => {
         if (!PROVIDERS.has(c.provider) || ids.has(c.id)) throw new Error('Invalid saved conversation.');
         ids.add(c.id);
-        return { id: string(c.id, 100), provider: c.provider, title: string(c.title, 100), updated: string(c.updated, 40), data: clean(c.data) };
+        return { id: string(c.id, 100), provider: c.provider, title: string(c.title, 100), pinned: c.pinned === true, titleSource: ['manual','ai','attempted'].includes(c.titleSource)?c.titleSource:'fallback', updated: string(c.updated, 40), data: clean(c.data) };
       });
       for (const p of PROVIDERS) {
         if (state.conversations.some(c => c.provider === p && c.id === loaded.selected?.[p])) state.selected[p] = loaded.selected[p];
@@ -65,7 +65,7 @@ export function createConversationStore(storage) {
   }
   return {
     error,
-    list: provider => state.conversations.filter(c => c.provider === provider).map(c => ({ id: c.id, title: c.title, updated: c.updated })).sort((a, b) => b.updated.localeCompare(a.updated)),
+    list: provider => state.conversations.filter(c => !provider || c.provider === provider).map(c => ({ id: c.id, provider:c.provider, title: c.title, pinned:c.pinned===true, titleSource:c.titleSource??'fallback', updated: c.updated })).sort((a, b) => b.updated.localeCompare(a.updated)),
     selected: provider => state.selected[provider] ?? null,
     get: (provider, id) => {
       const c = state.conversations.find(c => c.provider === provider && c.id === id);
@@ -79,9 +79,22 @@ export function createConversationStore(storage) {
       if (!previous && state.conversations.length >= 20) throw new Error('You have 20 saved conversations. Delete an older one to make room.');
       id = previous?.id ?? crypto.randomUUID();
       const title = (value.messages.find(m => m.role === 'user')?.content || value.draft || value.files[0]?.name || 'New conversation').trim().replace(/\s+/g, ' ').slice(0, 80) || 'New conversation';
-      const record = { id, provider, title, updated: new Date().toISOString(), data: value };
+      const record = { id, provider, title:previous?.titleSource&&previous.titleSource!=='fallback'?previous.title:title, pinned:previous?.pinned===true, titleSource:previous?.titleSource??'fallback', updated: previous&&JSON.stringify(previous.data)===JSON.stringify(value)?previous.updated:new Date().toISOString(), data: value };
       commit({ version: 1, selected: { ...state.selected, [provider]: id }, conversations: [...state.conversations.filter(c => c.id !== id), record] });
       return id;
+    },
+    update(provider,id,patch) {
+      const previous=state.conversations.find(c=>c.id===id&&c.provider===provider);
+      if(!previous)throw new Error('Conversation is unavailable.');
+      const next={...previous};
+      if(typeof patch.pinned==='boolean')next.pinned=patch.pinned;
+      if(patch.title!==undefined){
+        const title=string(patch.title,100).trim().replace(/\s+/g,' ');
+        if(!title)throw new Error('Enter a conversation title.');
+        if(patch.titleSource==='ai'&&previous.titleSource==='manual')return;
+        next.title=title;next.titleSource=patch.titleSource==='ai'?'ai':'manual';
+      }else if(patch.titleSource==='attempted'&&previous.titleSource==='fallback')next.titleSource='attempted';
+      commit({...state,conversations:state.conversations.map(c=>c===previous?next:c)});
     },
     remove(provider, id) {
       const selected = { ...state.selected };

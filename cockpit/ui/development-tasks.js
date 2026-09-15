@@ -1,3 +1,4 @@
+import {taskScreenshots} from './task-screenshots.js';
 import {initFleetChecks} from './fleet-check-view.js';
 import {guideReview} from './review-guide.js';
 import {acceptedBuildPanel} from './accepted-build-panel.js';
@@ -61,6 +62,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
       if(target){if(progress.target==='review')target.open=true;target.scrollIntoView({block:'center'});const focus=target.querySelector?.('summary')||target;focus.focus();}
     }));else next.append(node('p',progress.label));
     details.append(next);
+    details.append(taskScreenshots({task,world:current().frame.world,invoke,current}));
     const editorPanel=node('section',undefined,'attempt-checks');editorPanel.id='task-editor-context';details.append(editorPanel);renderEditor();
     const sessionPanel=node('section',undefined,'attempt-checks');sessionPanel.id='task-provider-session';details.append(sessionPanel);renderSession();
     initFleetChecks({root:details,invoke,context:()=>({world:runtimeWorld(current),task:heldProjection(current)?.development_tasks?.[task.id]})});

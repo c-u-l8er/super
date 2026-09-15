@@ -530,3 +530,33 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .machine-help {font-size:12px;color:#8b9bb0;margin-top:16px;}
 @media(max-width:1000px){.machine-columns{display:none}.machine-open{grid-template-columns:minmax(110px,1.6fr) minmax(80px,1fr) 64px 16px;gap:12px}.machine-capacity{display:none}.machine-vm-count:after{content:attr(data-unit);margin-left:4px;font-size:11px;color:#96a6bc}.machine-open{padding:20px 16px;}}
 @media(max-width:600px){.machine-open{grid-template-columns:minmax(100px,1fr) 80px 16px}.machine-vm-count{display:none}.machine-identity strong{font-size:14px}}
+
+/* Bot conversations keep navigation, transcript and configuration distinct. */
+.conversation-sidebar h2 {font-size:16px;margin:14px 0;overflow-wrap:anywhere;}
+.conversation-row {position:relative;display:flex;align-items:flex-start;margin:5px 0;}
+.conversation-link {display:block!important;min-width:0;flex:1;text-align:left;overflow-wrap:anywhere;padding-right:8px!important;}
+.conversation-link small {display:block;color:var(--muted);font-size:11px;margin-top:5px;}
+.conversation-link[aria-current="page"] {background:#20324a;border-color:#82aee1;}
+.conversation-menu {flex:0 0 25px;}
+.conversation-menu summary {cursor:pointer;padding:9px 3px;list-style:none;}
+.conversation-menu[open] {position:absolute;right:0;top:0;z-index:5;width:220px;background:#172335;border:1px solid #56718d;padding:8px;border-radius:8px;box-shadow:0 8px 25px #0009;}
+.conversation-menu input {width:100%;min-width:0;box-sizing:border-box;}
+.conversation-menu button {margin:4px 0;}
+#bot-surface.chat-view > .eyebrow,#bot-surface.chat-view > h1,#bot-surface.chat-view > .screen-description {display:none;}
+#bot-surface.chat-view {height:100%;min-height:0;box-sizing:border-box;display:flex;flex-direction:column;}
+#bot-surface[hidden],.bot-settings-panel[hidden],.conversation-sidebar[hidden] {display:none!important;}
+.bot-conversation:not([hidden]) {display:flex;flex-direction:column;min-height:0;flex:1;}
+.conversation-title {font-size:21px;margin:12px 0;overflow-wrap:anywhere;}
+.bot-conversation .bot-transcript {overflow-y:auto;overscroll-behavior:contain;flex:1;min-height:120px;margin:12px 0;padding:0 12px 12px 0;}
+.bot-conversation .bot-composer {flex-shrink:0;background:var(--panel,#101927);padding:12px;border-radius:12px;}
+.bot-conversation .bot-status {font-size:13px;margin:5px 0;}
+.bot-settings-panel {padding-top:16px;}
+.screenshot-pair {display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px;}
+.screenshot-pair figure {margin:0;min-width:0;}
+.screenshot-pair img {width:100%;height:auto;border:1px solid #35485f;border-radius:6px;}
+.screenshot-pair input {width:100%;font-size:12px;}
+@media(max-width:700px){.screenshot-pair{grid-template-columns:1fr;}}
+.conversation-sidebar h2,.conversation-title {text-transform:none;letter-spacing:normal;font-family:var(--sans,system-ui);}
+.conversation-link::before {content:none;}
+.conversation-sidebar > [role="status"]:empty {display:none;}
+#bot-surface.chat-view .record-tabs {flex-shrink:0;margin:0 0 8px;}

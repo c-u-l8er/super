@@ -5,17 +5,17 @@ import {node} from './app-shell.js';
 import {recordLabel} from './references.js';
 import {heldProjection,runtimeWorld} from './runtime-bots.js';
 import {botWork,watchable} from './bot-work.js';
-export function initBotWork({root,conversation,current,invoke}){
+export function initBotWork({root,conversation,settings,current,invoke}){
   const tabs=node('div',undefined,'record-tabs');tabs.setAttribute('role','tablist');tabs.setAttribute('aria-label','Bot details');
   const work=node('section',undefined,'bot-work');work.id='bot-work';conversation.id='bot-conversation';
   const selected=new Map();let botId='',signature='';const buttons={};
-  for(const [id,title] of [['conversation','Conversation'],['work','Work']]){
+  for(const [id,title] of [['conversation','Conversation'],['work','Work'],['settings','Bot settings']]){
     const b=node('button',title);b.type='button';b.id='bot-tab-'+id;b.setAttribute('role','tab');b.setAttribute('aria-controls','bot-'+id);b.onclick=()=>select(id);buttons[id]=b;tabs.append(b);
-    const panel=id==='work'?work:conversation;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby',b.id);
-    b.onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();const next=e.key==='Home'?'conversation':e.key==='End'?'work':id==='work'?'conversation':'work';select(next);buttons[next].focus();};
+    const panel=id==='work'?work:id==='settings'?settings:conversation;panel.setAttribute('role','tabpanel');panel.setAttribute('aria-labelledby',b.id);
+    b.onkeydown=e=>{if(!['ArrowLeft','ArrowRight','Home','End'].includes(e.key))return;e.preventDefault();const ids=['conversation','work','settings'];const next=e.key==='Home'?ids[0]:e.key==='End'?ids[2]:ids[(ids.indexOf(id)+(e.key==='ArrowRight'?1:2))%3];select(next);buttons[next].focus();};
   }
-  conversation.before(tabs);root.append(work);const assignments=node('div');work.append(assignments);const linked=initLinkedSessions({parent:work,invoke});
-  function select(id){selected.set(botId,id);conversation.hidden=id!=='conversation';work.hidden=id!=='work';for(const [key,b] of Object.entries(buttons)){b.setAttribute('aria-selected',String(id===key));b.tabIndex=id===key?0:-1;}}
+  conversation.before(tabs);root.append(work,settings);const assignments=node('div');work.append(assignments);const linked=initLinkedSessions({parent:work,invoke});
+  function select(id){selected.set(botId,id);conversation.hidden=id!=='conversation';work.hidden=id!=='work';settings.hidden=id!=='settings';root.classList.toggle('chat-view',id==='conversation');for(const [key,b] of Object.entries(buttons)){b.setAttribute('aria-selected',String(id===key));b.tabIndex=id===key?0:-1;}}
   // Button text is the shared display label; the navigation key keeps the stable record ID.
   function link(title,kind,id){const b=node('button',title,'subtle');b.type='button';b.dataset.recordOpen=kind+':'+id;b.title=`${kind[0].toUpperCase()+kind.slice(1)}: ${id}`;return b;}
   function form(title,field,value,focus){const b=node('button',title,'subtle');b.type='button';Object.assign(b.dataset,{recordForm:field,recordValue:value,recordFocus:focus});return b;}

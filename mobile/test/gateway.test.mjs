@@ -55,3 +55,5 @@ test('renewal is not reachable over HTTP',async t=>{
  for(const path of ['/api/renew','/api/new-code','/api/pairing'])
   assert.equal((await request(path,{method:'POST',cookie,body:{}})).status,405,path);
 });
+
+test('screenshot reads require pairing and cannot become uploads or arbitrary paths',async t=>{const {request,pair}=await setup(t);assert.equal((await request('/api/screenshots?task=dt_1')).status,401);const cookie=await pair();assert.equal((await request('/api/screenshots?task=dt_1',{cookie})).status,200);for(const path of ['/api/screenshots?task=../secret','/api/screenshots?task=dt_1&path=secret'])assert.equal((await request(path,{cookie})).status,405);assert.equal((await request('/api/screenshots?task=dt_1',{method:'POST',cookie,body:{data:'fake'}})).status,405);});

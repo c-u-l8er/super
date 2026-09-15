@@ -78,14 +78,14 @@ try {
   await script(`const e=document.querySelector('[data-draft=goal_ws]');e.value=arguments[0];e.dispatchEvent(new Event('change',{bubbles:true}))`,[ws.id]);
   await type('[data-draft=goal_title]','Make Super ready for dogfooding');await click('[data-id=open-goal] button');await until(()=>script(`return Object.values(window.cockpit.frame.projection.goals).some(g=>g.workspace_ref===arguments[0])`,[ws.id]));
   await click('#app-navigation [data-nav=repositories]');await click('[data-host-action=choose-repository]');await sleep(800);evidence.capture('Native repository folder picker before confirmation');
-  const {execFileSync}=await import('node:child_process');execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid)],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});await sleep(800);if(!await script('return Object.keys(window.cockpit.frame.projection.repositories??{}).length'))execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid)],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});
+  const {execFileSync}=await import('node:child_process');execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid),testRepo],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});await sleep(800);if(!await script('return Object.keys(window.cockpit.frame.projection.repositories??{}).length'))execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid),testRepo],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});
   if(await script(`return !!document.querySelector('#retry-stream')`)){await click('#retry-stream');console.log('note: explicitly reconnected after native folder selection');}
   await until(()=>script('return Object.keys(window.cockpit.frame.projection.repositories??{}).length>0'));
   await click('[data-rail-mode=bots]');await click('#rail-bots [data-nav=new-bot]');
   await type('#new-bot-name','Super Builder');await type('#new-bot-role','Implementation');await type('#new-bot-instructions','Build Super with reviewable changes.');await script(`document.querySelector('#new-bot-provider').value='ollama'`);await click('#create-bot-submit');
   await until(()=>script(`return document.querySelector('#bot-surface h1').textContent==='Super Builder' && !document.querySelector('#bot-provider').disabled`));
   const route=await script(`return document.querySelector('#bot-surface').dataset.screen`);
-  await script(`const p=document.querySelector('#bot-register-workspace');p.value=arguments[0];p.dispatchEvent(new Event('change'))`,[ws.id]);await click('#bot-register-runtime');
+  await click('#bot-tab-settings');await script(`const p=document.querySelector('#bot-register-workspace');p.value=arguments[0];p.dispatchEvent(new Event('change'))`,[ws.id]);await click('#bot-register-runtime');
   const bot=await until(()=>script(`return Object.values(window.cockpit.frame.projection.bots??{}).find(b=>b.name==='Super Builder')`));
   await until(()=>script(`return document.querySelector('#bot-status').textContent.includes('Bot identity registered')`));
   await click('#bot-tab-work');await click('#bot-work [data-record-form=lane_actor]');
@@ -93,11 +93,11 @@ try {
   await script(`const p=window.cockpit.frame.projection,g=Object.values(p.goals).find(g=>g.workspace_ref===arguments[0]),repo=Object.values(p.repositories)[0];for(const [key,value] of [['lane_goal',g.id],['lane_repo',repo.ref??repo.id]]){const e=document.querySelector('[data-draft='+key+']');e.value=value;e.dispatchEvent(new Event('change',{bubbles:true}));}`,[bot.workspace_ref]);
   await click('[data-id=open-lane] button');
   const lane=await until(()=>script(`return Object.values(window.cockpit.frame.projection.lanes).find(l=>l.actor===arguments[0])`,[bot.actor]));
-  await click('[data-rail-mode=bots]');await click(`#rail-bots [data-nav="${route}"]`);await click('#bot-tab-work');
+  await click('[data-rail-mode=bots]');if(await script(`return !document.querySelector('.conversation-sidebar').hidden`))await click('.conversation-sidebar > button');await click(`#rail-bots [data-nav="${route}"]`);await click('#bot-tab-work');
   if(process.env.SUPER_VISUAL_EVIDENCE_DIR)await script(`document.querySelector(arguments[0])?.scrollIntoView({block:'center'})`,["#bot-work"]);check('New lane appears in its bot Work page',await script(`return document.querySelector('.bot-work-stats strong').textContent==='1' && !!document.querySelector('#bot-work [data-record-open="lane:'+arguments[0]+'"]')`,[lane.id]));
   await click('#bot-work [data-record-form=worker_lane]');await type('[data-draft=worker_purpose]','Implement and review Super changes');await click('[data-id=open-worker] button');
   const worker=await until(()=>script(`return Object.values(window.cockpit.frame.projection.workers).find(w=>w.locus_ref===arguments[0])`,[lane.id]));
-  await click('[data-rail-mode=bots]');await click(`#rail-bots [data-nav="${route}"]`);await click('#bot-tab-work');
+  await click('[data-rail-mode=bots]');if(await script(`return !document.querySelector('.conversation-sidebar').hidden`))await click('.conversation-sidebar > button');await click(`#rail-bots [data-nav="${route}"]`);await click('#bot-tab-work');
   if(process.env.SUPER_VISUAL_EVIDENCE_DIR)await script(`document.querySelector(arguments[0])?.scrollIntoView({block:'center'})`,["#bot-work"]);check('Assigned worker is visible without inventing an available terminal',await script(`return document.querySelectorAll('.bot-work-stats strong')[1].textContent==='1' && document.querySelectorAll('.bot-work-stats strong')[2].textContent==='0' && !document.querySelector('#bot-work [data-watch-worker]') && document.querySelector('#bot-work').textContent.includes('OFFLINE')`));
   await script(`document.querySelector('#workspace-canvas').scrollTop=0`);
   if(shots){mkdirSync(shots,{recursive:true});execFileSync('/usr/bin/python3',[`${root}/tools/development-capture-window.py`,String(driver.pid),resolve(shots,'Super_Progress_02_Bot_Work.png')]);}
@@ -128,13 +128,13 @@ try {
   await until(()=>script(`return !!document.querySelector('[data-file-path="index.html"]')`));await click('[data-file-path="index.html"]');await until(()=>script(`return !document.querySelector('#editor-discuss').disabled`));await click('#editor-discuss');
   await until(()=>script(`return document.querySelector('#editor-status').textContent.includes('does not match')`));
   check('a different native repository cannot be shared with the plan',chatCalls===0&&await script(`return !document.querySelector('[data-screen=editor]').hidden`));
-  await click('#development-choose-editor');await sleep(700);execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid)]);await sleep(800);if(!await script(`return !!document.querySelector('[data-file-path="index.html"]')`))execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid)]);
+  await click('#development-choose-editor');await sleep(700);execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid),testRepo]);await sleep(800);if(!await script(`return !!document.querySelector('[data-file-path="index.html"]')`))execFileSync('/usr/bin/python3',[`${root}/tools/development-confirm-folder.py`,String(driver.pid),testRepo]);
   await until(()=>script(`return !!document.querySelector('[data-file-path="index.html"]')`));await click('[data-file-path="index.html"]');await until(()=>script(`return !document.querySelector('#editor-discuss').disabled`));
   await click('#editor-discuss');
   await until(()=>script(`return document.querySelector('#bot-attachment-list').textContent.includes('index.html')`));
   if(process.env.SUPER_VISUAL_EVIDENCE_DIR)await script(`document.querySelector(arguments[0])?.scrollIntoView({block:'center'})`,["#bot-attachment-list"]);check('plan file request opens the assigned bot without sending',chatCalls===0&&await script(`return document.querySelector('#bot-surface h1').textContent==='Super Builder'&&document.querySelector('#bot-attachment-list').textContent.includes('index.html')`));
   await until(()=>script(`return !document.querySelector('#bot-provider').disabled`));
-  await script(`const p=document.querySelector('#bot-provider');p.value='ollama';p.dispatchEvent(new Event('change'));const e=document.querySelector('#bot-endpoint');e.value=arguments[0];e.dispatchEvent(new Event('input',{bubbles:true}));`,[botEndpoint]);await click('#bot-connect');await until(()=>script(`return !document.querySelector('#bot-send').disabled`));
+  await click('#bot-tab-settings');await script(`const p=document.querySelector('#bot-provider');p.value='ollama';p.dispatchEvent(new Event('change'));const e=document.querySelector('#bot-endpoint');e.value=arguments[0];e.dispatchEvent(new Event('input',{bubbles:true}));`,[botEndpoint]);await click('#bot-connect');await until(()=>script(`return !document.querySelector('#bot-send').disabled`));await click('#bot-tab-conversation');
   await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=editor]');await click('#editor-discuss');await until(()=>script(`return !document.querySelector('#bot-surface').hidden&&document.querySelector('#bot-attachment-list').textContent.includes('index.html')`));await type('#bot-message','Make the planned edit');await click('#bot-send');
 
   async function photo(name,selector){if(!shots)return;await script('document.querySelector(arguments[0]).scrollIntoView({block:"center"})',[selector]);mkdirSync(shots,{recursive:true});run('/usr/bin/python3',[`${root}/tools/development-capture-window.py`,String(driver.pid),resolve(shots,name+'.png')]);}
@@ -148,7 +148,7 @@ try {
   await photo('03_Task_Reply_Received','#task-provider-session');
   await click('#task-provider-session button');
   check('open conversation selects conversation tab',await script(`return !document.querySelector('#bot-conversation').hidden&&!document.querySelector('#bot-surface').hidden`));
-  await type('#bot-message','Trigger provider error');await click('#bot-send');await until(()=>script(`return !document.querySelector('#bot-send').disabled`));
+  await type('#bot-message','Trigger provider error');await click('#bot-send');await until(()=>script(`return !document.querySelector('#bot-send').disabled`));await click('#bot-tab-conversation');
   await click('.task-conversation-backlink');
   check('unlinked followup does not claim task reply failure',await script(`return document.querySelector('#task-provider-session').textContent.includes('Provider connected')&&!document.querySelector('#task-provider-session').textContent.includes('Reply did not complete')`));
   await photo('04_Bot_Connection_Only','#task-provider-session');
@@ -163,8 +163,8 @@ try {
   await click('[data-task-conversation="'+linkedId+'"]');
   await until(()=>script(`return document.querySelector('#bot-history').value===arguments[0]&&document.querySelector('#bot-surface').textContent.includes('Saved proposal history · no action is restored')`,[linkedId]));
   check('saved conversation restores proposals read-only',await script(`return document.querySelector('#bot-surface').textContent.includes('Saved proposal history · no action is restored')&&!document.querySelector('.bot-proposal button')`));
-  await photo('07_Reopened_History','#bot-history');
-  await click('#bot-new');await type('#bot-message','Unrelated draft to preserve');
+  await photo('07_Reopened_History','.conversation-sidebar');
+  await until(()=>script(`return !document.querySelector('#bot-new').disabled`));await click('#bot-new');await until(()=>script(`return document.querySelector('#bot-message').value===''&&document.querySelector('#bot-history').value===''`));await type('#bot-message','Unrelated draft to preserve');
   await sleep(700);
   await click('[data-rail-mode=nav]');await click('#app-navigation [data-nav=development-tasks]');
   const beforeWorld=await script('return window.cockpit.frame.world');const callsBefore=chatCalls;
@@ -184,6 +184,6 @@ try {
   check('task opens exact history instead of newer unrelated draft',await script(`return document.querySelector('#bot-history').value===arguments[0]&&document.querySelector('#bot-message').value!=='Unrelated draft to preserve'`,[linkedId]));
   check('reopening never sends provider messages',chatCalls===callsBefore);
   check('newer unrelated draft remains in saved history',await script(`return [...document.querySelector('#bot-history').options].some(o=>o.textContent==='Unrelated draft to preserve')`));
-  await photo('09_Exact_History_Restored','#bot-history');
+  await photo('09_Exact_History_Restored','.conversation-sidebar');
   console.log(`durable conversation smoke: ${checks} held`);
 } catch(e){console.error(log);if(session)try{console.error(await script(`return document.querySelector('#bot-status')?.textContent`));}catch{}throw e;} finally {evidence.close();botFixture.close();if(session)try{await wd('DELETE',`/session/${session}`);}catch{}try{process.kill(-driver.pid,'SIGTERM');}catch{}}

@@ -318,14 +318,14 @@ pub fn start() {
         loop {
             // Bound the line before allocation; the only recognized operation is read.
             let mut line = Vec::new();
-            let mut limited = std::io::Read::take(&mut output, 256);
+            let mut limited = std::io::Read::take(&mut output, 512);
             if limited.read_until(b'\n', &mut line).is_err() || line.last() != Some(&b'\n') {
                 break;
             }
             let Ok(request) = serde_json::from_slice::<Value>(&line) else {
                 break;
             };
-            if request["operation"] != "snapshot"
+            if (request["operation"] != "snapshot" && request["operation"] != "screenshots")
                 || request["id"].as_str().map_or(true, |s| s.len() > 64)
             {
                 break;
@@ -334,6 +334,7 @@ pub fn start() {
                 .lock()
                 .map(|held| snapshot(&held))
                 .unwrap_or(json!({"available":false}));
+            let result=if request["operation"]=="screenshots"{crate::screenshots::observed(&result,request["task"].as_str().unwrap_or(""))}else{result};
             let sent = input
                 .lock()
                 .map(|mut writer| writeln!(writer, "{}", json!({"id":request["id"],"snapshot":result})).is_ok())

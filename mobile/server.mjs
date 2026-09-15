@@ -11,7 +11,7 @@ const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength
 const kindOf=ua=>!ua?'unknown':/Expo|okhttp|CFNetwork/i.test(ua)?'app':/Mozilla/i.test(ua)?'browser':'other';
 // Distinguishes two devices without exposing either session. One way, truncated.
 const deviceId=token=>createHash('sha256').update('super-mobile-device:'+token).digest('hex').slice(0,6);
-export function createGateway({snapshot, pairingCode, origin, now=Date.now, onDevices}) {
+export function createGateway({snapshot, screenshots=async()=>({available:false}), pairingCode, origin, now=Date.now, onDevices}) {
   const publicURL=new URL(origin);
   if(publicURL.origin!==origin || (publicURL.protocol!=='https:' && !(publicURL.protocol==='http:'&&['localhost','127.0.0.1'].includes(publicURL.hostname)))) throw Error('Use HTTPS, or loopback HTTP for development.');
   let pairUntil=now()+600_000, used=false, failures=0, windowEnd=now()+60_000;
@@ -31,7 +31,7 @@ export function createGateway({snapshot, pairingCode, origin, now=Date.now, onDe
   };
   const cookie=(v,age=28800)=>`super_mobile=${v}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${secure?'; Secure':''}`;
   const server=http.createServer({maxHeaderSize:8192,requestTimeout:5000,headersTimeout:5000},async(req,res)=>{
-    const send=(status,data,headers={})=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",...headers});res.end(typeof data==='string'?data:JSON.stringify(data));};
+    const send=(status,data,headers={})=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",...headers});res.end(typeof data==='string'?data:JSON.stringify(data));};
     try {
       if(req.headers.host!==publicURL.host || (req.headers.origin&&req.headers.origin!==origin))return send(403,{error:'Connection origin refused.'});
       if(req.method==='POST'&&req.headers.origin!==origin)return send(403,{error:'A same-origin request is required.'});
@@ -57,6 +57,7 @@ export function createGateway({snapshot, pairingCode, origin, now=Date.now, onDe
       if(!sessions.has(sid))return send(401,{error:'Pair this device to view Super.'});
       sessions.get(sid).lastSeen=now();publish();
       if(req.url==='/api/logout'&&req.method==='POST'){sessions.delete(sid);publish();return send(200,{paired:false},{'Set-Cookie':cookie('',0)});}
+      if(req.method==='GET'&&/^\/api\/screenshots\?task=[A-Za-z0-9_-]{1,100}$/.test(req.url)){const value=await screenshots(new URL(req.url,origin).searchParams.get('task'));if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});return send(200,value);}
       if(req.url==='/api/snapshot'&&req.method==='GET'){
         let timer;try{const value=await Promise.race([snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('timeout')),2500);})]);
           // Recheck revocation and expiry after waiting for the host.
@@ -96,7 +97,7 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
   const pairFile=process.env.SUPER_MOBILE_PAIR_FILE;
   if(!pairFile?.startsWith('/'))throw Error('Set SUPER_MOBILE_PAIR_FILE to a new absolute path.');
   const code=randomBytes(24).toString('hex');
-  let pending=null;
+  const pending=new Map();
   const lines=createInterface({input:process.stdin});
   lines.on('line',line=>{try{
     const r=JSON.parse(line);
@@ -104,14 +105,15 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
     // written to the 0600 file the desktop already reads; it never travels
     // back up this pipe, and nothing is logged.
     if(r.operation==='renew'){void renew();return;}
-    if(pending?.id===r.id){pending.resolve(r.snapshot);clearTimeout(pending.timer);pending=null;}
+    const held=pending.get(r.id);if(held){held.resolve(r.snapshot);clearTimeout(held.timer);pending.delete(r.id);}
   }catch{}});
-  const snapshot=()=>{
-    if(pending)return pending.promise;
+  const ask=(operation,task)=>{
+    if(pending.size>=8)return Promise.reject(Error('Host busy'));
     const id=randomUUID();let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});
-    const timer=setTimeout(()=>{pending=null;reject(Error('Host timeout'));},2000);
-    pending={id,promise,resolve,reject,timer};process.stdout.write(JSON.stringify({operation:'snapshot',id})+'\n');return promise;
+    const timer=setTimeout(()=>{pending.delete(id);reject(Error('Host timeout'));},2000);
+    pending.set(id,{resolve,reject,timer});process.stdout.write(JSON.stringify({operation,id,...(task?{task}:{})})+'\n');return promise;
   };
+  const snapshot=()=>ask('snapshot'),screenshots=task=>ask('screenshots',task);
   // Who is paired, for the desktop to show. A sibling of the pairing file, so
   // it inherits that directory's privacy and lifetime; written then renamed so
   // a reader never sees half of one. It carries derived identifiers only — no
@@ -125,7 +127,7 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
       await rename(devicesFile+'.new',devicesFile);
     }).catch(()=>{});
   };
-  const server=createGateway({snapshot,pairingCode:code,origin,onDevices});
+  const server=createGateway({snapshot,screenshots,pairingCode:code,origin,onDevices});
   // Exclusive creation refuses old files and symlinks; never log the code.
   await writeFile(pairFile,code+'\n',{mode:0o600,flag:'wx'});
   // Written then renamed, like the devices file beside it, so a desktop
