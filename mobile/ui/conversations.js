@@ -27,6 +27,8 @@ export function messageSpans(text){
 
 const el=(tag,text)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;return n;};
 export function initConversations(root,visible,{taskInfo=()=>null,onTask=()=>{}}={}){
+ let discussion=null;
+ const discussionCard=el('div'),discussionTitle=el('h2'),discussionNote=el('p'),startDiscussion=el('button','Start discussion'),cancelDiscussion=el('button','Cancel');discussionCard.className='chat-discussion';discussionCard.hidden=true;discussionCard.append(discussionTitle,discussionNote,startDiscussion,cancelDiscussion);
  const latest=el('button','Latest messages ↓'),tasks=el('div');latest.hidden=true;latest.className='chat-latest';tasks.className='chat-linked-tasks';
  const dismiss=el('button','Dismiss message');dismiss.hidden=true;
  const conflict=el('div'),keep=el('button','Keep my draft against this revision'),useDesktop=el('button','Use desktop draft');
@@ -42,14 +44,14 @@ export function initConversations(root,visible,{taskInfo=()=>null,onTask=()=>{}}
  chatPanel.append(fresh,el('p','Opening a conversation also selects it on desktop.'),list);
  optionsPanel.append(el('h3','Model & thinking'),confirmModel,label('Thinking',effort),el('h3','Conversation'),label('Title',title),rename,pin,el('h3','Draft'),save);
  openChats.onclick=()=>chatPanel.showModal();openOptions.onclick=()=>{titleRevision=view?.active.revision;optionsPanel.showModal()};modelChoice.onclick=()=>optionsPanel.showModal();confirmModel.onclick=()=>{if(view?.active.model){model.value=view.active.model;confirmModel.textContent='Selected · '+model.value;modelChoice.textContent=model.value+' ⌄';updateComposer();}};
- thread.append(messages,live,tasks);toolbar.append(modelChoice,send);composer.append(note,dismiss,conflict,keep,useDesktop,draft,toolbar,retry);root.append(header,thread,latest,composer,chatPanel,optionsPanel);
+ thread.append(messages,live,tasks);toolbar.append(modelChoice,send);composer.append(note,dismiss,conflict,keep,useDesktop,draft,toolbar,retry);root.append(header,discussionCard,thread,latest,composer,chatPanel,optionsPanel);
  let nearBottom=true,lastLive='';const follow=()=>{if(nearBottom)requestAnimationFrame(()=>{thread.scrollTop=thread.scrollHeight});else latest.hidden=false;};latest.onclick=()=>{nearBottom=true;thread.scrollTop=thread.scrollHeight;latest.hidden=true;};thread.onscroll=()=>{nearBottom=thread.scrollHeight-thread.clientHeight-thread.scrollTop<90;if(nearBottom)latest.hidden=true;};
 
  let recoveryBlocked=false,available=false,connectionNotice='Connecting to desktop…',feedback={kind:'info',message:''};
  const report=(message,kind='error')=>{feedback={message,kind};renderFeedback();};
  const renderFeedback=()=>{note.textContent=!available?[connectionNotice,...(['error','uncertain'].includes(feedback.kind)?[feedback.message]:[])].filter(Boolean).join('\n'):feedback.message;note.hidden=available&&!pending&&!['error','uncertain'].includes(feedback.kind);note.dataset.kind=feedback.kind;note.setAttribute('role','status');note.setAttribute('aria-live','polite');dismiss.hidden=recoveryBlocked||!available||!!pending||!['error','uncertain'].includes(feedback.kind);};
  dismiss.onclick=()=>report('','info');
- const updateComposer=()=>{const a=view?.active;draft.disabled=!!pending;send.disabled=recoveryBlocked||!available||!!pending||!!a?.busy||!a?.id||!draft.value.trim()||!a.model||model.value!==a.model;retry.hidden=!pending;renderFeedback();};
+ const updateComposer=()=>{const a=view?.active;discussionCard.hidden=!discussion;startDiscussion.disabled=recoveryBlocked||!available||!!pending||!!a?.busy||!discussion||!taskInfo(discussion);cancelDiscussion.disabled=!!pending;if(discussion){discussionTitle.textContent='Discuss · '+discussion.title;discussionNote.textContent=taskInfo(discussion)?'Prepare a new draft with '+(view?.bots.find(b=>b.id===a?.botId)?.name??'your assistant')+'. Review it before sending.':'This task changed. Reopen its review to continue.';}draft.disabled=!!pending;send.disabled=recoveryBlocked||!available||!!pending||!!a?.busy||!a?.id||!draft.value.trim()||!a.model||model.value!==a.model;retry.hidden=!pending;renderFeedback();};
  let view=null,key='',pending=null,lastMessages='',dirty=false,draftRevision=null,titleRevision=null,titleDirty=false;try{pending=JSON.parse(localStorage.getItem('super-mobile-pending')||'null')}catch{recoveryBlocked=true;feedback={kind:'error',message:'Pending request could not be read. Inspect desktop before sending.'};}
  if(pending)feedback={kind:'pending',message:'A request is awaiting confirmation. Retry checks the same request.'};
  const draftKey=()=> 'super-mobile-draft:'+key;
@@ -61,6 +63,7 @@ export function initConversations(root,visible,{taskInfo=()=>null,onTask=()=>{}}
   pending={id:crypto.randomUUID(),createdAt:Date.now(),operation,botId:a.botId,provider:a.provider,conversationId:a.id,revision:operation==='draft'||operation==='send'?(draftRevision??a.revision):operation==='update'&&extra.title!==undefined?(titleRevision??a.revision):a.revision,...extra};
   try{persist();report('Sending request to desktop…','pending');updateComposer();await dispatch(true);}catch(e){pending=null;report('Could not retain request locally. Nothing sent.');updateComposer();}
  };
+ startDiscussion.onclick=()=>{if(discussion&&taskInfo(discussion))command('create',{taskContext:{taskId:discussion.taskId,revision:discussion.revision,lineage:discussion.lineage}})};cancelDiscussion.onclick=()=>{discussion=null;updateComposer()};
  title.oninput=()=>{titleDirty=true};
  title.onfocus=()=>{titleRevision=view?.active.revision};
  keep.onclick=()=>{draftRevision=view.active.revision;localStorage.setItem(draftKey(),JSON.stringify({text:draft.value,revision:draftRevision}));};useDesktop.onclick=()=>{dirty=false;localStorage.removeItem(draftKey());draft.value=view.active.data?.draft??'';updateComposer();};
@@ -70,7 +73,7 @@ export function initConversations(root,visible,{taskInfo=()=>null,onTask=()=>{}}
  async function poll(){
   if(visible())try{
    const data=await api('conversations');if(!data.available)throw Error('Desktop conversation view unavailable. Draft retained on this device.');view=data.view;available=true;connectionNotice='';
-   if(pending){const receipt=data.receipts?.find(r=>r.id===pending.id);if(receipt){report(receipt.message,receipt.state==='done'?'info':receipt.state==='uncertain'?'uncertain':'error');if(receipt.state==='done'&&pending.operation==='update')titleDirty=false;const sent=pending.operation==='send',sentKey=JSON.stringify([pending.botId,pending.provider,pending.conversationId]);if(receipt.state==='done'&&pending.operation==='draft'&&draft.value===pending.text&&view.active.data?.draft===pending.text){dirty=false;draftRevision=view.active.revision;localStorage.removeItem(draftKey());}pending=null;persist();if(receipt.state==='done'&&sent){localStorage.removeItem('super-mobile-draft:'+sentKey);if(key===sentKey){dirty=false;draft.value='';}}}}
+   if(pending){const receipt=data.receipts?.find(r=>r.id===pending.id);if(receipt){if(receipt.state==='done'&&pending.operation==='create'&&pending.taskContext)discussion=null;report(receipt.message,receipt.state==='done'?'info':receipt.state==='uncertain'?'uncertain':'error');if(receipt.state==='done'&&pending.operation==='update')titleDirty=false;const sent=pending.operation==='send',sentKey=JSON.stringify([pending.botId,pending.provider,pending.conversationId]);if(receipt.state==='done'&&pending.operation==='draft'&&draft.value===pending.text&&view.active.data?.draft===pending.text){dirty=false;draftRevision=view.active.revision;localStorage.removeItem(draftKey());}pending=null;persist();if(receipt.state==='done'&&sent){localStorage.removeItem('super-mobile-draft:'+sentKey);if(key===sentKey){dirty=false;draft.value='';}}}}
    const a=view.active;heading.textContent=view.conversations.find(c=>c.id===a.id&&c.botId===a.botId)?.title||'New conversation';subtitle.textContent=(view.bots.find(b=>b.id===a.botId)?.name||'Assistant')+' · Connected';modelChoice.textContent=(model.value===a.model&&a.model?a.model:'Choose model')+' ⌄';confirmModel.textContent=(model.value===a.model?'✓ ':'Select · ')+(a.model||'Connect a provider on desktop');confirmModel.disabled=!a.model;const newKey=JSON.stringify([a.botId,a.provider,a.id]);
    if(key!==newKey){nearBottom=true;latest.hidden=true;lastLive='';key=newKey;const saved=localStorage.getItem(draftKey());dirty=saved!==null;const local=saved?JSON.parse(saved):null;draft.value=local?.text??a.data?.draft??'';draftRevision=local?.revision??a.revision;titleRevision=null;titleDirty=false;model.value='';lastMessages='';}
    else if(!dirty&&document.activeElement!==draft)draft.value=a.data?.draft??'';
@@ -87,6 +90,7 @@ export function initConversations(root,visible,{taskInfo=()=>null,onTask=()=>{}}
   setTimeout(poll,1000);
  }
  poll();
+ return {discuss:context=>{discussion=context;updateComposer();}};
 }
 
 function appendMessage(root,text){

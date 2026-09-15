@@ -1,0 +1,58 @@
+import {execFileSync} from 'node:child_process';
+import {open} from './lib/cockpit-control.mjs';
+import {readFileSync,mkdirSync,writeFileSync,mkdtempSync} from 'node:fs';
+import {tmpdir} from 'node:os';import {join} from 'node:path';import http from 'node:http';import assert from 'node:assert/strict';
+const out=process.env.SUPER_VISUAL_EVIDENCE_DIR||'/tmp/super-mobile-conversations';mkdirSync(out,{recursive:true});const pair=join(mkdtempSync(join(tmpdir(),'super-chat-')),'pair');
+process.env.SUPER_MOBILE_NODE=process.execPath;process.env.SUPER_MOBILE_GATEWAY=new URL('../mobile/server.mjs',import.meta.url).pathname;process.env.SUPER_MOBILE_PORT='4346';process.env.SUPER_MOBILE_ORIGIN='http://127.0.0.1:4346';process.env.SUPER_MOBILE_PAIR_FILE=pair;
+let calls=0;const checks=[];let app;const fixture=http.createServer(async(req,res)=>{let raw='';for await(const chunk of req)raw+=chunk;res.setHeader('content-type','application/json');if(req.url==='/api/tags')return res.end(JSON.stringify({models:[{name:'fixture'}]}));const body=JSON.parse(raw);assert.equal(body.model,'fixture');calls++;setTimeout(()=>res.end(JSON.stringify({message:{content:'<conversation-title>Shared mobile task</conversation-title>Fixture reply: the shared conversation received your message.',tool_calls:[]}})),500);});
+await new Promise(r=>fixture.listen(0,'127.0.0.1',r));let cookie='';
+const api=async(path,body)=>{const r=await fetch('http://127.0.0.1:4346/api/'+path,{method:body?'POST':'GET',headers:{Origin:'http://127.0.0.1:4346',Cookie:cookie,...(body?{'Content-Type':'application/json'}:{})},body:body?JSON.stringify(body):undefined});if(path==='pair')cookie=r.headers.get('set-cookie')?.split(';')[0]||'';return r.json();};
+const check=(name,value)=>{assert.ok(value,name);checks.push(name);console.log('PASS '+name);};
+try{
+ app=await open({port:4599});const page=code=>app.page(code),wait=(fn,label)=>app.until(fn,20000,label);
+ await page(`localStorage.setItem('super-last-provider','ollama');const {createConversationStore}=await import('./conversation-store.js');const store=createConversationStore(localStorage);store.save('ollama',null,{messages:[],entries:[],draft:'Original desktop draft',files:[],includeContext:false});location.reload();`);
+ await wait(()=>page(`return !!document.querySelector('#bot-provider')&&document.querySelector('#bot-provider').value==='ollama'`),'bot initialization');
+ await page(`document.querySelector('[data-nav="bot:assistant"]').click();document.querySelector('#bot-tab-settings').click();document.querySelector('#bot-endpoint').value='http://127.0.0.1:${fixture.address().port}';document.querySelector('#bot-model').value='fixture';document.querySelector('#bot-connect').click();`);
+ await wait(()=>page(`return !document.querySelector('#bot-send').disabled`),'fixture connected');
+ const paired=await api('pair',{code:readFileSync(pair,'utf8').trim()});check('isolated mobile session paired',paired.paired===true);
+ await wait(async()=> {const d=await api('conversations');return d.available&&d.view.active.model==='fixture';},'conversation publication');
+ let view=(await api('conversations')).view;console.log('fixture state',JSON.stringify({model:view.active.model,draft:view.active.data?.draft,id:view.active.id,count:view.conversations.length}));check('mobile reads the exact desktop conversation and draft',view.active.data.draft==='Original desktop draft'&&view.active.model==='fixture');
+ const make=(operation,extra={})=>({id:crypto.randomUUID(),createdAt:Date.now(),operation,botId:view.active.botId,provider:view.active.provider,conversationId:view.active.id,revision:view.active.revision,...extra});
+ const execute=async q=>{const result=await api('conversation',q);assert.equal(result.accepted,true);let receipt;await wait(async()=>{receipt=(await api('conversations')).receipts?.find(r=>r.id===q.id);return !!receipt},'request receipt');return receipt;};
+ const rename=make('update',{title:'Phone and desktop agree',pinned:true});check('mobile title and pin accepted',(await execute(rename)).state==='done');
+ check('desktop sidebar immediately reflects mobile title',await page(`return document.querySelector('.conversation-title').textContent==='Phone and desktop agree'`));
+ check('stale phone draft cannot overwrite newer desktop revision',(await execute(make('draft',{text:'stale overwrite'}))).state==='error');
+ view=(await api('conversations')).view;
+ check('missing model cannot send',(await execute(make('send',{text:'Do not send a default model'}))).state==='error');check('no provider call from refused send',calls===0);
+ const send=make('send',{text:'Continue the shared task',model:'fixture',effort:''});check('explicit model send dispatched',(await execute(send)).state==='done');await execute(send);
+ await wait(async()=>{view=(await api('conversations')).view;return !view.active.busy&&view.active.data.entries.some(e=>e.text.includes('Fixture reply'))},'reply persisted');
+ check('duplicate send produces one provider request',calls===1);check('phone and desktop share final history',await page(`return document.querySelector('#bot-transcript').textContent.includes('Fixture reply')`));
+ const response=await fetch(`http://127.0.0.1:4599/session/${app.session()}/screenshot`);writeFileSync(out+'/desktop-chat.png',Buffer.from((await response.json()).value,'base64'));
+
+ const ws=await app.create('open_workspace',{name:'Task discussion fixture'},{kind:'workspaces',field:'name',value:'Task discussion fixture'});
+ const goal=await app.create('open_goal',{workspace_ref:ws.record.id,title:'Readable mobile chat'},{kind:'goals',field:'title',value:'Readable mobile chat'});
+ const bot=await app.create('register_bot',{client_ref:'task-fixture',workspace_ref:ws.record.id,name:'Task fixture',role:'Builder',group:'Tests',provider:'ollama',instructions:'Fixture'},{kind:'bots',field:'client_ref',value:'task-fixture'});
+ const folder=mkdtempSync('/tmp/task-discussion-repo-');execFileSync('git',['init','-q',folder]);
+ await page(`document.querySelector('[data-nav="repositories"]').click();document.querySelector('[data-host-action="choose-repository"]').click()`);
+ await new Promise(r=>setTimeout(r,800));execFileSync('/usr/bin/python3',['tools/development-confirm-folder.py',String(process.pid),folder],{env:{...process.env,SUPER_CHOOSER_TITLE:'Register a local Git repository'}});
+ const repo=await app.until(async()=>(await app.list('repositories'))[0],10000,'repository');
+ await app.intent('open_lane',{goal_ref:goal.record.id,actor:bot.record.actor,repository_ref:repo.ref||repo.id,base_revision:'HEAD'});
+ const lane=await app.until(async()=>(await app.list('lanes')).find(l=>l.actor===bot.record.actor),10000,'lane');
+ await app.intent('create_development_task',{client_ref:'task-discussion',lane_ref:lane.id,title:'Keep mobile chat readable',criteria:'Keep the composer visible above the keyboard and preserve the existing draft.'});
+ const task=await app.until(async()=>(await app.list('development_tasks'))[0],10000,'task');
+ const world=await page(`return window.cockpit.frame.world`),taskContext={taskId:task.id,revision:task.revision,lineage:JSON.stringify([world.world_incarnation,world.world_generation])};
+ view=(await api('conversations')).view;
+ const original=view.active.id, count=view.conversations.length;
+ check('stale task selection is refused',(await execute(make('create',{taskContext:{...taskContext,revision:task.revision+1}}))).state==='error');
+ check('refused creation leaves conversation selected',(await api('conversations')).view.active.id===original);
+ const q=make('create',{taskContext});check('current task creates a discussion draft',(await execute(q)).state==='done');await execute(q);
+ await wait(async()=>{view=(await api('conversations')).view;return view.active.data?.draft.includes(task.criteria)},'task draft publication');
+ check('duplicate creation retains one conversation',view.conversations.length===count+1);
+ check('same task identity is retained in shared history',view.active.data.taskLinks.length===1&&Object.entries(taskContext).every(([k,v])=>view.active.data.taskLinks[0][k]===v));
+ check('desktop displays the same prepared draft',await app.page(`return document.querySelector('#bot-message').value===arguments[0]`,[view.active.data.draft]));
+ check('task discussion does not call a provider',calls===1);
+ check('previous conversation remains saved',view.conversations.some(c=>c.id===original));
+ writeFileSync(out+'/task.json',JSON.stringify(taskContext));
+ writeFileSync(out+'/checks.json',JSON.stringify({checks,providerCalls:calls,provider:'local controlled fixture'},null,2));
+ if(process.env.SUPER_KEEP_CHAT_FIXTURE==='1'){writeFileSync(out+'/ready.json',JSON.stringify({gateway:4346,driver:4599,session:app.session()}));console.log('Fixture ready for emulator');await new Promise(()=>{});}
+}finally{await app?.close();fixture.close();}

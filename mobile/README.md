@@ -43,3 +43,9 @@ Verification: `node --test mobile/test/*.test.mjs`, `node --test tools/mobile-co
 ### Phone chat layout
 
 The browser companion separates Chats and conversation settings into panels, leaving a scrolling transcript and bottom composer. Model selection is an explicit tap in settings. Expo has the corresponding native layout, searchable conversation lists, and a composer verified above the Android keyboard. Neither UI update requires restarting the gateway or pairing again.
+
+### Starting a task discussion
+
+Open a task review, choose **Discuss task**, then **Start discussion**. The selected chat bot is named before creation; use Chats to select another bot first if needed. Desktop validates the task's world lineage and revision and prepares a separate shared draft from its current title, status and criteria. The existing conversation stays saved. Opening or preparing a discussion does not call a provider: review the draft, select the exact connected model, then Send. The task link returns to the same current revision. This prepares a discussion, not task execution, source capture or approval.
+
+Validation: `node --test tools/mobile-task-discussion-test.mjs`; the native desktop flow is `tools/native-ui-test.sh node tools/mobile-task-discussion-smoke.mjs`, using only an explicit local fixture model.

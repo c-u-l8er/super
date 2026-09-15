@@ -9,3 +9,20 @@ export function taskHistoryLinks(history,taskId,world){
   })).sort((a,b)=>b.updated.localeCompare(a.updated)||a.id.localeCompare(b.id));
 }
 export function botConversationHistory(storage,botId){return createConversationStore({getItem:key=>storage.getItem(botId==='assistant'?key:`${key}:bot:${botId}`),setItem:()=>{throw Error('Read-only history lookup');}});}
+
+// The phone supplies only identity. Draft content comes from a live desktop view.
+export function taskDiscussion(projection,world,context){
+ const lineage=worldLineage(world),task=projection?.development_tasks?.[context?.taskId];
+ if(!lineage||!context||context.lineage!==lineage||!task||!Number.isSafeInteger(context.revision)||context.revision<1||task.revision!==context.revision)
+  throw Error('This task changed or is unavailable. Reopen its review before starting a discussion.');
+ const draft=`Discuss this task: ${task.title}
+Task: ${task.id} · Revision ${task.revision}
+Status: ${task.status}
+
+Acceptance criteria:
+${task.criteria||'No criteria recorded.'}
+
+Help me review the next step.`;
+ if(draft.length>8000)throw Error('This task is too large for a mobile draft. Start its discussion on desktop.');
+ return {messages:[],entries:[],files:[],includeContext:false,draft,taskLinks:[{taskId:task.id,revision:task.revision,lineage}]};
+}

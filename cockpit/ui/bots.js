@@ -3,7 +3,7 @@ import {conversationReply,titleInstruction} from './conversation-title.js';
 import {beginTaskActivity,observeTaskActivity,replyFailure} from './task-activity.js';
 import {initBotActivity} from './bot-activity.js';
 import {REVIEW_FILE_BYTES,REVIEW_FILE_LABEL} from './review-limits.js';
-import {worldLineage,taskHistoryLinks} from './task-conversations.js';
+import {worldLineage,taskHistoryLinks,taskDiscussion} from './task-conversations.js';
 import {publishTaskSession} from './task-session.js';
 import {validateContextBatch} from './related-files.js';
 import {initBotWork} from './bot-work-view.js';
@@ -455,6 +455,12 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     }
     if(request.botId!==bot.id||request.provider!==selected)throw Error('Open this bot and provider on the desktop before changing its conversation.');
     if(request.operation==='create'){
+      if(request.taskContext!==undefined){
+        const data=taskDiscussion(heldProjection(current),runtimeWorld(current),request.taskContext);
+        if(!saveCurrent())throw Error('Could not save the desktop draft.');
+        const id=history.save(selected,null,data);restoreSaved(id);lastSaved=JSON.stringify(snapshot());updateHistory();refresh();workView.conversation();
+        return {message:'Task discussion prepared. Review the draft and choose a model before sending.',conversationId:id};
+      }
       if(!saveCurrent())throw Error('Could not save the desktop draft.');reset();input.value=typeof request.text==='string'?request.text.slice(0,8000):'';
       if(!input.value)input.value='';
       conversationId=history.save(selected,null,snapshot());lastSaved=JSON.stringify(snapshot());updateHistory();refresh();return {message:'Conversation created.',conversationId};
