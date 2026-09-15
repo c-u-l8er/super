@@ -8,10 +8,10 @@ export function taskScreenshots({task,world,invoke,current}) {
  const gallery=node('div',undefined,'screenshot-pair'),notice=node('p'),undo=node('button','Undo removal');
  notice.setAttribute('role','status');undo.type='button';undo.hidden=true;panel.append(gallery,notice,undo);
  const lineage=[world.world_incarnation,world.world_generation],request={world:lineage,task:task.id,revision:task.revision};
- let busy=false,removed=null,record={},reviewUI=null,outputUI=null,previewTabs=[];
+ let busy=false,removed=null,record={},reviewUI=null,outputUI=null,previewTabs=[],emulators=[];
  const stillCurrent=()=>{const c=current(),w=c?.frame?.world;return panel.isConnected&&w&&JSON.stringify([w.world_incarnation,w.world_generation])===JSON.stringify(lineage)&&c.frame.projection?.development_tasks?.[task.id]?.revision===task.revision&&!c.withdrawn&&!c.unavailable&&!c.stalled;};
  const requireCurrent=()=>{if(!stillCurrent())throw Error('Task or connection changed. Reopen the task.');};
- function setBusy(value){busy=value;panel.setAttribute('aria-busy',String(value));panel.querySelectorAll('input,button').forEach(control=>control.disabled=value);if(!value)reviewUI?.refresh();}
+ function setBusy(value){busy=value;panel.setAttribute('aria-busy',String(value));panel.querySelectorAll('input,button,select').forEach(control=>control.disabled=value);if(!value)reviewUI?.refresh();}
  async function change(side,operation,data,previous) {
   if(busy)return;
   const label=side==='before'?'Before':'After';
@@ -48,7 +48,12 @@ export function taskScreenshots({task,world,invoke,current}) {
    const upload=node('label',undefined,'screenshot-upload');upload.append(node('span',image?'Replace screenshot':'Add '+label.toLowerCase()+' screenshot'),input);card.append(upload);
    if(image){const remove=node('button','Remove '+label.toLowerCase()+' screenshot');remove.type='button';remove.disabled=busy;remove.onclick=()=>change(side,'remove',null,image);card.append(remove);}
    const previewLabel=node('label','Local preview to capture','field'),preview=node('select');preview.setAttribute('aria-label','Preview for '+label+' screenshot');const blank=node('option','Choose an open Browser tab');blank.value='';preview.append(blank);for(const tab of previewTabs){const option=node('option',`Tab ${tab.id+1} · ${tab.url}`);option.value=String(tab.id);preview.append(option);}previewLabel.append(preview);const capture=node('button','Capture '+side+' from preview');capture.type='button';capture.disabled=busy||!previewTabs.length;capture.onclick=async()=>{if(busy)return;if(preview.value===''){notice.textContent='Choose the local app tab to capture.';return;}try{requireCurrent();setBusy(true);notice.textContent='Capturing the local app preview…';const next=await invoke('task_screenshots',{request:{...request,operation:'capture_preview',side,tab:Number(preview.value)}});if(stillCurrent()){paint(next);notice.textContent=label+' preview captured and attached.';}}catch(e){notice.textContent=String(e.message||e);}finally{setBusy(false);}};
-   card.append(previewLabel,capture);if(image?.capture)card.append(node('p','Captured local preview: '+image.capture.url+' · app source version unverified','directory-note'));
+   card.append(previewLabel,capture);
+   const emulatorLabel=node('label','Android emulator','field'),emulator=node('select');emulator.setAttribute('aria-label','Emulator for '+label+' screenshot');const noDevice=node('option',emulators.length?'Choose an emulator':'Refresh emulators to find running devices');noDevice.value='';emulator.append(noDevice);for(const device of emulators){const option=node('option',device.model+' · '+device.serial);option.value=device.serial;emulator.append(option);}emulatorLabel.append(emulator);
+   const captureEmulator=node('button','Capture '+side+' from emulator');captureEmulator.type='button';captureEmulator.disabled=busy||!emulators.length;
+   captureEmulator.onclick=async()=>{if(busy)return;if(!emulator.value){notice.textContent='Choose the emulator showing the intended app screen.';return;}try{requireCurrent();setBusy(true);notice.textContent='Capturing the emulator display…';const next=await invoke('task_screenshots',{request:{...request,operation:'capture_emulator',side,serial:emulator.value}});if(stillCurrent()){removed=null;undo.hidden=true;paint(next);notice.textContent=label+' emulator screenshot captured and attached.';}}catch(e){if(panel.isConnected)notice.textContent=String(e.message||e);}finally{setBusy(false);}};
+   const deviceControls=node('details');deviceControls.append(node('summary','Capture an Android emulator'),node('p','Open the intended app in a running emulator, then capture its full display. This does not launch or verify a source version.','directory-note'),emulatorLabel,captureEmulator);card.append(deviceControls);
+   if(image?.capture){const origin=image.capture;card.append(node('p',origin.kind==='android-emulator'?`Android emulator · ${origin.model} · ${origin.serial} · Android ${origin.android} · ${image.width} × ${image.height} full display · ${origin.activity} · app source version unverified`:'Captured local preview: '+origin.url+' · app source version unverified','directory-note'));}
    gallery.append(card);
   }
   if(!reviewUI){reviewUI=visualReview({task,request,invoke,current,getRecord:()=>record,onSaved:paint});panel.append(reviewUI.panel);}
@@ -58,6 +63,7 @@ export function taskScreenshots({task,world,invoke,current}) {
   if(outputUI)outputUI.replaceWith(nextOutput);else panel.append(nextOutput);outputUI=nextOutput;
   reviewUI.refresh();
  }
+ const refreshEmulators=node('button','Refresh emulators');refreshEmulators.type='button';refreshEmulators.onclick=async()=>{if(busy)return;try{requireCurrent();setBusy(true);notice.textContent='Finding running Android emulators…';const value=await invoke('task_screenshots',{request:{operation:'list_emulators'}});if(stillCurrent()){emulators=value.devices||[];paint(record);notice.textContent=emulators.length?'Choose the emulator under Before or After.':'No running emulator found. Start an Android emulator, open the app, then refresh.';}}catch(e){if(panel.isConnected)notice.textContent=String(e.message||e);}finally{setBusy(false);}};panel.append(refreshEmulators);
  const refreshPreviews=node('button','Refresh preview tabs');refreshPreviews.type='button';const loadPreviews=()=>invoke('browser_surface',{action:'status'}).then(value=>{previewTabs=(value.tabs||[]).filter(t=>/^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(?=[:/]|$)/.test(t.url||''));if(stillCurrent()&&!busy)paint(record);}).catch(()=>{});refreshPreviews.onclick=loadPreviews;panel.append(refreshPreviews);loadPreviews();
  invoke('task_screenshots',{request:{...request,operation:'list'}}).then(record=>{if(stillCurrent())paint(record);}).catch(e=>{if(panel.isConnected)notice.textContent=String(e);});
  return panel;

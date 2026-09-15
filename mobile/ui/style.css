@@ -2,3 +2,9 @@
 
 .summary p{white-space:pre-line}
 figure {margin:16px 0;}figcaption {font-weight:600;margin-bottom:8px;}figure img {display:block;max-width:100%;height:auto;border-radius:6px;}
+
+figure img {width:100%;max-height:min(40vh,300px);object-fit:contain;background:var(--bg,#111710);}
+.evidence-image-viewer {box-sizing:border-box;width:96vw;max-width:1100px;max-height:94vh;padding:12px;background:#172014;color:#e2e8da;border:1px solid #68775b;border-radius:10px;overflow:auto;}
+.evidence-image-viewer::backdrop {background:#000c;}
+.evidence-image-viewer button {position:sticky;top:0;display:block;margin:0 0 12px auto;}
+.evidence-image-viewer img {display:block;max-width:100%;height:auto;}

@@ -32,3 +32,13 @@ Open the target local app in Super's Browser. In the task's Before/After panel, 
 Run the starting app version before capturing Before, and the changed version before capturing After. Capture records the actual local URL and viewport, but does not prove which source built the served app. Preview captures are operator-triggered; automatic launch of arbitrary baseline/candidate apps is not implemented. Existing manual screenshots and task history are never replaced by guessed baseline images.
 
 References: [WebKit snapshot API](https://webkitgtk.org/reference/webkit2gtk/stable/method.WebView.get_snapshot.html), [Google Benchmark reporting and repeat controls](https://google.github.io/benchmark/user_guide.html).
+
+## Android emulator screenshots
+
+In Before and after, click **Refresh emulators**, expand **Capture an Android emulator** under the desired side, select the running emulator, and click **Capture before from emulator** or **Capture after from emulator**. Start the emulator and open the intended app screen first. Capture reads its actual full display, including system and browser bars, using Android's screenshot command. It works for the foreground app, including native apps; it does not require a Browser preview or an uploaded file.
+
+Each image retains the emulator serial, model, Android version, pixel dimensions, foreground activity and capture time. The same images and identifying details are available on paired mobile. SDK discovery uses ANDROID_HOME, ANDROID_SDK_ROOT, the standard Linux user SDK locations, or /usr/bin/adb. Physical devices, offline devices, malformed targets, incomplete boot and a changing foreground app are rejected. A failed capture leaves the previous image intact. Existing PNG limits apply.
+
+This is an operator-triggered capture of a running emulator. It neither builds nor launches the baseline/candidate app and therefore explicitly marks the app source version unverified. Automatic launch and source-bound capture remain unfinished. iOS Simulator capture is not implemented.
+
+Reference: [Android screenshot command](https://developer.android.com/tools/adb#screencap), [Android emulator startup](https://developer.android.com/studio/run/emulator-commandline).

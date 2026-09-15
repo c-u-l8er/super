@@ -101,6 +101,7 @@ mod codex_connection;
 mod keychain;
 mod mobile_gateway;
 mod screenshots;
+mod emulator_capture;
 mod preview;
 mod repository;
 mod review_tests;
@@ -613,6 +614,12 @@ async fn task_screenshots(request:Value,app:tauri::AppHandle)->Result<Value,Stri
     if request["operation"]=="capture_preview" {
         #[cfg(target_os="linux")] {return screenshots::capture_preview(request,app).await;}
         #[cfg(not(target_os="linux"))] {return Err("Native preview capture is currently supported on Linux.".into());}
+    }
+    if request["operation"]=="list_emulators" || request["operation"]=="capture_emulator" {
+        return tauri::async_runtime::spawn_blocking(move || {
+            if request["operation"]=="list_emulators" { emulator_capture::list() }
+            else { emulator_capture::capture(request) }
+        }).await.map_err(|e|e.to_string())?;
     }
     screenshots::request(request)
 }

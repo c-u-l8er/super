@@ -29,7 +29,8 @@ fn key(world: &Value, task: &str, revision: u64) -> Result<String, String> {
         Sha256::digest(serde_json::to_vec(&json!([world, task, revision])).unwrap())
     ))
 }
-pub fn request(r: Value) -> Result<Value, String> {
+pub fn request(r: Value) -> Result<Value, String> { request_with_origin(r, None) }
+fn request_with_origin(r: Value, origin: Option<Value>) -> Result<Value, String> {
     let _guard = WRITE.lock().map_err(|_| "Screenshot storage is busy.")?;
     let world = &r["world"];
     let task = r["task"].as_str().ok_or("Missing task.")?;
@@ -153,6 +154,7 @@ pub fn request(r: Value) -> Result<Value, String> {
         return Err("Screenshot storage has reached 100 task revisions.".into());
     }
     value["images"][side] = json!({"data":data,"sha256":format!("{:x}",Sha256::digest(&bytes)),"width":w,"height":h,"attached_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()});
+    if let Some(origin) = origin { value["images"][side]["capture"] = origin; }
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
@@ -241,6 +243,14 @@ mod storage_tests {
         );
         let mut r = json!({"operation":"save","world":["fixture",1],"task":"t","revision":1,"side":"before","data":data});
         assert!(request(r.clone()).unwrap()["images"]["before"].is_object());
+        let native = save_captured(r.clone(), json!({"kind":"android-emulator","serial":"emulator-5554"})).unwrap();
+        assert_eq!(native["images"]["before"]["capture"]["kind"], "android-emulator");
+        let mut broken = r.clone(); broken["data"] = json!("data:image/png;base64,broken");
+        assert!(save_captured(broken, json!({"kind":"android-emulator"})).is_err());
+        let mut read = r.clone(); read["operation"] = json!("list");
+        assert_eq!(request(read).unwrap(), native);
+        r["capture"] = json!({"kind":"android-emulator"});
+        assert!(request(r.clone()).unwrap()["images"]["before"]["capture"].is_null());
         r["side"] = json!("after");
         request(r.clone()).unwrap();
         r["operation"] = json!("list");
@@ -354,15 +364,10 @@ pub async fn capture_preview(mut r: Value, app: tauri::AppHandle) -> Result<Valu
     // Metadata originates here; ordinary uploads cannot assert a native capture.
     save_captured(r,json!({"kind":"local-preview","url":url,"tab":tab}))
 }
-fn save_captured(r:Value,origin:Value)->Result<Value,String>{
-    let mut value=request(r.clone())?;
-    let _guard=WRITE.lock().map_err(|_|"Evidence storage is busy.")?;
-    let id=key(&r["world"],r["task"].as_str().unwrap(),r["revision"].as_u64().unwrap())?;
-    // Reload to prevent replacing an intervening edit with an older record.
-    let path=ROOT.get().unwrap().join(format!("{id}.json"));
-    let current:Value=serde_json::from_slice(&std::fs::read(path).map_err(|e|e.to_string())?).map_err(|e|e.to_string())?;
-    let side=r["side"].as_str().unwrap();if current["images"][side]["sha256"]!=value["images"][side]["sha256"] {return Err("Screenshot changed during capture storage.".into());}value=current;
-    value["images"][side]["capture"]=origin;retain(ROOT.get().unwrap(),&id,&value)?;Ok(value)
+pub(crate) fn save_captured(r:Value,origin:Value)->Result<Value,String>{
+    // Image and native origin are validated and committed together under one lock.
+    // The public upload operation cannot submit or preserve capture provenance.
+    request_with_origin(r, Some(origin))
 }
 
 // Runner-owned comparison is separate from manually supplied logs.
