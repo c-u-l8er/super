@@ -16,7 +16,7 @@ export function comparisonNotes(before,after){
 export function taskRunEvidence({task,invoke,current}){
  const panel=node('section',undefined,'task-run-evidence task-screenshots');
  panel.append(node('h3','Tests and terminal results'),node('p','Recorded output is collected here automatically. Compare an earlier run with a later run; neither label establishes an unchanged-code baseline. Benchmarks need matching commands, inputs, machines and units.','directory-note'));
- const status=node('p'),refresh=node('button','Refresh recorded runs'),pair=node('div',undefined,'screenshot-pair'),notes=node('div');refresh.type='button';status.setAttribute('role','status');panel.append(refresh,status,pair,notes);
+ const status=node('p'),refresh=node('button','Refresh recorded runs'),pair=node('div',undefined,'screenshot-pair'),notes=node('div');refresh.type='button';status.setAttribute('role','status');panel.append(refresh,status,notes,pair);
  const origin=runtimeWorld(current);let signature='',rows=[],busy=false,selected={before:'',after:''};
  const valid=()=>panel.isConnected&&runtimeWorld(current)===origin&&current()?.frame?.projection?.development_tasks?.[task.id]?.revision===task.revision&&!current()?.unavailable&&!current()?.withdrawn&&!current()?.stalled;
  function draw(){
@@ -26,7 +26,7 @@ export function taskRunEvidence({task,invoke,current}){
    const empty=node('option','Choose a recorded run');empty.value='';select.append(empty);
    for(const r of rows){const option=node('option',`${r.profile} · ${r.machine} · ${r.verdict} · revision ${r.revision} · ${r.at||r.id}`);option.value=r.id;select.append(option);}select.value=selected[side];select.onchange=()=>{selected[side]=select.value;draw();};label.append(select);box.append(label);
    const r=rows.find(r=>r.id===selected[side]);
-   if(r){box.append(node('h4',r.verdict),node('p',r.id,'directory-note'),node('p',`Source: ${r.snapshot||'not recorded'}`,'directory-note'),node('p',r.confirmed?'Outcome recorded by the runner.':'Outcome is incomplete or unconfirmed.','directory-note'));if(r.exit!==undefined)box.append(node('p','Exit code: '+r.exit));const output=node('pre',r.output||'No output retained.','attempt-text');box.append(output);if(r.truncated)box.append(node('p','Output is shortened. This is not the complete log.','availability-note'));}
+   if(r){box.append(node('h4',r.verdict),node('p',`${r.machine} · ${r.at?new Date(r.at).toLocaleString():'Time not recorded'} · revision ${r.revision}`,'directory-note'),node('p',`Run: ${r.id.slice(0,18)}… · Source: ${r.snapshot?.slice(0,12)||'not recorded'}`,'directory-note'),node('p',r.confirmed?'Outcome recorded by the runner.':'Outcome is incomplete or unconfirmed.','directory-note'));const identity=node('details');identity.append(node('summary','Full run and source identity'),node('p',r.id,'directory-note'),node('p',r.snapshot||'Source not recorded','directory-note'));box.append(identity);if(r.exit!==undefined)box.append(node('p','Exit code: '+r.exit));const output=node('pre',r.output||'No output retained.','attempt-text');box.append(output);if(r.truncated)box.append(node('p','Output is shortened. This is not the complete log.','availability-note'));}
    pair.append(box);
   }
   for(const text of comparisonNotes(...['before','after'].map(s=>rows.find(r=>r.id===selected[s]))))notes.append(node('p',text,'availability-note'));
