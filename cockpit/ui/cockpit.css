@@ -584,3 +584,14 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .screenshot-upload { display:flex; flex-direction:column; gap:8px; margin:12px 0; font-size:12px; }
 .task-screenshots > [role=status]:empty, .visual-review > [role=status]:empty { display:none; }
 .visual-review > [role=status] { margin-top:12px; }
+
+.task-run-evidence .screenshot-pair {margin-top:16px;}
+.task-run-evidence .screenshot-pair > article {min-width:0;}
+.task-run-evidence .field {display:flex;flex-direction:column;gap:8px;}
+.task-run-evidence pre {max-height:340px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}
+.task-run-evidence .directory-note {overflow-wrap:anywhere;}
+
+.task-output-attachments {margin-top:20px;border-top:1px solid var(--line);padding-top:16px;}
+.task-output-attachments .field {display:flex;flex-direction:column;gap:6px;margin:10px 0;}
+.task-output-attachments .screenshot-pair > section {min-width:0;}
+.task-output-attachments pre {max-height:300px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;}

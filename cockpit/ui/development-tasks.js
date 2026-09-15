@@ -1,3 +1,4 @@
+import {taskRunEvidence} from './task-run-evidence.js';
 import {taskScreenshots} from './task-screenshots.js';
 import {initFleetChecks} from './fleet-check-view.js';
 import {guideReview} from './review-guide.js';
@@ -63,6 +64,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     }));else next.append(node('p',progress.label));
     details.append(next);
     details.append(taskScreenshots({task,world:current().frame.world,invoke,current}));
+    details.append(taskRunEvidence({task,invoke,current}));
     const editorPanel=node('section',undefined,'attempt-checks');editorPanel.id='task-editor-context';details.append(editorPanel);renderEditor();
     const sessionPanel=node('section',undefined,'attempt-checks');sessionPanel.id='task-provider-session';details.append(sessionPanel);renderSession();
     initFleetChecks({root:details,invoke,context:()=>({world:runtimeWorld(current),task:heldProjection(current)?.development_tasks?.[task.id]})});

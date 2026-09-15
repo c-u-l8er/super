@@ -1,3 +1,4 @@
+import {outputAttachments} from './task-output-attachments.js';
 import {node} from './app-shell.js';
 import {visualReview} from './visual-review.js';
 
@@ -7,7 +8,7 @@ export function taskScreenshots({task,world,invoke,current}) {
  const gallery=node('div',undefined,'screenshot-pair'),notice=node('p'),undo=node('button','Undo removal');
  notice.setAttribute('role','status');undo.type='button';undo.hidden=true;panel.append(gallery,notice,undo);
  const lineage=[world.world_incarnation,world.world_generation],request={world:lineage,task:task.id,revision:task.revision};
- let busy=false,removed=null,record={},reviewUI=null;
+ let busy=false,removed=null,record={},reviewUI=null,outputUI=null;
  const stillCurrent=()=>{const c=current(),w=c?.frame?.world;return panel.isConnected&&w&&JSON.stringify([w.world_incarnation,w.world_generation])===JSON.stringify(lineage)&&c.frame.projection?.development_tasks?.[task.id]?.revision===task.revision&&!c.withdrawn&&!c.unavailable&&!c.stalled;};
  const requireCurrent=()=>{if(!stillCurrent())throw Error('Task or connection changed. Reopen the task.');};
  function setBusy(value){busy=value;panel.setAttribute('aria-busy',String(value));panel.querySelectorAll('input,button').forEach(control=>control.disabled=value);if(!value)reviewUI?.refresh();}
@@ -49,6 +50,10 @@ export function taskScreenshots({task,world,invoke,current}) {
    gallery.append(card);
   }
   if(!reviewUI){reviewUI=visualReview({task,request,invoke,current,getRecord:()=>record,onSaved:paint});panel.append(reviewUI.panel);}
+  const outputOpen=outputUI?.open;
+  const nextOutput=outputAttachments({record,save:async(side,operation,output)=>{requireCurrent();if(busy)throw Error('Evidence is being saved. Try again.');setBusy(true);try{const next=await invoke('task_screenshots',{request:{...request,side,operation,output}});if(stillCurrent()){paint(next);notice.textContent=(side==='before'?'Before':'After')+' log '+(operation==='save_output'?'saved.':'removed.');}}finally{setBusy(false);}}});
+  nextOutput.open=outputOpen||!!record.outputs?.before||!!record.outputs?.after;
+  if(outputUI)outputUI.replaceWith(nextOutput);else panel.append(nextOutput);outputUI=nextOutput;
   reviewUI.refresh();
  }
  invoke('task_screenshots',{request:{...request,operation:'list'}}).then(record=>{if(stillCurrent())paint(record);}).catch(e=>{if(panel.isConnected)notice.textContent=String(e);});

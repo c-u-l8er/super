@@ -52,6 +52,25 @@ pub fn request(r: Value) -> Result<Value, String> {
     if r["operation"] == "list" {
         return Ok(value);
     }
+    if r["operation"] == "save_output" || r["operation"] == "remove_output" {
+        let side = r["side"].as_str().filter(|s| ["before", "after"].contains(s)).ok_or("Choose Before or After.")?;
+        if !value["outputs"].is_object() { value["outputs"] = json!({}); }
+        if r["operation"] == "remove_output" {
+            value["outputs"].as_object_mut().unwrap().remove(side);
+            if value["outputs"].as_object().unwrap().is_empty() && value["images"].as_object().is_none_or(|o| o.is_empty()) {
+                match std::fs::remove_file(&path) { Ok(()) => {VERSION.fetch_add(1, std::sync::atomic::Ordering::Release);}, Err(e) if e.kind()==std::io::ErrorKind::NotFound => {}, Err(_) => return Err("Could not remove log.".into()) }
+                return Ok(value);
+            }
+        } else {
+            let text = r["output"]["text"].as_str().filter(|s| !s.trim().is_empty() && s.len() <= 100_000).ok_or("Choose a text log up to 100 KB.")?;
+            for field in ["command", "source", "environment"] {
+                if !r["output"][field].as_str().is_some_and(|s| !s.trim().is_empty() && s.len() <= 1000) { return Err("Record the command, source version and environment for this log.".into()); }
+            }
+            value["outputs"][side] = json!({"text":text,"command":r["output"]["command"],"source":r["output"]["source"],"environment":r["output"]["environment"],"origin":"manual-import","sha256":format!("{:x}",Sha256::digest(text.as_bytes())),"attached_at":std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs()});
+        }
+        retain(root, &id, &value)?;
+        return Ok(value);
+    }
     if r["operation"] == "save_review" {
         let review = &r["review"];
         if !review.is_object() || review.to_string().len() > 48000
@@ -80,7 +99,7 @@ pub fn request(r: Value) -> Result<Value, String> {
             .as_object_mut()
             .ok_or("Screenshot record is unreadable.")?;
         images.remove(side);
-        if images.is_empty() {
+        if images.is_empty() && value["outputs"].as_object().is_none_or(|o| o.is_empty()) {
             match std::fs::remove_file(&path) {
                 Ok(()) => { VERSION.fetch_add(1, std::sync::atomic::Ordering::Release); }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
@@ -144,7 +163,11 @@ pub fn request(r: Value) -> Result<Value, String> {
     Ok(value)
 }
 fn retain(root: &std::path::Path, id: &str, value: &Value) -> Result<(), String> {
+    std::fs::create_dir_all(root).map_err(|_| "Cannot create evidence storage.")?;
     let path = root.join(format!("{id}.json"));
+    if !path.exists() && std::fs::read_dir(root).map_err(|_| "Cannot read evidence storage.")?.count() >= 100 { return Err("Evidence storage has reached 100 task revisions.".into()); }
+    if serde_json::to_vec(value).map_err(|e| e.to_string())?.len() > 6_000_000 { return Err("Evidence record exceeds 6 MB.".into()); }
+    #[cfg(unix)] { use std::os::unix::fs::PermissionsExt; std::fs::set_permissions(root,std::fs::Permissions::from_mode(0o700)).map_err(|_| "Cannot protect evidence storage.")?; }
     let temporary = root.join(format!("{id}.tmp"));
     std::fs::write(&temporary, serde_json::to_vec(&value).unwrap())
         .map_err(|_| "Could not save screenshot.")?;
@@ -283,6 +306,15 @@ mod storage_tests {
             base64::engine::general_purpose::STANDARD.encode(&bytes[..24])
         ));
         assert!(request(r).is_err());
+        let mut log = json!({"operation":"save_output","world":["fixture",1],"task":"log-task","revision":1,"side":"before","output":{"text":"latency_ms: 34\n","command":"node benchmark.mjs --requests 256; unit: ms","source":"commit-before","environment":"lab Linux / Node"}});
+        assert_eq!(request(log.clone()).unwrap()["outputs"]["before"]["origin"],"manual-import");
+        log["side"] = json!("after"); log["output"]["text"] = json!("latency_ms: 0.014\n");
+        assert!(request(log.clone()).unwrap()["outputs"]["before"].is_object());
+        let mut bad = log.clone(); bad["output"]["text"] = json!("x".repeat(100001)); assert!(request(bad).is_err());
+        let mut bad = log.clone(); bad["output"]["source"] = json!(""); assert!(request(bad).is_err());
+        log["operation"] = json!("remove"); assert!(request(log.clone()).unwrap()["outputs"]["before"].is_object());
+        log["operation"] = json!("remove_output");request(log.clone()).unwrap();log["side"]=json!("before");request(log.clone()).unwrap();
+        log["operation"] = json!("list");assert!(request(log).unwrap()["outputs"].is_null());
         let _ = std::fs::remove_dir_all(dir);
     }
 }
