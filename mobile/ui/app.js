@@ -8,7 +8,8 @@ const rows=p=>Object.values(p?.development_tasks??{});
 const attentionStates=new Set(['blocked','needs_changes','checks_missing','checks_attention','decision','finish']);
 const api=async(path,body)=>{const r=await fetch('/api/'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store',signal:AbortSignal.timeout(4000)});const v=await r.json();if(!r.ok){const e=Error(v.error);e.status=r.status;throw e;}return v;};
 function withdraw(message){current=null;$('#status').textContent=message;render();}
-initConversations(document.querySelector('#conversations'),()=>view==='chat'&&paired);
+const linkedTask=link=>current?.available&&JSON.stringify([current.world?.world_incarnation,current.world?.world_generation])===link.lineage&&current.projection?.development_tasks?.[link.taskId]?.revision===link.revision?current.projection.development_tasks[link.taskId]:null;
+initConversations(document.querySelector('#conversations'),()=>view==='chat'&&paired,{taskInfo:linkedTask,onTask:link=>{if(!linkedTask(link))return;selected=link.taskId;view='tasks';render();}});
 function render(){
   document.body.classList.toggle('chat-mode',view==='chat');
   document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));content.hidden=view==='chat';$('#conversations').hidden=view!=='chat';if(view==='chat')return;
