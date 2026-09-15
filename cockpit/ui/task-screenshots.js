@@ -1,4 +1,5 @@
 import {node} from './app-shell.js';
+import {visualReview} from './visual-review.js';
 
 export function taskScreenshots({task,world,invoke,current}) {
  const panel=node('section',undefined,'task-screenshots attempt-checks');
@@ -6,10 +7,10 @@ export function taskScreenshots({task,world,invoke,current}) {
  const gallery=node('div',undefined,'screenshot-pair'),notice=node('p'),undo=node('button','Undo removal');
  notice.setAttribute('role','status');undo.type='button';undo.hidden=true;panel.append(gallery,notice,undo);
  const lineage=[world.world_incarnation,world.world_generation],request={world:lineage,task:task.id,revision:task.revision};
- let busy=false,removed=null;
+ let busy=false,removed=null,record={},reviewUI=null;
  const stillCurrent=()=>{const c=current(),w=c?.frame?.world;return panel.isConnected&&w&&JSON.stringify([w.world_incarnation,w.world_generation])===JSON.stringify(lineage)&&c.frame.projection?.development_tasks?.[task.id]?.revision===task.revision&&!c.withdrawn&&!c.unavailable&&!c.stalled;};
  const requireCurrent=()=>{if(!stillCurrent())throw Error('Task or connection changed. Reopen the task.');};
- function setBusy(value){busy=value;panel.setAttribute('aria-busy',String(value));panel.querySelectorAll('input,button').forEach(control=>control.disabled=value);}
+ function setBusy(value){busy=value;panel.setAttribute('aria-busy',String(value));panel.querySelectorAll('input,button').forEach(control=>control.disabled=value);if(!value)reviewUI?.refresh();}
  async function change(side,operation,data,previous) {
   if(busy)return;
   const label=side==='before'?'Before':'After';
@@ -29,7 +30,8 @@ export function taskScreenshots({task,world,invoke,current}) {
   finally{setBusy(false);}
  }
  undo.onclick=()=>{if(removed)change(removed.side,'save',removed.data);};
- function paint(record) {
+ function paint(nextRecord) {
+  record=nextRecord;
   gallery.replaceChildren();
   for(const side of ['before','after']) {
    const label=side==='before'?'Before':'After',card=node('figure');card.append(node('figcaption',label));
@@ -46,6 +48,8 @@ export function taskScreenshots({task,world,invoke,current}) {
    if(image){const remove=node('button','Remove '+label.toLowerCase()+' screenshot');remove.type='button';remove.disabled=busy;remove.onclick=()=>change(side,'remove',null,image);card.append(remove);}
    gallery.append(card);
   }
+  if(!reviewUI){reviewUI=visualReview({task,request,invoke,current,getRecord:()=>record,onSaved:paint});panel.append(reviewUI.panel);}
+  reviewUI.refresh();
  }
  invoke('task_screenshots',{request:{...request,operation:'list'}}).then(record=>{if(stillCurrent())paint(record);}).catch(e=>{if(panel.isConnected)notice.textContent=String(e);});
  return panel;

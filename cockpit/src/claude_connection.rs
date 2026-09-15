@@ -406,6 +406,7 @@ impl Connection {
         schema: Value,
         effort: Option<String>,
         request_id: Option<String>,
+        images: Vec<String>,
     ) -> Result<Value, String> {
         if self.status(home.clone())?["connected"] != true {
             return Err("Connect your local Claude session before sending.".into());
@@ -423,7 +424,11 @@ impl Connection {
         *self.1.lock().map_err(|_| "Reply status unavailable.")? = ReplyState {
             id, active: true, phase: "Waiting for provider".into(), ..ReplyState::default()
         };
-        let (ok, v) = run_reply(c, prompt, self.1.clone(), 300)?;
+        let input = if images.is_empty() { prompt } else {
+            c.args(["--input-format", "stream-json"]);
+            format!("{}\n", json!({"type":"user","message":{"role":"user","content":crate::bots::image_content("anthropic", &prompt, &images)},"parent_tool_use_id":null}))
+        };
+        let (ok, v) = run_reply(c, input, self.1.clone(), 300)?;
         if needs_signin(&v) {
             std::fs::write(home.join("needs-signin"), b"expired\n")
                 .map_err(|_| "Could not record expired sign-in.")?;
@@ -437,17 +442,17 @@ fn configure_chat(c: &mut Command, model: &str, schema: &Value) {
         c.args(["--model", model]);
     }
 }
-fn needs_signin(v: &Value) -> bool {
-    v["is_error"] == true
-        && v["result"]
-            .as_str()
-            .map(|s| {
-                s.contains("OAuth session expired")
-                    || s.contains("Failed to authenticate")
-                    || s.contains("Not logged in")
-            })
-            .unwrap_or(false)
+fn failure_text(v: &Value) -> String {
+    let mut parts = vec![v["result"].as_str().unwrap_or("")];
+    if let Some(errors) = v["errors"].as_array() { parts.extend(errors.iter().take(8).filter_map(Value::as_str)); }
+    parts.join("\n")
 }
+fn needs_signin(v: &Value) -> bool {
+    let text = failure_text(v);
+    (v["is_error"] == true || v["subtype"] == "error_during_execution")
+        && ["OAuth session expired", "Failed to authenticate", "Not logged in"].iter().any(|s| text.contains(s))
+}
+
 fn decode_reply(ok: bool, v: Value) -> Result<Value, String> {
     if needs_signin(&v) {
         return Err("Claude sign-in has expired. Click Connect provider to sign in again. No app action was executed.".into());
@@ -475,6 +480,9 @@ mod tests {
         assert!(!error.contains("Connect provider"));
         let success = json!({"is_error":false,"result":"You've reached your Fable limit","structured_output":{"text":"quoted example"}});
         assert_eq!(decode_reply(true, success).unwrap()["text"], "quoted example");
+        let structured_expired = json!({"subtype":"error_during_execution","errors":["Failed to authenticate: OAuth session expired"]});
+        assert!(needs_signin(&structured_expired));
+        assert!(decode_reply(false, structured_expired).unwrap_err().contains("sign-in has expired"));
         let expired = json!({"is_error":true,"result":"Failed to authenticate: OAuth session expired"});
         assert!(decode_reply(false, expired).unwrap_err().contains("sign-in has expired"));
     }

@@ -57,3 +57,11 @@ Development task details accept Before and After PNG attachments (2 MB, up to 40
 ### Screenshot attachment controls (2026-09-15)
 
 Before/after attachments now have explicit removal with an immediate Undo action while the panel stays open. Removing the final image releases its storage slot. Controls show the task revision and PNG limits, preserve keyboard focus, announce save/removal outcomes, and recheck task identity after file reading. Native interaction and storage tests cover removal, restoration, retention of the other image, and updated mobile observations. Historical revision management and automatic capture remain open.
+
+### Requirement-based visual review (2026-09-15)
+
+Task screenshots now support an explicit AI review against each acceptance-criteria line. Findings distinguish visually met, missing and needs-verification, with reasons and possible regressions. A reviewer can link a recorded test snapshot or retained accepted build, inspect the checks and exact source/executable identity, and record that the findings were inspected. This does not accept the task or bypass required checks. Images remain manually attached with unverified capture origin; automatic capture from a known preview remains open.
+
+The review freezes criteria, both image digests, and selected evidence. Changed evidence makes older findings stale. Mobile shows findings read-only and withdraws loaded images/findings when desktop evidence changes. Model and effort choices are separate from bot conversation preferences. Claude uses real image blocks over stream-json; API adapters support their image formats. The Codex connection explicitly refuses visual review until image support is added.
+
+Controlled native, storage and Android checks pass. The attempted real Claude Opus 5 / medium image check reached an expired OAuth session; a new sign-in is needed to complete real-provider validation. This is separate from the full Super-on-Super acceptance gate.

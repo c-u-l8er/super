@@ -6,6 +6,8 @@ use std::{
     path::PathBuf,
     sync::{Mutex, OnceLock},
 };
+static VERSION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub fn version() -> u64 { VERSION.load(std::sync::atomic::Ordering::Acquire) }
 static ROOT: OnceLock<PathBuf> = OnceLock::new();
 static WRITE: Mutex<()> = Mutex::new(());
 pub fn init(path: PathBuf) {
@@ -50,6 +52,22 @@ pub fn request(r: Value) -> Result<Value, String> {
     if r["operation"] == "list" {
         return Ok(value);
     }
+    if r["operation"] == "save_review" {
+        let review = &r["review"];
+        if !review.is_object() || review.to_string().len() > 48000
+            || !review["basis"]["criteria"].is_string()
+            || !valid_findings(&review["findings"]) {
+            return Err("Visual review is incomplete or too large.".into());
+        }
+        for side in ["before", "after"] {
+            if !review["basis"][side].is_string() || review["basis"][side] != value["images"][side]["sha256"] {
+                return Err("Screenshots changed. Run a new visual review.".into());
+            }
+        }
+        value["review"] = review.clone();
+        retain(root, &id, &value)?;
+        return Ok(value);
+    }
     if r["operation"] != "save" && r["operation"] != "remove" {
         return Err("Unknown screenshot operation.".into());
     }
@@ -64,7 +82,7 @@ pub fn request(r: Value) -> Result<Value, String> {
         images.remove(side);
         if images.is_empty() {
             match std::fs::remove_file(&path) {
-                Ok(()) => {}
+                Ok(()) => { VERSION.fetch_add(1, std::sync::atomic::Ordering::Release); }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(_) => return Err("Could not remove screenshot.".into()),
             }
@@ -137,7 +155,16 @@ fn retain(root: &std::path::Path, id: &str, value: &Value) -> Result<(), String>
             .map_err(|_| "Cannot protect screenshot.")?;
     }
     std::fs::rename(temporary, path).map_err(|_| "Could not retain screenshot.")?;
+    VERSION.fetch_add(1, std::sync::atomic::Ordering::Release);
     Ok(())
+}
+fn valid_findings(value: &Value) -> bool {
+    let text = |v: &Value, limit: usize| v.as_str().is_some_and(|s| !s.trim().is_empty() && s.len() <= limit);
+    text(&value["summary"], 3000)
+        && value["requirements"].as_array().is_some_and(|rows| !rows.is_empty() && rows.len() <= 20 && rows.iter().enumerate().all(|(i,r)|
+            r["index"].as_u64() == Some(i as u64 + 1) && text(&r["requirement"],12000) && text(&r["reason"],3000)
+            && r["status"].as_str().is_some_and(|s| ["met","missing","uncertain"].contains(&s))))
+        && value["regressions"].as_array().is_some_and(|rows| rows.len() <= 20 && rows.iter().all(|r| text(r,2000)))
 }
 pub fn observed(snapshot: &Value, task: &str) -> Value {
     if snapshot["available"] != true {
@@ -208,6 +235,15 @@ mod storage_tests {
             observed(&json!({"available":false}), "t")["available"],
             false
         );
+        let record = request(r.clone()).unwrap();
+        let mut save_review = r.clone();
+        save_review["operation"] = json!("save_review");
+        save_review["review"] = json!({"basis":{"criteria":"Readable names","before":record["images"]["before"]["sha256"],"after":record["images"]["after"]["sha256"]},"findings":{"summary":"Test","requirements":[{"index":1,"requirement":"Readable names","status":"met","reason":"Names are visible"}],"regressions":[]}});
+        let mut invalid = save_review.clone(); invalid["review"]["findings"]["requirements"] = json!([]);
+        assert!(request(invalid).is_err());
+        assert!(request(save_review.clone()).unwrap()["review"].is_object());
+        save_review["review"]["basis"]["before"] = json!("wrong-image");
+        assert!(request(save_review).is_err());
         r["operation"] = json!("remove");
         r["side"] = json!("invalid");
         assert!(request(r.clone()).is_err());

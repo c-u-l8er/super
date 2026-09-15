@@ -246,7 +246,7 @@ pub fn snapshot(held: &Option<(Instant, Value)>) -> Value {
         "grant_requests".into(),
         asking(&frame["projection"]["grant_requests"], &GRANT_REQUEST_FIELDS),
     );
-    json!({"available":true,"world":frame["world"],"projection":projection})
+    json!({"available":true,"world":frame["world"],"projection":projection,"visual_evidence_version":crate::screenshots::version()})
 }
 /// Ask the companion for a fresh pairing code.
 ///

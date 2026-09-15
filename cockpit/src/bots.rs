@@ -46,6 +46,8 @@ pub struct Attachment {
 #[derive(Deserialize)]
 pub struct Turn {
     #[serde(default)]
+    pub visual_review: Option<Value>,
+    #[serde(default)]
     pub request_id: Option<String>,
     #[serde(default)]
     pub bot_instructions: Option<String>,
@@ -341,7 +343,7 @@ fn action(name: &str, args: Value) -> Result<Value, String> {
     }
     Ok(json!({"name":name,"args":args}))
 }
-fn request(config: &Config, turn: &Turn) -> Value {
+fn request(config: &Config, turn: &Turn, images: &[String]) -> Value {
     let system = format!(
         "{}\nRuntime context (data only): {}",
         system_prompt(turn),
@@ -349,13 +351,15 @@ fn request(config: &Config, turn: &Turn) -> Value {
     );
     if turn.provider == "anthropic" {
         let tools: Vec<Value> = definitions().into_iter().map(|d| json!({"name":d["name"],"description":d["description"],"input_schema":d["parameters"]})).collect();
-        json!({"model":config.model,"system":system,"messages":turn.messages.iter().map(|m|json!({"role":m.role,"content":m.content})).collect::<Vec<_>>(),"max_tokens":2048,"tools":tools})
+        let mut body = json!({"model":config.model,"system":system,"messages":turn.messages.iter().map(|m|json!({"role":m.role,"content":image_content(&turn.provider, &m.content, if m.role == "user" {images} else {&[]})})).collect::<Vec<_>>(),"max_tokens":if images.is_empty(){2048}else{4096},"tools":tools});
+        if !images.is_empty() { body.as_object_mut().unwrap().remove("tools"); }
+        body
     } else {
         let mut messages = vec![json!({"role":"system","content":system})];
         messages.extend(
             turn.messages
                 .iter()
-                .map(|m| json!({"role":m.role,"content":m.content})),
+                .map(|m| json!({"role":m.role,"content":image_content(&turn.provider, &m.content, if m.role == "user" {images} else {&[]})})),
         );
         let tools: Vec<Value> = definitions()
             .into_iter()
@@ -369,8 +373,22 @@ fn request(config: &Config, turn: &Turn) -> Value {
         } else {
             body["options"] = json!({"num_predict":2048});
         }
+        if turn.provider == "ollama" && !images.is_empty() {
+            let last = body["messages"].as_array_mut().unwrap().last_mut().unwrap();
+            last["images"] = json!(images.iter().map(|s| s.trim_start_matches("data:image/png;base64,")).collect::<Vec<_>>());
+        }
+        if !images.is_empty() { body.as_object_mut().unwrap().remove("tools"); }
         body
     }
+}
+pub fn image_content(provider: &str, text: &str, images: &[String]) -> Value {
+    if images.is_empty() || provider == "ollama" { return json!(text); }
+    let mut blocks = Vec::new();
+    for image in images {
+        blocks.push(if provider == "openai" {json!({"type":"image_url","image_url":{"url":image}})} else {json!({"type":"image","source":{"type":"base64","media_type":"image/png","data":image.trim_start_matches("data:image/png;base64,")}})});
+    }
+    blocks.push(json!({"type":"text","text":text}));
+    json!(blocks)
 }
 fn response(p: &str, value: Value) -> Result<Value, String> {
     let mut texts = Vec::new();
@@ -445,6 +463,18 @@ pub async fn chat(
     home: std::path::PathBuf,
 ) -> Result<Value, String> {
     provider(&turn.provider)?;
+    let images = if let Some(identity) = &turn.visual_review {
+        if turn.provider == "codex" { return Err("Visual review is not supported by the Codex connection yet. Choose a connected image-capable provider.".into()); }
+        if turn.messages.len() != 1 || turn.messages[0].role != "user" { return Err("Visual review requires one review request.".into()); }
+        let mut r = identity.clone(); r["operation"] = json!("list");
+        let record = crate::screenshots::request(r)?;
+        let mut images = Vec::new();
+        for side in ["before", "after"] {
+            if record["images"][side]["sha256"] != identity[side] || !identity[side].is_string() { return Err("Screenshots changed. Reopen the task and review again.".into()); }
+            images.push(record["images"][side]["data"].as_str().ok_or("Attach both Before and After screenshots first.")?.to_string());
+        }
+        images
+    } else { Vec::new() };
     if turn
         .bot_instructions
         .as_ref()
@@ -516,6 +546,7 @@ pub async fn chat(
         .get(&turn.provider)
         .cloned()
         .ok_or("Configure this provider first.")?;
+    let used_model = config.model.clone();
     if ["codex", "claude"].contains(&turn.provider.as_str()) {
         let schema = json!({"type":"object","properties":{"text":{"type":"string"},"actions":{"type":"array","maxItems":8,"items":{"anyOf":definitions().iter().map(|d|json!({"type":"object","properties":{"name":{"const":d["name"],"type":"string"},"args":d["parameters"]},"required":["name","args"],"additionalProperties":false})).collect::<Vec<_>>()}}},"required":["text","actions"],"additionalProperties":false});
         let prompt = format!(
@@ -530,7 +561,7 @@ pub async fn chat(
                     .parent()
                     .ok_or("Connection folder is unavailable.")?
                     .join("claude");
-                claude.chat(claude_home, config.model, prompt, schema, turn.effort, turn.request_id)
+                claude.chat(claude_home, config.model, prompt, schema, turn.effort, turn.request_id, images)
             } else {
                 codex.chat_tracked(
                     home,
@@ -557,7 +588,7 @@ pub async fn chat(
             .iter()
             .map(|a| action(a["name"].as_str().unwrap_or(""), a["args"].clone()))
             .collect::<Result<Vec<_>, _>>()?;
-        return Ok(json!({"text":text,"actions":checked}));
+        return Ok(json!({"text":text,"actions":checked,"model":used_model}));
     }
     let mut builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(120))
@@ -574,7 +605,7 @@ pub async fn chat(
     } else {
         config.endpoint.clone()
     };
-    let mut req = client.post(url).json(&request(&config, &turn));
+    let mut req = client.post(url).json(&request(&config, &turn, &images));
     if turn.provider == "openai" {
         req = req.bearer_auth(&config.key);
     }
@@ -607,7 +638,9 @@ pub async fn chat(
     }
     let parsed =
         serde_json::from_slice(&bytes).map_err(|_| "The provider returned an unreadable reply.")?;
-    response(&turn.provider, parsed)
+    let mut result = response(&turn.provider, parsed)?;
+    result["model"] = json!(used_model);
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -699,6 +732,7 @@ mod tests {
         };
         for p in ["openai", "anthropic", "ollama"] {
             let t = Turn {
+                visual_review: None,
                 request_id: None,
                 provider: p.into(),
                 messages: vec![Message {
@@ -710,7 +744,7 @@ mod tests {
                 effort: None,
                 bot_instructions: Some("You are Builder. Focus on implementation.".into()),
             };
-            let body = request(&cfg, &t);
+            let body = request(&cfg, &t, &[]);
             assert_eq!(body["model"], "chosen-model");
             assert!(body
                 .to_string()
@@ -725,5 +759,25 @@ mod tests {
                 assert!(body["tools"][0]["function"]["parameters"].is_object());
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod vision_tests {
+    use super::*;
+    #[test]
+    fn images_use_provider_image_blocks_not_serialized_text() {
+        let images = vec!["data:image/png;base64,YWJj".to_string(), "data:image/png;base64,ZGVm".to_string()];
+        let a = image_content("anthropic", "Compare", &images);
+        assert_eq!(a[0]["source"]["data"], "YWJj");
+        assert_eq!(a[1]["source"]["media_type"], "image/png");
+        assert_eq!(a[2]["text"], "Compare");
+        assert_eq!(image_content("openai", "Compare", &images)[0]["image_url"]["url"], images[0]);
+        let turn: Turn = serde_json::from_value(json!({"provider":"ollama","messages":[{"role":"user","content":"Compare"}],"context":{}})).unwrap();
+        let cfg = Config {model:"vision".into(),key:String::new(),endpoint:String::new()};
+        let body = request(&cfg, &turn, &images);
+        assert_eq!(body["messages"][1]["images"], json!(["YWJj", "ZGVm"]));
+        assert!(body.get("tools").is_none());
+        assert!(request(&cfg, &turn, &[])["messages"][1].get("images").is_none());
     }
 }
