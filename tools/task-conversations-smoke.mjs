@@ -108,6 +108,16 @@ try {
   const task=await until(()=>script(`return Object.values(window.cockpit.frame.projection.development_tasks??{}).find(t=>t.title==='Highlight changed ranges')`));
   await until(()=>script(`return document.querySelector('#development-task-detail').textContent.includes('Plan history')`));
   check('task creation binds the selected lane and bot',task.lane_ref===lane.id&&task.bot_ref===bot.id&&task.status==='planned');
+  await until(()=>script(`return !!document.querySelector('.task-screenshots .visual-review-controls')`));
+  check('full task page includes labeled screenshot review and empty guidance',await script(`return document.querySelector('.task-screenshots').textContent.includes('Add both a before and an after screenshot')&&document.querySelectorAll('.visual-review-controls label').length===4&&document.querySelector('#development-tasks').textContent.includes('Plan history')`));
+  await script(`document.querySelector('.task-screenshots').scrollIntoView({block:'start'})`);
+  await screenshot('Full_Task_Screenshot_Review');
+  await wd('POST',`/session/${session}/window/rect`,{width:680,height:900});
+  await script(`document.querySelector('.task-screenshots').scrollIntoView({block:'start'})`);
+  check('screenshot review fits a narrow task page',await script(`const p=document.querySelector('.task-screenshots');return p.scrollWidth<=p.clientWidth+1`));
+  await screenshot('Narrow_Task_Screenshot_Review');
+  await wd('POST',`/session/${session}/window/rect`,{width:1280,height:850});
+
   await script(`const e=document.querySelector('#task-status');e.value='blocked';e.dispatchEvent(new Event('change',{bubbles:true}))`);
   await type('#task-note','Waiting for review guidance');await click('#development-plan-update button');
   await until(()=>script(`return window.cockpit.frame.projection.development_tasks[arguments[0]].revision===2`,[task.id]));

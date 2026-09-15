@@ -560,3 +560,27 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .conversation-link::before {content:none;}
 .conversation-sidebar > [role="status"]:empty {display:none;}
 #bot-surface.chat-view .record-tabs {flex-shrink:0;margin:0 0 8px;}
+
+/* Keep the comparison and findings readable within a complete task page. */
+.task-screenshots { margin:24px 0; padding:20px; border:1px solid var(--line); border-radius:10px; }
+.task-screenshots > h3 { margin-top:0; }
+.screenshot-pair figure { padding:12px; border:1px solid var(--line); border-radius:8px; }
+.screenshot-pair figcaption { font-weight:600; margin-bottom:10px; }
+.screenshot-pair img { max-height:280px; object-fit:contain; background:var(--bg); }
+.screenshot-pair button { margin-top:8px; }
+.visual-review { border-top:1px solid var(--line); margin-top:20px; padding-top:8px; }
+.visual-review-controls { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:14px; margin:18px 0; }
+.visual-review-controls .field { display:flex; flex-direction:column; gap:6px; min-width:0; }
+.visual-review-controls .field[hidden] { display:none; }
+.visual-review-actions { display:flex; gap:8px; flex-wrap:wrap; }
+.visual-review article { padding:12px 16px; border:1px solid var(--line); border-radius:8px; margin:12px 0; }
+.visual-review article h5 { font-size:14px; margin:0 0 8px; }
+.visual-review article p { margin:8px 0 0; }
+.screenshot-preview { max-width:95vw; max-height:95vh; padding:16px; background:var(--bg); color:var(--ink); border:1px solid var(--line); }
+.screenshot-preview::backdrop { background:#000b; }
+.screenshot-preview img { display:block; max-width:100%; margin-top:12px; }
+@media(max-width:700px) { .task-screenshots {padding:12px;} .visual-review-controls {grid-template-columns:1fr;} }
+
+.screenshot-upload { display:flex; flex-direction:column; gap:8px; margin:12px 0; font-size:12px; }
+.task-screenshots > [role=status]:empty, .visual-review > [role=status]:empty { display:none; }
+.visual-review > [role=status] { margin-top:12px; }

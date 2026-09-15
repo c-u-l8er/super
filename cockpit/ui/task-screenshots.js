@@ -36,15 +36,15 @@ export function taskScreenshots({task,world,invoke,current}) {
   for(const side of ['before','after']) {
    const label=side==='before'?'Before':'After',card=node('figure');card.append(node('figcaption',label));
    const image=record.images?.[side];
-   if(image){const img=node('img');img.src=image.data;img.alt=`${label} screenshot for ${task.title}, revision ${task.revision}`;img.loading='lazy';card.append(img,node('p',`Attached ${new Date(image.attached_at*1000).toLocaleString()}`,'availability-note'));}
-   else card.append(node('p','No screenshot attached.','availability-note'));
+   if(image){const img=node('img');img.src=image.data;img.alt=`${label} screenshot for ${task.title}, revision ${task.revision}`;img.loading='lazy';const expand=node('button','Open '+label.toLowerCase()+' image');expand.type='button';expand.onclick=()=>{const dialog=node('dialog',undefined,'screenshot-preview'),close=node('button','Close image'),full=node('img');close.type='button';full.src=image.data;full.alt=img.alt;close.onclick=()=>dialog.close();dialog.append(close,full);dialog.addEventListener('close',()=>{dialog.remove();expand.focus();});panel.append(dialog);dialog.showModal();};card.append(img,expand,node('p',`Attached ${new Date(image.attached_at*1000).toLocaleString()}`,'availability-note'));}
+   else card.append(node('p',side==='before'?'Show the starting screen.':'Show the result of this task.','directory-note'));
    const input=node('input');input.type='file';input.accept='image/png';input.setAttribute('aria-label','Attach '+label+' screenshot');input.disabled=busy;
    input.onchange=()=>{
     const file=input.files[0];if(!file||busy)return;
     if(file.size>2_000_000){notice.textContent='Choose a PNG no larger than 2 MB.';input.value='';return;}
     change(side,'save',()=>new Promise((resolve,reject)=>{const reader=new FileReader();reader.onload=()=>resolve(reader.result);reader.onerror=()=>reject(Error('Could not read screenshot.'));reader.readAsDataURL(file);}));
    };
-   card.append(node('p',image?'Replace screenshot':'Add screenshot','availability-note'),input);
+   const upload=node('label',undefined,'screenshot-upload');upload.append(node('span',image?'Replace screenshot':'Add '+label.toLowerCase()+' screenshot'),input);card.append(upload);
    if(image){const remove=node('button','Remove '+label.toLowerCase()+' screenshot');remove.type='button';remove.disabled=busy;remove.onclick=()=>change(side,'remove',null,image);card.append(remove);}
    gallery.append(card);
   }

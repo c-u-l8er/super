@@ -1,7 +1,7 @@
 import {open} from './lib/cockpit-control.mjs';
 import assert from 'node:assert/strict';import {mkdirSync,writeFileSync} from 'node:fs';import http from 'node:http';
 const out=process.env.SUPER_VISUAL_EVIDENCE_DIR||'/tmp/super-conversation-evidence';mkdirSync(out,{recursive:true});let app;const checks=[];const check=(name,value)=>{assert.ok(value,name);checks.push(name);};
-let chatRequests=0;const server=http.createServer(async(req,res)=>{let body='';for await(const b of req)body+=b;res.setHeader('content-type','application/json');if(req.url==='/api/tags')return res.end(JSON.stringify({models:[{name:'fixture'}]}));const data=JSON.parse(body);if(data.messages.at(-1).images){assert.equal(data.messages.at(-1).images.length,2);assert.ok(data.messages.at(-1).images.every(x=>x.startsWith('iVBOR')));assert.ok(data.messages.at(-1).content.includes('Compare image 1'));return res.end(JSON.stringify({message:{content:JSON.stringify({summary:'The screen is clearer; persistence requires a functional check.',requirements:[{index:1,status:'met',reason:'Conversation names are readable.'},{index:2,status:'uncertain',reason:'A screenshot cannot show restart persistence.'}],regressions:[]})}}));}chatRequests++;assert.ok(data.messages.some(m=>m.content?.includes('<conversation-title>')));res.end(JSON.stringify({message:{content:'<conversation-title>Improve the Machines screen</conversation-title>Here is the conversation reply.\n'+ 'Here is the conversation reply.\n'.repeat(120),tool_calls:[]}}));});await new Promise(r=>server.listen(0,'127.0.0.1',r));
+let chatRequests=0;const server=http.createServer(async(req,res)=>{let body='';for await(const b of req)body+=b;res.setHeader('content-type','application/json');if(req.url==='/api/tags')return res.end(JSON.stringify({models:[{name:'fixture'}]}));const data=JSON.parse(body);if(data.messages.at(-1).images){assert.equal(data.messages.at(-1).images.length,2);assert.ok(data.messages.at(-1).images.every(x=>x.startsWith('iVBOR')));assert.ok(data.messages.at(-1).content.includes('Compare image 1'));return res.end(JSON.stringify({message:{content:JSON.stringify({summary:'The images are identical; persistence requires a functional check.',requirements:[{index:1,status:'met',reason:'Conversation names are readable.'},{index:2,status:'uncertain',reason:'A screenshot cannot show restart persistence.'}],regressions:[]})}}));}chatRequests++;assert.ok(data.messages.some(m=>m.content?.includes('<conversation-title>')));res.end(JSON.stringify({message:{content:'<conversation-title>Improve the Machines screen</conversation-title>Here is the conversation reply.\n'+ 'Here is the conversation reply.\n'.repeat(120),tool_calls:[]}}));});await new Promise(r=>server.listen(0,'127.0.0.1',r));
 try{
  app=await open({port:4597});
  const page=(code)=>app.page(code);const wait=(fn,what)=>app.until(fn,15000,what);
@@ -30,7 +30,14 @@ try{
  await page(`document.querySelector('.task-screenshots > button').click()`);
  await wait(()=>page(`return document.querySelectorAll('.task-screenshots img').length===2`),'undo removal');
  check('undo restores the removed image',await page(`return document.querySelector('.task-screenshots > button').hidden`));
- await page(`document.querySelector('.visual-review select[aria-label="Visual review provider"]').value='ollama';document.querySelector('.visual-review button').click()`);
+ await page(`const p=document.querySelector('.visual-review select[aria-label="Visual review provider"]');p.value='ollama';p.dispatchEvent(new Event('change'));`);
+ await wait(()=>page(`return !document.querySelector('.visual-review button').disabled`),'model catalog ready');
+ check('identical images are disclosed before review',await page(`return document.querySelector('.visual-review').textContent.includes('These images are identical')`));
+ check('review controls have visible labels',await page(`return [...document.querySelectorAll('.visual-review select')].every(s=>s.closest('label')?.querySelector('span')?.textContent)`));
+ await page(`[...document.querySelectorAll('.task-screenshots button')].find(b=>b.textContent==='Open before image').click()`);
+ check('image opens at full size in a modal',await page(`return document.querySelector('dialog').open&&document.querySelector('dialog img').naturalWidth>0`));
+ await page(`document.querySelector('dialog button').click()`);
+ await page(`document.querySelector('.visual-review button').click()`);
  await wait(()=>page(`return document.querySelector('.visual-review [role=status]').textContent.includes('Review saved')`),'visual findings');
  check('AI receives both image payloads and records requirement findings',await page(`return document.querySelector('.visual-review').textContent.includes('Visually met')&&document.querySelector('.visual-review').textContent.includes('Needs verification')`));
  await page(`[...document.querySelectorAll('.visual-review button')].find(b=>b.textContent==='Mark findings inspected').click()`);
