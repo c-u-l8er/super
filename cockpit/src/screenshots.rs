@@ -50,13 +50,29 @@ pub fn request(r: Value) -> Result<Value, String> {
     if r["operation"] == "list" {
         return Ok(value);
     }
-    if r["operation"] != "save" {
+    if r["operation"] != "save" && r["operation"] != "remove" {
         return Err("Unknown screenshot operation.".into());
     }
     let side = r["side"]
         .as_str()
         .filter(|s| ["before", "after"].contains(s))
         .ok_or("Choose Before or After.")?;
+    if r["operation"] == "remove" {
+        let images = value["images"]
+            .as_object_mut()
+            .ok_or("Screenshot record is unreadable.")?;
+        images.remove(side);
+        if images.is_empty() {
+            match std::fs::remove_file(&path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return Err("Could not remove screenshot.".into()),
+            }
+        } else {
+            retain(root, &id, &value)?;
+        }
+        return Ok(value);
+    }
     let data = r["data"].as_str().ok_or("Choose a PNG screenshot.")?;
     let encoded = data
         .strip_prefix("data:image/png;base64,")
@@ -106,6 +122,11 @@ pub fn request(r: Value) -> Result<Value, String> {
         std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
             .map_err(|_| "Cannot protect screenshot storage.")?;
     }
+    retain(root, &id, &value)?;
+    Ok(value)
+}
+fn retain(root: &std::path::Path, id: &str, value: &Value) -> Result<(), String> {
+    let path = root.join(format!("{id}.json"));
     let temporary = root.join(format!("{id}.tmp"));
     std::fs::write(&temporary, serde_json::to_vec(&value).unwrap())
         .map_err(|_| "Could not save screenshot.")?;
@@ -116,7 +137,7 @@ pub fn request(r: Value) -> Result<Value, String> {
             .map_err(|_| "Cannot protect screenshot.")?;
     }
     std::fs::rename(temporary, path).map_err(|_| "Could not retain screenshot.")?;
-    Ok(value)
+    Ok(())
 }
 pub fn observed(snapshot: &Value, task: &str) -> Value {
     if snapshot["available"] != true {
@@ -187,6 +208,32 @@ mod storage_tests {
             observed(&json!({"available":false}), "t")["available"],
             false
         );
+        r["operation"] = json!("remove");
+        r["side"] = json!("invalid");
+        assert!(request(r.clone()).is_err());
+        r["side"] = json!("before");
+        let removed = request(r.clone()).unwrap();
+        assert!(removed["images"]["before"].is_null());
+        assert!(removed["images"]["after"].is_object());
+        assert!(observed(&frame, "t")["record"]["images"]["before"].is_null());
+        r["operation"] = json!("save");
+        request(r.clone()).unwrap(); // Undo can restore the original bytes.
+        assert!(observed(&frame, "t")["record"]["images"]["before"].is_object());
+        r["operation"] = json!("remove");
+        request(r.clone()).unwrap();
+        r["side"] = json!("after");
+        assert!(request(r.clone()).unwrap()["images"]
+            .as_object()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.join("task-screenshots"))
+                .unwrap()
+                .count(),
+            0
+        );
+        assert!(request(r.clone()).is_ok()); // Removal is idempotent.
+        r["operation"] = json!("list");
         r["revision"] = json!(2);
         assert!(request(r.clone()).unwrap()["images"]
             .as_object()

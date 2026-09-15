@@ -24,6 +24,12 @@ try{
  await wait(()=>page(`return document.querySelectorAll('.task-screenshots input').length===2`),'screenshot attachment controls');
  for(const side of ['Before','After']){await page(`const bytes=Uint8Array.from(atob('${png}'),c=>c.charCodeAt(0)),transfer=new DataTransfer();transfer.items.add(new File([bytes],'screenshot.png',{type:'image/png'}));const input=document.querySelector('[aria-label="Attach ${side} screenshot"]');input.files=transfer.files;input.dispatchEvent(new Event('change'));`);await wait(()=>page(`return document.querySelector('.task-screenshots [role=status]').textContent.includes('${side} screenshot saved')`),'saved '+side);}
  check('desktop attachment controls decode and display both saved PNGs',await page(`return document.querySelectorAll('.task-screenshots img').length===2&&[...document.querySelectorAll('.task-screenshots img')].every(i=>i.complete&&i.naturalWidth>0)`));
+ await page(`const buttons=[...document.querySelectorAll('.task-screenshots button')];buttons.find(b=>b.textContent==='Remove before screenshot').click();`);
+ await wait(()=>page(`return document.querySelector('.task-screenshots [role=status]').textContent.includes('Before screenshot removed')`),'removed before');
+ check('removal keeps the other image and returns keyboard focus',await page(`return document.querySelectorAll('.task-screenshots img').length===1&&document.activeElement.getAttribute('aria-label')==='Attach Before screenshot'`));
+ await page(`document.querySelector('.task-screenshots > button').click()`);
+ await wait(()=>page(`return document.querySelectorAll('.task-screenshots img').length===2`),'undo removal');
+ check('undo restores the removed image',await page(`return document.querySelector('.task-screenshots > button').hidden`));
  const visual=await fetch(`http://127.0.0.1:4597/session/${app.session()}/screenshot`);writeFileSync(out+'/desktop-screenshots.png',Buffer.from((await visual.json()).value,'base64'));
  await page(`location.reload()`);await wait(()=>page(`return !!document.querySelector('[data-nav="bot:assistant"]')`),'reloaded app');await page(`document.querySelector('[data-nav="bot:assistant"]').click()`);await wait(()=>page(`return document.querySelectorAll('.conversation-link').length===3`),'restored list');
  check('titles and pin survive reload',await page(`return [...document.querySelectorAll('.conversation-link')].some(n=>n.textContent.includes('My machine review'))&&document.querySelector('.conversation-link').textContent.includes('Guest setup')`));
