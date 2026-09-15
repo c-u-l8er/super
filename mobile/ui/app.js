@@ -10,6 +10,7 @@ const api=async(path,body)=>{const r=await fetch('/api/'+path,{method:body?'POST
 function withdraw(message){current=null;$('#status').textContent=message;render();}
 initConversations(document.querySelector('#conversations'),()=>view==='chat'&&paired);
 function render(){
+  document.body.classList.toggle('chat-mode',view==='chat');
   document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));content.hidden=view==='chat';$('#conversations').hidden=view!=='chat';if(view==='chat')return;
   content.replaceChildren();document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));
   if(!current?.available){content.append(node('h1','Host unavailable'),node('p','Reconnect to see current tasks. No saved state is being shown as live.','empty'));return;}

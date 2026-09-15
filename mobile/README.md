@@ -39,3 +39,7 @@ The installed Expo Go delivery is a separate repository/service on port 8081. Op
 Session files are scoped to the configured origin, private mode 0600, atomically replaced, and retain only unexpired eight-hour sessions. They contain credentials and must never be published. The launcher uses `$XDG_STATE_HOME/super/mobile/sessions.json` (default `~/.local/state/super/mobile/sessions.json`). This does not change private network routing.
 
 Verification: `node --test mobile/test/*.test.mjs`, `node --test tools/mobile-conversation-ledger-test.mjs`, and `tools/mobile-conversation-smoke.mjs` with a built cockpit under the native test display. The smoke uses an explicit local fixture model, never an external default model. Real provider authentication, physical-phone validation, mobile proposal approval/application, and automatic source-bound build/launch/capture remain unfinished.
+
+### Phone chat layout
+
+The browser companion separates Chats and conversation settings into panels, leaving a scrolling transcript and bottom composer. Model selection is an explicit tap in settings. Expo has the corresponding native layout, searchable conversation lists, and a composer verified above the Android keyboard. Neither UI update requires restarting the gateway or pairing again.

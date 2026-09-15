@@ -5,14 +5,24 @@ export function initConversations(root,visible){
  title.maxLength=100;title.setAttribute('aria-label','Conversation title');draft.maxLength=8000;draft.rows=4;draft.setAttribute('aria-label','Message');model.setAttribute('aria-label','Exact connected model');model.placeholder='Enter the exact connected model';effort.setAttribute('aria-label','Thinking level');
  const label=(text,input)=>{const n=el('label',text);n.append(input);return n;};
  for(const b of [rename,pin,fresh,save,send])b.disabled=true;retry.hidden=true;
- root.append(heading,note,list,fresh,label('Title',title),rename,pin,messages,live,label('Message',draft),conflict,keep,useDesktop,label('Model (required for Send)',model),label('Thinking',effort),save,send,retry);
+ const header=el('div'),subtitle=el('p'),openChats=el('button','Chats'),openOptions=el('button','•••'),thread=el('div'),composer=el('div'),toolbar=el('div'),modelChoice=el('button','Choose model'),chatPanel=el('dialog'),optionsPanel=el('dialog'),confirmModel=el('button','Select connected model');
+ header.className='chat-header';thread.className='chat-thread';composer.className='chat-composer';toolbar.className='chat-tools';subtitle.className='chat-subtitle';draft.placeholder='Message your assistant…';draft.rows=2;send.textContent='Send ↑';
+ const headerText=el('div');headerText.append(heading,subtitle);header.append(openChats,headerText,openOptions);openOptions.setAttribute('aria-label','Conversation settings');
+ const setupPanel=(panel,name)=>{const top=el('div'),close=el('button','Done');top.className='chat-panel-header';top.append(el('h2',name),close);panel.append(top);panel.className='chat-panel';close.onclick=()=>panel.close();};
+ setupPanel(chatPanel,'Conversations');setupPanel(optionsPanel,'Conversation settings');
+ chatPanel.append(fresh,el('p','Opening a conversation also selects it on desktop.'),list);
+ optionsPanel.append(el('h3','Model & thinking'),confirmModel,label('Thinking',effort),el('h3','Conversation'),label('Title',title),rename,pin,el('h3','Draft'),save);
+ openChats.onclick=()=>chatPanel.showModal();openOptions.onclick=()=>{titleRevision=view?.active.revision;optionsPanel.showModal()};modelChoice.onclick=()=>optionsPanel.showModal();confirmModel.onclick=()=>{if(view?.active.model){model.value=view.active.model;confirmModel.textContent='Selected · '+model.value;}};
+ thread.append(messages,live);toolbar.append(modelChoice,send);composer.append(note,conflict,keep,useDesktop,draft,toolbar,retry);root.append(header,thread,composer,chatPanel,optionsPanel);
+ let nearBottom=true;thread.onscroll=()=>{nearBottom=thread.scrollHeight-thread.clientHeight-thread.scrollTop<90};
+
  let view=null,key='',pending=null,lastMessages='',dirty=false,draftRevision=null,titleRevision=null,titleDirty=false;try{pending=JSON.parse(localStorage.getItem('super-mobile-pending')||'null')}catch{}
  const draftKey=()=> 'super-mobile-draft:'+key;
  const api=async(path,body)=>{const r=await fetch('/api/'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,signal:AbortSignal.timeout(5000)});const data=await r.json();if(!r.ok||data.error)throw Object.assign(Error(data.error||'Conversation connection unavailable.'),{refused:!!data.error&&r.status!==503});return data;};
  const persist=()=>localStorage.setItem('super-mobile-pending',JSON.stringify(pending));
  const dispatch=async(first=false)=>{try{await api('conversation',pending);note.textContent='Request received. Waiting for desktop confirmation.';}catch(e){const refused=first===true&&e.refused;if(refused){pending=null;persist();}note.textContent=e.message+(refused?' Nothing queued; your draft is retained.':' Your draft is retained; retry uses the same request identity.');}};
  const command=async(operation,extra={})=>{
-  if(pending)return;const a=view?.active;if(!a)return;
+  if(pending)return;const a=view?.active;if(!a)return;if(operation==='open'||operation==='create'){chatPanel.close();nearBottom=true;}
   pending={id:crypto.randomUUID(),createdAt:Date.now(),operation,botId:a.botId,provider:a.provider,conversationId:a.id,revision:operation==='draft'||operation==='send'?(draftRevision??a.revision):operation==='update'&&extra.title!==undefined?(titleRevision??a.revision):a.revision,...extra};
   try{persist();await dispatch(true);}catch(e){pending=null;note.textContent='Could not retain request locally. Nothing sent.';}
  };
@@ -26,7 +36,7 @@ export function initConversations(root,visible){
   if(visible())try{
    const data=await api('conversations');if(!data.available)throw Error('Desktop conversation view unavailable. Draft retained on this device.');view=data.view;
    if(pending){const receipt=data.receipts?.find(r=>r.id===pending.id);if(receipt){note.textContent=receipt.message;if(receipt.state==='done'&&pending.operation==='update')titleDirty=false;const sent=pending.operation==='send',sentKey=JSON.stringify([pending.botId,pending.provider,pending.conversationId]);if(receipt.state==='done'&&pending.operation==='draft'&&draft.value===pending.text&&view.active.data?.draft===pending.text){dirty=false;draftRevision=view.active.revision;localStorage.removeItem(draftKey());}pending=null;persist();if(receipt.state==='done'&&sent){localStorage.removeItem('super-mobile-draft:'+sentKey);if(key===sentKey){dirty=false;draft.value='';}}}}
-   const a=view.active,newKey=JSON.stringify([a.botId,a.provider,a.id]);
+   const a=view.active;heading.textContent=view.conversations.find(c=>c.id===a.id&&c.botId===a.botId)?.title||'New conversation';subtitle.textContent=(view.bots.find(b=>b.id===a.botId)?.name||'Assistant')+' · Connected';modelChoice.textContent=(model.value===a.model&&a.model?a.model:'Choose model')+' ⌄';confirmModel.textContent=(model.value===a.model?'✓ ':'Select · ')+(a.model||'Connect a provider on desktop');confirmModel.disabled=!a.model;const newKey=JSON.stringify([a.botId,a.provider,a.id]);
    if(key!==newKey){key=newKey;const saved=localStorage.getItem(draftKey());dirty=saved!==null;const local=saved?JSON.parse(saved):null;draft.value=local?.text??a.data?.draft??'';draftRevision=local?.revision??a.revision;titleRevision=null;titleDirty=false;model.value='';lastMessages='';}
    else if(!dirty&&document.activeElement!==draft)draft.value=a.data?.draft??'';
    if(!pending&&!note.textContent)note.textContent='Shared with desktop. Opening a conversation also opens it there.';
@@ -34,11 +44,11 @@ export function initConversations(root,visible){
    const c=view.conversations.find(c=>c.id===a.id&&c.botId===a.botId);if(!titleDirty&&document.activeElement!==title)title.value=c?.title??'';pin.textContent=c?.pinned?'Unpin':'Pin';
    model.placeholder=a.model?'Connected: '+a.model+' — enter to confirm':'Connect a provider on desktop';
    const levels=JSON.stringify(a.efforts);if(effort.dataset.levels!==levels){effort.dataset.levels=levels;effort.replaceChildren(...(a.efforts??['']).map(v=>{const o=el('option',v||'Provider effort');o.value=v;return o;}));effort.value=a.effort;}
-   const raw=JSON.stringify(a.data?.entries??[]);if(raw!==lastMessages){messages.replaceChildren();for(const e of a.data?.entries??[]){messages.append(el('h3',e.label||e.role),el('p',e.text));}lastMessages=raw;}
+   const raw=JSON.stringify(a.data?.entries??[]);if(raw!==lastMessages){messages.replaceChildren();for(const e of a.data?.entries??[]){const bubble=el('article');bubble.className=e.role==='user'?'chat-user':'chat-assistant';bubble.append(el('h3',e.role==='user'?'You':view.bots.find(b=>b.id===a.botId)?.name||'Assistant'),el('p',e.text));messages.append(bubble);}lastMessages=raw;if(nearBottom)requestAnimationFrame(()=>{thread.scrollTop=thread.scrollHeight});}
    const changed=dirty&&draftRevision!==a.revision;conflict.hidden=keep.hidden=useDesktop.hidden=!changed;conflict.textContent='Desktop changed while you edited. Desktop draft: '+(a.data?.draft||'(empty)');
-   live.textContent=a.busy?(a.liveText||a.status):a.status;
-   draft.disabled=!!pending;for(const b of [rename,pin,save,send])b.disabled=!!pending||a.busy||!a.id;fresh.disabled=!!pending||a.busy;retry.hidden=!pending;
-  }catch(e){note.textContent=e.message;messages.replaceChildren();lastMessages='';live.textContent='Reconnect to read shared messages.';for(const b of [...list.querySelectorAll('button'),rename,pin,fresh,save,send])b.disabled=true;}
+   live.hidden=!a.busy;live.textContent=a.busy?(a.liveText||a.status):a.status;
+   draft.disabled=!!pending;for(const b of [rename,pin,save,send])b.disabled=!!pending||a.busy||!a.id;send.disabled=send.disabled||!draft.value.trim()||!a.model||model.value!==a.model;fresh.disabled=!!pending||a.busy;retry.hidden=!pending;note.hidden=!pending&&!/could not|refus|changed|expired|interrupted|unavailable|failed/i.test(note.textContent);
+  }catch(e){subtitle.textContent='Reconnecting';note.hidden=false;note.textContent=e.message;messages.replaceChildren();lastMessages='';live.textContent='Reconnect to read shared messages.';for(const b of [...list.querySelectorAll('button'),rename,pin,fresh,save,send])b.disabled=true;}
   setTimeout(poll,1000);
  }
  poll();
