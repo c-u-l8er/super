@@ -1,4 +1,5 @@
 import {conversationGroups,conversationKey,conversationStatus,readTracker} from './conversation-list.js';
+import {conversationIdentity,holdingHint,sameConversation} from './conversation-turns.js';
 // Small, text-only Markdown subset. HTML, images and URLs remain inert text.
 /** @param {string} text */
 export function messageBlocks(text){
@@ -51,7 +52,13 @@ export function initConversations(root,visible,{taskInfo=()=>null,onTask=()=>{}}
 
  let recoveryBlocked=false,available=false,connectionNotice='Connecting to desktop…',feedback={kind:'info',message:''};
  const report=(message,kind='error')=>{feedback={message,kind};renderFeedback();};
- const renderFeedback=()=>{note.textContent=!available?[connectionNotice,...(['error','uncertain'].includes(feedback.kind)?[feedback.message]:[])].filter(Boolean).join('\n'):feedback.message;note.hidden=available&&!pending&&!['error','uncertain'].includes(feedback.kind);note.dataset.kind=feedback.kind;note.setAttribute('role','status');note.setAttribute('aria-live','polite');dismiss.hidden=recoveryBlocked||!available||!!pending||!['error','uncertain'].includes(feedback.kind);};
+ // The single generation slot is desktop state, not local state. Derive the hint
+ // on every render so it clears itself the moment the turn ends, the open
+ // conversation owns it, or the connection drops. Never stored as feedback.
+ // Identity comes from conversation-turns.js, which reconciles a row's `id`
+ // with the open view's `conversationId`; never hand-compare those fields here.
+ const heldElsewhere=()=>{const turn=view?.turn,a=view?.active;if(!available||!turn||!a)return '';if(sameConversation(turn,conversationIdentity(a)))return '';const held=view.conversations?.find(c=>sameConversation(turn,conversationIdentity(c)));return holdingHint(turn,held?.title||'')||'';};
+ const renderFeedback=()=>{const hint=heldElsewhere(),priority=!!pending||['error','uncertain'].includes(feedback.kind);note.textContent=!available?[connectionNotice,...(['error','uncertain'].includes(feedback.kind)?[feedback.message]:[])].filter(Boolean).join('\n'):priority||!hint?feedback.message:hint;note.hidden=available&&!pending&&!['error','uncertain'].includes(feedback.kind)&&!hint;note.dataset.kind=feedback.kind;note.setAttribute('role','status');note.setAttribute('aria-live','polite');dismiss.hidden=recoveryBlocked||!available||!!pending||!['error','uncertain'].includes(feedback.kind);};
  dismiss.onclick=()=>report('','info');
  const updateComposer=()=>{const a=view?.active;discussionCard.hidden=!discussion;startDiscussion.disabled=recoveryBlocked||!available||!!pending||!!a?.busy||!discussion||!taskInfo(discussion);cancelDiscussion.disabled=!!pending;if(discussion){discussionTitle.textContent='Discuss · '+discussion.title;discussionNote.textContent=taskInfo(discussion)?'Prepare a new draft with '+(view?.bots.find(b=>b.id===a?.botId)?.name??'your assistant')+'. Review it before sending.':'This task changed. Reopen its review to continue.';}draft.disabled=!!pending;send.disabled=recoveryBlocked||!available||!!pending||!!a?.busy||!!view?.turn||!a?.id||!draft.value.trim()||!a.model||model.value!==a.model;retry.hidden=!pending;renderFeedback();};
  let view=null,key='',pending=null,lastMessages='',dirty=false,draftRevision=null,titleRevision=null,titleDirty=false;try{pending=JSON.parse(localStorage.getItem('super-mobile-pending')||'null')}catch{recoveryBlocked=true;feedback={kind:'error',message:'Pending request could not be read. Inspect desktop before sending.'};}
