@@ -12,7 +12,14 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
  // The directory is reached from the top of the list, not from a control below
  // it: with a long conversation list the old bottom button was off-screen. It
  // navigates directly rather than clicking a hidden rail proxy.
- const directory=node('button','← All bots','subtle conversation-directory');directory.type='button';directory.title='Show every bot';directory.setAttribute('aria-label','All bots — open the bot directory');directory.onclick=()=>{notice.textContent='';navigate('bots',true);};
+ const directory=node('button',undefined,'subtle conversation-directory'),directoryLabel=node('span','← All bots'),elsewhere=node('small','','conversation-elsewhere');directory.type='button';directory.title='Show every bot';directory.append(directoryLabel);directory.setAttribute('aria-label','All bots — open the bot directory');directory.onclick=()=>{notice.textContent='';navigate('bots',true);};
+ /* Unread conversations this view hides are announced on the directory button,
+  * because it is the one control that is always visible and is already the way
+  * to reach them. The badge is a CHILD of that button, never a sibling:
+  * .conversation-sidebar > button is pinned by tools/bot-navigation-smoke.mjs
+  * and by two other driven smokes as the single way back. The wording carries
+  * the count in text, so it survives without colour and without the badge. */
+ const unreadPhrase=n=>n+(n===1?' unread conversation':' unread conversations')+' not shown in this view';
  const hint=node('p','A reply is generating — other chats unlock when it finishes, or cancel it from the conversation.','rail-hint');hint.hidden=true;
  list.append(directory,top,controls,rows,hint,notice);
  /* An explicit bot choice is the person speaking; a rerender is not. Only the
@@ -29,7 +36,14 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
   const choices=JSON.stringify(state.bots.map(b=>[b.id,b.name]));if(bots.dataset.choices!==choices){bots.dataset.choices=choices;bots.replaceChildren();for(const b of [{id:'all',name:'All conversations'},...state.bots]){const o=node('option',b.name);o.value=b.id;bots.append(o)}}
   if(bots.value!==filter)bots.value=filter;
   rows.replaceChildren();
-  for(const group of conversationGroups(items,state.bots,{bot:filter,sort:order,search:query})){
+  const groups=conversationGroups(items,state.bots,{bot:filter,sort:order,search:query}),shown=new Set(groups.flatMap(g=>g.items).map(conversationKey)),elsewhereCount=items.filter(c=>c.unread&&!shown.has(conversationKey(c))).length;
+  /* The count is exactly what this render left out — the rendered groups are the
+   * only source, so the bot scope and the search text are both accounted for,
+   * keys mean no conversation is counted twice, and there is no second filter
+   * that could drift from conversationGroups. Seeing it changes nothing: the
+   * scope, the order, the search and the selection are the person's. */
+  directory.replaceChildren(directoryLabel);elsewhere.textContent=' · ● '+elsewhereCount+' unread elsewhere';directory.title=elsewhereCount?'Show every bot · '+unreadPhrase(elsewhereCount):'Show every bot';directory.setAttribute('aria-label','All bots — open the bot directory'+(elsewhereCount?' · '+unreadPhrase(elsewhereCount):''));if(elsewhereCount){directory.append(elsewhere);directory.dataset.unread=String(elsewhereCount);}else delete directory.dataset.unread;
+  for(const group of groups){
    rows.append(node('h3',group.label,'rail-label'));
    for(const c of group.items){
     const row=node('div',undefined,'conversation-row'),choose=act(c.title,()=>open(c.botId,c.provider,c.id));choose.className='nav-item conversation-link';choose.dataset.conversation=c.id;const here=c.botId===bot.id&&c.id===selected&&c.provider===provider;choose.setAttribute('aria-current',here?'page':'false');choose.title=busy&&!here?'A reply is generating. This chat unlocks when it finishes.':c.title;choose.disabled=busy&&!here;

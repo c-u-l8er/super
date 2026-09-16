@@ -169,6 +169,52 @@ try {
       const h=[...document.querySelectorAll('.conversation-sidebar .rail-hint')].find(n=>n.textContent.includes('A reply is generating'));
       return rows.length>0&&rows.every(n=>!n.disabled)&&(!h||h.hidden)`));
 
+  // --- 7c. unread the current view hides is still announced ---------------
+  // Scoping the list was a deliberate fix; hiding a reply that arrived on
+  // another bot was not. While a bot page is open the rail roster is hidden
+  // too, so the directory control is the only place left to say it.
+  await page(`const s=document.querySelector('.conversation-controls select[aria-label="Filter by bot"]');s.value='builder';s.dispatchEvent(new Event('change'));`);
+  await wait(() => page(`return document.querySelector('.conversation-controls select[aria-label="Filter by bot"]').value==='builder'`), 'scoped to builder');
+  const zero = await page(`const d=document.querySelector('.conversation-directory');
+    return JSON.stringify({text:d.textContent,label:d.getAttribute('aria-label'),title:d.title,kids:d.children.length,unread:'unread' in d.dataset});`);
+  check('with nothing unread elsewhere the control is exactly as it ships',
+    JSON.parse(zero).text === '← All bots' && JSON.parse(zero).label === 'All bots — open the bot directory'
+    && JSON.parse(zero).title === 'Show every bot' && JSON.parse(zero).kids === 1 && JSON.parse(zero).unread === false);
+  // A reply lands on the assistant while the list is scoped to the builder.
+  await page(`const {createConversationStore}=await import('./conversation-store.js');
+    const st=createConversationStore(localStorage);
+    const d=st.get('ollama','${seeded.assistantOne}');
+    d.entries.push({role:'assistant',label:'Workspace assistant',text:'A reply you have not read',proposals:[],referenceWorld:null});
+    d.messages.push({role:'assistant',content:'A reply you have not read',attachments:[]});
+    st.save('ollama','${seeded.assistantOne}',d);
+    // A real reply reaches the sidebar through updateHistory() -> render().
+    // Writing the store directly skips that, so emit the same signal the app
+    // emits rather than waiting on a render that nothing asked for.
+    document.dispatchEvent(new CustomEvent('page-selected',{detail:{id:'bot:builder'}}));`);
+  await wait(() => page(`return document.querySelector('.conversation-directory').dataset.unread==='1'`), 'the unread count to appear');
+  check('an unread reply on a bot this view hides is announced on the All bots control',
+    await page(`const d=document.querySelector('.conversation-directory');
+      return /1 unread conversation not shown in this view$/.test(d.getAttribute('aria-label'))&&d.textContent.includes('← All bots')&&d.textContent.includes('1');`));
+  check('and it is words, not colour — the count is in the accessible name',
+    await page(`return document.querySelector('.conversation-directory').getAttribute('aria-label').includes('unread')`));
+  check('the count is what this render left out — the unread chat is absent from the rows',
+    await page(`const d=document.querySelector('.conversation-directory');
+      const shown=[...document.querySelectorAll('.conversation-link')].map(n=>n.dataset.conversation);
+      return Number(d.dataset.unread)===1
+        &&!shown.includes('${seeded.assistantOne}')
+        &&shown.length>0&&shown.every(id=>id!=='${seeded.assistantOne}');`));
+  check('seeing it did not rescope, reorder, clear the search or move the selection',
+    await page(`return document.querySelector('.conversation-controls select[aria-label="Filter by bot"]').value==='builder'
+      &&document.querySelector('.conversation-controls select[aria-label="Sort conversations"]').value==='bot'
+      &&document.querySelector('.conversation-controls input[aria-label="Search conversations"]').value==='';`));
+  check('the sidebar still has exactly one direct-child button, and the badge is inside it',
+    await page(`const b=document.querySelectorAll('.conversation-sidebar > button');
+      return b.length===1&&b[0].classList.contains('conversation-directory')&&!!b[0].querySelector('.conversation-elsewhere');`));
+  await shot('07-unread-elsewhere');
+  check('clicking it — badge and all — still reaches the bot directory',
+    await page(`document.querySelector('.conversation-elsewhere').click();
+      return !document.getElementById('bot-directory').hidden&&document.getElementById('bot-surface').hidden;`));
+
   // --- 8. nothing the navigation touched was lost -------------------------
   await page(`window.__navReload=true;location.reload()`);
   await wait(() => page(`return window.__navReload!==true&&!!document.querySelector('[data-nav="bot:assistant"]')`), 'reloaded for persistence');
