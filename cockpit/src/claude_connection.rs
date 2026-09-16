@@ -21,7 +21,43 @@ struct ReplyState {
     /// `thinking_delta` carries `"thinking":""` and an `estimated_tokens`
     /// count — so there is nothing here to leak even by accident.
     thinking: u64,
+    /// Private accumulator for the structured reply as it streams. NEVER
+    /// exposed: `reply_status` does not carry it and nothing returns it. Only
+    /// the decoded `text` field is lifted out of it into `text` above, so
+    /// proposed actions and every other tool argument stay on this side.
+    partial: String,
     phase: String,
+}
+/// The public `text` field of a structured reply that has not finished
+/// arriving, and nothing else from it.
+///
+/// `--json-schema` makes the whole reply one tool argument, so a model that
+/// writes straight into the schema emits `input_json_delta` and no
+/// `text_delta` at all — which is a reply streaming past a page that is shown
+/// none of it. Forwarding the raw partial JSON would put proposed file
+/// contents and every other action argument across the boundary, so the
+/// prefix is decoded here and only the prose crosses, exactly as before.
+fn structured_prefix(partial: &str) -> Option<String> {
+    let rest = partial.trim_start().strip_prefix('{')?.trim_start();
+    let rest = rest.strip_prefix("\"text\"")?.trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let mut encoded = String::new();
+    let bytes: Vec<char> = rest.chars().collect();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            '"' => break,
+            '\\' => {
+                let size = if bytes.get(i + 1) == Some(&'u') { 6 } else { 2 };
+                if i + size > bytes.len() { break; }
+                encoded.extend(&bytes[i..i + size]);
+                i += size;
+            }
+            c => { encoded.push(c); i += 1; }
+        }
+    }
+    serde_json::from_str::<String>(&format!("\"{encoded}\"")).ok()
 }
 struct ReplyGuard(Arc<Mutex<ReplyState>>);
 impl Drop for ReplyGuard {
@@ -36,6 +72,22 @@ fn observe_reply(state: &mut ReplyState, event: &Value) {
             state.bytes = state.bytes.saturating_add(text.len());
             if state.text.len() + text.len() <= 65536 { state.text.push_str(text); }
             state.phase = "Receiving reply".into();
+        }
+    } else if event["type"] == "stream_event" && delta["type"] == "input_json_delta" {
+        // Measured 2026-09-16: a request that produced three file proposals
+        // emitted NO text_delta at all — the model wrote directly into the
+        // schema — so the page sat on "Preparing reply" for the 106 s it took
+        // to write the answer. The raw argument never crosses; only its
+        // decoded `text` field does.
+        if let Some(chunk) = delta["partial_json"].as_str() {
+            if state.partial.len() + chunk.len() <= 262_144 { state.partial.push_str(chunk); }
+            if let Some(prose) = structured_prefix(&state.partial) {
+                if prose.len() > state.text.len() && prose.len() <= 65536 {
+                    state.bytes = state.bytes.saturating_add(prose.len() - state.text.len());
+                    state.text = prose;
+                    state.phase = "Receiving reply".into();
+                }
+            }
         }
     } else if event["type"] == "stream_event" && delta["type"] == "thinking_delta" {
         // Measured 2026-09-16 with opus[1m] at xhigh on a request shaped like
@@ -719,6 +771,44 @@ mod streaming_tests {
         observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":9000}}}));
         assert_eq!(s.phase, "Receiving reply");
         assert_eq!(s.text, "Hello");
+    }
+    #[test]
+    fn a_structured_reply_streams_its_prose_and_never_its_actions() {
+        let mut s = ReplyState::default();
+        let chunks = [
+            "{\"text\": \"Fixing the la",
+            "tch.\\nIt is stale.\", \"actions\": [{\"name\": \"propose_file_edit\",",
+            " \"args\": {\"path\": \"a.rs\", \"content\": \"SECRET FILE BODY\"}}]}",
+        ];
+        let mut seen = Vec::new();
+        for c in chunks {
+            observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"input_json_delta","partial_json":c}}}));
+            seen.push(s.text.clone());
+        }
+        // It arrives progressively rather than all at the end.
+        assert_eq!(seen[0], "Fixing the la");
+        assert_eq!(s.text, "Fixing the latch.\nIt is stale.");
+        assert_eq!(s.phase, "Receiving reply");
+        // The action arguments are on the far side of the boundary and stay there.
+        assert!(!s.text.contains("SECRET FILE BODY"));
+        assert!(!s.text.contains("propose_file_edit"));
+        assert!(!s.phase.contains("SECRET"));
+        // And the raw accumulator is never handed to the page.
+        let c = Connection::default();
+        *c.1.lock().unwrap() = ReplyState { id: "one".into(), active: true, ..s };
+        let status = c.reply_status("one").unwrap();
+        assert_eq!(status["text"], "Fixing the latch.\nIt is stale.");
+        assert!(status.get("partial").is_none());
+        assert!(!status.to_string().contains("SECRET FILE BODY"));
+    }
+    #[test]
+    fn a_structured_reply_that_is_not_prose_yet_crosses_nothing() {
+        let mut s = ReplyState::default();
+        for junk in ["secret", "{\"actions\": [", "{\"tex", "not json at all"] {
+            observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"input_json_delta","partial_json":junk}}}));
+        }
+        assert!(s.text.is_empty(), "nothing may cross before the text field is readable");
+        assert_eq!(s.bytes, 0);
     }
     #[test]
     fn the_reply_budget_matches_the_reasoning_being_paid_for() {
