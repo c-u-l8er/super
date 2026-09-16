@@ -231,6 +231,31 @@ fn enable(home: &Path) -> Result<(), String> {
     std::fs::write(home.join("enabled"), b"local-cli\n")
         .map_err(|_| "Could not remember this connection.".into())
 }
+/// What one look at the connection means. `connected` and `needs_sign_in` are
+/// what the page is told; `clear_latch` says the remembered `needs-signin` file
+/// is stale and should be deleted; `start_login` says a browser sign-in is the
+/// only way forward.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Decision {
+    connected: bool,
+    needs_sign_in: bool,
+    clear_latch: bool,
+    start_login: bool,
+}
+/// Reality outranks memory. `needs-signin` is only a latch written by a failed
+/// reply; it must never outvote a locally signed-in CLI, or the person is sent
+/// through a browser login they do not need. `enabled` still gates `connected`,
+/// so clearing a stale latch cannot resurrect a provider the person forgot.
+/// Pure on purpose: the whole latch decision is unit-testable without a network
+/// or a real `claude` binary.
+fn decide(enabled: bool, latched: bool, signed_in: bool) -> Decision {
+    Decision {
+        connected: enabled && signed_in,
+        needs_sign_in: latched && !signed_in,
+        clear_latch: latched && signed_in,
+        start_login: !signed_in,
+    }
+}
 impl Connection {
     pub fn reply_status(&self, id: &str) -> Result<Value, String> {
         let state = self.1.lock().map_err(|_| "Reply status unavailable.")?;
@@ -250,6 +275,9 @@ impl Connection {
             .lock()
             .map_err(|_| "Claude connection is unavailable.")?;
         let mut failed = false;
+        // At most one `claude auth status` per call: the pending-login branch
+        // records what it learned so the decision below reuses it.
+        let mut probed: Option<bool> = None;
         if let Some(login) = state.as_mut() {
             if !login.opened {
                 if let Ok(url) = login.links.try_recv() {
@@ -263,23 +291,48 @@ impl Connection {
                 .try_wait()
                 .map_err(|_| "Could not check sign-in.")?;
             if result.is_some() || Instant::now() > login.deadline {
-                if result.map(|s| s.success()).unwrap_or(false) && signed_in(&home)? {
-                    enable(&home)?;
+                if result.map(|s| s.success()).unwrap_or(false) {
+                    let now = signed_in(&home)?;
+                    probed = Some(now);
+                    if now {
+                        enable(&home)?;
+                    } else {
+                        failed = true;
+                    }
                 } else {
                     failed = true;
                 }
                 *state = None;
             }
         }
-        let connected = !home.join("needs-signin").exists()
-            && home.join("enabled").exists()
-            && signed_in(&home)?;
+        // Read the files after the login branch, which may have just written
+        // `enabled` and removed the latch.
+        let enabled = home.join("enabled").exists();
+        let latched = home.join("needs-signin").exists();
+        let is_signed_in = match probed {
+            Some(known) => known,
+            // Only ask the CLI when a remembered connection could be reported
+            // as connected. With no `enabled` file the answer cannot change the
+            // report, so an unknown CLI counts as unsigned and no process runs.
+            None if enabled => signed_in(&home)?,
+            None => false,
+        };
+        let decision = decide(enabled, latched, is_signed_in);
+        if decision.clear_latch {
+            // Self-heal: the latch is stale, the CLI was signed back in
+            // elsewhere. Best effort; a failure here is re-healed next call.
+            let _ = std::fs::remove_file(home.join("needs-signin"));
+        }
         Ok(
-            json!({"connected":connected,"pending":state.is_some(),"failed":failed,"needsSignIn":home.join("needs-signin").exists(),"provider":"claude"}),
+            json!({"connected":decision.connected,"pending":state.is_some(),"failed":failed,"needsSignIn":decision.needs_sign_in,"provider":"claude"}),
         )
     }
     pub fn connect(&self, home: PathBuf) -> Result<Value, String> {
-        if !home.join("needs-signin").exists() && signed_in(&home)? {
+        // Ask the CLI before trusting the latch. Connecting is the act of
+        // remembering, so `enabled` is true by construction here; `enable()`
+        // writes it and removes any stale `needs-signin`.
+        let decision = decide(true, home.join("needs-signin").exists(), signed_in(&home)?);
+        if !decision.start_login {
             enable(&home)?;
             return Ok(json!({"connected":true,"pending":false,"provider":"claude"}));
         }
@@ -522,6 +575,64 @@ mod tests {
             .unwrap(),
             json!({"text":"Ready","actions":[]})
         );
+    }
+    #[test]
+    fn stale_latch_yields_to_a_signed_in_cli() {
+        // Signed back in outside Super: connected, the latch is dropped, and no
+        // browser sign-in is started. This is "why do I have to keep connecting".
+        let healed = decide(true, true, true);
+        assert!(healed.connected);
+        assert!(healed.clear_latch);
+        assert!(!healed.start_login);
+        assert!(!healed.needs_sign_in);
+        // Latch and a genuinely signed-out CLI: still needs a sign-in, nothing
+        // is cleared, and the browser flow is the only way forward.
+        let expired = decide(true, true, false);
+        assert!(!expired.connected);
+        assert!(expired.needs_sign_in);
+        assert!(!expired.clear_latch);
+        assert!(expired.start_login);
+        // Forgotten connection: a signed-in CLI does not resurrect it, with or
+        // without a latch to clear.
+        let forgotten = decide(false, false, true);
+        assert!(!forgotten.connected);
+        assert!(!forgotten.needs_sign_in);
+        let forgotten_latched = decide(false, true, true);
+        assert!(!forgotten_latched.connected);
+        assert!(forgotten_latched.clear_latch);
+        // Ordinary connected state: nothing to clear, nothing to report.
+        let steady = decide(true, false, true);
+        assert_eq!(
+            steady,
+            Decision { connected: true, needs_sign_in: false, clear_latch: false, start_login: false }
+        );
+        // Never connected while the CLI is signed out, whatever is remembered.
+        for enabled in [true, false] {
+            for latched in [true, false] {
+                let d = decide(enabled, latched, false);
+                assert!(!d.connected);
+                assert!(!d.clear_latch);
+                assert!(d.start_login);
+            }
+        }
+    }
+    #[test]
+    fn expired_sign_in_classification_is_unchanged() {
+        for text in ["OAuth session expired", "Failed to authenticate", "Not logged in"] {
+            assert!(needs_signin(&json!({"is_error":true,"result":text})));
+            assert!(needs_signin(&json!({"subtype":"error_during_execution","errors":[text]})));
+            assert!(decode_reply(false, json!({"is_error":true,"result":text}))
+                .unwrap_err()
+                .contains("Claude sign-in has expired. Click Connect provider to sign in again."));
+        }
+        // Not a sign-in problem: no latch-worthy classification.
+        assert!(!needs_signin(&json!({"is_error":false,"result":"OAuth session expired"})));
+        assert!(!needs_signin(&json!({"is_error":true,"result":"Claude could not finish the reply"})));
+        assert!(!needs_signin(&json!({"structured_output":{"text":"Ready"}})));
+        // A latch written by that classification still reports needsSignIn
+        // while the CLI stays signed out.
+        let expired = json!({"is_error":true,"result":"Failed to authenticate: OAuth session expired"});
+        assert!(decide(true, needs_signin(&expired), false).needs_sign_in);
     }
 }
 
