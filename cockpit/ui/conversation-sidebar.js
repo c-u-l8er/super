@@ -1,5 +1,5 @@
-import {node} from './app-shell.js';
-import {conversationGroups,conversationKey,conversationStatus,readTracker} from './conversation-list.js';
+import {node,navigate} from './app-shell.js';
+import {conversationGroups,conversationKey,conversationStatus,readTracker,scopedFilter} from './conversation-list.js';
 export function initConversationSidebar({root,fresh,get,open,update,remove}){
  const rail=document.getElementById('rail-bots'),list=node('section',undefined,'conversation-sidebar');rail.append(list);
  const heading=node('h2',undefined,'conversation-title');root.querySelector('.bot-conversation').prepend(heading);
@@ -8,14 +8,25 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
  const tracker=readTracker(localStorage,'super-conversation-read-desktop-v1');
  const act=(label,fn)=>{const b=node('button',label,'subtle');b.type='button';b.onclick=async()=>{try{await fn();notice.textContent='';}catch(e){notice.textContent=e.message;}};return b;};
  const controls=node('div',undefined,'conversation-controls'),search=node('input'),bots=node('select'),sort=node('select');search.placeholder='Search conversations';search.setAttribute('aria-label','Search conversations');bots.setAttribute('aria-label','Filter by bot');sort.setAttribute('aria-label','Sort conversations');for(const [v,t]of [['recent','Most recent'],['bot','Group by bot']]){const o=node('option',t);o.value=v;sort.append(o)}controls.append(search,bots,sort);search.oninput=()=>{query=search.value;signature='';render()};bots.onchange=()=>{filter=bots.value;signature='';render()};sort.onchange=()=>{order=sort.value;signature='';render()};
- const rows=node('div'),top=node('div',undefined,'conversation-list-heading');top.append(node('h2','Conversations'),fresh);list.append(top,controls,rows,act('Manage bots',()=>document.querySelector('#rail-bots [data-nav="bots"]')?.click()),notice);
+ const rows=node('div'),top=node('div',undefined,'conversation-list-heading');top.append(node('h2','Conversations'),fresh);
+ // The directory is reached from the top of the list, not from a control below
+ // it: with a long conversation list the old bottom button was off-screen. It
+ // navigates directly rather than clicking a hidden rail proxy.
+ const directory=node('button','← All bots','subtle conversation-directory');directory.type='button';directory.title='Show every bot';directory.setAttribute('aria-label','All bots — open the bot directory');directory.onclick=()=>{notice.textContent='';navigate('bots',true);};
+ list.append(directory,top,controls,rows,notice);
+ /* An explicit bot choice is the person speaking; a rerender is not. Only the
+  * paths that mean "I chose this bot" call this, and a refused or pending
+  * switch never reaches it, so the chosen scope survives both. */
+ function scopeToBot(id){filter=id;query='';search.value='';signature='';render();}
  function render(){
   const state=get(),{bot,selected,provider,busy,active}=state,visible=!root.hidden;
+  filter=scopedFilter(filter,state.bots);
   list.hidden=!visible;for(const child of rail.children)if(child!==list)child.hidden=visible;
   const reading=visible&&!document.hidden&&!root.querySelector('.bot-conversation').hidden&&root.querySelector('#bot-transcript').dataset.follow!=='false'?conversationKey(active):null;
   const items=tracker.update(state.items,reading),current=items.find(c=>c.botId===bot.id&&c.id===selected&&c.provider===provider);heading.textContent=current?.title||'New conversation';
   const sig=JSON.stringify([items,state.bots,selected,provider,busy,active?.generating,!!active?.liveText,filter,order,query]);if(sig===signature)return;signature=sig;
-  const choices=JSON.stringify(state.bots.map(b=>[b.id,b.name]));if(bots.dataset.choices!==choices){bots.dataset.choices=choices;bots.replaceChildren();for(const b of [{id:'all',name:'All bots'},...state.bots]){const o=node('option',b.name);o.value=b.id;bots.append(o)}bots.value=filter;}
+  const choices=JSON.stringify(state.bots.map(b=>[b.id,b.name]));if(bots.dataset.choices!==choices){bots.dataset.choices=choices;bots.replaceChildren();for(const b of [{id:'all',name:'All conversations'},...state.bots]){const o=node('option',b.name);o.value=b.id;bots.append(o)}}
+  if(bots.value!==filter)bots.value=filter;
   rows.replaceChildren();
   for(const group of conversationGroups(items,state.bots,{bot:filter,sort:order,search:query})){
    rows.append(node('h3',group.label,'rail-label'));
@@ -31,5 +42,5 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
   }
   if(!rows.children.length)rows.append(node('p','No matching conversations','rail-hint'));
  }
- document.addEventListener('page-selected',render);document.addEventListener('visibilitychange',render);root.querySelector('#bot-transcript').addEventListener('scroll',render);new MutationObserver(render).observe(root,{attributes:true,attributeFilter:['hidden']});return {render};
+ document.addEventListener('page-selected',render);document.addEventListener('visibilitychange',render);root.querySelector('#bot-transcript').addEventListener('scroll',render);new MutationObserver(render).observe(root,{attributes:true,attributeFilter:['hidden']});return {render,scopeToBot};
 }

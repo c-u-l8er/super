@@ -18,6 +18,11 @@ import { createConversationStore } from './conversation-store.js';
 export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const root = document.getElementById('bot-surface');
   let conversationSidebar=null,liveReply=null,streamText='';
+  /* Opening a saved chat also navigates to its bot, and that navigation is the
+   * app moving, not the person choosing a bot. Only an explicit choice rescopes
+   * the conversation list, so browsing every conversation survives opening one. */
+  let conversationNavigation=false;
+  const openingConversation=fn=>{conversationNavigation=true;try{return fn();}finally{conversationNavigation=false;}};
   root.dataset.screen='bot:assistant';
   let bot={id:'assistant',name:'Workspace assistant',group:'General',role:'Planning',instructions:'Help organize work into clear, reviewable steps.',provider:'codex'};
   const editReferences=new WeakMap();
@@ -379,7 +384,8 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     const edit=node('button','Edit bot','subtle');edit.type='button';edit.disabled=!!registrationUnavailable(current,bot.id);edit.dataset.nav='edit-bot';board.append(edit);
   }
   const roster=initBotDirectory({runtimeCurrent:current,runtimeBotActions,canSave:()=>!busy&&!runtimeBusy&&!pending,current:()=>bot,select:next=>{
-    if(next.id===bot.id){bot=next;showIdentity();return true;}
+    const chosen=!conversationNavigation;
+    if(next.id===bot.id){bot=next;showIdentity();if(chosen)conversationSidebar?.scopeToBot(next.id);return true;}
     if(busy||pending||runtimeBusy){status.textContent='Wait for the current reply or connection to finish before switching bots.';return false;}
     if(!saveCurrent())return false;
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
@@ -388,7 +394,9 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     let remembered=bot.provider;try{remembered=localStorage.getItem(storageKey('super-last-provider'))||remembered;}catch{}
     provider.value=[...provider.options].some(o=>o.value===remembered)?remembered:bot.provider;
     active=null;messages=[];proposals=[];files=[];catalog=[];conversationId=null;lastSaved='';pendingTurn=null;
-    transcript.replaceChildren();input.value='';changingBot=true;showIdentity();provider.dispatchEvent(new Event('change'));return true;
+    transcript.replaceChildren();input.value='';changingBot=true;showIdentity();provider.dispatchEvent(new Event('change'));
+    if(chosen)conversationSidebar?.scopeToBot(bot.id);
+    return true;
   }});
   document.addEventListener('runtime-view-rendered',showIdentity);
   new MutationObserver(showIdentity).observe(document.getElementById('world'),{childList:true});
@@ -397,7 +405,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   conversationSidebar=initConversationSidebar({root,fresh,get:()=>({bot,items:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),bots:roster.list(),active:{id:conversationId,botId:bot.id,provider:selected,generating:!!pendingTurn,liveText:streamText},selected:conversationId,provider:selected,busy:busy||pending}),
     update:(b,p,id,patch)=>{storeFor(b).update(p,id,patch);updateHistory();},
     remove:(b,p,id)=>{if(!confirm('Delete this conversation and its saved attachments?'))return;storeFor(b).remove(p,id);sessions.delete(p);if(bot.id===b&&conversationId===id)reset();updateHistory();},
-    open:async(b,p,id)=>{if(busy||pending||!saveCurrent())return;if(b!==bot.id){navigate('bot:'+b,true);for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));if(bot.id!==b||busy||loadingProvider)throw Error('Connection setup is still busy. Try again shortly.');}let token=++historyNavigation;if(p!==selected){provider.value=p;provider.dispatchEvent(new Event('change'));token=historyNavigation;for(let i=0;(loadingProvider||busy)&&i<300&&token===historyNavigation;i++)await new Promise(r=>setTimeout(r,100));}if(token!==historyNavigation||selected!==p)return;if(busy||loadingProvider){status.textContent='Connection setup is still busy. Reopen this conversation when it finishes.';return;}restoreSaved(id);saveCurrent();refresh();workView.conversation();}
+    open:async(b,p,id)=>{if(busy||pending||!saveCurrent())return;if(b!==bot.id){openingConversation(()=>navigate('bot:'+b,true));for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));if(bot.id!==b||busy||loadingProvider)throw Error('Connection setup is still busy. Try again shortly.');}let token=++historyNavigation;if(p!==selected){provider.value=p;provider.dispatchEvent(new Event('change'));token=historyNavigation;for(let i=0;(loadingProvider||busy)&&i<300&&token===historyNavigation;i++)await new Promise(r=>setTimeout(r,100));}if(token!==historyNavigation||selected!==p)return;if(busy||loadingProvider){status.textContent='Connection setup is still busy. Reopen this conversation when it finishes.';return;}restoreSaved(id);saveCurrent();refresh();workView.conversation();}
   });conversationSidebar.render();
 
   document.addEventListener('open-saved-task-conversation',e=>{
@@ -450,7 +458,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     if(request.operation==='open'){
       const candidate=storeFor(request.botId).list(request.provider).find(c=>c.id===request.conversationId);
       if(request.conversationId&&!candidate)throw Error('That conversation is unavailable.');
-      navigate('bot:'+request.botId,true);
+      openingConversation(()=>navigate('bot:'+request.botId,true));
       for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));
       if(bot.id!==request.botId||busy||loadingProvider)throw Error('Desktop connection setup is still busy. Try opening again after it finishes.');
       if(selected!==request.provider){provider.value=request.provider;provider.dispatchEvent(new Event('change'));for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));}

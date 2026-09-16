@@ -622,4 +622,6 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .conversation-sidebar{padding:4px 2px}.conversation-list-heading h2{font-size:14px;white-space:nowrap;overflow-wrap:normal;color:var(--ink)}.conversation-list-heading #bot-new{flex:0 0 30px;padding:4px;font-size:20px;background:transparent;border-color:transparent}
 .conversation-controls{grid-template-columns:minmax(0,1fr)}.conversation-controls select{appearance:none;background:#161b22;cursor:pointer}
 .conversation-menu-panel{left:0;right:0;width:100%;max-width:100%}
+.conversation-directory{display:block;width:100%;box-sizing:border-box;margin:0 0 8px;text-align:left;font:12px var(--sans,system-ui);padding:8px;border-radius:8px;background:#161b22;border:1px solid #343d49;color:#cad2de}
+.conversation-directory:hover{background:#202832;border-color:#4a586b}
 .conversation-title{color:var(--ink);font-size:20px}.bot-conversation .bot-composer textarea{border:0;background:transparent;resize:none;min-height:70px}.bot-conversation .bot-composer select{appearance:none;background:#17202d;border:1px solid #334154;border-radius:7px;padding:8px;color:#c9d5e7;font-size:12px}
