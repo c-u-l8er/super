@@ -21,6 +21,10 @@ struct ReplyState {
     /// `thinking_delta` carries `"thinking":""` and an `estimated_tokens`
     /// count — so there is nothing here to leak even by accident.
     thinking: u64,
+    /// True once the structured reply has begun arriving. From that moment the
+    /// schema's `text` field is the ONLY truth about what this reply says, and
+    /// the prose block stops being forwarded.
+    structured: bool,
     /// Private accumulator for the structured reply as it streams. NEVER
     /// exposed: `reply_status` does not carry it and nothing returns it. Only
     /// the decoded `text` field is lifted out of it into `text` above, so
@@ -68,6 +72,10 @@ fn observe_reply(state: &mut ReplyState, event: &Value) {
     // reasoning, signatures, tool arguments, or provider connection metadata.
     let delta = &event["event"]["delta"];
     if event["type"] == "stream_event" && delta["type"] == "text_delta" {
+        // A preview only, and only until the structured reply starts: with
+        // --json-schema always in force the prose block is never what gets
+        // saved, so it must never outlive the thing that is.
+        if state.structured { return; }
         if let Some(text) = delta["text"].as_str() {
             state.bytes = state.bytes.saturating_add(text.len());
             if state.text.len() + text.len() <= 65536 { state.text.push_str(text); }
@@ -82,8 +90,17 @@ fn observe_reply(state: &mut ReplyState, event: &Value) {
         if let Some(chunk) = delta["partial_json"].as_str() {
             if state.partial.len() + chunk.len() <= 262_144 { state.partial.push_str(chunk); }
             if let Some(prose) = structured_prefix(&state.partial) {
-                if prose.len() > state.text.len() && prose.len() <= 65536 {
-                    state.bytes = state.bytes.saturating_add(prose.len() - state.text.len());
+                // The schema's `text` is what `decode_reply` keeps and what the
+                // conversation stores, so once it starts arriving it REPLACES
+                // whatever the prose block had put on screen — even when that
+                // means the visible text gets shorter. Measured 2026-09-16: one
+                // reply streamed 2,701 characters of prose and saved 117
+                // characters of structured text, two entirely different pieces
+                // of writing. A person watching a reply has to be watching the
+                // reply they will be left with.
+                if prose.len() <= 65536 && (!state.structured || prose.len() != state.text.len()) {
+                    state.structured = true;
+                    state.bytes = prose.len();
                     state.text = prose;
                     state.phase = "Receiving reply".into();
                 }
@@ -809,6 +826,31 @@ mod streaming_tests {
         }
         assert!(s.text.is_empty(), "nothing may cross before the text field is readable");
         assert_eq!(s.bytes, 0);
+    }
+    #[test]
+    fn what_streams_is_what_gets_saved() {
+        // Measured 2026-09-16: one reply streamed 2,701 characters of prose and
+        // saved 117 characters of structured text — two different pieces of
+        // writing, and the person watched the one that was thrown away. With
+        // --json-schema always in force, the schema's `text` is the reply.
+        let mut s = ReplyState::default();
+        let prose = "A long draft the model wrote before answering. ".repeat(20);
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":prose}}}));
+        assert_eq!(s.text, prose, "before the schema arrives the prose is the only preview there is");
+        assert!(s.bytes > 900);
+        // The structured reply begins. It is shorter, and it wins anyway.
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"input_json_delta","partial_json":"{\"text\": \"Short answer."}}}));
+        assert_eq!(s.text, "Short answer.");
+        assert_eq!(s.bytes, "Short answer.".len());
+        assert_eq!(s.phase, "Receiving reply");
+        // And the prose block cannot take the screen back afterwards.
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":"more draft prose"}}}));
+        assert_eq!(s.text, "Short answer.");
+        // The structured reply keeps growing normally.
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"input_json_delta","partial_json":" Then more of it.\", \"actions\": [{\"name\": \"propose_file_edit\", \"args\": {\"content\": \"SECRET\"}}]}"}}}));
+        assert_eq!(s.text, "Short answer. Then more of it.");
+        assert!(!s.text.contains("SECRET"), "actions still never cross");
+        assert!(!s.text.contains("draft prose"));
     }
     #[test]
     fn the_reply_budget_matches_the_reasoning_being_paid_for() {
