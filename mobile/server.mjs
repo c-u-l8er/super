@@ -4,7 +4,7 @@ import {createHash, randomBytes, randomUUID, timingSafeEqual} from 'node:crypto'
 import {readFile, rename, writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {createInterface} from 'node:readline';
-const assets = new Map([['/conversation-list.js',['../cockpit/ui/conversation-list.js','text/javascript']],['/conversations.js',['ui/conversations.js','text/javascript']],['/', ['ui/index.html','text/html']], ['/app.js',['ui/app.js','text/javascript']], ['/style.css',['ui/style.css','text/css']], ['/task-progress.js',['../cockpit/ui/task-progress.js','text/javascript']], ['/review-test-coverage.js',['../cockpit/ui/review-test-coverage.js','text/javascript']]]);
+const assets = new Map([['/conversation-list.js',['../cockpit/ui/conversation-list.js','text/javascript']],['/conversation-turns.js',['../cockpit/ui/conversation-turns.js','text/javascript']],['/conversations.js',['ui/conversations.js','text/javascript']],['/', ['ui/index.html','text/html']], ['/app.js',['ui/app.js','text/javascript']], ['/style.css',['ui/style.css','text/css']], ['/task-progress.js',['../cockpit/ui/task-progress.js','text/javascript']], ['/review-test-coverage.js',['../cockpit/ui/review-test-coverage.js','text/javascript']]]);
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 // App or browser, and nothing finer. The two hold separate sessions and each
 // needs its own code, which is the only distinction worth reporting; the raw

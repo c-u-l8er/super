@@ -1,5 +1,6 @@
 import {node,navigate} from './app-shell.js';
 import {conversationGroups,conversationKey,conversationStatus,readTracker,scopedFilter} from './conversation-list.js';
+import {holdingHint} from './conversation-turns.js';
 export function initConversationSidebar({root,fresh,get,open,update,remove}){
  const rail=document.getElementById('rail-bots'),list=node('section',undefined,'conversation-sidebar');rail.append(list);
  const heading=node('h2',undefined,'conversation-title');root.querySelector('.bot-conversation').prepend(heading);
@@ -20,19 +21,19 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
   * and by two other driven smokes as the single way back. The wording carries
   * the count in text, so it survives without colour and without the badge. */
  const unreadPhrase=n=>n+(n===1?' unread conversation':' unread conversations')+' not shown in this view';
- const hint=node('p','A reply is generating — other chats unlock when it finishes, or cancel it from the conversation.','rail-hint');hint.hidden=true;
+ const hint=node('p','','rail-hint');hint.hidden=true;
  list.append(directory,top,controls,rows,hint,notice);
  /* An explicit bot choice is the person speaking; a rerender is not. Only the
   * paths that mean "I chose this bot" call this, and a refused or pending
   * switch never reaches it, so the chosen scope survives both. */
  function scopeToBot(id){filter=id;query='';search.value='';signature='';render();}
  function render(){
-  const state=get(),{bot,selected,provider,busy,active}=state,visible=!root.hidden;
+  const state=get(),{bot,selected,provider,busy,active,turn}=state,visible=!root.hidden;
   filter=scopedFilter(filter,state.bots);
   list.hidden=!visible;for(const child of rail.children)if(child!==list)child.hidden=visible;
   const reading=visible&&!document.hidden&&!root.querySelector('.bot-conversation').hidden&&root.querySelector('#bot-transcript').dataset.follow!=='false'?conversationKey(active):null;
   const items=tracker.update(state.items,reading),current=items.find(c=>c.botId===bot.id&&c.id===selected&&c.provider===provider);heading.textContent=current?.title||'New conversation';
-  const sig=JSON.stringify([items,state.bots,selected,provider,busy,active?.generating,!!active?.liveText,filter,order,query]);if(sig===signature)return;signature=sig;
+  const sig=JSON.stringify([items,state.bots,selected,provider,busy,turn&&[turn.botId,turn.provider,turn.conversationId,!!turn.text,turn.cancelRequested],filter,order,query]);if(sig===signature)return;signature=sig;
   const choices=JSON.stringify(state.bots.map(b=>[b.id,b.name]));if(bots.dataset.choices!==choices){bots.dataset.choices=choices;bots.replaceChildren();for(const b of [{id:'all',name:'All conversations'},...state.bots]){const o=node('option',b.name);o.value=b.id;bots.append(o)}}
   if(bots.value!==filter)bots.value=filter;
   rows.replaceChildren();
@@ -46,8 +47,8 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
   for(const group of groups){
    rows.append(node('h3',group.label,'rail-label'));
    for(const c of group.items){
-    const row=node('div',undefined,'conversation-row'),choose=act(c.title,()=>open(c.botId,c.provider,c.id));choose.className='nav-item conversation-link';choose.dataset.conversation=c.id;const here=c.botId===bot.id&&c.id===selected&&c.provider===provider;choose.setAttribute('aria-current',here?'page':'false');choose.title=busy&&!here?'A reply is generating. This chat unlocks when it finishes.':c.title;choose.disabled=busy&&!here;
-    const status=conversationStatus(c,active),badge=node('small',(c.unread?'● New reply · ':'')+status,'conversation-state');badge.dataset.state=status;choose.append(badge,node('small',state.bots.find(b=>b.id===c.botId)?.name+' · '+c.provider));
+    const row=node('div',undefined,'conversation-row'),choose=act(c.title,()=>open(c.botId,c.provider,c.id));choose.className='nav-item conversation-link';choose.dataset.conversation=c.id;const here=c.botId===bot.id&&c.id===selected&&c.provider===provider;choose.setAttribute('aria-current',here?'page':'false');choose.title=busy&&!here?'A connection or provider change is in progress. This chat opens when it finishes.':c.title;choose.disabled=busy&&!here;
+    const status=conversationStatus(c,turn),badge=node('small',(c.unread?'● New reply · ':'')+status,'conversation-state');badge.dataset.state=status;choose.append(badge,node('small',state.bots.find(b=>b.id===c.botId)?.name+' · '+c.provider));
     const more=node('details',undefined,'conversation-menu'),summary=node('summary','•••');summary.setAttribute('aria-label','Options for '+c.title);more.append(summary);more.ontoggle=()=>{if(more.open)for(const other of rows.querySelectorAll('details[open]'))if(other!==more)other.open=false;};
     const menu=node('div',undefined,'conversation-menu-panel'),pin=act(c.pinned?'Unpin conversation':'Pin conversation',()=>update(c.botId,c.provider,c.id,{pinned:!c.pinned}));
     const rename=node('form'),title=node('input');title.value=c.title;title.maxLength=100;title.required=true;title.setAttribute('aria-label','Conversation title');const save=node('button','Save title');save.type='submit';rename.append(title,save);rename.onsubmit=e=>{e.preventDefault();try{update(c.botId,c.provider,c.id,{title:title.value});}catch(error){notice.textContent=error.message;}};
@@ -56,12 +57,9 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
    }
   }
   if(!rows.children.length)rows.append(node('p','No matching conversations','rail-hint'));
-  /* Every row is disabled while a reply runs, because opening another chat
-   * would have to save and swap the conversation the reply is still writing
-   * into. That constraint is real; being unable to tell it from a dead UI is
-   * not. At extended reasoning levels a reply can hold this for minutes, so
-   * the reason is said out loud, next to the control that lifts it. */
-  hint.hidden=!busy;
+  const holder=turn?items.find(c=>c.botId===turn.botId&&c.provider===turn.provider&&c.id===turn.conversationId):null;
+  hint.textContent=turn?holdingHint(turn,holder?.title):busy?'A connection or provider change is in progress. Conversations open when it finishes.':'';
+  hint.hidden=!hint.textContent;
  }
  document.addEventListener('page-selected',render);document.addEventListener('visibilitychange',render);root.querySelector('#bot-transcript').addEventListener('scroll',render);new MutationObserver(render).observe(root,{attributes:true,attributeFilter:['hidden']});return {render,scopeToBot};
 }

@@ -147,32 +147,32 @@ try {
   await page(`document.querySelector('#bot-tab-conversation').click();document.querySelector('#bot-new').click();document.querySelector('#bot-message').value='Hold this reply';document.querySelector('#bot-message').dispatchEvent(new Event('input'));document.querySelector('.bot-composer').requestSubmit();`);
   await arrived.promise;                             // the provider really has the turn
   await wait(() => page(`return document.querySelector('#bot-send').disabled`), 'a reply in flight');
-  const scopedDuringReply = await filter();
   await page(`const {navigate}=await import('./app-shell.js');navigate('bot:assistant');`);
-  check('a bot switch refused while a reply is pending leaves the chosen scope unchanged',
-    await page(`return document.querySelector('#bot-surface').dataset.screen==='bot:builder'&&document.querySelector('#bot-status').textContent.includes('Wait for the current reply')`)
-    && await filter() === scopedDuringReply && scopedDuringReply === 'builder');
-  // --- 7b. a held reply explains itself instead of going quietly dead ------
-  check('while a reply runs, the chat it is writing into stays clickable',
-    await page(`const r=document.querySelector('.conversation-link[aria-current="page"]');return !!r&&!r.disabled`));
-  check('other chats are disabled and say why, rather than looking broken',
-    await page(`const rows=[...document.querySelectorAll('.conversation-link')].filter(n=>n.getAttribute('aria-current')!=='page');
-      return rows.length>0&&rows.every(n=>n.disabled&&n.title.includes('unlocks when it finishes'))`));
-  check('and the sidebar states the reason next to the list',
-    await page(`const h=[...document.querySelectorAll('.conversation-sidebar .rail-hint')].find(n=>n.textContent.includes('A reply is generating'));
-      return !!h&&!h.hidden`));
-  await shot('06-refused-switch-during-reply');
+  await wait(() => page(`return document.querySelector('#bot-surface').dataset.screen==='bot:assistant'`), 'bot switch during reply');
+  check('a bot switch while a reply is pending opens the chosen bot and scopes its chats',
+    await filter() === 'assistant');
+  // --- 7b. a held reply keeps navigation open and names the one-slot owner ---
+  check('while a reply runs, every listed chat stays clickable',
+    await page(`const rows=[...document.querySelectorAll('.conversation-link')];return rows.length>0&&rows.every(n=>!n.disabled)`));
+  check('and the sidebar names the generating conversation while saying reading stays open',
+    await page(`const h=[...document.querySelectorAll('.conversation-sidebar .rail-hint')].find(n=>/Generating a reply in/.test(n.textContent));
+      return !!h&&!h.hidden&&h.textContent.includes('every other chat stays open for reading')`));
+  await shot('06-switch-during-reply');
   release();                                         // release the held reply
-  await wait(() => page(`return !document.querySelector('#bot-send').disabled`), 'reply finished');
+  await wait(() => page(`return ![...document.querySelectorAll('.conversation-sidebar .rail-hint')].some(n=>/Generating a reply in/.test(n.textContent)&&!n.hidden)`), 'reply finished');
   check('when the reply finishes every chat is clickable again and the reason is withdrawn',
     await page(`const rows=[...document.querySelectorAll('.conversation-link')];
-      const h=[...document.querySelectorAll('.conversation-sidebar .rail-hint')].find(n=>n.textContent.includes('A reply is generating'));
+      const h=[...document.querySelectorAll('.conversation-sidebar .rail-hint')].find(n=>/Generating a reply in/.test(n.textContent));
       return rows.length>0&&rows.every(n=>!n.disabled)&&(!h||h.hidden)`));
 
   // --- 7c. unread the current view hides is still announced ---------------
   // Scoping the list was a deliberate fix; hiding a reply that arrived on
   // another bot was not. While a bot page is open the rail roster is hidden
   // too, so the directory control is the only place left to say it.
+  await page(`document.querySelector('.conversation-directory').click()`);
+  await wait(() => page(`return !document.getElementById('bot-directory').hidden`), 'directory before hidden unread');
+  await page(`document.querySelector('#bot-directory [data-nav="bot:builder"]').click()`);
+  await wait(() => page(`return document.querySelector('#bot-surface').dataset.screen==='bot:builder'`), 'builder before hidden unread');
   await page(`const s=document.querySelector('.conversation-controls select[aria-label="Filter by bot"]');s.value='builder';s.dispatchEvent(new Event('change'));`);
   await wait(() => page(`return document.querySelector('.conversation-controls select[aria-label="Filter by bot"]').value==='builder'`), 'scoped to builder');
   const zero = await page(`const d=document.querySelector('.conversation-directory');

@@ -1,8 +1,8 @@
 // Read markers belong to this device, not to the shared conversation revision.
+import {turnStatus} from './conversation-turns.js';
 export const conversationKey=c=>JSON.stringify([c.botId,c.provider,c.id]);
-export function conversationStatus(c,active){
- if(active?.id===c.id&&active?.botId===c.botId&&active?.provider===c.provider&&active?.generating)return active.liveText?'Generating':'Waiting';
- return c.state||'Ready';
+export function conversationStatus(c,turn){
+ return turnStatus(turn,c)||c.state||'Ready';
 }
 export function readTracker(storage,key){
  let seen={},primed=false;try{const raw=storage.getItem(key);primed=raw!==null;seen=JSON.parse(raw||'{}');if(!seen||typeof seen!=='object'||Array.isArray(seen))seen={};}catch{}

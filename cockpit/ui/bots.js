@@ -15,9 +15,10 @@ import { node, selectedWorkspace, bindDisclosure, navigate } from './app-shell.j
 import { initBotDirectory } from './bot-directory.js';
 import {initConversationSidebar} from './conversation-sidebar.js';
 import { createConversationStore } from './conversation-store.js';
+import {createTurnRegistry,holdingRefusal} from './conversation-turns.js';
 export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const root = document.getElementById('bot-surface');
-  let conversationSidebar=null,liveReply=null,streamText='';
+  let conversationSidebar=null,liveReply=null;
   /* Opening a saved chat also navigates to its bot, and that navigation is the
    * app moving, not the person choosing a bot. Only an explicit choice rescopes
    * the conversation list, so browsing every conversation survives opening one. */
@@ -61,8 +62,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const input=node('textarea');input.id='bot-message';input.rows=3;input.maxLength=8000;input.placeholder='What would you like to organize?';input.setAttribute('aria-label','Message to workspace assistant');
   const send=node('button','Send','primary');send.id='bot-send';send.type='submit';
   const cancelReply=node('button','Cancel reply');cancelReply.type='button';cancelReply.id='bot-cancel-reply';cancelReply.hidden=true;
-  let replyId=null,replyPoll=null;
-  cancelReply.onclick=async()=>{const id=replyId;if(!id)return;cancelReply.disabled=true;try{await invoke(managedCommand(provider.value),{operation:'cancel_reply',requestId:id});if(replyId===id)status.textContent='Cancelling reply…';}catch(error){if(replyId===id){status.textContent=String(error);cancelReply.disabled=false;}}};
+  cancelReply.onclick=async()=>{const request=turns.request();if(!request?.requestId)return;cancelReply.disabled=true;try{await invoke(managedCommand(request.provider),{operation:'cancel_reply',requestId:request.requestId});if(turns.requestCancel(request.token)){status.textContent='Cancelling reply…';paintLive();refresh();}}catch(error){if(turns.matches(request.token)){status.textContent=String(error);cancelReply.disabled=false;}}};
   const fresh=node('button','New conversation');fresh.type='button';fresh.id='bot-new';
   const effort=node('select');effort.id='bot-effort';effort.setAttribute('aria-label','Thinking level');
   const attach=node('input');attach.type='file';attach.multiple=true;attach.id='bot-attachments';attach.accept='.txt,.md,.json,.csv,.js,.ts,.tsx,.jsx,.rs,.py,.ex,.exs,.html,.css,.yaml,.yml,.toml,.xml,.log';
@@ -87,18 +87,34 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const newHistory=()=>createConversationStore({getItem:key=>localStorage.getItem(storageKey(key)),setItem:(key,value)=>localStorage.setItem(storageKey(key),value)});
   let history=newHistory();
   let conversationTaskLinks=[];
-  let conversationId=null,lastSaved='',pendingTurn=null,restoring=false,historyNavigation=0;
+  let conversationId=null,lastSaved='',restoring=false,historyNavigation=0;
+  const turns=createTurnRegistry();
+  const openTurn=()=>turns.turnFor(bot.id,selected,conversationId);
+  const turnProjection=()=>turns.current();
+  function paintLive(){
+    const turn=openTurn();
+    if(!turn){liveReply?.remove();liveReply=null;cancelReply.hidden=true;cancelReply.disabled=false;conversationSidebar?.render();return;}
+    if(!liveReply){liveReply=node('article',undefined,'bot-assistant live-reply');liveReply.append(node('p','Generating…','eyebrow'),node('div','','bot-message-text'));transcript.append(liveReply);}
+    const text=streamingReply(turn.text,['codex','claude'].includes(turn.provider));
+    const working=turn.phase&&turn.phase!=='Waiting for provider'?turn.phase+'…':'Waiting for reply…';
+    liveReply.querySelector('.bot-message-text').textContent=text||working;
+    liveReply.querySelector('.eyebrow').textContent=turn.cancelRequested?'Cancelling…':text?'Generating…':/^Thinking/.test(turn.phase||'')?'Thinking…':'Generating…';
+    cancelReply.hidden=!turn.requestId;cancelReply.disabled=turn.cancelRequested;
+    if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;
+    conversationSidebar?.render();
+  }
   function updateHistory(){
     const items=history.list(selected), options=[{id:'',title:'New conversation'},...items];
     if(historyPicker.options.length!==options.length||options.some((o,i)=>historyPicker.options[i]?.value!==o.id||historyPicker.options[i]?.textContent!==o.title)){
       historyPicker.replaceChildren();for(const item of options){const option=node('option',item.title);option.value=item.id;historyPicker.append(option);}
     }
-    historyPicker.value=conversationId??'';deleteConversation.disabled=busy||!conversationId;conversationSidebar?.render();
+    historyPicker.value=conversationId??'';deleteConversation.disabled=busy||!conversationId||!!openTurn();conversationSidebar?.render();
   }
   function snapshot(){
-    return {...(conversationTaskLinks.length?{taskLinks:conversationTaskLinks}:{}),messages:pendingTurn?messages.slice(0,pendingTurn.messageCount):messages,
+    const turn=openTurn();
+    return {...(conversationTaskLinks.length?{taskLinks:conversationTaskLinks}:{}),messages:turn?messages.slice(0,turn.messageCount):messages,
       entries:[...transcript.children].filter(e=>!e.classList.contains('live-reply')).map(e=>({role:e.classList.contains('bot-user')?'user':e.classList.contains('bot-assistant')?'assistant':'result',label:e.querySelector('.eyebrow')?.textContent??'',text:e.querySelector('.bot-message-text')?.dataset.rawText??e.querySelector('.bot-message-text')?.textContent??'',referenceWorld:e.querySelector('.bot-message-text')?.dataset.referenceWorld||null,proposals:[...e.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].map(p=>p.dataset.savedText??[...p.children].filter(c=>c.tagName!=='BUTTON').map(c=>c.dataset.rawText??c.textContent).join('\n'))})),
-      draft:pendingTurn?.draft??input.value,files:pendingTurn?.files??files,includeContext:include.checked,replyPending:!!pendingTurn};
+      draft:turn?.sent.draft??input.value,files:turn?.sent.files??files,includeContext:include.checked,replyPending:!!turn};
   }
   function saveCurrent(){
     if(restoring)return true;
@@ -111,7 +127,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   function restoreSaved(id){
     conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];taskRecovery=null;activity.reset();
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
-    restoring=true;conversationId=id;lastSaved='';messages=[];proposals=[];files=[];pendingTurn=null;input.value='';transcript.replaceChildren();
+    restoring=true;conversationId=id;lastSaved='';messages=[];proposals=[];files=[];input.value='';transcript.replaceChildren();liveReply=null;
     const saved=id?history.get(selected,id):null;
     if(saved){
       conversationTaskLinks=saved.taskLinks??[];
@@ -123,7 +139,8 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
       status.textContent='Saved conversation reopened. Historical proposals are read-only. Links look up current records; the original message is preserved.';
       historyStatus.textContent='Saved locally · messages and attachments return here. No message is sent by reopening.';
     }else if(history.error){historyStatus.textContent=history.error;}
-    showFiles();updateHistory();restoring=false;transcript.dataset.follow='true';requestAnimationFrame(()=>{transcript.scrollTop=transcript.scrollHeight;});
+    const turn=openTurn();if(turn?.sent.userMessage)messages.push(turn.sent.userMessage);
+    showFiles();updateHistory();restoring=false;transcript.dataset.follow='true';paintLive();requestAnimationFrame(()=>{transcript.scrollTop=transcript.scrollHeight;});
   }
   try{for(const [p,v] of JSON.parse(localStorage.getItem(storageKey('super-provider-preferences'))||'[]'))preferences.set(p,v);}catch{}
   function rememberChoice(p,v){preferences.set(p,{...preferences.get(p),...v});try{localStorage.setItem(storageKey('super-provider-preferences'),JSON.stringify([...preferences]));localStorage.setItem(storageKey('super-last-provider'),p);}catch{}}
@@ -150,13 +167,14 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     activity.refresh({id:bot.id,name:bot.name,model:active?.model,ready:!!active,pending,busy,hasProposals:proposals.some(p=>p.state==='proposed')});
     publishSession();
     const cloud=['openai','anthropic'].includes(provider.value),isCodex=provider.value==='codex',isClaude=provider.value==='claude',managed=isCodex||isClaude;keyField.hidden=!cloud;endpointField.hidden=provider.value!=='ollama';rememberField.hidden=!cloud;forget.hidden=!cloud;disconnect.hidden=!managed;modelField.hidden=managed;save.hidden=managed;disconnect.textContent=isClaude?'Disconnect Claude from Super':'Disconnect ChatGPT';
-    connect.disabled=busy||pending;provider.disabled=busy;modelPicker.disabled=busy;connect.textContent=pending?'Waiting for sign-in…':active?'Reconnect':'Connect provider';
+    const connectionLocked=busy||turns.inFlight();
+    connect.disabled=connectionLocked||pending;provider.disabled=connectionLocked;modelPicker.disabled=connectionLocked;connect.textContent=pending?'Waiting for sign-in…':active?'Reconnect':'Connect provider';
     connectionNote.textContent=isClaude?'Use your local Claude Code sign-in. Claude manages the credentials; account access and limits apply.':isCodex?'Sign in with ChatGPT in your browser. Your connection is managed automatically.':cloud?'Connect using your saved key. Add or replace a key in Manage connections.':'Use models running on your computer. No API key needed.';
     sharingText.textContent=` Include workspace names, goals, lane/worker summaries and repository references with messages sent to ${active?.provider??provider.value}. Only files you explicitly attach are included; API keys are never included.`;
-    historyPicker.disabled=busy;deleteConversation.disabled=busy||!conversationId;
-    send.disabled=busy||!active;fresh.disabled=busy;effort.disabled=busy;attach.disabled=busy;attachButton.disabled=busy;reload.disabled=busy||!active;
-    for(const n of form.elements)n.disabled=busy;
-    include.disabled=busy;
+    historyPicker.disabled=busy;deleteConversation.disabled=busy||!conversationId||!!openTurn();
+    send.disabled=busy||turns.inFlight()||!active;fresh.disabled=busy;effort.disabled=connectionLocked;attach.disabled=busy;attachButton.disabled=busy;reload.disabled=connectionLocked||!active;
+    for(const n of form.elements)n.disabled=connectionLocked;
+    include.disabled=connectionLocked;
     for(const a of proposals) a.button.disabled=busy||a.state!=='proposed'||(['propose_file_edit','review_file_set'].includes(a.name)?!a.reference:(!live()||worldKey(live())!==a.world||selectedWorkspace()!==a.workspace));
   }
   function line(role,text) {
@@ -171,7 +189,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   function showModels(){modelPicker.replaceChildren();const list=[...catalog];if(active&&!list.some(m=>m.id===active.model))list.push({id:active.model,name:active.model});for(const m of list){const o=node('option',m.name||m.id);o.value=m.id;modelPicker.append(o);}modelPicker.hidden=!active;if(active)modelPicker.value=active.model;showEfforts();}
   function showEfforts(){const info=catalog.find(m=>m.id===active?.model)??(provider.value==='claude'?catalog.find(m=>m.id.replace(/\[1m\]$/,'')===active?.model):null);const levels=info?.supportedReasoningEfforts?.map(x=>x.reasoningEffort)??[];effort.replaceChildren();for(const value of ['',...levels]){const o=node('option',value?value[0].toUpperCase()+value.slice(1):'Provider default');o.value=value;effort.append(o);}const saved=preferences.get(provider.value)?.efforts?.[active?.model];effort.value=levels.includes(saved)?saved:'';}
   effort.addEventListener('change',()=>rememberChoice(provider.value,{efforts:{...preferences.get(provider.value)?.efforts,[active.model]:effort.value}}));
-  function stash(){saveCurrent();sessions.set(selected,{active,messages,proposals,catalog,files,draft:input.value,children:[...transcript.childNodes],taskLinks:conversationTaskLinks,status:status.textContent,conversationId,includeContext:include.checked});}
+  function stash(){saveCurrent();sessions.set(selected,{active,messages,proposals,catalog,files,draft:input.value,children:[...transcript.childNodes].filter(n=>!n.classList?.contains('live-reply')),taskLinks:conversationTaskLinks,status:status.textContent,conversationId,includeContext:include.checked});}
   let changingBot=false,loadingProvider=false;
   provider.addEventListener('change',async()=>{
     historyNavigation++;
@@ -183,7 +201,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     conversationId=session?.conversationId??null;lastSaved='';include.checked=session?.includeContext??true;
     pending=false;clearTimeout(poll);status.textContent=session?.status??'Connect this provider to begin.';
     if(!session)restoreSaved(history.selected(selected));
-    rememberChoice(selected,{});showModels();showFiles();updateHistory();refresh();
+    rememberChoice(selected,{});showModels();showFiles();updateHistory();paintLive();refresh();
     loadingProvider=true;try { if(active){await refreshModels();}else if(saved?.model&&!['codex','claude'].includes(selected)){connect.click();}else if(['codex','claude'].includes(selected)){const p=selected;busy=true;refresh();try{const r=await invoke(managedCommand(p),{operation:'status'});if(r.connected)await activateManaged(p);}catch(error){status.textContent=String(error);}finally{busy=false;refresh();}} } finally {loadingProvider=false;}
   });
   for(const control of [model,key,endpoint])control.addEventListener('input',()=>{active=null;status.textContent='Apply these provider settings before sending.';refresh();});
@@ -265,29 +283,36 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   }
   fresh.addEventListener('click',()=>{if(busy||!saveCurrent())return;historyNavigation++;reset();workView.conversation();status.textContent=active?'New conversation. Ready for your message.':'Configure a provider first.';refresh();});
   composer.addEventListener('submit',async e=>{
-    e.preventDefault();const draft=input.value;const sentFiles=[...files];const sentReferences=sentFiles.map(f=>editReferences.get(f)).filter(Boolean);const text=input.value.trim();if(busy||!active||(!text&&!files.length))return;
+    e.preventDefault();
+    if(turns.inFlight()){const held=turns.current(),title=storeFor(held.botId).list(held.provider).find(c=>c.id===held.conversationId)?.title;status.textContent=holdingRefusal(held,title);refresh();return;}
+    const draft=input.value;const sentFiles=[...files];const sentReferences=sentFiles.map(f=>editReferences.get(f)).filter(Boolean);const text=input.value.trim();if(busy||!active||(!text&&!files.length))return;
     if(messages.length>=44){status.textContent='Start a new conversation to continue.';return;}
     const wantsTitle=!conversationId||history.list(selected).find(c=>c.id===conversationId)?.titleSource==='fallback';
+    if(!conversationId&&!saveCurrent())return;
     const frame=live(),origin=worldKey(frame),workspace=selectedWorkspace();
     const turnContext=context();
+    const sentBot={id:bot.id,name:bot.name,role:bot.role,instructions:bot.instructions};
+    const sentProvider=selected,sentActive={...active},sentEffort=effort.value;
+    const userMessage={role:'user',content:text,attachments:sentFiles};
+    const sentLabel=`${sentBot.name} · ${sentActive.provider} · ${sentActive.model}`;
+    const title=history.list(sentProvider).find(c=>c.id===conversationId)?.title??'';
+    const requestId=['codex','claude'].includes(sentActive.provider)?crypto.randomUUID():null;
+    const token=turns.begin({botId:sentBot.id,provider:sentProvider,conversationId,requestId,messageCount:messages.length,title,draft,files:sentFiles,userMessage});
     taskReplyRefs=sentReferences.map(r=>r.task).filter(Boolean);taskReply='Waiting for reply';taskRecovery=null;
     const activityId=crypto.randomUUID();beginTaskActivity({id:activityId,botId:bot.id,world:runtimeWorld(current),tasks:taskReplyRefs,provider:active.provider,model:active.model});
-    pendingTurn={draft,files:sentFiles,messageCount:messages.length};transcript.dataset.follow='true';requestAnimationFrame(()=>{transcript.scrollTop=transcript.scrollHeight;});
-    messages.push({role:'user',content:text,attachments:sentFiles});line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();busy=true;refresh();status.textContent=active.provider==='codex'?'Waiting for Codex… Large file replies can take up to five minutes.':`Waiting for ${active.provider}… Replies can take up to ${active.provider==='claude'?({max:'30',xhigh:'15',high:'10'}[effort.value]||'five'):'two'} minutes.`;saveCurrent();
-    activity.start(['codex','claude'].includes(active.provider));
-    streamText='';liveReply=node('article',undefined,'bot-assistant live-reply');liveReply.append(node('p','Generating…','eyebrow'),node('div','','bot-message-text'));transcript.append(liveReply);
-    /* The bubble is where a person looks while they wait, and it said
- * "Waiting for reply…" for every second of reasoning — which at extended
- * thinking levels is minutes of a screen that looks stuck. Until prose
- * arrives, show what the provider is actually doing; the phase carries a
- * magnitude that climbs, so the wait reads as work rather than a hang. */
-    const observeLive=r=>{if(!pendingTurn)return;activity.observe(r);if(typeof r.text==='string'){streamText=streamingReply(r.text,['codex','claude'].includes(active.provider));const working=r.phase&&r.phase!=='Waiting for provider'?r.phase+'…':'Waiting for reply…';liveReply.querySelector('.bot-message-text').textContent=streamText||working;liveReply.querySelector('.eyebrow').textContent=streamText?'Generating…':/^Thinking/.test(r.phase||'')?'Thinking…':'Generating…';if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}conversationSidebar?.render();};
+    transcript.dataset.follow='true';messages.push(userMessage);line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();paintLive();refresh();status.textContent=sentActive.provider==='codex'?'Waiting for Codex… Large file replies can take up to five minutes.':`Waiting for ${sentActive.provider}… Replies can take up to ${sentActive.provider==='claude'?({max:'30',xhigh:'15',high:'10'}[sentEffort]||'five'):'two'} minutes.`;saveCurrent();
+    activity.start(['codex','claude'].includes(sentActive.provider));
+    const observeLive=r=>{if(!turns.observe(token,r))return;if(turns.owns({botId:bot.id,provider:selected,conversationId})){activity.observe(r);paintLive();}else conversationSidebar?.render();};
     const onEvent=new window.__TAURI__.core.Channel();onEvent.onmessage=observeLive;
-    replyId=['codex','claude'].includes(active.provider)?crypto.randomUUID():null;
-    if(replyId){const id=replyId,p=active.provider;const poll=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId:id});if(replyId!==id)return;cancelReply.hidden=!r.active;cancelReply.disabled=r.cancelled;observeLive(r);observeTaskActivity(activityId,r);if(r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(replyId===id)replyPoll=setTimeout(poll,300);};poll();}
+    let replyPoll=null;
+    if(requestId){const p=sentActive.provider;const pollReply=async()=>{try{const r=await invoke(managedCommand(p),{operation:'reply_status',requestId});if(!turns.matches(token))return;observeLive(r);observeTaskActivity(activityId,r);if(turns.owns({botId:bot.id,provider:selected,conversationId})&&r.active&&!r.cancelled)status.textContent=r.received_bytes?`Receiving ${managedName(p)} reply… ${r.received_bytes.toLocaleString()} bytes of assistant text received.`:`${r.phase||'Waiting for provider'}…`;}catch{}if(turns.matches(token))replyPoll=setTimeout(pollReply,300);};pollReply();}
     try {
-      const reply=await invoke('bot_chat' ,{onEvent,turn:{expected_model:active.model,request_id:replyId,provider:active.provider,messages,context:turnContext,bot_instructions:`Name: ${bot.name}\nRole: ${bot.role}\n${bot.instructions}\n${wantsTitle?titleInstruction:''}`,effort:effort.value||null}});
+      const reply=await invoke('bot_chat' ,{onEvent,turn:{expected_model:sentActive.model,request_id:requestId,provider:sentActive.provider,messages:[...messages],context:turnContext,bot_instructions:`Name: ${sentBot.name}\nRole: ${sentBot.role}\n${sentBot.instructions}\n${wantsTitle?titleInstruction:''}`,effort:sentEffort||null}});
       const titled=conversationReply(reply.text,wantsTitle);reply.text=titled.text;
+      observeTaskActivity(activityId,{type:'finish',text:reply.text||''});
+      if(!turns.owns({botId:bot.id,provider:selected,conversationId})){
+        const done=turns.finish(token);clearTimeout(replyPoll);if(done)landReply(done,{reply,titled,sentLabel,wantsTitle});conversationSidebar?.render();return;
+      }
       liveReply?.remove();liveReply=null;
       const entry=line('assistant',reply.text||'Review the proposed step below.');
       messages.push({role:'assistant',content:[reply.text,reply.actions.length?`Proposed only, not executed: ${JSON.stringify(reply.actions)}`:''].filter(Boolean).join('\n')});
@@ -323,16 +348,16 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
         dismiss.addEventListener('click',()=>{if(busy||a.state!=='proposed')return;a.state='dismissed';result.textContent='Dismissed · no change made';dismiss.disabled=true;messages.push({role:'user',content:`I dismissed the proposed ${a.name} action. It was not executed.`});refresh();});
         proposal.append(result,button,dismiss);entry.append(proposal);
       }
-      observeTaskActivity(activityId,{type:'finish',text:reply.text||''});activity.finish(false);taskReply='Reply received';pendingTurn=null;status.textContent='Reply received.';
-      replyId=null;clearTimeout(replyPoll);cancelReply.hidden=true;
+      activity.finish(false);taskReply='Reply received';status.textContent='Reply received.';
+      const done=turns.finish(token);clearTimeout(replyPoll);cancelReply.hidden=true;
       saveCurrent();
-      if(conversationId&&wantsTitle){try{history.update(selected,conversationId,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* Reply remains usable if local title storage is full. */}}
+      if(done?.conversationId&&wantsTitle){try{storeFor(done.botId).update(done.provider,done.conversationId,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* Reply remains usable if local title storage is full. */}}
 
-    }catch(error){if(streamText)line('result','Interrupted reply (partial):\n'+streamText);taskRecovery=replyFailure(error);observeTaskActivity(activityId,{type:'finish',error:true,failure:String(error)});activity.finish(true);taskReply='Reply did not complete';pendingTurn=null;messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(active?.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
-    finally{liveReply?.remove();liveReply=null;streamText='';replyId=null;clearTimeout(replyPoll);cancelReply.hidden=true;busy=false;saveCurrent();refresh();if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}
+    }catch(error){const turn=turns.current(),partial=turn?streamingReply(turn.text,['codex','claude'].includes(turn.provider)):'';const owned=turns.owns({botId:bot.id,provider:selected,conversationId});observeTaskActivity(activityId,{type:'finish',error:true,failure:String(error)});const done=turns.finish(token);clearTimeout(replyPoll);if(!owned){if(done)landReply(done,{error,partial,sentLabel});conversationSidebar?.render();return;}if(partial)line('result','Interrupted reply (partial):\n'+partial);taskRecovery=replyFailure(error);activity.finish(true);taskReply='Reply did not complete';messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(sentActive.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
+    finally{clearTimeout(replyPoll);paintLive();saveCurrent();refresh();if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}
   });
   historyPicker.addEventListener('change',()=>{if(busy)return;historyNavigation++;const id=historyPicker.value;if(!saveCurrent()){updateHistory();return;}restoreSaved(id||null);saveCurrent();refresh();});
-  deleteConversation.addEventListener('click',()=>{if(busy||!conversationId)return;if(!confirm('Delete this saved conversation and its locally saved attachments?'))return;try{history.remove(selected,conversationId);sessions.delete(selected);reset();historyStatus.textContent='Conversation deleted from this device.';refresh();}catch(error){historyStatus.textContent=String(error);}});
+  deleteConversation.addEventListener('click',()=>{if(busy||!conversationId||openTurn())return;if(!confirm('Delete this saved conversation and its locally saved attachments?'))return;try{history.remove(selected,conversationId);sessions.delete(selected);reset();historyStatus.textContent='Conversation deleted from this device.';refresh();}catch(error){historyStatus.textContent=String(error);}});
   input.addEventListener('input',()=>{historyNavigation++;saveCurrent();});
   document.addEventListener('before-page-select',()=>{historyNavigation++;});
   include.addEventListener('change',saveCurrent);
@@ -388,17 +413,17 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     }
     const edit=node('button','Edit bot','subtle');edit.type='button';edit.disabled=!!registrationUnavailable(current,bot.id);edit.dataset.nav='edit-bot';board.append(edit);
   }
-  const roster=initBotDirectory({runtimeCurrent:current,runtimeBotActions,canSave:()=>!busy&&!runtimeBusy&&!pending,current:()=>bot,select:next=>{
+  const roster=initBotDirectory({runtimeCurrent:current,runtimeBotActions,canSave:()=>!busy&&!runtimeBusy&&!pending&&!turns.inFlight(),current:()=>bot,select:next=>{
     const chosen=!conversationNavigation;
     if(next.id===bot.id){bot=next;showIdentity();if(chosen)conversationSidebar?.scopeToBot(next.id);return true;}
-    if(busy||pending||runtimeBusy){status.textContent='Wait for the current reply or connection to finish before switching bots.';return false;}
+    if(busy||pending||runtimeBusy){status.textContent='Wait for the current connection or runtime operation to finish before switching bots.';return false;}
     if(!saveCurrent())return false;
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
     conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];taskRecovery=null;activity.reset();bot=next;history=newHistory();preferences.clear();sessions.clear();
     try{for(const [p,v] of JSON.parse(localStorage.getItem(storageKey('super-provider-preferences'))||'[]'))preferences.set(p,v);}catch{}
     let remembered=bot.provider;try{remembered=localStorage.getItem(storageKey('super-last-provider'))||remembered;}catch{}
     provider.value=[...provider.options].some(o=>o.value===remembered)?remembered:bot.provider;
-    active=null;messages=[];proposals=[];files=[];catalog=[];conversationId=null;lastSaved='';pendingTurn=null;
+    active=null;messages=[];proposals=[];files=[];catalog=[];conversationId=null;lastSaved='';
     transcript.replaceChildren();input.value='';changingBot=true;showIdentity();provider.dispatchEvent(new Event('change'));
     if(chosen)conversationSidebar?.scopeToBot(bot.id);
     return true;
@@ -407,9 +432,28 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   new MutationObserver(showIdentity).observe(document.getElementById('world'),{childList:true});
   showIdentity();
   const storeFor=id=>id===bot.id?history:createConversationStore({getItem:key=>localStorage.getItem(id==='assistant'?key:`${key}:bot:${id}`),setItem:(key,value)=>localStorage.setItem(id==='assistant'?key:`${key}:bot:${id}`,value)});
-  conversationSidebar=initConversationSidebar({root,fresh,get:()=>({bot,items:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),bots:roster.list(),active:{id:conversationId,botId:bot.id,provider:selected,generating:!!pendingTurn,liveText:streamText},selected:conversationId,provider:selected,busy:busy||pending}),
+  function landReply(turn,{reply=null,titled=null,error=null,partial='',sentLabel='',wantsTitle=false}={}){
+    const store=storeFor(turn.botId),base=store.get(turn.provider,turn.conversationId);
+    if(!base)throw new Error('The conversation that sent this reply is unavailable.');
+    const data={...base,messages:[...base.messages],entries:[...base.entries],draft:base.draft,files:base.files,replyPending:false};
+    if(reply){
+      const user=turn.sent.userMessage,assistantText=reply.text||'Review the proposed step below.';
+      data.messages.push(user,{role:'assistant',content:[reply.text,reply.actions?.length?`Proposed only, not executed: ${JSON.stringify(reply.actions)}`:''].filter(Boolean).join('\n')});
+      const proposals=(reply.actions??[]).map(a=>a.name==='propose_file_edit'?`${a.name}: ${a.args?.path??'unknown path'} · ${a.args?.content===null?'delete':new TextEncoder().encode(a.args?.content??'').length+' bytes'}`:`${a.name}: ${JSON.stringify(a.args??{})}`);
+      data.entries.push({role:'assistant',label:sentLabel,text:assistantText,referenceWorld:null,proposals});
+      data.draft='';data.files=[];
+    }else{
+      if(partial)data.entries.push({role:'result',label:'App result',text:'Interrupted reply (partial):\n'+partial,referenceWorld:null,proposals:[]});
+      data.entries.push({role:'result',label:'App result',text:String(error),referenceWorld:null,proposals:[]});
+      data.draft=turn.sent.draft;data.files=turn.sent.files;
+    }
+    store.save(turn.provider,turn.conversationId,data);
+    if(reply&&wantsTitle){try{store.update(turn.provider,turn.conversationId,titled?.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* The reply is durable even if its optional title is not. */}}
+    sessions.delete(turn.provider);
+  }
+  conversationSidebar=initConversationSidebar({root,fresh,get:()=>({bot,items:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),bots:roster.list(),active:{id:conversationId,botId:bot.id,provider:selected},turn:turnProjection(),selected:conversationId,provider:selected,busy:busy||pending}),
     update:(b,p,id,patch)=>{storeFor(b).update(p,id,patch);updateHistory();},
-    remove:(b,p,id)=>{if(!confirm('Delete this conversation and its saved attachments?'))return;storeFor(b).remove(p,id);sessions.delete(p);if(bot.id===b&&conversationId===id)reset();updateHistory();},
+    remove:(b,p,id)=>{if(turns.owns({botId:b,provider:p,conversationId:id}))throw Error('Cancel the generating reply before deleting this conversation.');if(!confirm('Delete this conversation and its saved attachments?'))return;storeFor(b).remove(p,id);sessions.delete(p);if(bot.id===b&&conversationId===id)reset();updateHistory();},
     open:async(b,p,id)=>{if(busy||pending||!saveCurrent())return;if(b!==bot.id){openingConversation(()=>navigate('bot:'+b,true));for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));if(bot.id!==b||busy||loadingProvider)throw Error('Connection setup is still busy. Try again shortly.');}let token=++historyNavigation;if(p!==selected){provider.value=p;provider.dispatchEvent(new Event('change'));token=historyNavigation;for(let i=0;(loadingProvider||busy)&&i<300&&token===historyNavigation;i++)await new Promise(r=>setTimeout(r,100));}if(token!==historyNavigation||selected!==p)return;if(busy||loadingProvider){status.textContent='Connection setup is still busy. Reopen this conversation when it finishes.';return;}restoreSaved(id);saveCurrent();refresh();workView.conversation();}
   });conversationSidebar.render();
 
@@ -418,7 +462,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     const open=()=>{
       if(token!==historyNavigation)return;
       if(bot.id!==request.botId||runtimeWorld(current)!==request.world){status.textContent='The bot or world changed. Reopen the task to select its saved conversation.';return;}
-      if(loadingProvider||(busy&&!pendingTurn)){if(++tries<100){setTimeout(open,100);return;}status.textContent='Provider setup is still busy. Reopen the task and try again.';return;}
+      if(loadingProvider||busy){if(++tries<100){setTimeout(open,100);return;}status.textContent='Provider setup is still busy. Reopen the task and try again.';return;}
       if(busy||pending||runtimeBusy){status.textContent='Finish the current reply or connection before reopening saved history.';return;}
       const task=heldProjection(current)?.development_tasks?.[request.taskId];
       if(!task||heldProjection(current)?.bots?.[task.bot_ref]?.client_ref!==bot.id||!taskHistoryLinks(history,task.id,request.world).some(c=>c.id===request.conversationId&&c.provider===request.provider)){status.textContent='This linked conversation is unavailable or was deleted. Reopen the task to refresh its history.';return;}
@@ -452,10 +496,11 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   initMobileConversationBridge({invoke,view:()=>({
     bots:roster.list().map(b=>({id:b.id,name:b.name,provider:b.provider})),
     conversations:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),
-    active:{botId:bot.id,provider:selected,id:conversationId,model:active?.model??null,effort:effort.value,efforts:[...effort.options].map(o=>o.value),busy:busy||pending||runtimeBusy,generating:!!pendingTurn,status:status.textContent,
+    turn:turnProjection(),
+    active:{botId:bot.id,provider:selected,id:conversationId,model:active?.model??null,effort:effort.value,efforts:[...effort.options].map(o=>o.value),busy:busy||pending||runtimeBusy,generating:!!openTurn(),status:status.textContent,
       revision:history.list(selected).find(c=>c.id===conversationId)?.revision??null,
       data:conversationId?history.get(selected,conversationId):null,
-      liveText:pendingTurn?streamText:''}
+      liveText:openTurn()?streamingReply(openTurn().text,['codex','claude'].includes(openTurn().provider)):''}
   }),perform:async request=>{
     if(busy||pending||runtimeBusy||loadingProvider)throw Error('A desktop conversation operation is in progress. Wait for it to finish.');
     if(!roster.get(request.botId))throw Error('That bot is unavailable.');
@@ -490,6 +535,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     if(conversationId!==request.conversationId)throw Error('Open this conversation before editing or sending.');
     if(typeof request.text!=='string'||request.text.length>8000)throw Error('Enter a message of at most 8,000 characters.');
     if(request.operation==='send'){
+      if(turns.inFlight()){const held=turns.current(),title=storeFor(held.botId).list(held.provider).find(c=>c.id===held.conversationId)?.title;throw Error(holdingRefusal(held,title));}
       if(!active||typeof request.model!=='string'||!request.model.trim()||request.model!==active.model)throw Error('Select the exact connected model before sending. No default model will be used.');
       if(![...effort.options].some(o=>o.value===(request.effort??'')))throw Error('The requested thinking level is unavailable.');
       if(!request.text.trim())throw Error('Enter a message before sending.');

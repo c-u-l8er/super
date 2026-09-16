@@ -56,6 +56,6 @@ The desktop, browser companion and Expo chat lists can filter by bot and group b
 
 Direct Ollama NDJSON and OpenAI/Anthropic SSE replies are decoded incrementally, with text sent through a Tauri channel. Managed Codex/Claude public assistant text feeds the same live transcript. Mobile mirrors the text through the private gateway, polling more frequently during generation. Updates are batched rather than sent once per token. No partial tool arguments become proposals; completion and normal action validation are required. Interrupted streams retain the original draft and a labeled partial result.
 
-Super still has one active provider turn at a time; changing the selected conversation while it runs remains disabled. Lists and other work screens can be inspected while waiting. External provider/account behavior must be checked with an explicitly selected model; the automated streaming smoke uses a delayed local fixture only.
+Super still has one active provider turn at a time. Chats remain navigable while it runs; the generating indicator follows the owning conversation and a second send is refused until that reply finishes or is cancelled. External provider/account behavior must be checked with an explicitly selected model; the automated streaming smoke uses a delayed local fixture only.
 
 Checks: `node --test tools/conversation-list-test.mjs`, `cargo test --manifest-path cockpit/Cargo.toml bot_stream`, and `tools/native-ui-test.sh node tools/mobile-streaming-smoke.mjs`.

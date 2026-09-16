@@ -611,8 +611,8 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .conversation-link[aria-current=page]{background:#283342!important;color:#fff!important;box-shadow:inset 2px 0 #9dc9ff}
 .conversation-link:hover{background:#202832!important}.conversation-link:disabled{opacity:.7}
 .conversation-link small{font-size:10px;line-height:1.5;margin-top:2px;color:#8e9aab}
-.conversation-link .conversation-state{color:#b6c5d9}.conversation-state[data-state=Generating],.conversation-state[data-state=Waiting]{color:#a7d7fa}
-.conversation-state[data-state=Generating]::before,.conversation-state[data-state=Waiting]::before{content:'◌ ';display:inline-block;animation:conversation-pulse 1s ease-in-out infinite}
+.conversation-link .conversation-state{color:#b6c5d9}.conversation-state[data-state=Generating],.conversation-state[data-state=Waiting],.conversation-state[data-state=Cancelling]{color:#a7d7fa}
+.conversation-state[data-state=Generating]::before,.conversation-state[data-state=Waiting]::before,.conversation-state[data-state=Cancelling]::before{content:'◌ ';display:inline-block;animation:conversation-pulse 1s ease-in-out infinite}
 @keyframes conversation-pulse{50%{opacity:.35}}@media(prefers-reduced-motion:reduce){.conversation-state::before{animation:none!important}}
 .conversation-menu{position:static;flex:0 0 30px}.conversation-menu summary{padding:8px;border-radius:6px;color:#a6b2c4;font-size:11px}
 .conversation-menu[open]{position:static;width:auto;padding:0;border:0;background:none;box-shadow:none}
