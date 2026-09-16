@@ -17,6 +17,10 @@ struct ReplyState {
     cancelled: bool,
     text: String,
     bytes: usize,
+    /// Reasoning MAGNITUDE only. The CLI already redacts the content — a
+    /// `thinking_delta` carries `"thinking":""` and an `estimated_tokens`
+    /// count — so there is nothing here to leak even by accident.
+    thinking: u64,
     phase: String,
 }
 struct ReplyGuard(Arc<Mutex<ReplyState>>);
@@ -32,6 +36,19 @@ fn observe_reply(state: &mut ReplyState, event: &Value) {
             state.bytes = state.bytes.saturating_add(text.len());
             if state.text.len() + text.len() <= 65536 { state.text.push_str(text); }
             state.phase = "Receiving reply".into();
+        }
+    } else if event["type"] == "stream_event" && delta["type"] == "thinking_delta" {
+        // Measured 2026-09-16 with opus[1m] at xhigh on a request shaped like
+        // real work: 170 of 262 seconds elapsed before the first visible token,
+        // and for all of it this function had no branch to take — so `phase`
+        // sat on whatever `content_block_start` left and `bytes` stayed 0,
+        // which the page renders as one frozen line. The count is cumulative,
+        // so take the larger value rather than adding.
+        if let Some(tokens) = delta["estimated_tokens"].as_u64() {
+            state.thinking = state.thinking.max(tokens);
+        }
+        if state.text.is_empty() {
+            state.phase = format!("Thinking · {} tokens", state.thinking);
         }
     } else if event["type"] == "system" && event["subtype"] == "init" {
         state.phase = "Provider started".into();
@@ -260,7 +277,7 @@ impl Connection {
     pub fn reply_status(&self, id: &str) -> Result<Value, String> {
         let state = self.1.lock().map_err(|_| "Reply status unavailable.")?;
         if state.id != id { return Ok(json!({"active":false})); }
-        Ok(json!({"active":state.active,"cancelled":state.cancelled,"received_bytes":state.bytes,"text":state.text,"phase":state.phase}))
+        Ok(json!({"active":state.active,"cancelled":state.cancelled,"received_bytes":state.bytes,"thinking_tokens":state.thinking,"text":state.text,"phase":state.phase}))
     }
     pub fn cancel_reply(&self, id: &str) -> Result<Value, String> {
         let mut state = self.1.lock().map_err(|_| "Reply status unavailable.")?;
@@ -466,10 +483,12 @@ impl Connection {
         }
         let mut c = command(&home)?;
         configure_chat(&mut c, &model, &schema);
+        let mut budget = reply_budget(None);
         if let Some(e) = effort {
             if !["low", "medium", "high", "xhigh", "max"].contains(&e.as_str()) {
                 return Err("Unsupported Claude thinking level.".into());
             }
+            budget = reply_budget(Some(e.as_str()));
             c.args(["--effort", &e]);
         }
         let id = request_id.ok_or("Reply identity required.")?;
@@ -481,12 +500,30 @@ impl Connection {
             c.args(["--input-format", "stream-json"]);
             format!("{}\n", json!({"type":"user","message":{"role":"user","content":crate::bots::image_content("anthropic", &prompt, &images)},"parent_tool_use_id":null}))
         };
-        let (ok, v) = run_reply(c, input, self.1.clone(), 300)?;
+        let (ok, v) = run_reply(c, input, self.1.clone(), budget)?;
         if needs_signin(&v) {
             std::fs::write(home.join("needs-signin"), b"expired\n")
                 .map_err(|_| "Could not record expired sign-in.")?;
         }
         decode_reply(ok, v)
+    }
+}
+/// How long one reply may take, by the reasoning level the person chose.
+///
+/// Measured 2026-09-16, opus[1m], the CLI flags `configure_chat` builds, on a
+/// request shaped like real work (two sources attached, a complete replacement
+/// file requested): 170.3s of reasoning before the first visible token, result
+/// at 262.5s. Two larger requests — one at xhigh, one at high — ran past the
+/// flat 300s budget and the person lost the whole turn to "did not respond in
+/// time". Extended reasoning is the thing the higher levels are for; a budget
+/// that cannot contain it makes them unusable. The person can still stop a
+/// reply at any point with Cancel, so this is a ceiling, not a wait.
+fn reply_budget(effort: Option<&str>) -> u64 {
+    match effort {
+        Some("max") => 1800,
+        Some("xhigh") => 900,
+        Some("high") => 600,
+        _ => 300,
     }
 }
 fn configure_chat(c: &mut Command, model: &str, schema: &Value) {
@@ -651,6 +688,53 @@ mod streaming_tests {
         observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":"x".repeat(65536)}}}));
         assert_eq!(s.text, "Hello");
         assert_eq!(s.bytes, 65541);
+    }
+    #[test]
+    fn reasoning_shows_progress_without_ever_carrying_its_content() {
+        let mut s = ReplyState::default();
+        // A real thinking_delta is already redacted by the CLI — `"thinking":""`
+        // with a cumulative `estimated_tokens`. Feed it a non-empty one anyway:
+        // nothing that crosses into the page may contain it.
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"thinking_delta","thinking":"private chain of thought","estimated_tokens":50}}}));
+        assert!(s.text.is_empty());
+        assert_eq!(s.bytes, 0, "reasoning must never be counted as assistant text");
+        assert_eq!(s.thinking, 50);
+        assert_eq!(s.phase, "Thinking · 50 tokens");
+        assert!(!s.phase.contains("private"));
+        // Cumulative, not additive, and it keeps moving so the line is not frozen.
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":1200}}}));
+        assert_eq!(s.phase, "Thinking · 1200 tokens");
+        // A late lower count never walks the signal backwards.
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":7}}}));
+        assert_eq!(s.thinking, 1200);
+        // A signature is still ignored entirely.
+        let before = s.phase.clone();
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"signature_delta","signature":"CAISpSQKpgEIERgC"}}}));
+        assert_eq!(s.phase, before);
+        assert!(s.text.is_empty());
+        // Visible text takes the line over, and reasoning cannot reclaim it.
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"text_delta","text":"Hello"}}}));
+        assert_eq!(s.text, "Hello");
+        assert_eq!(s.phase, "Receiving reply");
+        observe_reply(&mut s, &json!({"type":"stream_event","event":{"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":9000}}}));
+        assert_eq!(s.phase, "Receiving reply");
+        assert_eq!(s.text, "Hello");
+    }
+    #[test]
+    fn the_reply_budget_matches_the_reasoning_being_paid_for() {
+        assert_eq!(reply_budget(None), 300);
+        assert_eq!(reply_budget(Some("low")), 300);
+        assert_eq!(reply_budget(Some("medium")), 300);
+        assert_eq!(reply_budget(Some("high")), 600);
+        assert_eq!(reply_budget(Some("xhigh")), 900);
+        assert_eq!(reply_budget(Some("max")), 1800);
+        // An unknown level is refused before it reaches here; if one ever does,
+        // it gets the conservative budget rather than an unbounded wait.
+        assert_eq!(reply_budget(Some("enormous")), 300);
+        // Every level must outlast the 262.5 s measured for one ordinary request.
+        for e in ["low", "medium", "high", "xhigh", "max"] {
+            assert!(reply_budget(Some(e)) >= 300);
+        }
     }
     #[test]
     fn current_login_destination_and_spoofs() {

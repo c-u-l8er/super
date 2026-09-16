@@ -13,7 +13,8 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
  // it: with a long conversation list the old bottom button was off-screen. It
  // navigates directly rather than clicking a hidden rail proxy.
  const directory=node('button','← All bots','subtle conversation-directory');directory.type='button';directory.title='Show every bot';directory.setAttribute('aria-label','All bots — open the bot directory');directory.onclick=()=>{notice.textContent='';navigate('bots',true);};
- list.append(directory,top,controls,rows,notice);
+ const hint=node('p','A reply is generating — other chats unlock when it finishes, or cancel it from the conversation.','rail-hint');hint.hidden=true;
+ list.append(directory,top,controls,rows,hint,notice);
  /* An explicit bot choice is the person speaking; a rerender is not. Only the
   * paths that mean "I chose this bot" call this, and a refused or pending
   * switch never reaches it, so the chosen scope survives both. */
@@ -31,7 +32,7 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
   for(const group of conversationGroups(items,state.bots,{bot:filter,sort:order,search:query})){
    rows.append(node('h3',group.label,'rail-label'));
    for(const c of group.items){
-    const row=node('div',undefined,'conversation-row'),choose=act(c.title,()=>open(c.botId,c.provider,c.id));choose.className='nav-item conversation-link';choose.dataset.conversation=c.id;choose.setAttribute('aria-current',c.botId===bot.id&&c.id===selected&&c.provider===provider?'page':'false');choose.title=c.title;choose.disabled=busy;
+    const row=node('div',undefined,'conversation-row'),choose=act(c.title,()=>open(c.botId,c.provider,c.id));choose.className='nav-item conversation-link';choose.dataset.conversation=c.id;const here=c.botId===bot.id&&c.id===selected&&c.provider===provider;choose.setAttribute('aria-current',here?'page':'false');choose.title=busy&&!here?'A reply is generating. This chat unlocks when it finishes.':c.title;choose.disabled=busy&&!here;
     const status=conversationStatus(c,active),badge=node('small',(c.unread?'● New reply · ':'')+status,'conversation-state');badge.dataset.state=status;choose.append(badge,node('small',state.bots.find(b=>b.id===c.botId)?.name+' · '+c.provider));
     const more=node('details',undefined,'conversation-menu'),summary=node('summary','•••');summary.setAttribute('aria-label','Options for '+c.title);more.append(summary);more.ontoggle=()=>{if(more.open)for(const other of rows.querySelectorAll('details[open]'))if(other!==more)other.open=false;};
     const menu=node('div',undefined,'conversation-menu-panel'),pin=act(c.pinned?'Unpin conversation':'Pin conversation',()=>update(c.botId,c.provider,c.id,{pinned:!c.pinned}));
@@ -41,6 +42,12 @@ export function initConversationSidebar({root,fresh,get,open,update,remove}){
    }
   }
   if(!rows.children.length)rows.append(node('p','No matching conversations','rail-hint'));
+  /* Every row is disabled while a reply runs, because opening another chat
+   * would have to save and swap the conversation the reply is still writing
+   * into. That constraint is real; being unable to tell it from a dead UI is
+   * not. At extended reasoning levels a reply can hold this for minutes, so
+   * the reason is said out loud, next to the control that lifts it. */
+  hint.hidden=!busy;
  }
  document.addEventListener('page-selected',render);document.addEventListener('visibilitychange',render);root.querySelector('#bot-transcript').addEventListener('scroll',render);new MutationObserver(render).observe(root,{attributes:true,attributeFilter:['hidden']});return {render,scopeToBot};
 }

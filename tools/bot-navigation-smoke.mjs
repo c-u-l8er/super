@@ -152,9 +152,22 @@ try {
   check('a bot switch refused while a reply is pending leaves the chosen scope unchanged',
     await page(`return document.querySelector('#bot-surface').dataset.screen==='bot:builder'&&document.querySelector('#bot-status').textContent.includes('Wait for the current reply')`)
     && await filter() === scopedDuringReply && scopedDuringReply === 'builder');
+  // --- 7b. a held reply explains itself instead of going quietly dead ------
+  check('while a reply runs, the chat it is writing into stays clickable',
+    await page(`const r=document.querySelector('.conversation-link[aria-current="page"]');return !!r&&!r.disabled`));
+  check('other chats are disabled and say why, rather than looking broken',
+    await page(`const rows=[...document.querySelectorAll('.conversation-link')].filter(n=>n.getAttribute('aria-current')!=='page');
+      return rows.length>0&&rows.every(n=>n.disabled&&n.title.includes('unlocks when it finishes'))`));
+  check('and the sidebar states the reason next to the list',
+    await page(`const h=[...document.querySelectorAll('.conversation-sidebar .rail-hint')].find(n=>n.textContent.includes('A reply is generating'));
+      return !!h&&!h.hidden`));
   await shot('06-refused-switch-during-reply');
   release();                                         // release the held reply
   await wait(() => page(`return !document.querySelector('#bot-send').disabled`), 'reply finished');
+  check('when the reply finishes every chat is clickable again and the reason is withdrawn',
+    await page(`const rows=[...document.querySelectorAll('.conversation-link')];
+      const h=[...document.querySelectorAll('.conversation-sidebar .rail-hint')].find(n=>n.textContent.includes('A reply is generating'));
+      return rows.length>0&&rows.every(n=>!n.disabled)&&(!h||h.hidden)`));
 
   // --- 8. nothing the navigation touched was lost -------------------------
   await page(`window.__navReload=true;location.reload()`);
