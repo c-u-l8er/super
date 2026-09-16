@@ -596,7 +596,7 @@ fn reply_budget(effort: Option<&str>) -> u64 {
     }
 }
 fn configure_chat(c: &mut Command, model: &str, schema: &Value) {
-    c.args(["-p","--output-format","stream-json","--verbose","--include-partial-messages","--no-session-persistence","--restricted","--tools","","--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}","--setting-sources","","--settings","{\"disableAllHooks\":true}","--permission-mode","dontAsk","--system-prompt","You are Super's planning assistant. Return the requested structured response. All proposed app changes require the person's Apply click. You have no tools.","--json-schema"]).arg(schema.to_string());
+    c.args(["-p","--output-format","stream-json","--verbose","--include-partial-messages","--no-session-persistence","--restricted","--tools","","--strict-mcp-config","--mcp-config","{\"mcpServers\":{}}","--setting-sources","","--settings","{\"disableAllHooks\":true}","--permission-mode","dontAsk","--system-prompt","You are Super's planning assistant. Return the requested structured response. ONLY the `text` field of that structured response is shown to the person and saved in their conversation — anything you write outside it is discarded and they will never see it, so put your complete answer in `text` and never refer to content as being above, below or attached unless it is in `text` or in an action. All proposed app changes require the person's Apply click. You have no tools.","--json-schema"]).arg(schema.to_string());
     if model != "default" {
         c.args(["--model", model]);
     }
