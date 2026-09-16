@@ -3,12 +3,26 @@ import {node,navigate} from './app-shell.js';
 import {createBotRoster,providers} from './bot-roster.js';
 export function initBotDirectory({select,current,runtimeCurrent,runtimeBotActions,canSave}) {
   const localRoster=createBotRoster(localStorage);
-  const roster={error:localRoster.error,save:b=>localRoster.save(b),get:id=>{const r=registeredBot(runtimeCurrent,id);return r?profileOf(r):localRoster.get(id);},list:()=>{const profiles=new Map(localRoster.list().map(b=>[b.id,b]));for(const r of Object.values(heldProjection(runtimeCurrent)?.bots??{}))profiles.set(r.client_ref,profileOf(r));return [...profiles.values()];}};
+  // Archive and restore are guarded at action time, not at render time, and move roster membership only: conversation, draft and provider keys are never touched from here.
+  function archiveLocal(id){
+    if(!canSave())throw new Error('Wait for the current bot operation to finish.');
+    if(id==='assistant')throw new Error('The workspace assistant cannot be archived.');
+    if(registrationUnavailable(runtimeCurrent,id))throw new Error('Reconnect before archiving this bot: its runtime registration cannot be checked right now.');
+    if(registeredBot(runtimeCurrent,id))throw new Error('This bot is registered in the runtime. Only local conversational profiles can be archived.');
+    if(!localRoster.get(id))throw new Error('That bot is not an active local profile on this device.');
+    return localRoster.archive(id);
+  }
+  function restoreLocal(id){
+    if(!canSave())throw new Error('Wait for the current bot operation to finish.');
+    return localRoster.restore(id);
+  }
+  const roster={error:localRoster.error,save:b=>localRoster.save(b),get:id=>{const r=registeredBot(runtimeCurrent,id);return r?profileOf(r):localRoster.get(id);},list:()=>{const profiles=new Map(localRoster.list().map(b=>[b.id,b]));for(const r of Object.values(heldProjection(runtimeCurrent)?.bots??{}))profiles.set(r.client_ref,profileOf(r));return [...profiles.values()];},listArchived:()=>localRoster.listArchived(),archive:id=>archiveLocal(id),restore:id=>restoreLocal(id)};
   const canvas=document.getElementById('workspace-canvas');
   const directory=node('section',undefined,'app-screen');directory.dataset.screen='bots';directory.hidden=true;
   const creation=node('section',undefined,'app-screen');creation.dataset.screen='new-bot';creation.hidden=true;
   directory.id='bot-directory';creation.id='bot-creation';canvas.append(directory,creation);
   const notice=node('p',roster.error||'','bot-status');notice.setAttribute('role','status');
+  const status=node('p','','bot-status');status.setAttribute('role','status');status.id='bot-archive-status';
   const button=(text,route,cls='subtle')=>{const b=node('button',text,cls);b.type='button';b.dataset.nav=route;return b;};
   creation.append(button('← All bots','bots'),node('p','SUPER / BOTS / CREATE','eyebrow'),node('h1','Create bot'),node('p','Give this bot a name, a purpose, and a provider. Its conversations are saved separately on this device.','screen-description'));
   const form=node('form',undefined,'bot-profile-form');
@@ -22,18 +36,47 @@ export function initBotDirectory({select,current,runtimeCurrent,runtimeBotAction
   const label=node('label','Provider','field');label.append(provider);form.append(label);
   const save=node('button','Create bot','primary');save.type='submit';save.id='create-bot-submit';
   form.append(node('p','Created bots start as conversational profiles. Runtime execution and capability delegation require the runtime bot contract.','availability-note'),save,button('Cancel','bots'),notice);creation.append(form);
+  function onArchive(id){
+    try{const bot=archiveLocal(id);status.textContent=`Archived ${bot.name}. Its conversations, drafts, pins and provider settings stay on this device and come back when you restore it.`;renderSignature='';render();if(current()?.id===id)navigate('bots',true);}
+    catch(error){status.textContent=String(error);}
+  }
+  function onRestore(id){
+    try{const bot=restoreLocal(id);status.textContent=`Restored ${bot.name} with its original id, so its saved conversations and provider settings resolve again.`;renderSignature='';render();}
+    catch(error){status.textContent=String(error);}
+  }
+  /* The roster reports an unreadable archive through archiveError and keeps the
+   * ACTIVE roster working, so listArchived() throws rather than pretending the
+   * archive is empty — losing a profile to a silent empty list is the failure
+   * this whole change exists to prevent. render() must therefore not let that
+   * throw escape: it is driven by shell-ready, runtime-view-rendered and a
+   * MutationObserver, and an exception here takes the bot directory down over a
+   * key that has nothing to do with the profiles it is drawing. Show what can be
+   * drawn, and say the rest is unreadable. */
+  const retiredProfiles=()=>{try{return localRoster.listArchived();}catch{return [];}};
   function render(){
-    const signature=JSON.stringify([roster.list(),heldProjection(runtimeCurrent)?Object.values(heldProjection(runtimeCurrent).bots??{}).map(b=>[b.id,b.revision]):null]);if(signature===renderSignature)return;renderSignature=signature;
-    directory.replaceChildren(node('p','SUPER / BOTS','eyebrow'),node('h1','Bots'),node('p','Choose a persistent role for your work. Each bot has its own page, instructions, and saved conversations.','screen-description'),button('+ Create bot','new-bot','primary'));
+    const signature=JSON.stringify([roster.list(),retiredProfiles(),localRoster.archiveError??null,heldProjection(runtimeCurrent)?Object.values(heldProjection(runtimeCurrent).bots??{}).map(b=>[b.id,b.revision]):null]);if(signature===renderSignature)return;renderSignature=signature;
+    directory.replaceChildren(node('p','SUPER / BOTS','eyebrow'),node('h1','Bots'),node('p','Choose a persistent role for your work. Each bot has its own page, instructions, and saved conversations.','screen-description'),button('+ Create bot','new-bot','primary'),status);
     if(roster.error)directory.append(node('p',roster.error,'availability-note'));
+    if(!roster.error&&localRoster.archiveError)directory.append(node('p',localRoster.archiveError,'availability-note'));
     const rail=document.getElementById('bot-roster-links');if(rail)rail.replaceChildren();
     const groups=[...new Set(roster.list().map(b=>b.group))];
     for(const group of groups){
       directory.append(node('h2',group));if(rail)rail.append(node('p',group.toUpperCase(),'rail-label'));
       for(const bot of roster.list().filter(b=>b.group===group)){
         const row=node('article',undefined,'bot-profile-card');row.append(button(bot.name,'bot:'+bot.id,'record-trigger'),node('p',bot.role,'record-row-subtitle'),node('p',bot.instructions||'No instructions yet.','directory-note'),node('span',!heldProjection(runtimeCurrent)?'Runtime status unavailable':registeredBot(runtimeCurrent,bot.id)?'Registered in runtime':'Local conversational profile','status-chip'));
+        if(bot.id!=='assistant'){const archive=node('button','Archive','subtle');archive.type='button';archive.dataset.archiveBot=bot.id;archive.addEventListener('click',()=>onArchive(bot.id));row.append(archive);}
         directory.append(row);
         if(rail){const link=button('','bot:'+bot.id,'nav-item bot-roster-link');const copy=node('span',bot.name);copy.append(node('small',bot.role));link.append(copy);link.classList.toggle('on',current()?.id===bot.id);rail.append(link);}
+      }
+    }
+    const retired=retiredProfiles();
+    if(retired.length){
+      directory.append(node('h2','Archived bots'),node('p','Archived profiles keep their id and their saved conversations. Restore one to bring it back to the directory, the rail and the conversation filter exactly as it was.','screen-description'));
+      for(const bot of retired){
+        const row=node('article',undefined,'bot-profile-card archived-bot-card');
+        const restore=node('button','Restore','subtle');restore.type='button';restore.dataset.restoreBot=bot.id;restore.addEventListener('click',()=>onRestore(bot.id));
+        row.append(node('p',bot.name,'record-row-title'),node('p',bot.role,'record-row-subtitle'),node('span','Archived · local profile','status-chip'),restore);
+        directory.append(row);
       }
     }
   }
