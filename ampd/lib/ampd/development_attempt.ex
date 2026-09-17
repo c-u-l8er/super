@@ -319,6 +319,28 @@ defmodule Ampd.DevelopmentAttempt do
   @inline_draft 24_000
   @inline_proposed 32_000
 
+  # How much review material one world may retain, in total.
+  #
+  # 64 KiB was too small to be usable: `Ampd.CommandSpec` admits a single
+  # attempt of 24 000 + 32 000 bytes of file text, so one real review could
+  # exceed the whole directory, and recording an 18 KB file against a
+  # directory already holding 46 715 bytes was refused outright.
+  #
+  # It cannot simply be made large either. `Ampd.Frame` caps ONE frame at
+  # 256 KiB and the whole projection travels as one frame; `encode!/1` turns
+  # an oversized projection into a refusal, so the app goes blind rather than
+  # stale. The bound, from the live world:
+  #
+  #     development_attempts   131 072   this cap
+  #     development_tasks       65 536   its own cap, development_task.ex
+  #     everything else         16 318   measured
+  #     --------------------------------
+  #     worst case             212 926   under the 262 144 frame cap
+  #
+  # About 49 KB of headroom. 160 KiB would leave about 22 KB and is too tight.
+  # The 50-attempt count cap above still bounds how many records there can be.
+  @directory_bytes 128 * 1024
+
   def set_limit, do: @max_members * Ampd.ReviewContent.file_bytes()
 
   defp staged?(row), do: is_map(row) and Map.keys(row) == ["source"]
@@ -1251,15 +1273,15 @@ defmodule Ampd.DevelopmentAttempt do
       |> Kernel.*(4608)
 
     # Bound serialized bytes too: control characters can expand in JSON frames.
-    with {:ok, _} <- Ampd.Frame.logical_size(attempts, 64 * 1024),
+    with {:ok, _} <- Ampd.Frame.logical_size(attempts, @directory_bytes),
          {:ok, encoded} <- Ampd.Frame.encode(attempts),
-         true <- byte_size(encoded) + reserved <= 64 * 1024 do
+         true <- byte_size(encoded) + reserved <= @directory_bytes do
       {:ok, record, Map.put(s, "development_attempts", attempts)}
     else
       _ ->
         refuse(
           "attempt-directory-full",
-          "Review material exceeds this world's 64 KB limit. Existing records are preserved."
+          "Review material exceeds this world's #{div(@directory_bytes, 1024)} KB limit. Existing records are preserved."
         )
     end
   end

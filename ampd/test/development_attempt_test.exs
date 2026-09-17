@@ -236,7 +236,11 @@ defmodule Ampd.DevelopmentAttemptTest do
 
   test "JSON expansion is bounded before saving review material", c do
     f = fields(c)
-    draft = String.duplicate(<<1>>, 18000)
+    # 24 000 is the largest shared_draft CommandSpec admits, and each control
+    # byte becomes a six-character JSON escape: 144 000 encoded against a
+    # 131 072 budget, while the logical size stays far under it. That contrast
+    # is the test - the encoded check is what catches this, not the logical one.
+    draft = String.duplicate(<<1>>, 24000)
 
     source =
       f["source"]
@@ -272,7 +276,7 @@ defmodule Ampd.DevelopmentAttemptTest do
     s =
       Loci.initial()
       |> Map.put("development_attempts", %{
-        a["id"] => Map.put(a, "criteria", String.duplicate("x", 65536))
+        a["id"] => Map.put(a, "criteria", String.duplicate("x", 140_000))
       })
 
     assert {:refused, %{"code" => "attempt-directory-full"}} =
@@ -530,7 +534,10 @@ defmodule Ampd.DevelopmentAttemptTest do
       Loci.initial()
       |> put_in(
         ["development_attempts", a["id"]],
-        Map.put(before, "criteria", String.duplicate("x", 30000))
+        # Sized so the RESERVE is what refuses it: 8 started runs hold back
+        # 8 x 4608 = 36 864 bytes, and 100 000 of criteria encodes well under
+        # the 131 072 budget on its own but not once the reserve is counted.
+        Map.put(before, "criteria", String.duplicate("x", 100_000))
       )
 
     assert {:refused, _} =
