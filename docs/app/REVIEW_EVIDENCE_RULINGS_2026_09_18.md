@@ -212,7 +212,7 @@ The live `loci` store, read with `:dets` from a copy, before and after:
 
 | | before (18:21 backup) | after the open | after the round |
 |---|---|---|---|
-| `development_attempts` as JSON | 130 720 (8 records) | 30 881 (8) | 42 079 (10, from the page) |
+| `development_attempts` as JSON | 130 720 (8 records) | 30 881 (8) | 42 079 (9, from the page) |
 | whole `loci` state as JSON | 183 595 | 85 277 | — |
 | `da_0062` (single file, accepted) | 43 567 | 6 268 | — |
 | `da_0030` (three-file inline set) | 30 631 | 3 384 | — |
