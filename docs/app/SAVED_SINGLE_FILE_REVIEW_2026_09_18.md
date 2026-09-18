@@ -75,3 +75,17 @@ and said so. This closes that gap through the page's own controls.
   needs `DEVELOPMENT_TEST_ROOT` and a confirm this box cannot do.
 * Acceptance after Save was not driven here; it is unchanged and
   `development-acceptance-smoke` covers it.
+
+## After the install — 2026-09-18 23:39Z
+
+Commit `b3c6f7e` (this change) and `48aa9d1` (the first-reply guard) were
+fast-forwarded into `~/build/super-review-content`, built there
+(`cargo build --release`, 34.7 s), and installed as `super-desktop` after
+`~/build/backup-world.sh` (`default-20260918T233855Z`): MainPID's `/proc/<pid>/exe`
+is the worktree's `super-cockpit`, sha256 `1be00b791212054f…`; gateway 4318 → 200,
+Expo 8081 → 200, connector 4320 → 403 without the identity header, as before.
+Driven from the installed checkout on that binary: `saved-file-review-resume`
+**13 held · 0 failed**, `plan-steps` 9/9. From the source clone before the
+install (binary `7c615270…`): saved-file-review-resume 13/13, plan-steps 9/9,
+palette-records 12/12, reference-text 55/55, registered-repository 19/19.
+The unit's journal since the restart carries no error line.
