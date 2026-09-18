@@ -1,5 +1,5 @@
 import {initMobileConversationBridge} from './mobile-conversation-bridge.js';
-import {conversationReply,titleInstruction,streamingReply} from './conversation-title.js';
+import {conversationReply,titleInstruction,streamingReply,emptyFirstReply} from './conversation-title.js';
 import {beginTaskActivity,observeTaskActivity,replyFailure} from './task-activity.js';
 import {initBotActivity} from './bot-activity.js';
 import {REVIEW_FILE_BYTES,REVIEW_FILE_LABEL} from './review-limits.js';
@@ -289,6 +289,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     if(messages.length>=44){status.textContent='Start a new conversation to continue.';return;}
     const wantsTitle=!conversationId||history.list(selected).find(c=>c.id===conversationId)?.titleSource==='fallback';
     if(!conversationId&&!saveCurrent())return;
+    const sentConversation=conversationId;
     const frame=live(),origin=worldKey(frame),workspace=selectedWorkspace();
     const turnContext=context();
     const sentBot={id:bot.id,name:bot.name,role:bot.role,instructions:bot.instructions};
@@ -309,6 +310,11 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     try {
       const reply=await invoke('bot_chat' ,{onEvent,turn:{expected_model:sentActive.model,request_id:requestId,provider:sentActive.provider,messages:[...messages],context:turnContext,bot_instructions:`Name: ${sentBot.name}\nRole: ${sentBot.role}\n${sentBot.instructions}\n${wantsTitle?titleInstruction:''}`,effort:sentEffort||null}});
       const titled=conversationReply(reply.text,wantsTitle);reply.text=titled.text;
+      if(wantsTitle&&emptyFirstReply(titled,reply.actions)){
+        // Measured 2026-09-18 (opus[1m]/xhigh, first reply of a new conversation): the structured text was the requested header alone — `<conversation-title>…` never closed, 78 bytes, no note, no action — and the page landed it as "Reply received." with nothing to review; the same request resent in the now-titled conversation answered in 92 s. So the title (closed or not) is kept, the turn fails like any other with the draft restored, and the resend does not ask for a title again.
+        try{storeFor(sentBot.id).update(sentProvider,sentConversation,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* The refusal below stands without the title. */}
+        throw Error(`The reply stopped at its title header and carried no answer and no proposal. Your message is restored — send it again in this conversation.`);
+      }
       observeTaskActivity(activityId,{type:'finish',text:reply.text||''});
       if(!turns.owns({botId:bot.id,provider:selected,conversationId})){
         const done=turns.finish(token);clearTimeout(replyPoll);if(done)landReply(done,{reply,titled,sentLabel,wantsTitle});conversationSidebar?.render();return;
