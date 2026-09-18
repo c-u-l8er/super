@@ -141,6 +141,8 @@ dialog::backdrop { background:#030915aa; }
 /* Reference labels preserve a visible interaction affordance. */
 a[data-record-ref] { color:var(--ice); text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; }
 a[data-record-ref]:hover { text-decoration-style:solid; }
+/* The same reference inside a button or summary: identity and tooltip, no nested link. */
+.record-ref { text-decoration:underline; text-decoration-style:dotted; text-underline-offset:3px; cursor:help; }
 .workspace-delete { margin:0 14px 12px; color:var(--gone); }
 #delete-workspace-dialog { max-width:520px; }
 #delete-workspace-dialog button { margin:12px 12px 0 0; }

@@ -1,13 +1,21 @@
 import {initConversations} from '/conversations.js';
 import {taskProgress} from '/task-progress.js';
+import {referenceText,setReferenceFrame,setReferenceRouting} from './references.js';
 const $=s=>document.querySelector(s), content=$('#content'), notice=$('#notice');
 let current=null,view='attention',selected=null,busy=false,paired=false,lastSuccess=0,serial=0,lastWorld=null;
-const node=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;};
+/* The same reference rule as the desktop (cockpit/ui/references.js): a record
+ * id in any text is a reference. The phone shows the id and puts the name in
+ * the tooltip; it can open a plan (or an attempt's plan), so only those two
+ * kinds render as links — the rest are tooltip spans. */
+const PLAIN_TEXT_TAGS=new Set(['pre','code','textarea','input','select','option']);
+setReferenceRouting(kind=>kind==='Development plan'||kind==='Review attempt');
+const node=(tag,text,cls)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined){if(PLAIN_TEXT_TAGS.has(tag))e.textContent=text;else referenceText(e,text,undefined,{display:'id'});}return e;};
+content.addEventListener('click',e=>{const a=e.target.closest('a[data-record-ref]');if(!a)return;e.preventDefault();const p=current?.projection,id=a.dataset.recordRef;const task=p?.development_tasks?.[id]??p?.development_tasks?.[p?.development_attempts?.[id]?.task_ref];if(!task)return;selected=task.id;view='tasks';render();});
 const button=(label,fn,cls)=>{const e=node('button',label,cls);e.onclick=fn;return e;};
 const rows=p=>Object.values(p?.development_tasks??{});
 const attentionStates=new Set(['blocked','needs_changes','checks_missing','checks_attention','decision','finish']);
 const api=async(path,body)=>{const r=await fetch('/api/'+path,{method:body?'POST':'GET',headers:body?{'Content-Type':'application/json'}:{},body:body?JSON.stringify(body):undefined,cache:'no-store',signal:AbortSignal.timeout(4000)});const v=await r.json();if(!r.ok){const e=Error(v.error);e.status=r.status;throw e;}return v;};
-function withdraw(message){current=null;$('#status').textContent=message;render();}
+function withdraw(message){current=null;setReferenceFrame(null);$('#status').textContent=message;render();}
 const linkedTask=link=>current?.available&&JSON.stringify([current.world?.world_incarnation,current.world?.world_generation])===link.lineage&&current.projection?.development_tasks?.[link.taskId]?.revision===link.revision?current.projection.development_tasks[link.taskId]:null;
 const chat=initConversations(document.querySelector('#conversations'),()=>view==='chat'&&paired,{taskInfo:linkedTask,onTask:link=>{if(!linkedTask(link))return;selected=link.taskId;view='tasks';render();}});
 function render(){
@@ -48,7 +56,7 @@ function render(){
     content.append(node('p','Closing this page does not stop the host. This alpha needs desktop Super to remain open.','muted'),button('Disconnect this device',async()=>{serial++;try{await api('logout',{});paired=false;current=null;selected=null;lastWorld=null;content.replaceChildren();$('#app').hidden=true;$('#pair').hidden=false;notice.textContent='Device disconnected. In desktop Super, open Mobile device and choose New pairing code to connect again.';}catch{withdraw('Disconnect not confirmed');notice.textContent='Could not confirm disconnection. Restore the connection and try again, or restart the desktop observer to end all device sessions.';}}));
   }
 }
-async function refresh(){if(busy)return;busy=true;const request=serial;try{const next=await api('snapshot');if(request!==serial||document.hidden)return;paired=true;$('#pair').hidden=true;$('#app').hidden=false;const identity=w=>JSON.stringify([w?.world_incarnation,w?.world_generation,w?.projection_epoch]);const nextWorld=next.available?identity(next.world):null;const changed=lastWorld&&nextWorld&&lastWorld!==nextWorld;if(nextWorld)lastWorld=nextWorld;const redraw=JSON.stringify(current)!==JSON.stringify(next);current=next;lastSuccess=Date.now();$('#status').textContent=next.available?'● Connected':'Host reconnecting';if(next.available)notice.textContent='';if(changed)selected=null;if(redraw)render();}catch(e){if(request!==serial)return;if(e.status===401){if(paired)notice.textContent='This session ended. Ask desktop Super for a new pairing code.';paired=false;$('#app').hidden=true;$('#pair').hidden=false;current=null;selected=null;lastWorld=null;content.replaceChildren();}else{withdraw('Disconnected');if(paired)notice.textContent='The connection was interrupted. We’ll retry while this page is open.';}}finally{busy=false;}}
+async function refresh(){if(busy)return;busy=true;const request=serial;try{const next=await api('snapshot');if(request!==serial||document.hidden)return;paired=true;$('#pair').hidden=true;$('#app').hidden=false;const identity=w=>JSON.stringify([w?.world_incarnation,w?.world_generation,w?.projection_epoch]);const nextWorld=next.available?identity(next.world):null;const changed=lastWorld&&nextWorld&&lastWorld!==nextWorld;if(nextWorld)lastWorld=nextWorld;const redraw=JSON.stringify(current)!==JSON.stringify(next);current=next;setReferenceFrame(next.available?next:null);lastSuccess=Date.now();$('#status').textContent=next.available?'● Connected':'Host reconnecting';if(next.available)notice.textContent='';if(changed)selected=null;if(redraw)render();}catch(e){if(request!==serial)return;if(e.status===401){if(paired)notice.textContent='This session ended. Ask desktop Super for a new pairing code.';paired=false;$('#app').hidden=true;$('#pair').hidden=false;current=null;selected=null;lastWorld=null;content.replaceChildren();}else{withdraw('Disconnected');if(paired)notice.textContent='The connection was interrupted. We’ll retry while this page is open.';}}finally{busy=false;}}
 $('#pair-form').onsubmit=async e=>{e.preventDefault();serial++;try{await api('pair',{code:$('#code').value.replace(/\s/g,'')});$('#code').value='';notice.textContent='';paired=true;await refresh();}catch(e){notice.textContent=e.message;}};
 $('#refresh').onclick=()=>{notice.textContent='';refresh();};
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;selected=null;render();});

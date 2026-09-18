@@ -1,3 +1,4 @@
+import {referenceText} from './references.js';
 import {conversationGroups,conversationKey,conversationStatus,readTracker} from './conversation-list.js';
 import {conversationIdentity,holdingHint,sameConversation} from './conversation-turns.js';
 // Small, text-only Markdown subset. HTML, images and URLs remain inert text.
@@ -27,7 +28,8 @@ export function messageSpans(text){
  flush();return parts;
 }
 
-const el=(tag,text)=>{const n=document.createElement(tag);if(text!=null)n.textContent=text;return n;};
+/* Chat text follows the desktop's reference rule: a record id is a reference. */
+const el=(tag,text)=>{const n=document.createElement(tag);if(text!=null){if(tag==='pre'||tag==='code'||tag==='textarea'||tag==='input'||tag==='option')n.textContent=text;else referenceText(n,text,undefined,{display:'id'});}return n;};
 export function initConversations(root,visible,{taskInfo=()=>null,onTask=()=>{}}={}){
  let discussion=null;const tracker=readTracker(localStorage,'super-mobile-read-v1');
  const filterBot=el('select'),sort=el('select');filterBot.setAttribute('aria-label','Filter by bot');sort.setAttribute('aria-label','Sort conversations');for(const [value,label] of [['recent','Most recent'],['bot','Group by bot']]){const o=el('option',label);o.value=value;sort.append(o)}

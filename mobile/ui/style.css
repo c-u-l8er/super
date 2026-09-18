@@ -22,3 +22,4 @@ body.chat-mode{height:100dvh;overflow:hidden}body.chat-mode>header{display:none}
 .chat-list-row{display:block;width:100%;text-align:left;border:0;border-bottom:1px solid #303a29;border-radius:6px;background:transparent;padding:14px 10px}.chat-list-row small{display:block;margin-top:5px;color:#a2ae98}.chat-list-row .chat-unread{color:#c8f581}.chat-panel select{width:100%;padding:10px;background:#252e20;color:#e7ecdf;border:1px solid #47573a;border-radius:8px}
 
 .chat-list-row small[data-state=Generating]::before,.chat-list-row small[data-state=Waiting]::before{content:'◌ ';animation:chat-pulse 1s ease-in-out infinite}@keyframes chat-pulse{50%{opacity:.35}}@media(prefers-reduced-motion:reduce){.chat-list-row small::before{animation:none!important}}
+a[data-record-ref]{color:#c9ee80;text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}.record-ref{text-decoration:underline;text-decoration-style:dotted;text-underline-offset:3px}

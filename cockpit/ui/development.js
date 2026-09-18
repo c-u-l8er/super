@@ -14,9 +14,13 @@ import {codeEditor} from './vendor/code-editor.js';
 import {createBotRoster} from './bot-roster.js';
 import {navigate} from './app-shell.js';
 import {heldProjection,runtimeWorld,waitForBot} from './runtime-bots.js';
+import {referenceText} from './references.js';
 // Device-local work surfaces; runtime observations stay bound to their worker.
 export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageContent:putContent,current}) {
-  const el=(tag,text,cls)=>{const e=document.createElement(tag);if(text!==undefined)e.textContent=text;if(cls)e.className=cls;return e;};
+  // Same text rule as app-shell.js node(): a record id in prose is a reference; raw-data and form tags stay
+  // plain. Options here compose their own "name · ref" labels, so they stay exactly as written.
+  const PLAIN_TEXT_TAGS=new Set(['pre','code','textarea','input','select','option','script','style']);
+  const el=(tag,text,cls)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined){if(PLAIN_TEXT_TAGS.has(tag))e.textContent=text;else referenceText(e,text);}return e;};
   const button=(text,id,fn)=>{const b=el('button',text);b.type='button';b.id=id;b.onclick=fn;return b;};
   const recoveryStore=createWorkbenchRecovery(localStorage),initialRecovery=recoveryStore.snapshot(),recoveryBars={};
   let recoveryTimer=0,recoveryProblem=recoveryStore.error||'',projectReady=false,browserReady=false,shellReady=false,recovering=false;

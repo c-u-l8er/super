@@ -17,7 +17,7 @@ export function renderRecordPage({node,entry,frame,backLabel,detail}){
   const {record:r,key,label}=entry,p=frame.projection??{},info=describeRecord(r,key,label);
   page.dataset.recordKey=key;
   const header=node('header',undefined,'record-page-header');header.append(node('p',info.kind.toUpperCase(),'eyebrow'),node('h1',info.title));
-  const meta=node('div',undefined,'record-meta');if(info.id)meta.append(node('span',info.id,'record-id'));
+  const meta=node('div',undefined,'record-meta');if(info.id)meta.append(node('span',info.id,'record-id',{display:'id'}));
   if(info.status)meta.append(node('span',String(info.status).replaceAll('_',' '),'record-status'));header.append(meta);page.append(header);
   const actions=node('div',undefined,'record-actions');
   function action(label,intent,args,danger=false){const b=node('button',label,danger?'record-danger':'primary');b.type='button';b.dataset.intent=intent;b.dataset.args=JSON.stringify(args);if(danger)b.dataset.danger='true';return b;}
@@ -36,7 +36,7 @@ export function renderRecordPage({node,entry,frame,backLabel,detail}){
     plans.append(node('h2','Development plans'),node('p',`${open.length} open · ${completed.length} completed · ${cancelled.length} cancelled`,'availability-note'));
     /* development-tasks.js listens on document for [data-development-task]; the
      * button carries that key and needs nothing else to route. */
-    const planRow=({t,day})=>{const article=node('article',undefined,'plan-row');const b=node('button',t.title,'subtle');b.type='button';b.dataset.developmentTask=t.id;article.append(b,node('span',`${t.id} · rev ${t.revision} · ${String(t.status??'').replaceAll('_',' ')}`+(day?` · ${day}`:''),'record-row-subtitle'));return article;};
+    const planRow=({t,day})=>{const article=node('article',undefined,'plan-row');const b=node('button',t.title,'subtle');b.type='button';b.dataset.developmentTask=t.id;article.append(b,node('span',`${t.id} · rev ${t.revision} · ${String(t.status??'').replaceAll('_',' ')}`+(day?` · ${day}`:''),'record-row-subtitle',{display:'id'}));return article;};
     if(open.length&&(completed.length||cancelled.length))plans.append(node('h3','Open'));
     for(const x of open)plans.append(planRow(x));
     if(completed.length){plans.append(node('h3','Completed'));for(const x of completed)plans.append(planRow(x));}

@@ -1,7 +1,7 @@
 import {initRecordTabs} from './record-tabs.js';
 import { updateNavCounts } from './work-guidance.js';
 import { describeRecord, renderRecordPage } from './record-page.js';
-import { referenceText, readable, selectionText, reference, referenceWorld } from './references.js';
+import { referenceText, readable, selectionText, reference, referenceWorld, demoteNestedReferences } from './references.js';
 import {findRecords} from './record-finder.js';
 /* Presentation state only. Runtime facts remain inside the frame-owned world. */
 export const screens = [
@@ -53,7 +53,7 @@ export function syncWorkspacePicker(workspaces) {
   if (changed) {
     picker.replaceChildren();
     for (const w of desired) {
-      const option = node('option', w.id?`${w.name?.trim() || w.id} · ${w.id}`:w.name); option.textContent=w.id?`${w.name?.trim() || w.id} · ${w.id}`:w.name; option.value = w.id; picker.append(option);
+      const option = node('option', w.id?`${w.name?.trim() || w.id} · ${w.id}`:w.name); option.value = w.id; picker.append(option);
     }
   }
   picker.value = workspace; picker.disabled = false;
@@ -63,11 +63,21 @@ let recordRegistry=new Map(),currentRecord=null;const viewHistory=[];let history
 let plannedHeadings = 0;
 export function beginFrameLayout() { plannedHeadings = 0;recordRegistry=new Map(); }
 export function expectedHeadings() { return plannedHeadings; }
-export function node(tag, text, cls) {
+/* Tags whose text is raw data or a form value, never prose: an id inside a
+ * JSON dump or a text field stays exactly as written. Everything else goes
+ * through referenceText, so a record id anywhere on screen is a reference
+ * (link or tooltip) rather than plain text. `option` keeps its own labelling.
+ * tools/check-reference-text.mjs fails any new text path that bypasses this. */
+const PLAIN_TEXT_TAGS = new Set(['pre', 'code', 'textarea', 'input', 'select', 'script', 'style']);
+export function node(tag, text, cls, {display} = {}) {
   const n = document.createElement(tag);
   if (tag === 'h2') plannedHeadings += 1;
-  if (text !== undefined) {if (tag==='p') referenceText(n,text);else n.textContent=tag==='option'?selectionText(text):text;}
   if (cls) n.className = cls;
+  if (text !== undefined) {
+    if (tag === 'option') n.textContent = selectionText(text);
+    else if (PLAIN_TEXT_TAGS.has(tag)) n.textContent = text;
+    else referenceText(n, text, undefined, {display});
+  }
   return n;
 }
 export function panel(id) {
@@ -97,8 +107,10 @@ export function detail(record,key,label='View details') {
   registerRecord(record,key,label);const info=describeRecord(record,key,label);
   const row=node('section',undefined,'record-detail');row.dataset.detail=key;
   const button=node('button',undefined,'record-trigger');button.type='button';button.dataset.recordOpen=key;button.title=info.id??info.kind;
-  const copy=node('span',undefined,'record-row-copy');copy.append(node('span',info.title,'record-row-title'),node('span',[info.kind,info.status,info.id,record.host_name,record.goal_ref?readable(record.goal_ref):null,record.repository_ref?readable(record.repository_ref):null].filter(Boolean).join(' · '),'record-row-subtitle'));
-  button.append(copy,node('span','→','record-row-arrow'));button.setAttribute('aria-label',`Open ${info.kind.toLowerCase()}: ${info.title}${info.id?", "+info.id:""}`);row.append(button);return row;
+  const copy=node('span',undefined,'record-row-copy'),subtitle=node('span',undefined,'record-row-subtitle');copy.append(node('span',info.title,'record-row-title'),subtitle);
+  button.append(copy,node('span','→','record-row-arrow'));button.setAttribute('aria-label',`Open ${info.kind.toLowerCase()}: ${info.title}${info.id?", "+info.id:""}`);row.append(button);
+  // rendered after it sits inside the button, so the id becomes a tooltip span, not a nested link
+  referenceText(subtitle,[info.kind,info.status,info.id,record.host_name,record.goal_ref?readable(record.goal_ref):null,record.repository_ref?readable(record.repository_ref):null].filter(Boolean).join(' · '),undefined,{display:'id'});return row;
 }
 function snapshot(){return {screen:selected,record:currentRecord,workspace,scroll:document.getElementById('workspace-canvas').scrollTop};}
 function saveRoute(){if(historyIndex>=0)viewHistory[historyIndex]=snapshot();}
@@ -172,7 +184,10 @@ export function initShell() {
   document.addEventListener('click',event=>{
     const back=event.target.closest('[data-record-back]');if(back){travel(-1);return;}
     const trigger=event.target.closest('[data-record-open]');if(trigger){openRecord(trigger.dataset.recordOpen);return;}
-    const link=event.target.closest('a[data-record-ref]');if(link){event.preventDefault();const r=reference(link.dataset.recordRef);if(r)openRecord(r.key);return;}
+    const link=event.target.closest('a[data-record-ref]');if(link){event.preventDefault();const r=reference(link.dataset.recordRef);if(!r)return;
+      // plans and review attempts live on the Development tasks screen, not a record page; development-tasks.js answers this event
+      if(r.kind==='Development plan'||r.kind==='Review attempt'){document.dispatchEvent(new CustomEvent('open-development-task',{detail:{taskId:r.kind==='Development plan'?r.id:r.record.task_ref,attemptId:r.kind==='Review attempt'?r.id:null}}));return;}
+      openRecord(r.key);return;}
     const setup=event.target.closest('[data-setup-form]');if(setup){mode('nav');navigate('manage-work');const target=document.querySelector(`[data-id="${setup.dataset.setupForm}"]`);target?.scrollIntoView({block:'center'});target?.querySelector('input,select')?.focus();return;}
     const form=event.target.closest('[data-record-form]');if(form){
       workspace='';document.dispatchEvent(new Event('workspace-view-change'));mode('nav');navigate('manage-work');
@@ -246,7 +261,7 @@ export function initShell() {
     }
     if (records.length) results.append(node('p', 'Records', 'palette-group'));
     for (const r of records) {
-      const b = node('button', `${r.kind} · ${r.id} · ${r.title}` + (r.status ? ` · ${r.status}` : ''), 'palette-result');
+      const b = node('button', `${r.kind} · ${r.id} · ${r.title}` + (r.status ? ` · ${r.status}` : ''), 'palette-result', {display: 'id'});
       b.dataset.recordId = r.id; b.dataset.recordKind = r.kind;
       if (r.kind === 'Development plan' || r.kind === 'Review attempt') {
         // development-tasks.js already handles [data-development-task] on document; this click must bubble to it.
@@ -275,6 +290,8 @@ export function initShell() {
   document.addEventListener('keydown', e => {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); if (!dialog.open) open(); else dialog.close(); }
   });
+  // references built before their control existed (a title span appended into a button) become tooltip spans once the frame lands
+  document.addEventListener('runtime-view-rendered',()=>demoteNestedReferences(document.body));
   navigate(selected);
   document.dispatchEvent(new Event('shell-ready'));
 }

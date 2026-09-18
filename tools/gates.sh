@@ -76,6 +76,7 @@ gate "intent surface"     node tools/check-intent-surface.mjs
 gate "measurement prose"  node tools/check-measurement-prose.mjs
 gate "source hygiene"     node tools/check-source-hygiene.mjs
 gate "preview"            node tools/check-preview.mjs
+gate "reference text"     node tools/check-reference-text.mjs
 
 echo
 printf 'gates: %d held · %d failed · %d could not run\n' "$PASS" "$FAIL" "$SKIP"

@@ -65,7 +65,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     const head=node('div',undefined,'plan-head');head.dataset.planPanel='head';
     head.append(button('← All development plans',()=>show(null)));
     const focus=button('Focus on this task',()=>document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:task.id}})));focus.id='task-focus';head.append(focus);
-    head.append(node('h2',task.title),node('span',task.status,'status-chip'),node('p',`Plan ${task.id} · revision ${task.revision} · lane base: ${task.base_revision||'not selected'} (not a validated result)`,'availability-note'));
+    head.append(node('h2',task.title),node('span',task.status,'status-chip'),node('p',`Plan ${task.id} · revision ${task.revision} · lane base: ${task.base_revision||'not selected'} (not a validated result)`,'availability-note',{display:'id'}));
     const stepper=node('ol',undefined,'plan-steps');stepper.id='task-steps';stepper.setAttribute('aria-label','Plan steps');
     for(const s of plan.steps){const li=node('li',undefined,'plan-step');li.dataset.step=s.key;li.dataset.state=s.state;const b=node('button',s.label,'plan-step-button');b.type='button';b.disabled=s.state==='todo';b.setAttribute('aria-current',s.state==='current'||s.state==='blocked'?'step':'false');b.onclick=()=>{wizard.step=s.key;wizard.all=false;apply();};
       li.append(b,node('span',{done:'done',current:'now',blocked:'blocked',todo:'to do'}[s.state],'plan-step-state'));stepper.append(li);}
@@ -162,7 +162,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     for(const attempt of rows){
       const combined=attempt.schema==='development-review-set@1';
       const card=node('details',undefined,'development-attempt');card.dataset.attemptId=attempt.id;
-      card.append(node('summary',`${combined?attempt.files.length+' files · Combined review':attempt.source.path} · ${attempt.status.replaceAll('_',' ')} · ${attempt.id}`));
+      card.append(node('summary',`${combined?attempt.files.length+' files · Combined review':attempt.source.path} · ${attempt.status.replaceAll('_',' ')} · ${attempt.id}`,undefined,{display:'id'}));
       card.append(node('p',`Recorded against plan revision ${attempt.task_revision}; current plan revision ${task.revision}. Review revision ${attempt.revision}.`,'availability-note'),node('p',attempt.criteria));
       const material=node('details');material.append(node('summary','Retained source and proposed text'));
       const retained=combined?attempt.files:[attempt];
@@ -286,7 +286,18 @@ export function initDevelopmentTasks({invoke,actions,current}){
   }
   document.addEventListener('continue-development-task',e=>{const task=heldProjection(current)?.development_tasks?.[e.detail.taskId];if(!task)return;botFilter='';signature='';refresh();show(task);navigate('development-tasks',true);details.querySelector('[data-task-next-action] button')?.click();});
   all.onclick=()=>{botFilter='';signature='';refresh();};
-  document.addEventListener('click',e=>{const b=e.target.closest('[data-development-task]');if(!b)return;const task=heldProjection(current)?.development_tasks?.[b.dataset.developmentTask];if(!task)return;botFilter='';signature='';refresh();show(task);navigate('development-tasks',true);});
+  /* One route for every way a plan is reached by id — a [data-development-task]
+   * control (record pages, the palette) or a plan/attempt reference link
+   * (app-shell.js dispatches open-development-task). An attempt id opens its
+   * card, switching the wizard to every section when the step hides it. */
+  function reveal(taskId,attemptId){
+    const task=heldProjection(current)?.development_tasks?.[taskId];if(!task)return false;
+    botFilter='';signature='';refresh();show(task);navigate('development-tasks',true);
+    if(attemptId){let card=details.querySelector(`[data-attempt-id="${attemptId}"]`);if(card&&card.closest('[data-plan-panel]')?.hidden){wizard.all=true;show(task);card=details.querySelector(`[data-attempt-id="${attemptId}"]`);}if(card){card.open=true;card.scrollIntoView({block:'center'});card.querySelector('summary')?.focus();}}
+    return true;
+  }
+  document.addEventListener('click',e=>{const b=e.target.closest('[data-development-task]');if(!b)return;reveal(b.dataset.developmentTask,b.dataset.attemptId||null);});
+  document.addEventListener('open-development-task',e=>{reveal(e.detail?.taskId,e.detail?.attemptId||null);});
   document.addEventListener('open-development-tasks',e=>{botFilter=e.detail?.bot||'';signature='';refresh();navigate('development-tasks',true);});
   document.addEventListener('runtime-view-rendered',refresh);document.addEventListener('workspace-view-change',()=>{show(null);refresh();});
   new MutationObserver(refresh).observe(document.getElementById('world'),{childList:true});refresh();
