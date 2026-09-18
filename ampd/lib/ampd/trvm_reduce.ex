@@ -33,7 +33,7 @@ defmodule Ampd.TrvmReduce do
 
   @allowlist %{
     "trvm.reduce" =>
-      ~w(term_sha256 nf_sha256 nf_bytes interactions worker_exited guardian_status sem scenario_digest epoch)
+      ~w(term_sha256 nf_sha256 nf_bytes interactions worker_exited job_retired guardian_status sem scenario_digest epoch)
   }
 
   @doc "The receipt-carried result fields a capability may carry; `[]` for all others."
@@ -56,7 +56,8 @@ defmodule Ampd.TrvmReduce do
   defp shaped?("nf_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
   defp shaped?("nf_bytes", v), do: is_integer(v) and v >= 1 and v <= @max_output
   defp shaped?("interactions", v), do: is_integer(v) and v >= 0 and v <= @max_interactions
-  defp shaped?("worker_exited", v), do: v == true
+  defp shaped?("worker_exited", v), do: is_boolean(v)
+  defp shaped?("job_retired", v), do: is_boolean(v)
   defp shaped?("guardian_status", v), do: v == 0
   defp shaped?("sem", v), do: is_binary(v) and String.starts_with?(v, "sem-")
   defp shaped?("scenario_digest", v), do: is_binary(v)
@@ -81,11 +82,11 @@ defmodule Ampd.TrvmReduce do
   Only a reaped child (`{:ok, ...}`) carrying a `candidate` with
   `workerExited: true` becomes a result.
   """
-  def result_from(
-        {:ok, %{candidate: %{"status" => "candidate", "workerExited" => true} = c}},
-        term,
-        params
-      ) do
+  def result_from({:ok, %{candidate: %{"status" => "candidate"} = c}}, term, params)
+      when :erlang.map_get("workerExited", c) == true or
+             :erlang.map_get("jobRetired", c) == true do
+    # The forward rule (TRVM resident README §6): a reaped one-shot worker (`workerExited: true`) OR a retired job id
+    # from a live resident worker (`jobRetired: true`). The receipt says which; the reference gate stays the honesty check.
     output = c["output"]
 
     unless is_binary(output), do: raise("trvm.reduce: host candidate without output")
@@ -96,7 +97,8 @@ defmodule Ampd.TrvmReduce do
         "nf_sha256" => sha256(output),
         "nf_bytes" => byte_size(output),
         "interactions" => c["interactions"],
-        "worker_exited" => true,
+        "worker_exited" => c["workerExited"] == true,
+        "job_retired" => c["jobRetired"] == true,
         "guardian_status" => 0,
         "sem" => params["sem"],
         "scenario_digest" => params["scenario_digest"],

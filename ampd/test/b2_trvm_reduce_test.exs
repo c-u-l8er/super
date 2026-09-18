@@ -1,5 +1,6 @@
 Code.require_file("../../tools/hypersurface/node_executor.exs", __DIR__)
 Code.require_file("../../tools/hypersurface/reducer_bridge.exs", __DIR__)
+Code.require_file("../../tools/hypersurface/resident_executor.exs", __DIR__)
 
 defmodule Ampd.B2TrvmReduceTest do
   @moduledoc """
@@ -215,6 +216,44 @@ defmodule Ampd.B2TrvmReduceTest do
     }
   end
 
+  # B2_TRVM_EXECUTOR=resident runs the same cases through the RESIDENT checked host (TRVM runtime/wasm/resident):
+  # one daemon per test, owned by the same guardian, jobs as frames; the warm-path barrier is `jobRetired`, not a
+  # worker exit (README §6's forward rule). Unset, the one-shot managed-Node executor of the witness.
+  defp resident?, do: System.get_env("B2_TRVM_EXECUTOR") == "resident"
+
+  defp start_bridge(timeout_ms \\ 3000) do
+    if resident?() do
+      c = config(timeout_ms)
+
+      {:ok, ex} =
+        HyperSurface.ResidentExecutor.start_link(%{
+          guardian: c.guardian,
+          node: c.node,
+          driver: Path.expand("../../tools/hypersurface/resident-serve.mjs", __DIR__),
+          host: Path.join(Path.dirname(c.host), "../resident/resident.mjs") |> Path.expand(),
+          scratch: c.scratch,
+          pool: 2
+        })
+
+      {:ok, server} =
+        Reducer.start_link({:managed_resident, %{executor: ex, timeout_ms: timeout_ms}})
+
+      Process.put(:resident_executor, ex)
+      {:ok, server}
+    else
+      Reducer.start_link({:managed_node, config(timeout_ms)})
+    end
+  end
+
+  defp stop_bridge(server) do
+    GenServer.stop(server)
+
+    case Process.delete(:resident_executor) do
+      nil -> :ok
+      ex -> HyperSurface.ResidentExecutor.stop(ex)
+    end
+  end
+
   defp await_take(server, peer, op, n \\ 0) do
     if n > 1_000_000, do: raise("poll budget exceeded")
 
@@ -364,9 +403,9 @@ defmodule Ampd.B2TrvmReduceTest do
   test "G1 · the 30-relay world, epoch 1: one effect, one receipt, the reference payload, Forge's film",
        ctx do
     [g] = grants!(1)
-    {:ok, server} = Reducer.start_link({:managed_node, config()})
+    {:ok, server} = start_bridge()
     r = perform(ctx, server, @world)
-    GenServer.stop(server)
+    stop_bridge(server)
     assert r["allow"], inspect(r)
 
     e = Effects.get(r["effect_id"])
@@ -379,7 +418,12 @@ defmodule Ampd.B2TrvmReduceTest do
     assert rc["effect_ref"] == e["id"] and r["receipt"]["id"] == rc["id"]
     assert rc["capability"] == @cap and rc["pack"] == "trvm@0.1" and rc["actor"] == "kestrel"
     assert rc["idempotency_key"] == e["idempotency_key"]
-    assert rc["worker_exited"] == true and rc["guardian_status"] == 0
+    assert rc["guardian_status"] == 0
+
+    if resident?(),
+      do: assert(rc["job_retired"] == true and rc["worker_exited"] == false),
+      else: assert(rc["worker_exited"] == true and rc["job_retired"] == false)
+
     assert rc["sem"] == @sem and rc["scenario_digest"] == @scenario_digest and rc["epoch"] == 1
     assert rc["interactions"] == reference(@world)["wasm_interactions"]
 
@@ -411,9 +455,9 @@ defmodule Ampd.B2TrvmReduceTest do
   test "F-K · managed deadline while reducing: adapter raises, UNKNOWN with crash_phase nil, no receipt",
        ctx do
     [g] = grants!(1)
-    {:ok, server} = Reducer.start_link({:managed_node, config(1)})
+    {:ok, server} = start_bridge(1)
     r = perform(ctx, server, @world)
-    GenServer.stop(server)
+    stop_bridge(server)
 
     refute r["allow"]
     assert r["reason"] =~ "effect-unknown"
@@ -439,7 +483,7 @@ defmodule Ampd.B2TrvmReduceTest do
   test "F-R · owner restart before commit: the reduction completes, the commit is stale, recovers UNKNOWN at ATTEMPTED",
        ctx do
     grants!(1)
-    {:ok, server} = Reducer.start_link({:managed_node, config()})
+    {:ok, server} = start_bridge()
     me = self()
     real = TrvmReduce.adapter(reducer(ctx, server, me), params(@world), term(@world))
 
@@ -466,7 +510,7 @@ defmodule Ampd.B2TrvmReduceTest do
 
     send(pid, :go)
     r = Task.await(task, 20_000)
-    GenServer.stop(server)
+    stop_bridge(server)
 
     refute r["allow"]
     assert r["reason"] =~ "effect-commit-refused · write-lease-stale"
@@ -527,6 +571,7 @@ defmodule Ampd.B2TrvmReduceTest do
           "nf_bytes" => byte_size(fake_output),
           "interactions" => 1,
           "worker_exited" => true,
+          "job_retired" => false,
           "guardian_status" => 0,
           "sem" => @sem,
           "scenario_digest" => @scenario_digest,
@@ -558,7 +603,7 @@ defmodule Ampd.B2TrvmReduceTest do
   test "F-Z · size refusals: a 0-byte term and a 65,537-byte term are refused by the host, UNKNOWN, no receipt",
        ctx do
     [g1, g2] = grants!(2)
-    {:ok, server} = Reducer.start_link({:managed_node, config()})
+    {:ok, server} = start_bridge()
 
     for {label, t, g} <- [{"empty", "", g1}, {"oversize", String.duplicate("x", 65_537), g2}] do
       p = %{
@@ -594,7 +639,7 @@ defmodule Ampd.B2TrvmReduceTest do
                " effect: " <> inspect(Map.take(e, ["id", "grant_ref", "state"]))
     end
 
-    GenServer.stop(server)
+    stop_bridge(server)
     assert Receipts.count() == 0
     listing = close_with_state_and_listing()
 
@@ -610,12 +655,12 @@ defmodule Ampd.B2TrvmReduceTest do
   test "F-I · the same request under two one-shot grants: two effects, one idempotency key, two receipts",
        ctx do
     [g1, g2] = grants!(2)
-    {:ok, server} = Reducer.start_link({:managed_node, config()})
+    {:ok, server} = start_bridge()
     r1 = perform(ctx, server, @world)
     {out1, _} = host_output()
     r2 = perform(ctx, server, @world)
     {out2, _} = host_output()
-    GenServer.stop(server)
+    stop_bridge(server)
     assert r1["allow"] and r2["allow"]
     e1 = Effects.get(r1["effect_id"])
     e2 = Effects.get(r2["effect_id"])
@@ -645,7 +690,7 @@ defmodule Ampd.B2TrvmReduceTest do
   test "S · the six spans over #{@spans_runs} sequential golden runs, exp 2^16 as the reduction control",
        ctx do
     grants!(@spans_runs)
-    {:ok, server} = Reducer.start_link({:managed_node, config()})
+    {:ok, server} = start_bridge()
 
     rows =
       for i <- 1..@spans_runs do
@@ -684,7 +729,7 @@ defmodule Ampd.B2TrvmReduceTest do
         %{"executor_ms" => (t1 - t0) / 1.0e6, "interactions" => c["interactions"]}
       end
 
-    GenServer.stop(server)
+    stop_bridge(server)
 
     # the floor: bare node, the driver and the host, no bridge, no guardian, no effect
     floor =

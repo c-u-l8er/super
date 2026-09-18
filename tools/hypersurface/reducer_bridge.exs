@@ -1,4 +1,5 @@
 Code.require_file("node_executor.exs", __DIR__)
+Code.require_file("resident_executor.exs", __DIR__)
 
 defmodule HyperSurface.ReducerBridge do
   @moduledoc """
@@ -139,6 +140,9 @@ defmodule HyperSurface.ReducerBridge do
         slot.stop_unconfirmed -> {:error, :stop_unconfirmed}
         slot.exited -> :ok
         slot.managed -> HyperSurface.NodeExecutor.cancel(slot.pid)
+        # the resident adapter answers :ok only on the host's own stop witness (workerExited after terminate,
+        # or jobRetired before the cancel arrived) or on the daemon's reaped status after a kill
+        slot.resident -> HyperSurface.ResidentJob.cancel(slot.pid)
         true -> :ok
       end
 
@@ -189,7 +193,10 @@ defmodule HyperSurface.ReducerBridge do
 
   def handle_info({:DOWN, monitor, :process, _, reason}, %{slot: %{monitor: monitor} = slot} = st) do
     result = if reason == :normal, do: slot.result, else: nil
-    uncertain = slot.managed and not slot.node_reaped
+
+    uncertain =
+      (slot.managed and not slot.node_reaped) or
+        (slot.resident and slot.resident_witness not in [:retired, :confirmed])
 
     slot = %{slot | result: result, exited: not uncertain, stop_unconfirmed: uncertain}
     {:noreply, %{st | slot: notify_ready(slot)}}
@@ -203,6 +210,28 @@ defmodule HyperSurface.ReducerBridge do
 
   def handle_info({:node_reaped, op}, %{slot: %{op: op} = slot} = st) do
     {:noreply, %{st | slot: %{slot | node_reaped: true}}}
+  end
+
+  # The resident job's three endings: a retired job id (the warm-path barrier, TRVM resident README §2), a stop the
+  # host or the kernel confirmed, or neither -- which is exactly the one-shot path's `stop_unconfirmed`.
+  def handle_info({:resident_retired, op}, %{slot: %{op: op} = slot} = st),
+    do: {:noreply, %{st | slot: %{slot | resident_witness: :retired}}}
+
+  def handle_info({:resident_confirmed, op}, %{slot: %{op: op} = slot} = st),
+    do: {:noreply, %{st | slot: %{slot | resident_witness: :confirmed}}}
+
+  def handle_info({:resident_unconfirmed, op}, %{slot: %{op: op} = slot} = st) do
+    {:noreply,
+     %{
+       st
+       | slot:
+           notify_ready(%{
+             slot
+             | result: nil,
+               stop_unconfirmed: true,
+               resident_witness: :unconfirmed
+           })
+     }}
   end
 
   def handle_info({:stop_unconfirmed, op}, %{slot: %{op: op} = slot} = st) do
@@ -283,6 +312,8 @@ defmodule HyperSurface.ReducerBridge do
               exited: false,
               cancelled: false,
               managed: match?({:managed_node, _}, executor),
+              resident: match?({:managed_resident, _}, executor),
+              resident_witness: nil,
               stop_unconfirmed: false,
               node_reaped: false,
               waiter: nil
@@ -297,6 +328,13 @@ defmodule HyperSurface.ReducerBridge do
     config = Map.put(config, :fence_key, lane)
 
     case HyperSurface.NodeExecutor.start(parent, op, input, config) do
+      {:ok, pid} -> {:ok, pid, Process.monitor(pid)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp start_executor({:managed_resident, config}, parent, op, input, _lane) do
+    case HyperSurface.ResidentJob.start(parent, op, input, config) do
       {:ok, pid} -> {:ok, pid, Process.monitor(pid)}
       {:error, reason} -> {:error, reason}
     end
