@@ -33,7 +33,7 @@ defmodule Ampd.Receipts do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state emit reset validation_start validation_outcome)a
+  @participant_mutations ~w(close_store load_state emit emit_ticketed fence_epoch fence_retire reset validation_start validation_outcome)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -52,6 +52,7 @@ defmodule Ampd.Receipts do
       {:sealed, reason} -> {:ok, %{tab: nil, s: sealed_state(), sealed: reason}}
     end
   end
+
   @doc """
   What a sealed registry serves: nothing. A sealed store's persisted
   truth is unknown or untrusted, so projecting `initial/0` would hand
@@ -66,7 +67,32 @@ defmodule Ampd.Receipts do
   def close_store, do: ask(:close_store)
   def load_state(s), do: ask({:load_state, s})
   def initial, do: %{"log" => [], "seq" => 7}
-  def emit(m), do: ask({:emit, m})
+
+  @doc """
+  Append a record.
+
+  **The mediated boundary (E3-1), stated exactly.** A record that names an
+  effect — `effect_ref` present — is that effect's receipt witness, and it
+  is appended ONLY through `emit/2` with a ticket the journal owner signed
+  for `emit_receipt` on that effect. `emit/1` refuses such a record
+  `write-unmediated`, in this process, before anything is written. A record
+  naming no effect (`worktree_created@1`, a validation record through its
+  typed admission, a test kind) is an ordinary ledger append and stays
+  unmediated: it attests to no effect and no listing reads it as one.
+  """
+  def emit(m) when is_map(m), do: ask({:emit, m})
+
+  @doc "The mediated append: `{:ok, record, witness}` or `{:refused, refusal@1}`. The row carries `landed_by` = the ticket."
+  def emit(ticket, m) when is_map(ticket) and is_map(m), do: ask({:emit_ticketed, ticket, m})
+
+  @doc "Journal-owner only: install this incarnation's fence (`Ampd.Fence`)."
+  def fence_epoch(epoch, key), do: ask({:fence_epoch, epoch, key})
+  @doc "This resource's fence as persisted — epoch and retired leases, never the key. A read."
+  def fence, do: ask(:fence)
+
+  @doc "Journal-owner only: retire a lease at this resource; replies with the landings held under it."
+  def fence_retire(lease_id, reason), do: ask({:fence_retire, lease_id, reason})
+
   @doc """
   **Every record of every kind, in append order.**
 
@@ -250,12 +276,15 @@ defmodule Ampd.Receipts do
         handle_ordered(msg, st)
     end
   end
+
   @impl true
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
+
   def handle_call(:close_store, _f, st) do
     if st.tab, do: :dets.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
+
   @doc """
   Append a record. **The store's identity is minted here and cannot be
   supplied.**
@@ -310,6 +339,74 @@ defmodule Ampd.Receipts do
   job that ran correctly and found a NUL byte. Each typed kind says what
   happened in its own vocabulary instead.
   """
+  def handle_call({:emit, %{"effect_ref" => ref} = m}, _f, %{s: s} = st) when ref != nil do
+    # E3-1: a record naming an effect is a mediated write. Refused here, by
+    # name, before the append — see `emit/1`.
+    {:reply,
+     {:refused,
+      Ampd.Fence.refusal(
+        s["fence"],
+        "write-unmediated",
+        "a receipt naming effect #{ref} must be appended through emit/2 with the journal owner's ticket",
+        nil,
+        "Ampd.Receipts"
+      )}, st}
+    |> then(fn r ->
+      _ = m
+      r
+    end)
+  end
+
+  def handle_call({:emit_ticketed, ticket, m}, _f, %{s: s} = st) do
+    target = if is_map(ticket), do: ticket["target"], else: nil
+
+    verdict =
+      with :ok <- Ampd.Fence.check(s["fence"], ticket, "emit_receipt", target) do
+        cond do
+          m["kind"] in protected_kinds() ->
+            {:refused, "write-unscoped", "kind #{m["kind"]} has its own typed admission"}
+
+          m["effect_ref"] not in [nil, target] ->
+            {:refused, "write-unscoped",
+             "the record names #{m["effect_ref"]}; the ticket targets #{target}"}
+
+          Enum.any?(s["log"], &(&1["effect_ref"] == target)) ->
+            {:refused, "write-duplicate", "a receipt for #{target} is already in the ledger"}
+
+          true ->
+            :ok
+        end
+      end
+
+    case verdict do
+      {:refused, code, why} ->
+        {:reply, {:refused, Ampd.Fence.refusal(s["fence"], code, why, ticket, "Ampd.Receipts")},
+         st}
+
+      :ok ->
+        {record, st} =
+          append(
+            st,
+            %{"kind" => @default_kind}
+            |> Map.merge(m)
+            |> Map.merge(%{"effect_ref" => target, "landed_by" => Ampd.Fence.witness_of(ticket)})
+          )
+
+        witness = %{
+          "ticket_id" => ticket["ticket_id"],
+          "proof" => Ampd.Fence.proof(s["fence"], ticket, "landed")
+        }
+
+        {:reply, {:ok, record, witness}, st}
+    end
+  end
+
+  def handle_call({:fence_epoch, _, _} = msg, from, st),
+    do: Ampd.Fence.handle_owner_call(msg, from, st, __MODULE__, &landed_under/2)
+
+  def handle_call({:fence_retire, _, _} = msg, from, st),
+    do: Ampd.Fence.handle_owner_call(msg, from, st, __MODULE__, &landed_under/2)
+
   def handle_call({:emit, m}, _f, st) do
     # **R0b.R·1.** `kind` is still the producer's — that is the whole point of
     # R2 — with exactly two exceptions, and they are exceptions because they
@@ -339,6 +436,17 @@ defmodule Ampd.Receipts do
   end
 
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["log"], st}
+
+  # A read of this resource's fence — epoch and retired set, never the key.
+  def handle_call(:fence, _f, %{s: s} = st),
+    do: {:reply, if(is_map(s["fence"]), do: Map.delete(s["fence"], "key"), else: nil), st}
+
+  defp landed_under(s, lease_id) do
+    s["log"]
+    |> Enum.map(& &1["landed_by"])
+    |> Enum.filter(&(is_map(&1) and &1["lease_id"] == lease_id))
+    |> Enum.map(&Map.put(&1, "op", "emit_receipt"))
+  end
 
   @doc false
   # The one place a row is minted. `id` and `seq` are applied LAST and are
@@ -466,8 +574,11 @@ defmodule Ampd.Receipts do
 
   def handle_ordered({:load_state, s}, st) do
     tab = st.tab || Ampd.Store.open!(@store)
-    {:reply, :ok, %{st | tab: tab, s: Ampd.Store.save(tab, s), sealed: nil}}
+
+    {:reply, :ok,
+     %{st | tab: tab, s: Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s)), sealed: nil}}
   end
 
-  def handle_ordered(:reset, %{tab: tab} = st), do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, initial())}}
+  def handle_ordered(:reset, %{tab: tab} = st),
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, Ampd.Fence.carry(initial(), st.s))}}
 end

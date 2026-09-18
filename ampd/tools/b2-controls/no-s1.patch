@@ -1,0 +1,15 @@
+# CONTROL no-s1: attempt/2 stops enforcing S-1: ATTEMPTED is journaled with the consumption outstanding (F9) -> L-3 sequencing-violated
+# Applied with `git apply`; the harness must FAIL and the verifier must go RED.
+diff --git a/ampd/lib/ampd/effects.ex b/ampd/lib/ampd/effects.ex
+index a9dfe4c..95adbc6 100644
+--- a/ampd/lib/ampd/effects.ex
++++ b/ampd/lib/ampd/effects.ex
+@@ -701,7 +701,7 @@ defmodule Ampd.Effects do
+       |> Enum.map(&Contract.op_of_store/1)
+       |> Enum.reject(&MapSet.member?(l.done, &1))
+ 
+-    if missing == [],
++    if true or missing == [],
+       do: :ok,
+       else:
+         {:refused,

@@ -39,6 +39,32 @@ defmodule Ampd.Ordered do
   def from_coordinator?(_), do: false
 
   @doc """
+  True when a `handle_call/3` `from` is the journal owner (`Ampd.Effects`).
+
+  The participant fence is the owner's projection onto a resource: only the
+  owner may move it, and it moves it from `init` — before any coordinator
+  transaction could carry the message — so the guard is "from the owner",
+  not "from the total order".
+  """
+  def from_journal_owner?({pid, _ref}) do
+    o = Process.whereis(Ampd.Effects)
+    o != nil and pid == o
+  end
+
+  def from_journal_owner?(_), do: false
+
+  @doc "The refusal a fence message gets when it does not come from the journal owner."
+  def owner_refusal(op, mod) do
+    Ampd.Refusal.new("fence-not-from-journal-owner",
+      component: inspect(mod),
+      retryable: false,
+      requires_human: false,
+      public_message: "Only the effect journal owner may move a participant's write fence.",
+      operator_detail: %{"operation" => inspect(op), "module" => inspect(mod)}
+    )
+  end
+
+  @doc """
   The refusal a mutation gets when the registry is sealed.
 
   This is why a sealed registry refuses rather than raising: the mutation

@@ -666,6 +666,13 @@ defmodule Ampd.Authority do
         pk = CapabilityRegistry.get(Core.pack_of(cap)) || %{}
         req = request || %{}
 
+        # T2. The branch is written here from `decide/4`'s own two booleans —
+        # whether consent is bound and whether the grant is one-shot — never
+        # from anything a caller supplied. The journal derives every
+        # obligation set from it.
+        branch =
+          Ampd.Effects.Contract.branch_of(auth["approval_ref"] != nil, auth["one_shot"] == true)
+
         e =
           Effects.propose(%{
             "effect_key" => auth["effect_key"],
@@ -676,7 +683,10 @@ defmodule Ampd.Authority do
             "resource" => resource,
             "request_id" => req["er"],
             "request_revision" => req["rev"] || 1,
-            "request" => req["params"]
+            "request" => req["params"],
+            "branch" => branch,
+            "grant_ref" => auth["grant_ref"],
+            "approval_ref" => auth["approval_ref"]
           })
 
         Effects.authorized(e["id"], %{
@@ -692,11 +702,32 @@ defmodule Ampd.Authority do
           {:error, why} ->
             {:refused, Map.merge(auth, %{"allow" => false, "reason" => why})}
 
-          {:ok, claimed} ->
-            # The lease begins here. Consent is spent only now, with the
-            # claim already durable and the order already held.
-            Gateway.consume!(auth)
-            {:claimed, auth, claimed}
+          {:refused, r} ->
+            {:refused,
+             Map.merge(auth, %{"allow" => false, "reason" => r["code"], "refusal" => r})}
+
+          {:ok, claimed, lease} ->
+            # The lease begins here — and since B2 it is an object the
+            # journal owner signed, not only a guarantee of the ordering.
+            # Consent is spent only now, with the claim already durable and
+            # the order already held, through tickets the participants
+            # verify themselves.
+            case Gateway.consume_leased!(auth, lease) do
+              :ok ->
+                {:claimed, auth, claimed, lease}
+
+              {:refused, r} ->
+                # A refused consumption cannot proceed and must not stay
+                # CLAIMED: FAILED, with the participants' acknowledgment.
+                Effects.fail(e["id"], "consumption-refused · " <> r["code"])
+
+                {:refused,
+                 Map.merge(auth, %{
+                   "allow" => false,
+                   "reason" => "consumption-refused · " <> r["code"],
+                   "refusal" => r
+                 })}
+            end
         end
       end
     end)

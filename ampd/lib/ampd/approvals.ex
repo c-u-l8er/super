@@ -16,7 +16,7 @@ defmodule Ampd.Approvals do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state push new_pending mark reset)a
+  @participant_mutations ~w(close_store load_state push new_pending mark mark_consumed fence_epoch fence_retire reset)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -59,6 +59,25 @@ defmodule Ampd.Approvals do
 
   def mark(id, status, reason \\ nil), do: ask({:mark, id, status, reason})
 
+  @doc """
+  The mediated consumption of consent (E3-1): the ticket must be the
+  journal owner's for `consume_approval` on this row; the row gains
+  `consumed_by` (the effect) and `consumed_witness` (the ticket) in the
+  same save as its status. `mark(id, "consumed")` remains the legacy,
+  unmediated arity for `Ampd.Conformance.authorize/4` and records no
+  witness. B3/B4 are not evidenced by the B2 experiment; this exists so
+  every branch takes the same lease.
+  """
+  def mark_consumed(ticket) when is_map(ticket), do: ask({:mark_consumed, ticket})
+
+  @doc "Journal-owner only: install this incarnation's fence (`Ampd.Fence`)."
+  def fence_epoch(epoch, key), do: ask({:fence_epoch, epoch, key})
+  @doc "This resource's fence as persisted — epoch and retired leases, never the key. A read."
+  def fence, do: ask(:fence)
+
+  @doc "Journal-owner only: retire a lease at this resource; replies with the landings held under it."
+  def fence_retire(lease_id, reason), do: ask({:fence_retire, lease_id, reason})
+
   def last_pending do
     all() |> Enum.reverse() |> Enum.find(&(&1["status"] == "pending"))
   end
@@ -66,7 +85,7 @@ defmodule Ampd.Approvals do
   def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
-  @ordered_ops [:push, :new_pending, :mark, :reset, :load_state]
+  @ordered_ops [:push, :new_pending, :mark, :mark_consumed, :reset, :load_state]
   @impl true
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
@@ -97,10 +116,76 @@ defmodule Ampd.Approvals do
 
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["approvals"], st}
 
+  # A read of this resource's fence — epoch and retired set, never the key.
+  def handle_call(:fence, _f, %{s: s} = st),
+    do: {:reply, if(is_map(s["fence"]), do: Map.delete(s["fence"], "key"), else: nil), st}
+
+  def handle_call({:fence_epoch, _, _} = msg, from, st),
+    do: Ampd.Fence.handle_owner_call(msg, from, st, __MODULE__, &landed_under/2)
+
+  def handle_call({:fence_retire, _, _} = msg, from, st),
+    do: Ampd.Fence.handle_owner_call(msg, from, st, __MODULE__, &landed_under/2)
+
+  defp landed_under(s, lease_id) do
+    s["approvals"]
+    |> Enum.map(& &1["consumed_witness"])
+    |> Enum.filter(&(is_map(&1) and &1["lease_id"] == lease_id))
+    |> Enum.map(&Map.put(&1, "op", "consume_approval"))
+  end
+
   # --- ordered implementations (reached only via the guard above) ----
   def handle_ordered({:load_state, s}, st) do
     tab = st.tab || Ampd.Store.open!(@store)
-    {:reply, :ok, %{st | tab: tab, s: Ampd.Store.save(tab, s), sealed: nil}}
+
+    {:reply, :ok,
+     %{st | tab: tab, s: Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s)), sealed: nil}}
+  end
+
+  def handle_ordered({:mark_consumed, ticket}, %{tab: tab, s: s} = st) do
+    target = if is_map(ticket), do: ticket["target"], else: nil
+    a = target && Enum.find(s["approvals"], &(&1["id"] == target))
+
+    verdict =
+      with :ok <- Ampd.Fence.check(s["fence"], ticket, "consume_approval", target) do
+        cond do
+          a == nil ->
+            {:refused, "write-unscoped", "no approval #{inspect(target)}"}
+
+          a["consumed_by"] != nil or a["status"] == "consumed" ->
+            {:refused, "write-duplicate", "#{target} is already consumed"}
+
+          true ->
+            :ok
+        end
+      end
+
+    case verdict do
+      {:refused, code, why} ->
+        {:reply, {:refused, Ampd.Fence.refusal(s["fence"], code, why, ticket, "Ampd.Approvals")},
+         st}
+
+      :ok ->
+        approvals =
+          Enum.map(s["approvals"], fn x ->
+            if x["id"] == target,
+              do:
+                Map.merge(x, %{
+                  "status" => "consumed",
+                  "consumed_by" => ticket["effect"],
+                  "consumed_witness" => Ampd.Fence.witness_of(ticket)
+                }),
+              else: x
+          end)
+
+        st = %{st | s: Ampd.Store.save(tab, %{s | "approvals" => approvals})}
+
+        witness = %{
+          "ticket_id" => ticket["ticket_id"],
+          "proof" => Ampd.Fence.proof(s["fence"], ticket, "landed")
+        }
+
+        {:reply, {:ok, witness}, st}
+    end
   end
 
   def handle_ordered({:push, m}, %{tab: tab, s: s} = st),
@@ -133,7 +218,7 @@ defmodule Ampd.Approvals do
   end
 
   def handle_ordered(:reset, %{tab: tab} = st),
-    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, initial())}}
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, Ampd.Fence.carry(initial(), st.s))}}
 
   # ------------------------------------------------ consent from elsewhere
   #

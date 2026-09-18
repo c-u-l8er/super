@@ -44,14 +44,18 @@ defmodule Ampd.Gateway do
         # agent has no business reading. It lives in operator_detail, and
         # `Ampd.Refusal.project_result/2` replaces it on the general
         # channel with the public message.
-        %{"allow" => false, "reason" => reason, "sealed" => true,
+        %{
+          "allow" => false,
+          "reason" => reason,
+          "sealed" => true,
           "refusal" =>
             Ampd.Refusal.new(code,
               component: inspect(mod),
               retryable: false,
               requires_human: true,
               operator_detail: %{"seal" => reason, "seals" => length(Ampd.seals())}
-            )}
+            )
+        }
     end
   end
 
@@ -109,14 +113,17 @@ defmodule Ampd.Gateway do
   # gaining a class — the drift that would put a resource name back into
   # an agent's hands.
   defp refuse(code, reason, detail, opts \\ []) do
-    %{"allow" => false, "reason" => reason,
+    %{
+      "allow" => false,
+      "reason" => reason,
       "refusal" =>
         Ampd.Refusal.new(code,
           component: "Ampd.Gateway",
           retryable: Keyword.get(opts, :retryable, false),
           requires_human: Keyword.get(opts, :requires_human, false),
           operator_detail: Map.put(detail, "reason", reason)
-        )}
+        )
+    }
   end
 
   defp do_decide(cap, resource, ctx, params_or_nil, mode) do
@@ -124,9 +131,11 @@ defmodule Ampd.Gateway do
 
     cond do
       pk == nil or pk["surface"] == nil ->
-        refuse("capability-undeclared",
+        refuse(
+          "capability-undeclared",
           "capability-undeclared · pack \"" <> Core.pack_of(cap) <> "\" declares no surface",
-          %{"pack" => Core.pack_of(cap)})
+          %{"pack" => Core.pack_of(cap)}
+        )
 
       # A DISCOVERED pack already declares its full surface — that is what
       # makes it browsable before you install it. `installation` was read
@@ -136,11 +145,16 @@ defmodule Ampd.Gateway do
       # unread, it ran the other way, and discovery conferred authority the
       # moment anyone granted against it.
       pk["installation"] not in ["installed", "builtin"] ->
-        refuse("pack-not-installed",
-          "pack-not-installed · " <> Core.pack_of(cap) <> " is " <> to_string(pk["installation"]) <>
+        refuse(
+          "pack-not-installed",
+          "pack-not-installed · " <>
+            Core.pack_of(cap) <>
+            " is " <>
+            to_string(pk["installation"]) <>
             " — a declared surface is not an installed one",
           %{"pack" => Core.pack_of(cap), "installation" => pk["installation"]},
-          requires_human: true)
+          requires_human: true
+        )
 
       true ->
         decl = pk["surface"][Core.cap_key(cap)]
@@ -148,16 +162,21 @@ defmodule Ampd.Gateway do
 
         cond do
           decl == nil ->
-            refuse("capability-undeclared",
+            refuse(
+              "capability-undeclared",
               "capability-undeclared · " <> cap <> " is not in the pack surface",
-              %{"capability" => cap, "pack" => Core.pack_of(cap)})
+              %{"capability" => cap, "pack" => Core.pack_of(cap)}
+            )
 
           decl["deny"] == true and
               not Enum.any?(grants, &(&1["status"] == "active" and &1["capability"] == cap)) ->
-            refuse("denied-by-default",
-              "denied-by-default · " <> cap <> " (class " <> decl["cls"] <> ") — narrow one-shot grants only",
+            refuse(
+              "denied-by-default",
+              "denied-by-default · " <>
+                cap <> " (class " <> decl["cls"] <> ") — narrow one-shot grants only",
               %{"capability" => cap, "class" => decl["cls"]},
-              requires_human: true)
+              requires_human: true
+            )
 
           true ->
             retired? = &Session.retired?/1
@@ -169,7 +188,8 @@ defmodule Ampd.Gateway do
                 # The code stored is the true one. `Ampd.Refusal.agent_code/1`
                 # is what decides whether an agent may read it.
                 refuse(code, Core.near_miss(grants, cap, resource, ctx, retired?), detail,
-                  requires_human: true)
+                  requires_human: true
+                )
 
               g ->
                 pl = Core.derive_placement(pk, g, ctx)
@@ -177,8 +197,13 @@ defmodule Ampd.Gateway do
                 cond do
                   pl["ok"] != true ->
                     Map.put(
-                      refuse("placement-denied", pl["reason"], %{"capability" => cap, "cited" => pl["cited"]}),
-                      "placement", pl)
+                      refuse("placement-denied", pl["reason"], %{
+                        "capability" => cap,
+                        "cited" => pl["cited"]
+                      }),
+                      "placement",
+                      pl
+                    )
 
                   decl["approval"] == "every_effect" ->
                     approval_path(cap, resource, ctx, params_or_nil, pk, g, pl, mode)
@@ -186,12 +211,21 @@ defmodule Ampd.Gateway do
                   true ->
                     req = params_or_nil || %{}
 
-                    %{"allow" => true, "grant_ref" => g["id"],
-                      "one_shot" => g["duration"] == "once", "placement" => pl,
+                    %{
+                      "allow" => true,
+                      "grant_ref" => g["id"],
+                      "one_shot" => g["duration"] == "once",
+                      "placement" => pl,
                       "authority_snapshot_at_entry" => GrantRegistry.snapshot(),
                       "effect_key" =>
-                        Core.effect_key(cap, resource, req["er"] || "er-" <> cap,
-                          req["rev"] || 1, req["params"])}
+                        Core.effect_key(
+                          cap,
+                          resource,
+                          req["er"] || "er-" <> cap,
+                          req["rev"] || 1,
+                          req["params"]
+                        )
+                    }
                 end
             end
         end
@@ -200,9 +234,11 @@ defmodule Ampd.Gateway do
 
   defp approval_path(cap, resource, ctx, request, pk, g, pl, mode) do
     if request == nil or request["params"] == nil do
-      refuse("request-missing",
+      refuse(
+        "request-missing",
         "request-missing · approval-class effects need an explicit intent — nothing hashes an empty request",
-        %{"capability" => cap})
+        %{"capability" => cap}
+      )
     else
       # Sampled once, before anything can be consumed: this is the
       # authority the effect is authorized *under*, and the value the
@@ -234,45 +270,67 @@ defmodule Ampd.Gateway do
       # assertion that pins the divergence to exactly these two fields.
       lin = Ampd.World.lineage() || %{}
 
-      env = %{"schema" => "approval-intent@1",
-              "effect_key" => ek,
-              "pack" => Core.pack_of(cap) <> "@" <> pk["version"],
-              "capability" => cap, "actor" => ctx["actor"], "resource" => resource,
-              "grant" => g["id"], "authority_snapshot" => snapshot,
-              "placement" => pl["site"],
-              "world_installation_id" => lin["installation_id"],
-              "world_generation" => lin["generation"],
-              "request_id" => er, "request_revision" => rev,
-              "request" => request["params"]}
+      env = %{
+        "schema" => "approval-intent@1",
+        "effect_key" => ek,
+        "pack" => Core.pack_of(cap) <> "@" <> pk["version"],
+        "capability" => cap,
+        "actor" => ctx["actor"],
+        "resource" => resource,
+        "grant" => g["id"],
+        "authority_snapshot" => snapshot,
+        "placement" => pl["site"],
+        "world_installation_id" => lin["installation_id"],
+        "world_generation" => lin["generation"],
+        "request_id" => er,
+        "request_revision" => rev,
+        "request" => request["params"]
+      }
 
       h = Core.intent_digest(env)
 
-      exact = Enum.find(Approvals.all(), fn a ->
-        a["status"] == "granted" and a["request_hash"] == h and
-          a["capability"] == cap and a["actor"] == ctx["actor"] and
-          a["grant_ref"] == g["id"] and a["pack_version"] == pk["version"] and
-          a["snapshot"] == snapshot and a["placement"] == pl["site"] and
-          a["world_installation_id"] == lin["installation_id"] and
-          a["world_generation"] == lin["generation"]
-      end)
+      exact =
+        Enum.find(Approvals.all(), fn a ->
+          a["status"] == "granted" and a["request_hash"] == h and
+            a["capability"] == cap and a["actor"] == ctx["actor"] and
+            a["grant_ref"] == g["id"] and a["pack_version"] == pk["version"] and
+            a["snapshot"] == snapshot and a["placement"] == pl["site"] and
+            a["world_installation_id"] == lin["installation_id"] and
+            a["world_generation"] == lin["generation"]
+        end)
 
       if exact do
-        %{"allow" => true, "grant_ref" => g["id"], "approval_ref" => exact["id"],
-          "request_hash" => h, "effect_key" => ek,
-          "one_shot" => g["duration"] == "once", "placement" => pl,
-          "authority_snapshot_at_entry" => snapshot, "intent_envelope" => env}
+        %{
+          "allow" => true,
+          "grant_ref" => g["id"],
+          "approval_ref" => exact["id"],
+          "request_hash" => h,
+          "effect_key" => ek,
+          "one_shot" => g["duration"] == "once",
+          "placement" => pl,
+          "authority_snapshot_at_entry" => snapshot,
+          "intent_envelope" => env
+        }
       else
         if mode == :preflight do
           # Eligible, but consent for this exact intent does not exist yet.
           # Reporting that is the whole job — opening the proposal belongs
           # to `request_effect`, and happens inside the order.
           Map.merge(
-            refuse("approval-required",
+            refuse(
+              "approval-required",
               "approval-required · consent for this exact intent does not exist yet",
-              %{"capability" => cap}, requires_human: true),
-            %{"requires_approval" => true,
-              "grant_ref" => g["id"], "request_hash" => h, "effect_key" => ek,
-              "placement" => pl, "authority_snapshot_at_entry" => snapshot}
+              %{"capability" => cap},
+              requires_human: true
+            ),
+            %{
+              "requires_approval" => true,
+              "grant_ref" => g["id"],
+              "request_hash" => h,
+              "effect_key" => ek,
+              "placement" => pl,
+              "authority_snapshot_at_entry" => snapshot
+            }
           )
         else
           Approvals.all()
@@ -281,20 +339,39 @@ defmodule Ampd.Gateway do
               a["capability"] == cap and get_in(a, ["envelope", "request_id"]) == er and
               a["request_hash"] != h
           end)
-          |> Enum.each(fn a -> Approvals.mark(a["id"], "stale", "proposal revised since consent") end)
+          |> Enum.each(fn a ->
+            Approvals.mark(a["id"], "stale", "proposal revised since consent")
+          end)
 
           pend =
-            Enum.find(Approvals.all(), fn a -> a["status"] == "pending" and a["request_hash"] == h end) ||
-              Approvals.new_pending(%{"request_hash" => h, "grant_ref" => g["id"],
-                "capability" => cap, "actor" => ctx["actor"], "pack_version" => pk["version"],
-                "snapshot" => snapshot, "placement" => pl["site"], "envelope" => env,
+            Enum.find(Approvals.all(), fn a ->
+              a["status"] == "pending" and a["request_hash"] == h
+            end) ||
+              Approvals.new_pending(%{
+                "request_hash" => h,
+                "grant_ref" => g["id"],
+                "capability" => cap,
+                "actor" => ctx["actor"],
+                "pack_version" => pk["version"],
+                "snapshot" => snapshot,
+                "placement" => pl["site"],
+                "envelope" => env,
                 "world_installation_id" => lin["installation_id"],
                 "world_generation" => lin["generation"],
-                "resource" => resource, "held_ctx" => ctx})
+                "resource" => resource,
+                "held_ctx" => ctx
+              })
 
-          %{"allow" => false, "held" => true, "approval_id" => pend["id"],
-            "grant_ref" => g["id"], "request_hash" => h, "effect_key" => ek,
-            "placement" => pl, "authority_snapshot_at_entry" => snapshot}
+          %{
+            "allow" => false,
+            "held" => true,
+            "approval_id" => pend["id"],
+            "grant_ref" => g["id"],
+            "request_hash" => h,
+            "effect_key" => ek,
+            "placement" => pl,
+            "authority_snapshot_at_entry" => snapshot
+          }
         end
       end
     end
@@ -310,6 +387,66 @@ defmodule Ampd.Gateway do
     if auth["approval_ref"], do: Approvals.mark(auth["approval_ref"], "consumed")
     if auth["one_shot"], do: GrantRegistry.consume_one_shot(auth["grant_ref"])
     :ok
+  end
+
+  @doc false
+  # The mediated consumption (E3-1): each required-at-claim write goes
+  # through a ticket the journal owner signs and the participant verifies.
+  # `:ok`, or the first `{:refused, refusal@1}`.
+  def consume_leased!(auth, lease) do
+    with :ok <-
+           consume_step(
+             auth["approval_ref"],
+             lease,
+             "consume_approval",
+             &Approvals.mark_consumed/1
+           ),
+         :ok <-
+           consume_step(
+             if(auth["one_shot"], do: auth["grant_ref"]),
+             lease,
+             "consume_grant",
+             &GrantRegistry.consume_one_shot/1
+           ) do
+      :ok
+    end
+  end
+
+  defp consume_step(nil, _lease, _op, _write), do: :ok
+
+  defp consume_step(target, lease, op, write) do
+    case ticketed(lease, op, target, write) do
+      {:ok, _} -> :ok
+      {:refused, r} -> {:refused, r}
+    end
+  end
+
+  @doc false
+  # One mediated write: authorise, present the ticket to the participant,
+  # report the participant's terminal to the journal owner with the
+  # participant's own proof. The report travels with THIS caller — a
+  # participant never calls the owner, which is what keeps the call graph
+  # acyclic.
+  def ticketed(lease, op, target, write) do
+    case Effects.authorize_write(lease, op, target) do
+      {:ok, t} ->
+        case write.(t) do
+          {:ok, w} ->
+            :ok = Effects.landed(t, w)
+            {:ok, nil}
+
+          {:ok, record, w} ->
+            :ok = Effects.landed(t, w)
+            {:ok, record}
+
+          {:refused, r} ->
+            Effects.refused(t, r["code"], get_in(r, ["operator_detail", "proof"]))
+            {:refused, r}
+        end
+
+      {:refused, r} ->
+        {:refused, r}
+    end
   end
 
   # ------------------------------------------------------------- perform
@@ -363,37 +500,78 @@ defmodule Ampd.Gateway do
       {:refused, auth} ->
         auth
 
-      {:claimed, auth, e} ->
-        {:ok, _e2, attempt} = Effects.attempt(e["id"], "none · no connector installed (C1.0b)")
+      {:claimed, auth, e, lease} ->
+        case Effects.attempt(lease, "none · no connector installed (C1.0b)") do
+          {:refused, r} ->
+            Map.merge(auth, %{
+              "allow" => false,
+              "effect_id" => e["id"],
+              "reason" => "effect-attempt-refused · " <> r["code"],
+              "refusal" => r
+            })
 
-        try do
-          result = adapter.(attempt)
-          Effects.commit(e["id"], result)
-          rcpt = emit_receipt(cap, auth, e["id"], attempt, ctx)
-          Map.merge(auth, %{"effect_id" => e["id"], "receipt" => rcpt})
-        rescue
-          # **A participant failure is not the adapter raising, and this
-          # rescue is wide enough to say it was.** `Effects.commit/2` and
-          # `emit_receipt/5` (via `Receipts.emit/1`) both cross the boundary
-          # now, so `Ampd.Participant.Failure` can arrive here and be
-          # relabelled "adapter raised" — factually false, and it collapses
-          # `:not_applied` (retryable, nothing was mutated) into UNKNOWN.
-          #
-          # Not live today: `perform/4` runs after `claim_and_consume/4`
-          # returns, deliberately outside the order (see the block comment
-          # above), where the boundary degrades to `GenServer.call` and
-          # exits rather than raising. It becomes live the day anyone puts
-          # this under a transaction, which is exactly when nobody will be
-          # looking at this rescue.
-          e2 in Ampd.Participant.Failure ->
-            reraise e2, __STACKTRACE__
-
-          err ->
-            Effects.unknown(e["id"], "adapter raised: #{Exception.message(err)}")
-
-            Map.merge(auth, %{"allow" => false, "effect_id" => e["id"],
-              "reason" => "effect-unknown · the adapter raised after ATTEMPTED was durable — outcome unresolved"})
+          {:ok, _e2, attempt} ->
+            perform_attempt(cap, auth, e, lease, attempt, ctx, adapter)
         end
+    end
+  end
+
+  defp perform_attempt(cap, auth, e, lease, attempt, ctx, adapter) do
+    try do
+      result = adapter.(attempt)
+
+      case Effects.commit(lease, result) do
+        {:refused, r} ->
+          # The lease ended under a running adapter — retired, or the
+          # journal owner restarted. The adapter ran; what the journal
+          # says about this effect is what retirement or recovery
+          # wrote, and it is not COMMITTED.
+          Map.merge(auth, %{
+            "allow" => false,
+            "effect_id" => e["id"],
+            "reason" =>
+              "effect-commit-refused · " <>
+                r["code"] <> " — the adapter ran; the outcome is the journal's, not this reply's",
+            "refusal" => r
+          })
+
+        _committed ->
+          case emit_receipt(cap, auth, e["id"], attempt, ctx, lease) do
+            {:ok, rcpt} ->
+              Map.merge(auth, %{"effect_id" => e["id"], "receipt" => rcpt})
+
+            {:refused, r} ->
+              # COMMITTED, and the receipt was refused: the listing reads
+              # this effect's receipt as MISSING, and says so.
+              Map.merge(auth, %{"effect_id" => e["id"], "receipt" => nil, "receipt_refusal" => r})
+          end
+      end
+    rescue
+      # **A participant failure is not the adapter raising, and this
+      # rescue is wide enough to say it was.** `Effects.commit/2` and
+      # `emit_receipt/5` (via `Receipts.emit/1`) both cross the boundary
+      # now, so `Ampd.Participant.Failure` can arrive here and be
+      # relabelled "adapter raised" — factually false, and it collapses
+      # `:not_applied` (retryable, nothing was mutated) into UNKNOWN.
+      #
+      # Not live today: `perform/4` runs after `claim_and_consume/4`
+      # returns, deliberately outside the order (see the block comment
+      # above), where the boundary degrades to `GenServer.call` and
+      # exits rather than raising. It becomes live the day anyone puts
+      # this under a transaction, which is exactly when nobody will be
+      # looking at this rescue.
+      e2 in Ampd.Participant.Failure ->
+        reraise e2, __STACKTRACE__
+
+      err ->
+        Effects.unknown(e["id"], "adapter raised: #{Exception.message(err)}")
+
+        Map.merge(auth, %{
+          "allow" => false,
+          "effect_id" => e["id"],
+          "reason" =>
+            "effect-unknown · the adapter raised after ATTEMPTED was durable — outcome unresolved"
+        })
     end
   end
 
@@ -403,21 +581,32 @@ defmodule Ampd.Gateway do
   # effect's own consumption has landed. A one-shot moves between them,
   # and the pair is the evidence: X authorized this, the effect consumed
   # its use, Y is what remains.
-  defp emit_receipt(cap, auth, effect_id, attempt, ctx) do
+  defp emit_receipt(cap, auth, effect_id, attempt, ctx, lease) do
     pk = Core.pack_of(cap)
     pv = (CapabilityRegistry.get(pk) || %{})["version"] || "0"
 
     # `actor` is on the receipt so a receipt can be projected to the actor
     # it belongs to. Without it the ledger is all-or-nothing: either every
     # agent reads every receipt on the machine, or none reads its own.
-    Receipts.emit(%{"actor" => ctx["actor"], "capability" => cap, "pack" => pk <> "@" <> pv,
-      "grant_ref" => auth["grant_ref"], "approval_ref" => auth["approval_ref"],
-      "approval_digest" => auth["request_hash"], "placement" => auth["placement"],
-      "effect_ref" => effect_id,
-      "effect_key" => auth["effect_key"],
-      "idempotency_key" => attempt["idempotency_key"],
-      "authority_snapshot_at_entry" => auth["authority_snapshot_at_entry"],
-      "authority_snapshot_after" => GrantRegistry.snapshot(),
-      "secret_material_exposed_to_engine" => false})
+    #
+    # Ticketed (E3-1): the ledger appends a receipt naming this effect only
+    # under the journal owner's ticket, and reports the landing back.
+    ticketed(lease, "emit_receipt", effect_id, fn t ->
+      Receipts.emit(t, %{
+        "actor" => ctx["actor"],
+        "capability" => cap,
+        "pack" => pk <> "@" <> pv,
+        "grant_ref" => auth["grant_ref"],
+        "approval_ref" => auth["approval_ref"],
+        "approval_digest" => auth["request_hash"],
+        "placement" => auth["placement"],
+        "effect_ref" => effect_id,
+        "effect_key" => auth["effect_key"],
+        "idempotency_key" => attempt["idempotency_key"],
+        "authority_snapshot_at_entry" => auth["authority_snapshot_at_entry"],
+        "authority_snapshot_after" => GrantRegistry.snapshot(),
+        "secret_material_exposed_to_engine" => false
+      })
+    end)
   end
 end
