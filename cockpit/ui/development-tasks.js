@@ -87,7 +87,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     if(plan.finishable){const draft=completionReason(p,task);if(draft&&!reason.value)reason.value=draft;complete.textContent='Approve and finish plan';complete.className='primary';
       section.append(node('h3','Finish this plan'),node('p','A tested result for this plan revision is accepted. The reason below was drafted from it — edit it or approve it as written. Finishing records your planning decision; it does not certify later source changes.','directory-note'),completionField,complete);
       next.after(section);}
-    else{complete.disabled=true;reason.disabled=true;reason.placeholder='Available once a tested result for this revision is accepted';
+    else{complete.hidden=true;reason.readOnly=true;reason.placeholder='Available once a tested result for this revision is accepted';
       section.append(node('h3','Finish this plan'),node('p',`Not yet: ${progress.label.toLowerCase()} first. Finishing needs an accepted result for the current plan revision with no open reviews or unfinished test runs.`,'directory-note'),completionField,complete);details.append(section);}
     if(plan.current==='prepare'&&!plan.cancelled)next.after(prepare);
     const finishRevision=task.revision;
