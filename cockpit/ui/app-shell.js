@@ -2,6 +2,7 @@ import {initRecordTabs} from './record-tabs.js';
 import { updateNavCounts } from './work-guidance.js';
 import { describeRecord, renderRecordPage } from './record-page.js';
 import { referenceText, readable, selectionText, reference, referenceWorld } from './references.js';
+import {findRecords} from './record-finder.js';
 /* Presentation state only. Runtime facts remain inside the frame-owned world. */
 export const screens = [
   ['continue-work', 'Continue work', 'One task and one next step.'],
@@ -233,14 +234,37 @@ export function initShell() {
   const results = document.getElementById('navigation-results');
   function updateResults() {
     results.textContent = '';
-    for (const [id, title] of screens.filter(s => s[1].toLowerCase().includes(search.value.toLowerCase()))) {
+    const pages = screens.filter(s => s[1].toLowerCase().includes(search.value.toLowerCase()));
+    const searched = search.value.trim().length >= 2;
+    // cockpit.js publishes the held frame as globalThis.cockpit.frame; this module has no other frame accessor.
+    const records = searched ? findRecords(globalThis.cockpit?.frame?.projection ?? null, search.value, {limit: 12}) : [];
+    if (records.length && pages.length) results.append(node('p', 'Pages', 'palette-group'));
+    for (const [id, title] of pages) {
       const b = node('button', title, 'palette-result');
       b.addEventListener('click', () => { dialog.close(); navigate(id, true); });
       results.append(b);
     }
-    if (!results.children.length) results.append(node('p', 'No matching pages.', 'empty'));
+    if (records.length) results.append(node('p', 'Records', 'palette-group'));
+    for (const r of records) {
+      const b = node('button', `${r.kind} · ${r.id} · ${r.title}` + (r.status ? ` · ${r.status}` : ''), 'palette-result');
+      b.dataset.recordId = r.id; b.dataset.recordKind = r.kind;
+      if (r.kind === 'Development plan' || r.kind === 'Review attempt') {
+        // development-tasks.js already handles [data-development-task] on document; this click must bubble to it.
+        if (r.route.task) b.dataset.developmentTask = r.route.task;
+        if (r.kind === 'Review attempt') b.dataset.attemptId = r.route.attempt;
+        b.addEventListener('click', () => { dialog.close(); if (workspace) { workspace = ''; document.dispatchEvent(new Event('workspace-view-change')); } });
+      } else {
+        b.addEventListener('click', () => { dialog.close(); const found = reference(r.route.record); if (found) openRecord(found.key); else navigate({Workspace:'positions', Goal:'goals', Lane:'lanes', Bot:'bots', Repository:'repositories', Worker:'runtime-assignments'}[r.kind] ?? 'mission', true); });
+      }
+      results.append(b);
+    }
+    if (!pages.length && !records.length) results.append(node('p', searched ? 'No matching pages or records.' : 'No matching pages.', 'empty'));
   }
-  function open() { search.value = ''; updateResults(); dialog.showModal(); search.focus(); }
+  function open() {
+    search.value = ''; search.placeholder = 'Find a page or record — dt_0052, a title, a bot…';
+    const title = document.getElementById('navigation-title'); if (title) title.textContent = 'Go to a page or record';
+    updateResults(); dialog.showModal(); search.focus();
+  }
   document.getElementById('open-navigation').addEventListener('click', open);
   document.getElementById('close-navigation').addEventListener('click', () => dialog.close());
   search.addEventListener('input', updateResults);

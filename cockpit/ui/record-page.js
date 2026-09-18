@@ -23,7 +23,26 @@ export function renderRecordPage({node,entry,frame,backLabel,detail}){
   function action(label,intent,args,danger=false){const b=node('button',label,danger?'record-danger':'primary');b.type='button';b.dataset.intent=intent;b.dataset.args=JSON.stringify(args);if(danger)b.dataset.danger='true';return b;}
   function form(label,field,value,focus){const b=node('button',label,'primary');b.type='button';b.dataset.recordForm=field;b.dataset.recordValue=value;b.dataset.recordFocus=focus;actions.append(b);}
   const relatedTasks=Object.values(p.development_tasks??{}).filter(t=>({Workspace:t.workspace_ref,Goal:t.goal_ref,Lane:t.lane_ref,Bot:t.bot_ref,Repository:t.repository_ref}[info.kind])===(r.id??r.ref));
-  if(relatedTasks.length){const plans=node('section');plans.append(node('h2','Development plans'));for(const t of relatedTasks){const b=node('button',`${t.title} · ${t.status}`,'subtle');b.type='button';b.dataset.developmentTask=t.id;plans.append(b);}page.append(plans);}
+  if(relatedTasks.length){
+    /* Cancelled and planned copies of one title used to sit side by side in
+     * insertion order, with no id, revision or date to tell them apart. Group
+     * by status, newest movement first, and fold the cancelled ones away. */
+    const rows=relatedTasks.map(t=>{const raw=t.history?.at?.(-1)?.at??'',last=typeof raw==='string'?raw:'';return {t,last,day:last.slice(0,10)};});
+    const rank=s=>s==='blocked'?0:s==='planned'?2:1,recent=(a,b)=>b.last.localeCompare(a.last);
+    const open=rows.filter(x=>!['completed','cancelled'].includes(x.t.status)).sort((a,b)=>rank(a.t.status)-rank(b.t.status)||recent(a,b)||String(a.t.id??'').localeCompare(String(b.t.id??'')));
+    const completed=rows.filter(x=>x.t.status==='completed').sort(recent);
+    const cancelled=rows.filter(x=>x.t.status==='cancelled').sort(recent);
+    const plans=node('section');
+    plans.append(node('h2','Development plans'),node('p',`${open.length} open · ${completed.length} completed · ${cancelled.length} cancelled`,'availability-note'));
+    /* development-tasks.js listens on document for [data-development-task]; the
+     * button carries that key and needs nothing else to route. */
+    const planRow=({t,day})=>{const article=node('article',undefined,'plan-row');const b=node('button',t.title,'subtle');b.type='button';b.dataset.developmentTask=t.id;article.append(b,node('span',`${t.id} · rev ${t.revision} · ${String(t.status??'').replaceAll('_',' ')}`+(day?` · ${day}`:''),'record-row-subtitle'));return article;};
+    if(open.length&&(completed.length||cancelled.length))plans.append(node('h3','Open'));
+    for(const x of open)plans.append(planRow(x));
+    if(completed.length){plans.append(node('h3','Completed'));for(const x of completed)plans.append(planRow(x));}
+    if(cancelled.length){const folded=node('details');folded.append(node('summary',`Cancelled (${cancelled.length})`));for(const x of cancelled)folded.append(planRow(x));plans.append(folded);}
+    page.append(plans);
+  }
   const values=k=>Object.values(p[k]??{});
   const goals=values('goals'),lanes=values('lanes'),workers=values('workers');
   let children=[],linked=[];
