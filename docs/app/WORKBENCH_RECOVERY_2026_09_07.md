@@ -4,6 +4,11 @@ This continuation addresses the manual workbench's restart gap and connects
 saved-change review to bot conversations. It does not implement Swarm delegation
 or autonomous coding.
 
+**Later pass (2026-09-18):** a repository that is already registered can be reopened in
+the Editor by its reference, without the native chooser — see
+`REGISTERED_REPOSITORY_EDITOR_2026_09_18.md`. The rule below that recovery never uses a
+saved path as permission is unchanged; the reference route asks the runtime, not the page.
+
 ## Recovery behavior
 
 - Editor saves recovery copies of file tabs, the selected file and unsaved drafts

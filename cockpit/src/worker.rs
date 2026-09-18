@@ -344,6 +344,13 @@ pub enum Msg {
         path: PathBuf,
         reply: SyncSender<Result<Value, String>>,
     },
+    /// A registered repository named by its ref. The runtime answers the
+    /// folder the person registered; nothing is mutated. On the intent lane
+    /// because its reply is what the Editor builds on next.
+    RegisteredRepository {
+        repository_ref: String,
+        reply: SyncSender<Result<PathBuf, String>>,
+    },
     RecordReviewTest {
         operation: String,
         fields: Value,
@@ -1261,6 +1268,16 @@ fn apply(
             let out = match (chan, rt) {
                 (Some(_), Some(rt)) => crate::repository::register(rt, &path),
                 _ => Err("The runtime is not ready to register a repository.".into()),
+            };
+            let _ = reply.send(out);
+        }
+        Msg::RegisteredRepository {
+            repository_ref,
+            reply,
+        } => {
+            let out = match (chan, rt) {
+                (Some(_), Some(rt)) => crate::repository::registered_root(rt, &repository_ref),
+                _ => Err("The runtime is unavailable. Open the repository when connected.".into()),
             };
             let _ = reply.send(out);
         }

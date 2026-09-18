@@ -25,7 +25,10 @@
  *   * `choose_repository` opens a NATIVE chooser and accepts no path from the
  *     page. The folder a person selects is the whole input. `chooseRepository()`
  *     below opens the dialog and returns what the host says; it cannot answer
- *     the dialog.
+ *     the dialog. (Opening an ALREADY registered repository in the Editor is
+ *     different: `openRepository(ref)` names it by reference and the runtime
+ *     answers the folder the person registered — no dialog, and still no
+ *     path from the page.)
  *   * Connecting a provider means signing in to an account in a browser.
  *
  * Both bind the world to something outside it. A script may drive the world;
@@ -229,6 +232,14 @@ export async function open({
      * has to finish it.
      */
     chooseRepository() { return control.native('choose_repository'); },
+
+    /**
+     * Open a REGISTERED repository in the Editor by its `rp_` ref, without a
+     * dialog. The host asks the runtime for the folder that registration
+     * recorded and re-checks it is a Git root; a ref that names nothing
+     * registered is a refusal, thrown.
+     */
+    openRepository(repositoryRef) { return control.native('open_workbench_repository', {repositoryRef}); },
 
     /** Raw page access, for the rare thing that is genuinely about the page. */
     page: sync,

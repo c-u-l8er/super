@@ -357,6 +357,38 @@ async fn choose_workbench(
     .await
     .map_err(|_| "Repository selection could not finish.")?
 }
+/// Open a REGISTERED repository in the Editor, by reference.
+///
+/// The page supplies `rp_XXXX` and nothing else. The runtime answers the
+/// folder the person registered through the native chooser, and
+/// `Workbench::choose` re-checks it is a Git top-level before holding it.
+/// No dialog: `choose_workbench` is a GTK modal on this process's main
+/// thread, which no script can answer and which stalls every other command
+/// while it waits — so that stays the route for a folder that is NOT yet
+/// registered, and this is the route for one that is.
+#[tauri::command]
+async fn open_workbench_repository(
+    repository_ref: String,
+    state: State<'_, workbench::Workbench>,
+    queue: State<'_, Queues>,
+) -> Result<Value, String> {
+    repository::repository_reference(&repository_ref)?;
+    let state = state.inner().clone();
+    let q = queue.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let (reply, wait) = sync_channel(1);
+        q.intent(Msg::RegisteredRepository {
+            repository_ref,
+            reply,
+        })?;
+        let path = wait
+            .recv()
+            .map_err(|_| "Repository lookup was interrupted.")??;
+        state.choose(path)
+    })
+    .await
+    .map_err(|_| "Repository selection could not finish.")?
+}
 #[tauri::command]
 async fn development_request(
     request: workbench::Request,
@@ -968,6 +1000,7 @@ fn main() {
             intent,
             choose_repository,
             choose_workbench,
+            open_workbench_repository,
             review_content,
             development_request,
             review_tests,

@@ -1,5 +1,12 @@
 //! Repository onboarding stays in the native host. The webview requests a
 //! chooser, never supplies a filesystem path, and receives no stored path.
+//!
+//! Opening an ALREADY REGISTERED repository in the Editor needs no chooser:
+//! the page names it by its `rp_` ref, the runtime answers the folder the
+//! person registered, and [`registered_root`] re-checks it is a Git
+//! top-level. The ref is the only thing that crosses the webview boundary,
+//! and a ref names nothing the person did not already choose in the native
+//! chooser when they registered it.
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -106,6 +113,47 @@ pub fn register(rt: &super_host::Runtime, selected: &Path) -> Result<Value, Stri
         "schema": "bridge-command@1", "command": "register_repository", "path": root
     })).map_err(|_| "The runtime could not confirm repository registration. Check the repository list before trying again.")?;
     registration_receipt(result)
+}
+
+/// A registered repository's Git root, answered by the runtime and
+/// re-validated here. Takes a reference, never a path.
+pub fn registered_root(rt: &super_host::Runtime, repository_ref: &str) -> Result<PathBuf, String> {
+    repository_reference(repository_ref)?;
+    let result = rt
+        .bridge_call(&json!({
+            "schema": "bridge-command@1", "command": "registered_repository",
+            "repository_ref": repository_ref
+        }))
+        .map_err(|_| "The runtime could not look up that repository. Check the repository list before trying again.")?;
+    git_root(&registered_path(result)?)
+}
+
+/// The shape a repository reference must have before it is sent anywhere:
+/// `rp_` and digits, at most 100 bytes. Anything else — a path, an empty
+/// string, a ref with a suffix — is refused before the runtime is asked.
+pub fn repository_reference(reference: &str) -> Result<(), String> {
+    let digits = reference.strip_prefix("rp_").unwrap_or("");
+    if reference.len() <= 100 && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit()) {
+        Ok(())
+    } else {
+        Err("Choose a registered repository.".into())
+    }
+}
+
+/// The path out of a `registered_repository` reply, or the runtime's own
+/// public refusal message.
+fn registered_path(result: Value) -> Result<PathBuf, String> {
+    if result["ok"] != true {
+        return Err(result["refusal"]["public_message"]
+            .as_str()
+            .unwrap_or("That repository is not registered in this world.")
+            .to_string());
+    }
+    let path = result["repository"]["path"]
+        .as_str()
+        .filter(|p| !p.is_empty())
+        .ok_or("The runtime returned no folder for that repository.")?;
+    Ok(PathBuf::from(path))
 }
 
 pub fn record_review_test(
@@ -227,6 +275,32 @@ mod tests {
         assert!(git_root(&s.0.join("missing"))
             .unwrap_err()
             .contains("no longer available"));
+    }
+    #[test]
+    fn a_repository_reference_is_a_ref_and_never_a_path() {
+        for ok in ["rp_0001", "rp_0003", "rp_123456"] {
+            assert!(repository_reference(ok).is_ok(), "{ok}");
+        }
+        for bad in ["", "rp_", "rp_x", "/home/someone/source", "rp_0003/../x", "wt_0001", "RP_0001", "rp_0003 "] {
+            assert_eq!(repository_reference(bad).unwrap_err(), "Choose a registered repository.", "{bad}");
+        }
+        let long = format!("rp_{}", "9".repeat(98));
+        assert!(repository_reference(&long).is_err());
+    }
+    #[test]
+    fn a_registered_reply_yields_its_path_and_a_refusal_yields_its_message() {
+        assert_eq!(
+            registered_path(json!({"ok": true, "repository": {"ref": "rp_0001", "path": "/private/source"}})).unwrap(),
+            PathBuf::from("/private/source")
+        );
+        assert_eq!(
+            registered_path(json!({"ok": false, "refusal": {"code": "repository-unknown",
+                "public_message": "That repository is not registered in this world. Register it first."}}))
+                .unwrap_err(),
+            "That repository is not registered in this world. Register it first."
+        );
+        assert!(registered_path(json!({"ok": true, "repository": {"ref": "rp_0001"}})).is_err());
+        assert!(registered_path(json!({"ok": true, "repository": {"ref": "rp_0001", "path": ""}})).is_err());
     }
     #[test]
     fn submission_receipt_does_not_return_the_stored_path() {

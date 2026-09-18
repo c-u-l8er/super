@@ -52,6 +52,7 @@ fn main() {
             "intent",
             "choose_repository",
             "choose_workbench",
+            "open_workbench_repository",
             "review_content",
             "development_request",
             "review_tests",

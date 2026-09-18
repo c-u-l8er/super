@@ -874,6 +874,52 @@ defmodule Ampd.Transport do
       end
     end
 
+    # **A registered repository, by reference, for the host process only.**
+    #
+    # The projection publishes repositories as `{ref, name}` and discards
+    # the path on purpose. Until this arm existed the Editor could reach a
+    # working tree only through a native folder chooser — a GTK modal on the
+    # cockpit's main thread, which nothing but a person at the display can
+    # answer, and which blocks every other command while it waits. So every
+    # restart re-required a person, and no run through Super could be closed
+    # headlessly.
+    #
+    # Registration already IS the person's decision: `register_repository`
+    # stores exactly the folder they chose in the native chooser, ordered,
+    # in the world. Re-opening that folder by its `rp_` ref asks nothing new
+    # of them, so it may be answered without a dialog. The page sends the
+    # ref — the same one the projection shows and `open_lane` takes — and
+    # the path goes to the host process, which re-checks it is a Git
+    # top-level before holding it. Never a projection field: the frame is
+    # read by several surfaces, and an agent channel has no route here.
+    defp run("registered_repository", %{"repository_ref" => ref}, fds) when is_binary(ref) do
+      Enum.each(fds, &close_fd/1)
+
+      repo =
+        if byte_size(ref) <= 100 and Regex.match?(~r/^rp_[0-9]+$/, ref),
+          do: Ampd.Worktree.repo(ref)
+
+      case repo do
+        %{"ref" => ^ref, "path" => path} when is_binary(path) ->
+          ok(%{"repository" => %{"ref" => ref, "path" => path}})
+
+        _ ->
+          %{
+            "schema" => "bridge-reply@1",
+            "ok" => false,
+            "refusal" =>
+              Ampd.Refusal.new("repository-unknown",
+                component: "Ampd.Transport.HostBridge",
+                retryable: false,
+                requires_human: true,
+                public_message:
+                  "That repository is not registered in this world. Register it first.",
+                operator_detail: %{"repository_ref" => ref}
+              )
+          }
+      end
+    end
+
     # **The other half of the same gap.** `register_repository` had no door
     # from outside the BEAM; neither does installing a capability pack, and
     # without one no world can reach a state where *any* worktree is
