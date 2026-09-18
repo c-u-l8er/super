@@ -86,7 +86,10 @@ defmodule Ampd.CarrierTest do
     {control, agent} = Ampd.attach_pair("kestrel")
     ws = ok!(Control.command(control, :open_workspace, ["acme"]), "workspace")
     goal = ok!(Control.command(control, :open_goal, [ws["id"], "run a carrier"]), "goal")
-    lane = ok!(Control.command(control, :open_lane, [goal["id"], "kestrel", r["ref"], nil]), "lane")
+
+    lane =
+      ok!(Control.command(control, :open_lane, [goal["id"], "kestrel", r["ref"], nil]), "lane")
+
     worker = occupy!(control, agent, lane["id"])
 
     %{control: control, agent: agent, goal: goal, lane: lane, worker: worker, repo_ref: r["ref"]}
@@ -132,6 +135,114 @@ defmodule Ampd.CarrierTest do
 
   defp committed?(t), do: Loci.attempt(t)["state"] == "COMMITTED"
   defp attempt_state(t), do: Loci.attempt(t)["state"]
+
+  describe "HyperSurface-0 fixed profile" do
+    @describetag :hypersurface
+    test "the actual command persists preflight and projects accepted membership", ctx do
+      result = Control.command(ctx.agent, :start_carrier, [ctx.lane["id"]])
+      assert result["allow"]
+      refute Map.has_key?(result["carrier"], "surface_binding")
+      assert result["carrier"]["surface"]["evidence"] == "recorded"
+      [attempt] = Loci.attempts()
+      assert attempt["surface_binding"]["requirement"] == Ampd.SurfaceProfile.requirement()
+
+      assert attempt["surface_binding"]["execution_basis_digest"] ==
+               Ampd.Core.intent_digest(attempt["carrier_basis"])
+
+      assert attempt["state"] == "COMMITTED"
+      surface = Worker.projected(%{ctx.worker["id"] => ctx.worker})[ctx.worker["id"]]["surface"]
+
+      assert surface == %{
+               "status" => "RUNNING",
+               "admission_profile" => "super.local-carrier-terminal.v0",
+               "evidence" => "recorded"
+             }
+
+      assert Map.keys(surface) |> Enum.sort() == ~w(admission_profile evidence status)
+    end
+
+    test "live membership outranks stale attempt bookkeeping in the surface projection", ctx do
+      assert {:ok, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+      [attempt] = Loci.attempts()
+
+      Ampd.AuthorityCoordinator.transact(fn ->
+        Loci.patch_attempt(attempt["ticket_id"], %{"state" => "START_ADMITTED"})
+      end)
+
+      assert Carrier.surface_of(ctx.worker)["status"] == "RUNNING"
+      assert Carrier.surface_of(ctx.worker)["evidence"] == "recorded"
+      Carrier.reconcile(attempt["ticket_id"])
+      assert Harness.terminated() == []
+      assert Loci.attempt(attempt["ticket_id"])["state"] == "COMMITTED"
+    end
+
+    test "pending preflight does not project accepted instance evidence", ctx do
+      assert {:ok, _ticket} = Carrier.admit_start(ctx.agent, ctx.lane["id"])
+
+      assert Carrier.surface_of(ctx.worker) == %{
+               "status" => "START_ADMITTED",
+               "admission_profile" => nil,
+               "evidence" => "legacy-or-unrecorded"
+             }
+
+      assert Harness.started() == []
+    end
+
+    test "missing or changed profile bindings cannot commit", ctx do
+      assert {:ok, ticket} = Carrier.admit_start(ctx.agent, ctx.lane["id"])
+      assert {:ok, obs} = Carrier.machine_start(ticket)
+
+      for binding <- [nil, %{}, Map.put(ticket["surface_binding"], "floor_version", -1)] do
+        altered = Map.put(ticket, "surface_binding", binding)
+        assert {:refused, r} = Carrier.commit_start(altered, obs)
+        assert r["code"] == "surface-profile-binding-changed"
+        assert Peer.carriers() == []
+      end
+
+      Carrier.reap_refused(ticket, obs)
+      assert length(Harness.terminated()) == 1
+    end
+
+    test "post-admission floor failure still refuses and reaps", ctx do
+      Harness.put_policy(fn ticket ->
+        obs = Harness.observation(ticket)
+        {:ok, put_in(obs, ["attested", "network"], "allowed")}
+      end)
+
+      assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+      assert r["code"] == "carrier-confinement-unacceptable"
+      assert Peer.carriers() == []
+      assert length(Harness.terminated()) == 1
+      assert Carrier.surface_of(ctx.worker)["admission_profile"] == nil
+    end
+
+    @tag timeout: 60_000, lifecycle_experiment: true
+    test "queued start outlives caller timeout without admitting replacement", ctx do
+      gate = Ampd.Carrier.Machine.Gate
+      :ok = :sys.suspend(gate)
+      started = System.monotonic_time(:millisecond)
+
+      try do
+        assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+        assert System.monotonic_time(:millisecond) - started >= gate.call_timeout_ms()
+        assert Harness.started() == []
+        [attempt] = Carrier.unresolved()
+        assert attempt["state"] == "INDETERMINATE"
+        assert Carrier.surface_of(ctx.worker)["status"] == "INDETERMINATE"
+        assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
+        :ok = :sys.resume(gate)
+        gate.sync()
+        # The real Gate dispatched the queued call AFTER the caller timed out.
+        assert length(Harness.started()) == 1
+        assert Peer.carriers() == []
+        assert Carrier.reconcile(attempt["ticket_id"])["state"] == "RESOLVED"
+        assert length(Harness.terminated()) == 1
+        assert Carrier.unresolved() == []
+      after
+        :sys.resume(gate)
+      end
+    end
+  end
 
   # ==================================================================== E1
   describe "E1 · admission is what reaches the machine, not a request" do
@@ -255,7 +366,9 @@ defmodule Ampd.CarrierTest do
       end)
 
       assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
+
       assert r["code"] in ~w(carrier-world-generation-stale carrier-peer-gone carrier-not-attached)
+
       assert Peer.carriers() == []
     end
   end
@@ -318,7 +431,9 @@ defmodule Ampd.CarrierTest do
     test "a process with a descriptor outside the allowlist cannot commit", ctx do
       Harness.put_policy(fn ticket ->
         obs = Harness.observation(ticket)
-        {:ok, put_in(obs, ["observed", "fds"], Map.put(obs["observed"]["fds"], "9", "/etc/passwd"))}
+
+        {:ok,
+         put_in(obs, ["observed", "fds"], Map.put(obs["observed"]["fds"], "9", "/etc/passwd"))}
       end)
 
       assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
@@ -753,6 +868,7 @@ defmodule Ampd.CarrierTest do
       # The old E13 asserted only the first, and passed while the OS process
       # kept running — the two are different events.
       assert Peer.carriers() == []
+
       assert inc["carrier_ref"] in Harness.terminated(),
              "the process was orphaned: membership ended and nothing reaped it"
     end
@@ -783,7 +899,8 @@ defmodule Ampd.CarrierTest do
           {"refusal not attributable", ["attested", "seccomp_deny_errno"], 1},
           {"attestor is not the host", ["attested", "attestor"], "someone-else"},
           {"environment not exact", ["observed", "env_keys"], ["PATH"]},
-          {"stdin is not null", ["observed", "fds"], %{"0" => "/etc/passwd", "1" => "l", "2" => "l", "3" => "socket:[1]"}}
+          {"stdin is not null", ["observed", "fds"],
+           %{"0" => "/etc/passwd", "1" => "l", "2" => "l", "3" => "socket:[1]"}}
         ] do
       test "a Carrier cannot commit with #{label}", ctx do
         path = unquote(Macro.escape(path))
@@ -823,6 +940,7 @@ defmodule Ampd.CarrierTest do
       assert "descriptor_set_exact" in names
 
       att = Enum.map(Ampd.Carrier.Floor.attested_rows(), fn {_, n, _} -> n end)
+
       assert "landlock_governs_filesystem" in att,
              "the floor does not require Landlock, which is the defect this closure exists to fix"
     end
@@ -833,7 +951,12 @@ defmodule Ampd.CarrierTest do
     test "concurrent starts are serialized and each gets its own observation", ctx do
       # A second Worker at a second Locus, so two admissions are legitimately
       # concurrent rather than racing the same seat.
-      lane2 = ok!(Control.command(ctx.control, :open_lane, [ctx.goal["id"], "kestrel", ctx.repo_ref, nil]), "lane")
+      lane2 =
+        ok!(
+          Control.command(ctx.control, :open_lane, [ctx.goal["id"], "kestrel", ctx.repo_ref, nil]),
+          "lane"
+        )
+
       {:ok, agent2} = Peer.attach_agent("kestrel")
       w2 = ok!(Control.command(ctx.control, :open_worker, [lane2["id"], "second"]), "worker")
       ok!(Control.command(agent2, :attach_worker, [w2["id"]]), "worker")
@@ -901,7 +1024,11 @@ defmodule Ampd.CarrierTest do
 
     test "restoring the admitted payload lets a fresh admission succeed", ctx do
       b = %{Harness.default_basis() | "payload_digest" => "sha256:" <> String.duplicate("cd", 32)}
-      Harness.put_policy(fn t -> {:ok, put_in(Harness.observation(t), ["attested", "execution_basis"], b)} end)
+
+      Harness.put_policy(fn t ->
+        {:ok, put_in(Harness.observation(t), ["attested", "execution_basis"], b)}
+      end)
+
       assert {:refused, _} = Carrier.start(ctx.agent, ctx.lane["id"])
 
       # The refused attempt is terminal — STALE, not INDETERMINATE — because
@@ -914,7 +1041,10 @@ defmodule Ampd.CarrierTest do
 
     test "a protocol version change is a discontinuity too", ctx do
       b = %{Harness.default_basis() | "carrier_protocol_version" => 2}
-      Harness.put_policy(fn t -> {:ok, put_in(Harness.observation(t), ["attested", "execution_basis"], b)} end)
+
+      Harness.put_policy(fn t ->
+        {:ok, put_in(Harness.observation(t), ["attested", "execution_basis"], b)}
+      end)
 
       assert {:refused, r} = Carrier.start(ctx.agent, ctx.lane["id"])
       assert r["code"] == "carrier-execution-basis-changed"
@@ -1092,7 +1222,9 @@ defmodule Ampd.CarrierTest do
         |> Enum.map(fn {_, n, _} -> n end)
 
       assert length(names) == 26
-      assert length(Enum.uniq(names)) == 26, "two floor rows share a name, so one cannot be reported"
+
+      assert length(Enum.uniq(names)) == 26,
+             "two floor rows share a name, so one cannot be reported"
 
       # v2's exercise of the rule: the row that claimed to bind the payload
       # and did not is gone, and the one that replaced it is attested rather
@@ -1153,9 +1285,16 @@ defmodule Ampd.CarrierTest do
       # replacement requires the full object and 64 hex characters, so the
       # value a hand-written attestation reaches for no longer passes.
       for bad <- [
-            %{"schema" => "carrier-execution-basis@1", "payload_digest" => String.duplicate("a", 40)},
-            %{"schema" => "carrier-execution-basis@1", "payload_digest" => "sha256:" <> String.duplicate("z", 64),
-              "carrier_protocol" => "carrier-lifecycle", "carrier_protocol_version" => 1},
+            %{
+              "schema" => "carrier-execution-basis@1",
+              "payload_digest" => String.duplicate("a", 40)
+            },
+            %{
+              "schema" => "carrier-execution-basis@1",
+              "payload_digest" => "sha256:" <> String.duplicate("z", 64),
+              "carrier_protocol" => "carrier-lifecycle",
+              "carrier_protocol_version" => 1
+            },
             %{"payload_digest" => "sha256:" <> String.duplicate("ab", 32)},
             "sha256:" <> String.duplicate("ab", 32)
           ] do
@@ -1286,7 +1425,12 @@ defmodule Ampd.CarrierTest do
       # there are no victims left to name. `terminate_all` is not a blunt
       # instrument here — reconstructing victim IDs from records that
       # deliberately no longer exist is the thing that cannot be done.
-      lane2 = ok!(Control.command(ctx.control, :open_lane, [ctx.goal["id"], "kestrel", ctx.repo_ref, nil]), "lane")
+      lane2 =
+        ok!(
+          Control.command(ctx.control, :open_lane, [ctx.goal["id"], "kestrel", ctx.repo_ref, nil]),
+          "lane"
+        )
+
       {:ok, agent2} = Peer.attach_agent("kestrel")
       w2 = ok!(Control.command(ctx.control, :open_worker, [lane2["id"], "second"]), "worker")
       ok!(Control.command(agent2, :attach_worker, [w2["id"]]), "worker")
@@ -1488,12 +1632,14 @@ defmodule Ampd.CarrierTest do
       # are still identical — so exactly one row can refuse it.
       Harness.put_policy(fn ticket ->
         obs = Harness.observation(ticket)
+
         fds = %{
           "0" => "/dev/null",
           "1" => "/dev/null",
           "2" => "/dev/null",
           "3" => "socket:[4242]"
         }
+
         {:ok, put_in(obs, ["observed", "fds"], fds)}
       end)
 
@@ -1510,12 +1656,14 @@ defmodule Ampd.CarrierTest do
       # three terminals is a Carrier the host handed two it did not mean to.
       Harness.put_policy(fn ticket ->
         obs = Harness.observation(ticket)
+
         fds = %{
           "0" => "/dev/pts/7",
           "1" => "/dev/pts/8",
           "2" => "/dev/pts/9",
           "3" => "socket:[4242]"
         }
+
         {:ok, put_in(obs, ["observed", "fds"], fds)}
       end)
 
@@ -1625,7 +1773,13 @@ defmodule Ampd.CarrierTest do
 
   defp await_peer!(n \\ 200) do
     Enum.reduce_while(1..n, nil, fn _, _ ->
-      if is_pid(Process.whereis(Ampd.Peer)), do: {:halt, :ok}, else: (Process.sleep(20); {:cont, nil})
+      if is_pid(Process.whereis(Ampd.Peer)),
+        do: {:halt, :ok},
+        else:
+          (
+            Process.sleep(20)
+            {:cont, nil}
+          )
     end) || flunk("Ampd.Peer never came back")
 
     Process.sleep(50)
@@ -1641,8 +1795,12 @@ defmodule Ampd.CarrierTest do
   defp await_ready(was, n \\ 400) do
     Enum.reduce_while(1..n, nil, fn _, _ ->
       case Ampd.Carrier.Machine.Gate.readiness() do
-        {:ready, e} when e != was -> {:halt, {:ready, e}}
-        _ -> Process.sleep(25); {:cont, nil}
+        {:ready, e} when e != was ->
+          {:halt, {:ready, e}}
+
+        _ ->
+          Process.sleep(25)
+          {:cont, nil}
       end
     end) ||
       flunk(
@@ -1678,8 +1836,12 @@ defmodule Ampd.CarrierTest do
   defp await_readiness(target, n \\ 400) do
     Enum.reduce_while(1..n, nil, fn _, _ ->
       case Ampd.Carrier.Machine.Gate.readiness() do
-        ^target -> {:halt, target}
-        _ -> Process.sleep(25); {:cont, nil}
+        ^target ->
+          {:halt, target}
+
+        _ ->
+          Process.sleep(25)
+          {:cont, nil}
       end
     end) ||
       flunk(
@@ -1691,8 +1853,12 @@ defmodule Ampd.CarrierTest do
   defp await_gate_sync(n \\ 200) do
     Enum.reduce_while(1..n, nil, fn _, _ ->
       case Process.whereis(Ampd.Carrier.Machine.Gate) do
-        nil -> Process.sleep(20); {:cont, nil}
-        _ -> {:halt, Ampd.Carrier.Machine.Gate.sync()}
+        nil ->
+          Process.sleep(20)
+          {:cont, nil}
+
+        _ ->
+          {:halt, Ampd.Carrier.Machine.Gate.sync()}
       end
     end) || flunk("the carrier machine gate never came back")
   end

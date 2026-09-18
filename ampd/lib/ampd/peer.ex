@@ -397,6 +397,9 @@ defmodule Ampd.Peer do
       when is_binary(peer_id) and is_map(binding) and is_list(reap),
       do: ask({:attach_worker, peer_id, binding, reap})
 
+  @doc "Read a peer and its attachment together in one live Peer state."
+  def occupancy_snapshot(peer_id), do: ask({:occupancy_snapshot, peer_id})
+
   @doc """
   The live attachment for `peer_id`, or `nil`.
 
@@ -607,7 +610,6 @@ defmodule Ampd.Peer do
 
   def authoritative_context(_, _), do: nil
 
-
   # ------------------------------------------------- the ordered boundary
   #
   # **Every client call in this module goes through here, and each declares
@@ -639,7 +641,8 @@ defmodule Ampd.Peer do
     if dead?(from) do
       {:reply, {:refused, owner_gone()}, st}
     else
-      id = "pr-" <> st.epoch <> "-" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
+      id =
+        "pr-" <> st.epoch <> "-" <> (:crypto.strong_rand_bytes(8) |> Base.encode16(case: :lower))
 
       peer = %{
         "schema" => @schema,
@@ -661,7 +664,12 @@ defmodule Ampd.Peer do
       touched()
 
       {:reply, {:ok, id},
-       %{st | peers: Map.put(st.peers, id, peer), seq: st.seq + 1, owners: own(st.owners, from, id)}}
+       %{
+         st
+         | peers: Map.put(st.peers, id, peer),
+           seq: st.seq + 1,
+           owners: own(st.owners, from, id)
+       }}
     end
   end
 
@@ -686,7 +694,6 @@ defmodule Ampd.Peer do
   def handle_call({:claim_control, opts}, {from, _} = _f, st) do
     if dead?(from), do: {:reply, {:refused, owner_gone()}, st}, else: claim(opts, from, st)
   end
-
 
   # A handle from another incarnation can never resolve, whatever the map
   # happens to contain. The epoch check is redundant with `peers` being
@@ -747,6 +754,9 @@ defmodule Ampd.Peer do
         att =
           Map.merge(binding, %{
             "schema" => @attachment_schema,
+            # A successful attach is a new occupancy occurrence even when
+            # the Peer and Worker are unchanged. Async results bind this ID.
+            "occupancy_epoch" => :crypto.strong_rand_bytes(16) |> Base.encode16(case: :lower),
             "peer_ref" => peer_id,
             "peer_epoch" => st.epoch,
             "attached_at" => DateTime.utc_now() |> DateTime.to_iso8601()
@@ -759,6 +769,17 @@ defmodule Ampd.Peer do
         {:reply, {:ok, att},
          %{st | attachments: st.attachments |> Map.drop(reap) |> Map.put(peer_id, att)}}
     end
+  end
+
+  def handle_call({:occupancy_snapshot, peer_id}, _from, st) do
+    result =
+      if is_binary(peer_id) and String.contains?(peer_id, "-" <> st.epoch <> "-") do
+        {Map.get(st.peers, peer_id), Map.get(st.attachments, peer_id)}
+      else
+        {nil, nil}
+      end
+
+    {:reply, result, st}
   end
 
   def handle_call({:attachment, peer_id}, _f, st) when is_binary(peer_id) do
@@ -860,7 +881,9 @@ defmodule Ampd.Peer do
         touched()
         rec = Map.put(record, "status", "COMMITTING")
         ref = Process.monitor(pid)
-        {:reply, {:ok, rec}, %{st | terminals: Map.put(st.terminals, peer_id, %{record: rec, pid: pid, ref: ref})}}
+
+        {:reply, {:ok, rec},
+         %{st | terminals: Map.put(st.terminals, peer_id, %{record: rec, pid: pid, ref: ref})}}
     end
   end
 
@@ -885,7 +908,9 @@ defmodule Ampd.Peer do
       true ->
         touched()
         rec = Map.put(r, "status", "ACTIVE")
-        {:reply, {:ok, rec}, %{st | terminals: Map.put(st.terminals, peer_id, %{t | record: rec})}}
+
+        {:reply, {:ok, rec},
+         %{st | terminals: Map.put(st.terminals, peer_id, %{t | record: rec})}}
     end
   end
 
@@ -937,7 +962,8 @@ defmodule Ampd.Peer do
     # reset does not make a running process stop existing, so if the Reaper is
     # not up to hear this, the debt has to be somewhere a restarted one can
     # find it.
-    pending = Enum.reduce(Map.values(st.carriers), st.pending_reaps, &Map.put(&2, &1["carrier_ref"], &1))
+    pending =
+      Enum.reduce(Map.values(st.carriers), st.pending_reaps, &Map.put(&2, &1["carrier_ref"], &1))
 
     if Process.whereis(Ampd.Carrier.Reaper) do
       for {_id, inc} <- st.carriers, do: Ampd.Carrier.Reaper.orphaned(inc)
@@ -956,10 +982,10 @@ defmodule Ampd.Peer do
     {:reply, :ok,
      %{
        st
-       # **Deliberately survives the reset.** Everything else here is identity
-       # and identity is what a reset invalidates; a pending reap is a fact
-       # about the OS, and the OS did not attend the reset.
-       | pending_reaps: pending,
+       | # **Deliberately survives the reset.** Everything else here is identity
+         # and identity is what a reset invalidates; a pending reap is a fact
+         # about the OS, and the OS did not attend the reset.
+         pending_reaps: pending,
          peers: %{},
          control_claimed: false,
          epoch: new_epoch(),
@@ -1039,8 +1065,13 @@ defmodule Ampd.Peer do
     touched()
 
     {:reply, {:ok, id},
-     %{st | peers: Map.put(st.peers, id, peer), control_claimed: true, seq: st.seq + 1,
-            owners: own(st.owners, from, id)}}
+     %{
+       st
+       | peers: Map.put(st.peers, id, peer),
+         control_claimed: true,
+         seq: st.seq + 1,
+         owners: own(st.owners, from, id)
+     }}
   end
 
   # **`peers` is in the operator projection, and nothing here is an
@@ -1098,8 +1129,13 @@ defmodule Ampd.Peer do
 
   defp kill_terminal(st, peer_id) do
     case Map.get(st.terminals, peer_id) do
-      nil -> :ok
-      t -> Process.demonitor(t.ref, [:flush]); Process.exit(t.pid, :kill); :ok
+      nil ->
+        :ok
+
+      t ->
+        Process.demonitor(t.ref, [:flush])
+        Process.exit(t.pid, :kill)
+        :ok
     end
   end
 
@@ -1121,25 +1157,28 @@ defmodule Ampd.Peer do
     # handler both arrive here. Releasing it at the call sites instead
     # would mean a Carrier whose process died silently kept occupying a
     # position no live channel could vacate.
-    %{st | peers: Map.delete(st.peers, id),
-           control_claimed: st.control_claimed and not freed,
-           owners: owners,
-           attachments: Map.delete(st.attachments, id),
-           # The execution Carrier's *membership* goes with the session that
-           # admitted it. Dropping it here — the one place every way of losing
-           # a channel converges — is what makes that true by construction.
-           #
-           # **Membership ending is not the process ending, and the source
-           # used to claim it was.** Review caught it: the host's
-           # `serve_carrier` map still held the child, so the OS process kept
-           # running with nothing in the runtime referring to it. `orphaned/1`
-           # hands the incarnation to whoever will do the reaping.
-           #
-           # It is announced rather than performed. This function runs inside
-           # the `Ampd.Peer` GenServer and on the `:DOWN` path; submitting a
-           # machine request from here would put an 8-second timeout in front
-           # of every disconnect.
-           carriers: Map.delete(st.carriers, id)}
+    %{
+      st
+      | peers: Map.delete(st.peers, id),
+        control_claimed: st.control_claimed and not freed,
+        owners: owners,
+        attachments: Map.delete(st.attachments, id),
+        # The execution Carrier's *membership* goes with the session that
+        # admitted it. Dropping it here — the one place every way of losing
+        # a channel converges — is what makes that true by construction.
+        #
+        # **Membership ending is not the process ending, and the source
+        # used to claim it was.** Review caught it: the host's
+        # `serve_carrier` map still held the child, so the OS process kept
+        # running with nothing in the runtime referring to it. `orphaned/1`
+        # hands the incarnation to whoever will do the reaping.
+        #
+        # It is announced rather than performed. This function runs inside
+        # the `Ampd.Peer` GenServer and on the `:DOWN` path; submitting a
+        # machine request from here would put an 8-second timeout in front
+        # of every disconnect.
+        carriers: Map.delete(st.carriers, id)
+    }
     # The terminal relation is subordinate to the Carrier relation, and this
     # is one of the four places the Carrier relation ends. It is released
     # unconditionally rather than through `release_carrier/2`, because here

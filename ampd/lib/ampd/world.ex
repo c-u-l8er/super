@@ -65,9 +65,14 @@ defmodule Ampd.World do
 
   defp dir, do: Ampd.Store.data_dir()
 
-  defp path do
-    File.mkdir_p!(dir())
-    Path.join(dir(), "world.json")
+  # Reads must not create directories. Authority checks read this path often;
+  # preparing its parents belongs to the explicit manifest write operations.
+  defp path, do: Path.join(dir(), "world.json")
+
+  defp write!(meta) do
+    target = path()
+    File.mkdir_p!(Path.dirname(target))
+    File.write!(target, encode(meta))
   end
 
   @doc "Whatever is on disk, unvalidated. Diagnostics only."
@@ -117,7 +122,9 @@ defmodule Ampd.World do
   def manifest_state do
     case read_raw() do
       nil ->
-        :absent
+        # A present but undecodable manifest is evidence to preserve, not
+        # permission to initialize a new world over it.
+        if File.exists?(path()), do: :malformed, else: :absent
 
       m ->
         # Version is read **before** shape, because shape is versioned.
@@ -171,9 +178,14 @@ defmodule Ampd.World do
 
     [
       {"schema", m["schema"] == @schema},
-      {"schema_version", is_integer(m["schema_version"]) and m["schema_version"] == @schema_version},
-      {"installation_id", is_binary(m["installation_id"]) and Regex.match?(~r/^w-[0-9a-f]{16}$/, m["installation_id"] || "")},
-      {"initialized_at", is_binary(m["initialized_at"]) and match?({:ok, _, _}, DateTime.from_iso8601(m["initialized_at"] || ""))},
+      {"schema_version",
+       is_integer(m["schema_version"]) and m["schema_version"] == @schema_version},
+      {"installation_id",
+       is_binary(m["installation_id"]) and
+         Regex.match?(~r/^w-[0-9a-f]{16}$/, m["installation_id"] || "")},
+      {"initialized_at",
+       is_binary(m["initialized_at"]) and
+         match?({:ok, _, _}, DateTime.from_iso8601(m["initialized_at"] || ""))},
       {"generation", is_integer(m["generation"])}
     ]
     |> Enum.reject(&elem(&1, 1))
@@ -181,34 +193,9 @@ defmodule Ampd.World do
   end
 
   defp decode(bin) do
-    # No JSON dep: the manifest is a flat string/integer map we write ourselves.
-    bin
-    |> String.trim()
-    |> String.trim_leading("{")
-    |> String.trim_trailing("}")
-    |> String.split(",")
-    |> Enum.reduce(%{}, fn pair, acc ->
-      case String.split(pair, ":", parts: 2) do
-        [k, v] -> Map.put(acc, unq(k), unq(v))
-        _ -> acc
-      end
-    end)
-    |> case do
-      m when map_size(m) == 0 -> nil
-      m -> m
-    end
-  end
-
-  defp unq(s) do
-    s = String.trim(s)
-
-    if String.starts_with?(s, "\"") do
-      String.trim(s, "\"")
-    else
-      case Integer.parse(s) do
-        {n, ""} -> n
-        _ -> s
-      end
+    case JSON.decode(bin) do
+      {:ok, m} when is_map(m) and map_size(m) > 0 -> m
+      _ -> nil
     end
   end
 
@@ -217,10 +204,7 @@ defmodule Ampd.World do
       m
       |> Map.to_list()
       |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.map_join(",", fn
-        {k, v} when is_integer(v) -> "\"#{k}\":#{v}"
-        {k, v} -> "\"#{k}\":\"#{v}\""
-      end)
+      |> Enum.map_join(",", fn {k, v} -> JSON.encode!(k) <> ":" <> JSON.encode!(v) end)
 
     "{" <> inner <> "}"
   end
@@ -254,7 +238,7 @@ defmodule Ampd.World do
       "generation" => 1
     }
 
-    File.write!(path(), encode(meta))
+    write!(meta)
     meta
   end
 
@@ -337,7 +321,7 @@ defmodule Ampd.World do
           |> Map.put("restored_from_snapshot", rf["snapshot"] || rf[:snapshot] || "unknown")
       end
 
-    File.write!(path(), encode(meta))
+    write!(meta)
     meta
   end
 
