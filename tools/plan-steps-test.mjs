@@ -30,9 +30,9 @@ test('a blocked plan is blocked at the first step; completed and cancelled plans
  assert.equal(states(done),'done done done done done');assert.equal(done.current,null);assert.equal(done.completed,true);
  assert.equal(planSteps({development_attempts:{}},task({status:'cancelled'})).cancelled,true);
 });
-test('an accepted result at an OLDER revision does not finish the current one',()=>{
+test('an accepted result at an OLDER revision still finishes the plan: criteria are immutable, a note only bumps the revision',()=>{
  const r=planSteps({development_attempts:{da_0062:accepted}},task({revision:6}));
- assert.equal(r.finishable,false);assert.equal(r.current,'prepare');
+ assert.equal(r.finishable,true);assert.equal(r.current,'finish');
 });
 test('the drafted reason names the accepted attempt, file, test count and snapshot, and fits the 250-character input',()=>{
  const p={development_attempts:{da_0062:accepted,da_0030:{id:'da_0030',task_ref:'dt_0052',task_revision:3,status:'recorded'}}};

@@ -16,7 +16,6 @@ defmodule Ampd.DevelopmentAttempt do
           attempt != nil and task != nil and
             attempt["revision"] == revision and
             attempt["status"] != "dismissed" and task["status"] not in ~w(cancelled completed) and
-            task["revision"] == attempt["task_revision"] and
             Ampd.Worktree.matches_repository?(attempt["repository_ref"], path)
 
         %{"matched" => matched, "attempt" => if(matched, do: attempt, else: nil)}
@@ -27,6 +26,7 @@ defmodule Ampd.DevelopmentAttempt do
   end
 
   @fields ~w(client_ref task_ref task_revision source shared_draft proposed_text)
+  @bodies ~w(shared_draft proposed_text)
   @source_fields ~w(schema scope basis_id head path disk_sha256 draft_sha256 draft_bytes unsaved result_sha256 result_bytes task_ref task_revision repository_ref world)
   def fields, do: @fields
   defp digest(s), do: :crypto.hash(:sha256, s) |> Base.encode16(case: :lower)
@@ -94,25 +94,36 @@ defmodule Ampd.DevelopmentAttempt do
     do: create_set(fields, s)
 
   def create(fields, s) when is_map(fields) do
+    # A record is STAGED or INLINE, exactly as a change-set member is. Staged,
+    # the command's two body fields arrive as nil and are dropped here, so the
+    # record is its source basis alone and every consumer — `member_content/1`,
+    # the projection, the host's resolver, the downgrade — already reads it.
+    # Inline is the older shape, still accepted and still bounded by its caps.
+    fields = Map.reject(fields, fn {k, v} -> k in @bodies and v == nil end)
     task = s["development_tasks"][fields["task_ref"]]
     source = fields["source"]
+    keys = Enum.sort(Map.keys(fields))
 
     old =
       Enum.find_value(s["development_attempts"], fn {_, a} ->
         if a["client_ref"] == fields["client_ref"], do: a
       end)
 
-    valid =
-      Enum.sort(Map.keys(fields)) == Enum.sort(@fields) and nonempty?(fields["client_ref"], 100) and
-        text?(fields["shared_draft"], 24000) and text?(fields["proposed_text"], 32000) and
-        source?(source, fields["shared_draft"], fields["proposed_text"])
+    fault =
+      cond do
+        keys not in [Enum.sort(@fields), Enum.sort(@fields -- @bodies)] or
+          not nonempty?(fields["client_ref"], 100) or not is_map(source) ->
+          {"attempt-fields-invalid", "The review material or its content identities are invalid.",
+           %{}}
+
+        true ->
+          member_fault(Map.take(fields, ["source" | @bodies]))
+      end
 
     cond do
-      not valid ->
-        refuse(
-          "attempt-fields-invalid",
-          "The review material or its content identities are invalid."
-        )
+      fault != nil ->
+        {code, message, detail} = fault
+        refuse(code, message, detail)
 
       old != nil ->
         if Map.take(old, @fields) == fields,
@@ -123,11 +134,17 @@ defmodule Ampd.DevelopmentAttempt do
               "This request already identifies different review material."
             )
 
-      task == nil or task["revision"] !== fields["task_revision"] or
-          task["status"] in ~w(cancelled completed) ->
+      # The plan must be open and the revision one it has had. Not the CURRENT
+      # revision: a plan's title and criteria are immutable, so a note or a
+      # status change between sharing a file and recording its review changes
+      # nothing the review is judged against (ruled 2026-09-18; the equality
+      # this replaces refused a real review as `attempt-task-stale` on 09-16).
+      task == nil or task["status"] in ~w(cancelled completed) or
+        not is_integer(fields["task_revision"]) or
+          fields["task_revision"] > task["revision"] ->
         refuse("attempt-task-stale", "Reopen the current plan and prepare a fresh review.")
 
-      source["task_ref"] != task["id"] or source["task_revision"] !== task["revision"] or
+      source["task_ref"] != task["id"] or source["task_revision"] !== fields["task_revision"] or
           source["repository_ref"] != task["repository_ref"] ->
         refuse(
           "attempt-source-mismatch",
@@ -234,11 +251,11 @@ defmodule Ampd.DevelopmentAttempt do
                "This request already identifies different review material."
              )
 
-      task == nil or task["revision"] !== f["task_revision"] or
-          task["status"] in ~w(cancelled completed) ->
+      task == nil or task["status"] in ~w(cancelled completed) or
+        not is_integer(f["task_revision"]) or f["task_revision"] > task["revision"] ->
         refuse("attempt-task-stale", "Reopen the current plan before recording this change set.")
 
-      not coherent_set?(files, task) ->
+      not coherent_set?(files, task, f["task_revision"]) ->
         refuse(
           "attempt-source-mismatch",
           "Every file must belong to the same current plan, repository, world and source commit, with a distinct path."
@@ -270,7 +287,7 @@ defmodule Ampd.DevelopmentAttempt do
           "schema" => "development-review-set@1",
           "client_ref" => f["client_ref"],
           "task_ref" => task["id"],
-          "task_revision" => task["revision"],
+          "task_revision" => f["task_revision"],
           "revision" => 1,
           "workspace_ref" => task["workspace_ref"],
           "bot_ref" => task["bot_ref"],
@@ -339,6 +356,13 @@ defmodule Ampd.DevelopmentAttempt do
   #
   # About 49 KB of headroom. 160 KiB would leave about 22 KB and is too tight.
   # The 50-attempt count cap above still bounds how many records there can be.
+  #
+  # Since 2026-09-18 no body lives in a record: single-file reviews are
+  # recorded by digest like change-set members, and `stage_inline/1` moves the
+  # bodies of records written before that out as the world opens. Measured on
+  # the live world the day it was ruled: the five inline records held 130 720
+  # of the 131 072 bytes; their metadata alone is about 25 KB. So this cap now
+  # bounds metadata, and is not the thing that decides how much can be reviewed.
   @directory_bytes 128 * 1024
 
   def set_limit, do: @max_members * Ampd.ReviewContent.file_bytes()
@@ -350,9 +374,15 @@ defmodule Ampd.DevelopmentAttempt do
 
   defp member_fault(row) when is_map(row) do
     cond do
-      staged?(row) -> staged_fault(row["source"])
-      inline?(row) -> inline_fault(row)
-      true -> {"attempt-fields-invalid", "A file is neither a staged nor a complete inline replacement.", %{}}
+      staged?(row) ->
+        staged_fault(row["source"])
+
+      inline?(row) ->
+        inline_fault(row)
+
+      true ->
+        {"attempt-fields-invalid",
+         "A file is neither a staged nor a complete inline replacement.", %{}}
     end
   end
 
@@ -481,6 +511,7 @@ defmodule Ampd.DevelopmentAttempt do
       acc +
         if staged?(row) do
           s = row["source"]
+
           (Ampd.ReviewContent.size(s["draft_sha256"]) || 0) +
             (Ampd.ReviewContent.size(s["result_sha256"]) || 0)
         else
@@ -569,8 +600,10 @@ defmodule Ampd.DevelopmentAttempt do
   Rewrite inline members to name their content, for members whose content is
   already published.
 
-  **Phase two of the migration, and deliberately not wired to a command.**
-  Compatibility is what fixes the problem: inline bodies stopped reaching the
+  **Phase two of the migration.** Both phases run as the world opens, from
+  `Ampd.Loci` through `stage_inline/1`, since 2026-09-18 — until then this was
+  deliberately unwired, and the five inline records on the live world held
+  130 KB of the directory's 128 KiB budget. Compatibility is what fixes the problem: inline bodies stopped reaching the
   projection the moment `Ampd.Projection` began publishing members without
   them, so an existing record already costs a frame nothing. What migrating
   buys is the space those bodies take in the `loci` authority store, which
@@ -593,6 +626,26 @@ defmodule Ampd.DevelopmentAttempt do
 
     {Map.put(s, "development_attempts", migrated), %{"migrated" => moved}}
   end
+
+  @doc """
+  Both phases, as the world opens: publish every inline body, then rewrite
+  the members whose bodies are verifiably published.
+
+  Safe to run on every open. Publication is addressed by bytes, so a body
+  already published is a no-op; a member is rewritten only when both of its
+  sides read back under their digests; anything the store refuses is left
+  inline and named in the report. The record's meaning never changes — the
+  same digests, the same basis — only where the bytes live. The inverse is
+  `inline_from_content/1`, which `Ampd.Downgrade` runs for an older runtime.
+  """
+  def stage_inline(%{"development_attempts" => attempts} = s) when is_map(attempts) do
+    published = Ampd.ReviewContent.absorb(attempts)
+    {next, moved} = migrate_inline(s)
+    {next, Map.merge(published, moved)}
+  end
+
+  def stage_inline(s),
+    do: {s, %{"published" => 0, "bytes" => 0, "refused" => [], "migrated" => 0}}
 
   defp migrate_attempt(%{"files" => files} = a) when is_list(files),
     do: Map.put(a, "files", Enum.map(files, &migrate_member/1))
@@ -643,16 +696,18 @@ defmodule Ampd.DevelopmentAttempt do
     {converted, blocked} =
       Enum.reduce(attempts, {%{}, []}, fn {id, a}, {acc, blocks} ->
         case convert_attempt(a) do
-          {:ok, next} -> {Map.put(acc, id, next), blocks}
-          {:blocked, why} -> {Map.put(acc, id, a), blocks ++ Enum.map(why, &Map.put(&1, "attempt", id))}
+          {:ok, next} ->
+            {Map.put(acc, id, next), blocks}
+
+          {:blocked, why} ->
+            {Map.put(acc, id, a), blocks ++ Enum.map(why, &Map.put(&1, "attempt", id))}
         end
       end)
 
     moved = Enum.count(converted, fn {id, a} -> a != attempts[id] end)
 
     {Map.put(s, "development_attempts", converted),
-     %{"converted" => moved, "blocked" => blocked,
-       "downgradable" => blocked == []}}
+     %{"converted" => moved, "blocked" => blocked, "downgradable" => blocked == []}}
   end
 
   defp convert_attempt(%{"files" => files} = a) when is_list(files) do
@@ -681,7 +736,9 @@ defmodule Ampd.DevelopmentAttempt do
       true ->
         deletion? = source["schema"] == "selected-file-deletion-basis@1"
         current = Ampd.ReviewContent.fetch(source["draft_sha256"])
-        proposed = if deletion?, do: {:ok, nil}, else: Ampd.ReviewContent.fetch(source["result_sha256"])
+
+        proposed =
+          if deletion?, do: {:ok, nil}, else: Ampd.ReviewContent.fetch(source["result_sha256"])
 
         case {current, proposed} do
           {{:ok, c}, {:ok, p}} ->
@@ -713,8 +770,13 @@ defmodule Ampd.DevelopmentAttempt do
   defp convert_member(row), do: {row, []}
 
   defp block(source, side, bytes, max, reason),
-    do: %{"path" => source["path"], "side" => side, "bytes" => bytes, "max" => max,
-          "reason" => reason}
+    do: %{
+      "path" => source["path"],
+      "side" => side,
+      "bytes" => bytes,
+      "max" => max,
+      "reason" => reason
+    }
 
   defp unavailable_message(faults) do
     listed =
@@ -725,7 +787,7 @@ defmodule Ampd.DevelopmentAttempt do
     "Review content is unavailable: #{listed}. Stage it again; nothing is tested or accepted without it."
   end
 
-  defp coherent_set?(files, task) do
+  defp coherent_set?(files, task, revision) do
     first = hd(files)["source"]
     paths = Enum.map(files, & &1["source"]["path"])
 
@@ -733,7 +795,7 @@ defmodule Ampd.DevelopmentAttempt do
       Enum.all?(files, fn row ->
         source = row["source"]
 
-        source["task_ref"] == task["id"] and source["task_revision"] === task["revision"] and
+        source["task_ref"] == task["id"] and source["task_revision"] === revision and
           source["repository_ref"] == task["repository_ref"] and source["head"] == first["head"] and
           source["world"] == first["world"] and current_world?(source["world"])
       end)
@@ -780,8 +842,7 @@ defmodule Ampd.DevelopmentAttempt do
           else: refuse("test-start-conflict", "This run already belongs to a different request.")
 
       a["revision"] !== fields["revision"] or a["status"] in ["dismissed", "accepted"] or
-        task == nil or
-        task["revision"] !== a["task_revision"] or task["status"] in ~w(cancelled completed) ->
+        task == nil or task["status"] in ~w(cancelled completed) ->
         refuse("test-review-stale", "Reopen the latest plan and review before testing.")
 
       not is_binary(fields["path"]) or
@@ -1034,8 +1095,26 @@ defmodule Ampd.DevelopmentAttempt do
       length(attempt["history"]) >= 32 ->
         refuse("attempt-history-full", "This review reached its 32-event limit.")
 
+      # The proposed text is read through the one resolver, so a staged record
+      # checks the bytes its digest names — bounded by the per-file cap — and
+      # a record whose bytes are gone refuses by name rather than checking "".
+      (content = member_content(attempt)) == {:error, :missing} or
+          match?({:error, _}, content) ->
+        {:error, state} = content
+
+        refuse(
+          "review-content-unavailable",
+          "The proposed content of #{attempt["source"]["path"]} is #{state}. Stage it again; nothing is checked without it.",
+          %{
+            "path" => attempt["source"]["path"],
+            "side" => "proposed",
+            "state" => to_string(state)
+          }
+        )
+
       true ->
-        check = text_check(attempt) |> Map.put("requested_revision", revision)
+        {:ok, %{"proposed" => text}} = member_content(attempt)
+        check = text_check(attempt, text) |> Map.put("requested_revision", revision)
         next = revision + 1
 
         persist(
@@ -1123,7 +1202,7 @@ defmodule Ampd.DevelopmentAttempt do
 
     a != nil and run != nil and task != nil and a["revision"] == revision and
       a["status"] not in ["dismissed", "accepted"] and length(a["history"]) < 32 and
-      task["revision"] == a["task_revision"] and task["status"] not in ~w(cancelled completed) and
+      task["status"] not in ~w(cancelled completed) and
       latest == run and run["state"] == "completed" and run["outcome"]["verdict"] == "pass" and
       Enum.all?(get_in(task, ["required_checks", "profiles"]) || [], fn profile ->
         Enum.any?(
@@ -1174,8 +1253,7 @@ defmodule Ampd.DevelopmentAttempt do
 
   defp test_outcome?(_, _), do: false
 
-  defp text_check(attempt) do
-    text = attempt["proposed_text"]
+  defp text_check(attempt, text) when is_binary(text) do
     lines = String.split(text, "\n")
 
     checks = [

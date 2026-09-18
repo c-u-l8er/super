@@ -16,7 +16,7 @@ test('failed, mismatched and unfinished profiles cannot become ready for decisio
 test('completion requires a matching accepted receipt and no current open review',()=>{
  const accepted={...attempt,status:'accepted',acceptance:{schema:'development-acceptance@1',task_revision:2}};
  assert.equal(taskProgress(projection([accepted]),task).state,'finish');
- assert.equal(taskProgress(projection([{...accepted,acceptance:{schema:'development-acceptance@1',task_revision:1}}]),task).state,'prepare');
+ assert.equal(taskProgress(projection([{...accepted,task_revision:1,acceptance:{schema:'development-acceptance@1',task_revision:1}}]),task).state,'finish','a result accepted at an earlier revision is a result for this plan: criteria are immutable');
  assert.equal(taskProgress(projection([accepted,{...attempt,id:'z'}]),task).state,'checks_missing');
  assert.equal(taskProgress(projection([accepted,{...attempt,id:'old',task_revision:1,test_runs:{r:{...run,state:'started'}}}]),task).state,'waiting');
 });

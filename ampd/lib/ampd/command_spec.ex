@@ -365,8 +365,11 @@ defmodule Ampd.CommandSpec do
         %{name: "task_ref", type: {:id, "dt_"}, required: true},
         %{name: "task_revision", type: {:count, @max_generation}, required: true},
         %{name: "source", type: {:map, 4096}, required: true},
-        %{name: "shared_draft", type: {:string, 24000}, required: true},
-        %{name: "proposed_text", type: {:string, 32000}, required: true}
+        # Absent when the bodies were published first (`put_review_content`)
+        # and the record names them by the digests its source already
+        # carries. Present, they are the older inline shape, still accepted.
+        %{name: "shared_draft", type: {:string, 24000}, required: false, default: nil},
+        %{name: "proposed_text", type: {:string, 32000}, required: false, default: nil}
       ]
     },
     "check_development_attempt_text" => %{

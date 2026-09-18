@@ -1,7 +1,6 @@
 import {reviewTestCoverage} from './review-test-coverage.js';
 export function reviewNextStep(task,attempt,{reviewed=false,openedEditor=false}={}){
   if(!task||!attempt)return {kind:'unavailable',label:'Reconnect to continue',detail:'Current review state is unavailable.'};
-  if(task.revision!==attempt.task_revision)return {kind:'stale',label:'Open the current plan',detail:'This review belongs to an older plan. Prepare a new proposal from the current criteria.'};
   if(['completed','cancelled'].includes(task.status)||['accepted','dismissed'].includes(attempt.status))return {kind:'done',label:'Review retained',detail:'This review is saved as history.'};
   if(task.status==='blocked'||attempt.status==='needs_changes')return {kind:'blocked',label:'Read the review notes',detail:'Resolve the recorded blocker or requested changes before continuing.'};
   const coverage=reviewTestCoverage(attempt.test_runs,task.required_checks?.profiles??[]);

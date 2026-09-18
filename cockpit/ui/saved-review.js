@@ -27,7 +27,6 @@ export function savedReviewSet(attempt,task){
   if(['accepted','dismissed'].includes(attempt.status))throw Error(`Review ${attempt.id} is ${attempt.status} and retained as history. Record a fresh proposal for further changes.`);
   if(!task||task.id!==attempt.task_ref)throw Error('The plan this review belongs to is no longer available.');
   if(['cancelled','completed'].includes(task.status))throw Error(`Plan ${task.id} is ${task.status}. Its reviews are history and cannot be staged.`);
-  if(task.revision!==attempt.task_revision)throw Error(`Review ${attempt.id} was recorded against plan revision ${attempt.task_revision}; the plan is at revision ${task.revision}. Prepare a fresh file request.`);
   if(attempt.files.length<2||attempt.files.length>4)throw Error('A combined review holds two to four files.');
   const members=attempt.files.map(row=>{
     const s=row?.source;

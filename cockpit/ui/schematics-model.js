@@ -30,7 +30,7 @@ export function schematic({screen,level='screen',screens,p,world,chosen,session,
  const scoped=p?{...p,development_tasks:Object.fromEntries(Object.entries(p.development_tasks??{}).filter(([,t])=>(!workspace||t.workspace_ref===workspace)&&(!screen.startsWith('bot:')||p.bots?.[t.bot_ref]?.client_ref===screen.slice(4))))}:null;
  const editorTask=kind==='editor'&&editor?.task?.world===world&&scoped?.development_tasks?.[editor.task.id]?.revision===editor.task.revision?editor.task.id:null;
  const focus=workFocus(scoped,world,editorTask||chosen,session),task=focus.task,bot=task?p?.bots?.[task.bot_ref]:null;
- const all=task?Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id&&a.task_revision===task.revision):[];
+ const all=task?Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id):[];
  const attempt=all.find(a=>a.id===focus.attempt)||all.at(-1),coverage=reviewTestCoverage(attempt?.test_runs,task?.required_checks?.profiles??[]);
  const sv=taskSessionView(p,task,world,session),live=!!task&&session?.world===world&&session.botId===bot?.client_ref&&session.tasks?.some(t=>t.id===task.id&&t.revision===task.revision&&t.world===world);
  const state=(value)=>!p?'Unavailable':!task?'No selected task':value;

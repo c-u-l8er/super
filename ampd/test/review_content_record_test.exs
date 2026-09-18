@@ -392,13 +392,125 @@ defmodule Ampd.ReviewContentRecordTest do
     assert r["code"] == "attempt-source-mismatch"
   end
 
-  test "a set recorded against a superseded plan revision is refused", c do
+  test "a set shared before a planning note still records; a future revision and a cancelled plan refuse",
+       c do
     files = [staged_member(c.task, "a.js", "one", "two"), staged_member(c.task, "b.js", "x", "y")]
 
     Authority.update_development_task(c.task["id"], c.task["revision"], "blocked", "waiting")
 
-    assert %{"allow" => false, "refusal" => r} = record(c, files)
+    assert %{"allow" => true, "development_attempt" => a} = record(c, files)
+    assert a["task_revision"] == c.task["revision"]
+
+    assert %{"allow" => false, "refusal" => r} =
+             Control.command(c.human, :record_development_change_set, [
+               "set-future",
+               c.task["id"],
+               c.task["revision"] + 5,
+               %{"files" => files}
+             ])
+
     assert r["code"] == "attempt-task-stale"
+
+    Authority.update_development_task(c.task["id"], c.task["revision"] + 1, "cancelled", "stop")
+    assert %{"allow" => false, "refusal" => r} = record(c, files, "set-two")
+    assert r["code"] == "attempt-task-stale"
+  end
+
+  # ------------------------------------------------------- one file, by digest
+
+  defp record_file(c, member, ref \\ "file-one") do
+    Control.command(c.human, :record_development_attempt, [
+      ref,
+      c.task["id"],
+      c.task["revision"],
+      member["source"],
+      member["shared_draft"],
+      member["proposed_text"]
+    ])
+  end
+
+  test "a single-file review is recorded by digest: no body in the record, a content ref in the projection, and the text check reads the staged bytes",
+       c do
+    # Larger than the old inline caps, which is the case this exists for.
+    draft = String.duplicate("a line of the current text\n", 2500)
+    proposed = draft <> "and a proposed line with a trailing space \n"
+    member = staged_member(c.task, "cockpit/ui/development.js", draft, proposed)
+    assert byte_size(draft) > 24_000
+
+    assert %{"allow" => true, "development_attempt" => a} = record_file(c, member)
+    stored = Loci.development_attempts()[a["id"]]
+    refute Map.has_key?(stored, "shared_draft") or Map.has_key?(stored, "proposed_text")
+    assert byte_size(JSON.encode!(stored)) < 4_000
+
+    assert Ampd.DevelopmentAttempt.member_content(stored) ==
+             {:ok, %{"current" => draft, "proposed" => proposed}}
+
+    published = Projection.operator()["development_attempts"][a["id"]]
+    assert published["content"]["held"] == "staged"
+    assert published["content"]["current"]["state"] == "available"
+    assert published["content"]["proposed"]["bytes"] == byte_size(proposed)
+    refute Map.has_key?(published, "proposed_text")
+
+    # The same request again is the same record, not a conflict.
+    assert %{"allow" => true, "development_attempt" => ^a} = record_file(c, member)
+
+    checked = Control.command(c.human, :check_development_attempt_text, [a["id"], 1])
+    assert checked["allow"] == true
+    check = checked["development_attempt"]["text_check"]
+    assert check["requested_revision"] == 1
+
+    assert Enum.any?(
+             check["checks"],
+             &(&1["id"] == "trailing-whitespace" and &1["outcome"] != "pass")
+           ),
+           "the check read the staged proposed text: #{inspect(check)}"
+  end
+
+  test "a single-file record naming content that was never published refuses as UNAVAILABLE, naming the side, and records nothing",
+       c do
+    member = %{"source" => source(c.task, "a.js", "one", "two")}
+    assert %{"allow" => false, "refusal" => r} = record_file(c, member)
+    assert r["code"] == "review-content-unavailable"
+    assert r["operator_detail"]["side"] == "current"
+    assert Loci.development_attempts() == %{}
+  end
+
+  test "an inline single-file record's bodies leave the record as the world opens, and read back the same",
+       c do
+    draft = "before\n"
+    proposed = "after\n"
+
+    inline = %{
+      "source" => source(c.task, "a.js", draft, proposed),
+      "shared_draft" => draft,
+      "proposed_text" => proposed
+    }
+
+    assert %{"allow" => true, "development_attempt" => a} = record_file(c, inline)
+    assert Loci.development_attempts()[a["id"]]["shared_draft"] == draft
+    assert ReviewContent.verify(hash(draft)) != :available
+
+    :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
+    {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
+
+    staged = Loci.development_attempts()[a["id"]]
+    refute Map.has_key?(staged, "shared_draft") or Map.has_key?(staged, "proposed_text")
+
+    assert Map.drop(staged, ~w(shared_draft proposed_text)) ==
+             Map.drop(a, ~w(shared_draft proposed_text))
+
+    assert ReviewContent.verify(hash(draft)) == :available and
+             ReviewContent.verify(hash(proposed)) == :available
+
+    assert Ampd.DevelopmentAttempt.member_content(staged) ==
+             {:ok, %{"current" => draft, "proposed" => proposed}}
+
+    assert Projection.operator()["development_attempts"][a["id"]]["content"]["held"] == "staged"
+
+    # Opening again moves nothing: the bodies are already where they belong.
+    :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
+    {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
+    assert Loci.development_attempts()[a["id"]] == staged
   end
 
   # --------------------------------------------- all or nothing, and after

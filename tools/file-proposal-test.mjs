@@ -4,8 +4,9 @@ test('only the exact shared editor snapshot can become a draft',()=>assert.equal
 test('changed drafts and replaced repositories do not accept old proposals',()=>{for(const state of [{...current,session:'two'},{...current,generation:3},{...current,file:{path:'index.html',draft:'new work'}},{...current,file:null}])assert.throws(()=>checkFileProposal(ref,proposal,state));});
 test('unshared files, excerpts and oversized proposals are refused',()=>{for(const [r,p] of [[null,proposal],[{...ref,draft:undefined},proposal],[ref,{...proposal,path:'other.html'}],[ref,{...proposal,content:'x'.repeat(262145)}]])assert.throws(()=>checkFileProposal(r,p,current));});
 test('empty replacement text is reviewable and never mutates the current draft',()=>{assert.equal(checkFileProposal(ref,{...proposal,content:''},current),'');assert.equal(current.file.draft,'before');});
-test('plan-linked proposals require the same available plan revision',()=>{
+test('plan-linked proposals require the same available plan, at any of its revisions',()=>{
  const reference={...ref,task:{id:'dt_1',revision:2,world:'world-one'}},state={...current,world:'world-one',task:{id:'dt_1',revision:2,status:'planned'}};
  assert.equal(checkFileProposal(reference,proposal,state),'after');
- for(const changed of [{...state,world:'world-two'},{...state,task:null},{...state,task:{...state.task,revision:3}},{...state,task:{...state.task,status:'cancelled'}}])assert.throws(()=>checkFileProposal(reference,proposal,changed),/plan changed/);
+ assert.equal(checkFileProposal(reference,proposal,{...state,task:{...state.task,revision:3}}),'after','a later plan revision is the same plan: criteria are immutable, a note only bumps the revision');
+ for(const changed of [{...state,world:'world-two'},{...state,task:null},{...state,task:{...state.task,status:'cancelled'}}])assert.throws(()=>checkFileProposal(reference,proposal,changed),/plan changed/);
 });

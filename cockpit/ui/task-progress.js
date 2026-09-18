@@ -7,7 +7,11 @@ export function taskProgress(p,task){
   if(task.status==='completed')return result('completed','Plan completed','Accepted results and completion history are retained.');
   if(task.status==='cancelled')return result('cancelled','Plan cancelled','Previous reviews remain available as history.');
   const all=Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id);
-  const current=all.filter(a=>a.task_revision===task.revision);
+  // Every review of the plan, whatever revision it was recorded against: a
+  // plan's criteria are immutable, so a note or a status change does not make
+  // a review stale (ruled 2026-09-18; the revision filter here showed Prepare
+  // for a plan whose result was accepted one note earlier).
+  const current=all;
   const running=all.find(a=>Object.values(a.test_runs??{}).some(r=>r.state==='started'));
   if(running)return result('waiting','Check unfinished test run','A runtime start is awaiting its final outcome. Open the review for progress or recovery.','review',running);
   if(task.status==='blocked')return result('blocked','Review plan blocker',task.history?.at(-1)?.note||'Resolve the recorded blocker and update the plan.','planning');
@@ -20,8 +24,8 @@ export function taskProgress(p,task){
     if(!coverage.ready)return result('checks_attention','Resolve test results','A used profile is failed, incomplete, or tested a different snapshot. Open the review to inspect and rerun it.','review',a);
   }
   if(open.length)return result('decision','Review saved files and decide','Used test profiles agree. Stage the saved review in Editor and apply the staged change set (or save the exact proposal), then use the review’s file check and acceptance control.','review',open[0]);
-  if(current.some(a=>a.status==='accepted'&&a.acceptance?.schema==='development-acceptance@1'&&a.acceptance.task_revision===task.revision))return result('finish','Review plan completion','A result for this plan revision is accepted. Confirm the criteria are met and record a completion reason. Integration and rebuilding remain separate.','completion');
-  return result('prepare','Prepare file request',all.length?'No open review or accepted result covers this plan revision. Prepare a fresh request using the current criteria.':'Choose a source file in Editor and share it with the assigned bot.','prepare');
+  if(current.some(a=>a.status==='accepted'&&a.acceptance?.schema==='development-acceptance@1'))return result('finish','Review plan completion','A result for this plan is accepted. Confirm the criteria are met and record a completion reason. Integration and rebuilding remain separate.','completion');
+  return result('prepare','Prepare file request',all.length?'No open review or accepted result covers this plan. Prepare a fresh request from its criteria.':'Choose a source file in Editor and share it with the assigned bot.','prepare');
 }
 
 export function taskProgressRows(p,workspace='',botRef=''){

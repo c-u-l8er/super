@@ -45,11 +45,20 @@ defmodule Ampd.DevelopmentAttemptTest do
     draft = "before\r\n"
     proposed = "after\n"
 
+    head = String.duplicate("a", 40)
+
+    # Bound the way the host binds it (`workbench.rs` file_basis): the basis
+    # is the digest of what it names, so a record cannot name one thing and
+    # carry another. Single-file records check this since 2026-09-18, as
+    # change-set members always did.
     source = %{
       "schema" => "selected-file-basis@1",
       "scope" => "selected-file-only",
-      "basis_id" => hash("basis"),
-      "head" => String.duplicate("a", 40),
+      "basis_id" =>
+        hash(
+          JSON.encode!(["selected-file-basis@1", head, "index.html", hash(draft), hash(draft)])
+        ),
+      "head" => head,
       "path" => "index.html",
       "disk_sha256" => hash(draft),
       "draft_sha256" => hash(draft),
@@ -126,7 +135,7 @@ defmodule Ampd.DevelopmentAttemptTest do
     f = fields(c)
     a = Authority.record_development_attempt(f)
     assert Authority.record_development_attempt(f) == a
-    altered = %{f | "source" => Map.put(f["source"], "head", String.duplicate("b", 40))}
+    altered = bind(%{f | "source" => Map.put(f["source"], "head", String.duplicate("b", 40))})
 
     assert {:refused, %{"code" => "attempt-request-conflict"}} =
              Authority.record_development_attempt(altered)
@@ -228,7 +237,17 @@ defmodule Ampd.DevelopmentAttemptTest do
     next = Authority.update_development_attempt(a["id"], 1, "needs_changes", "Retain this")
     :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
     {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
-    assert Loci.development_attempts()[a["id"]] == next
+
+    # As the world opens the inline bodies move to the content store; the
+    # record keeps everything else and reads back the same bytes.
+    restarted = Loci.development_attempts()[a["id"]]
+    refute Map.has_key?(restarted, "shared_draft") or Map.has_key?(restarted, "proposed_text")
+
+    assert Map.drop(restarted, ~w(shared_draft proposed_text)) ==
+             Map.drop(next, ~w(shared_draft proposed_text))
+
+    assert DevelopmentAttempt.member_content(restarted) ==
+             {:ok, %{"current" => next["shared_draft"], "proposed" => next["proposed_text"]}}
 
     assert Loci.shape(Map.delete(Loci.initial(), "development_attempts"))["development_attempts"] ==
              %{}
@@ -247,6 +266,7 @@ defmodule Ampd.DevelopmentAttemptTest do
       |> Map.put("disk_sha256", hash(draft))
       |> Map.put("draft_sha256", hash(draft))
       |> Map.put("draft_bytes", byte_size(draft))
+      |> then(&bind(%{"source" => &1})["source"])
 
     oversized = %{f | "shared_draft" => draft, "source" => source}
 
@@ -283,12 +303,36 @@ defmodule Ampd.DevelopmentAttemptTest do
              DevelopmentAttempt.update(a["id"], {1, "needs_changes", "Bounded"}, s)
   end
 
+  # What a record keeps across a world open: everything but the bodies, which
+  # move to the content store on open and read back through `member_content/1`
+  # (proved by "store restart retains draft, result and notes").
+  defp durable(a), do: Map.drop(a, ~w(shared_draft proposed_text))
+
   defp proposal(f, text, path \\ "sample.json") do
     f
     |> Map.put("proposed_text", text)
     |> put_in(["source", "path"], path)
     |> put_in(["source", "result_sha256"], hash(text))
     |> put_in(["source", "result_bytes"], byte_size(text))
+    |> bind()
+  end
+
+  # Re-derive the basis from what it names, as the host does, after a fixture
+  # changes the path, head or current text it was bound to.
+  defp bind(%{"source" => source} = f) do
+    put_in(
+      f,
+      ["source", "basis_id"],
+      hash(
+        JSON.encode!([
+          "selected-file-basis@1",
+          source["head"],
+          source["path"],
+          source["disk_sha256"],
+          source["draft_sha256"]
+        ])
+      )
+    )
   end
 
   test "human text checks derive from retained bytes and survive store restart", c do
@@ -307,7 +351,7 @@ defmodule Ampd.DevelopmentAttemptTest do
     assert before == {Loci.development_tasks(), Loci.workers(), Ampd.Validation.all()}
     :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
     {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
-    assert Loci.development_attempts()[a["id"]] == next
+    assert durable(Loci.development_attempts()[a["id"]]) == durable(next)
   end
 
   test "issues retain bounded line findings and JSON failure", c do
@@ -394,7 +438,66 @@ defmodule Ampd.DevelopmentAttemptTest do
 
     assert Loci.development_attempts() == before
     Authority.update_development_task(a["task_ref"], 1, "blocked", "Changed plan")
+
+    assert DevelopmentAttempt.for_local_tests(a["id"], 1, repo["path"], world)["matched"],
+           "a plan update changes nothing the review is judged against"
+
+    Authority.update_development_task(a["task_ref"], 2, "cancelled", "Stop")
     refute DevelopmentAttempt.for_local_tests(a["id"], 1, repo["path"], world)["matched"]
+  end
+
+  test "a planning note does not orphan a review: recording, tests, acceptance and completion hold across plan revisions",
+       c do
+    a = Authority.record_development_attempt(fields(c))
+    world = a["source"]["world"]
+    repo = Ampd.Worktree.repo(a["repository_ref"])
+
+    # The note moves the plan to revision 2. The review stays this plan's review.
+    noted = Authority.update_development_task(a["task_ref"], 1, "planned", "Progress note")
+    assert noted["revision"] == 2
+    assert DevelopmentAttempt.for_local_tests(a["id"], 1, repo["path"], world)["matched"]
+
+    # A review shared before the note still records, against the revision it was shared at.
+    b = Authority.record_development_attempt(Map.put(fields(c), "client_ref", "attempt-two"))
+    assert b["task_revision"] == 1
+
+    # A revision the plan has never had refuses.
+    future = fields(c) |> Map.put("client_ref", "attempt-future") |> Map.put("task_revision", 9)
+    future = put_in(future, ["source", "task_revision"], 9)
+
+    assert {:refused, %{"code" => "attempt-task-stale"}} =
+             Authority.record_development_attempt(future)
+
+    refute match?({:refused, _}, Authority.begin_development_test(a["id"], test_start(a)))
+    Authority.finish_development_test(a["id"], "run-fixture", world, test_outcome(a))
+    checked = Authority.prepare_development_acceptance(a["id"], acceptance_fields(a))
+    token = checked["acceptance_check"]["token"]
+
+    accepted =
+      Authority.accept_development_attempt(
+        a["id"],
+        checked["revision"],
+        token,
+        "Meets criteria",
+        world
+      )
+
+    assert accepted["status"] == "accepted" and accepted["acceptance"]["task_revision"] == 1
+
+    # The unresolved second review still blocks completion; dismissed, it does not.
+    assert {:refused, %{"code" => "task-completion-not-ready"}} =
+             Authority.update_development_task(a["task_ref"], 2, "completed", "Done")
+
+    Authority.update_development_attempt(
+      b["id"],
+      1,
+      "dismissed",
+      "Superseded by the accepted one"
+    )
+
+    completed = Authority.update_development_task(a["task_ref"], 2, "completed", "Done")
+    assert completed["status"] == "completed"
+    assert completed["completion"]["accepted_attempt_refs"] == [a["id"]]
   end
 
   defp test_start(a, run_id \\ "run-fixture") do
@@ -448,7 +551,7 @@ defmodule Ampd.DevelopmentAttemptTest do
 
     :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
     {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
-    assert Loci.development_attempts()[a["id"]] == finished
+    assert durable(Loci.development_attempts()[a["id"]]) == durable(finished)
     refute Map.has_key?(Projection.agent(c.bot["actor"]), "development_attempts")
   end
 
@@ -579,7 +682,7 @@ defmodule Ampd.DevelopmentAttemptTest do
 
     :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
     {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
-    assert Loci.development_attempts()[a["id"]] == final
+    assert durable(Loci.development_attempts()[a["id"]]) == durable(final)
   end
 
   test "recovery preserves finished results and refuses a foreign world", c do
@@ -658,7 +761,7 @@ defmodule Ampd.DevelopmentAttemptTest do
 
     :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
     {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
-    assert Loci.development_attempts()[a["id"]] == accepted
+    assert durable(Loci.development_attempts()[a["id"]]) == durable(accepted)
   end
 
   test "acceptance refuses foreign content and invalidates checks when the plan changes", c do
@@ -702,8 +805,10 @@ defmodule Ampd.DevelopmentAttemptTest do
 
     Authority.update_development_task(a["task_ref"], 1, "blocked", "New requirements")
 
-    assert {:refused, _} =
-             Authority.accept_development_attempt(a["id"], 1, token, "Meets criteria", world)
+    # Criteria are immutable: a plan note or status change is not a change to
+    # what was tested, so the prepared acceptance still stands.
+    accepted = Authority.accept_development_attempt(a["id"], 1, token, "Meets criteria", world)
+    assert accepted["status"] == "accepted"
   end
 
   test "new unfinished or failed tests prevent acceptance of an older passing run", c do
@@ -756,7 +861,7 @@ defmodule Ampd.DevelopmentAttemptTest do
     assert finished["test_runs"]["run-fixture"]["outcome"] == outcome
     :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
     {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
-    assert Loci.development_attempts()[a["id"]] == finished
+    assert durable(Loci.development_attempts()[a["id"]]) == durable(finished)
   end
 
   test "Rust outcomes require the admitted profile and pinned toolchain", c do
@@ -785,7 +890,7 @@ defmodule Ampd.DevelopmentAttemptTest do
     assert finished["test_runs"]["run-fixture"]["outcome"] == outcome
     :ok = Supervisor.terminate_child(Ampd.Supervisor, Loci)
     {:ok, _} = Supervisor.restart_child(Ampd.Supervisor, Loci)
-    assert Loci.development_attempts()[a["id"]] == finished
+    assert durable(Loci.development_attempts()[a["id"]]) == durable(finished)
   end
 
   test "required plan checks are immutable, validated and cannot be omitted at acceptance", c do

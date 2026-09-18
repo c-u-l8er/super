@@ -33,7 +33,7 @@ const short=s=>typeof s==='string'&&s.length>=12?s.slice(0,12):'';
 /* One sentence, at most `limit` characters, built only from the accepted result. */
 export function completionReason(p,task,{limit=250}={}){
   if(!p||!task)return '';
-  const accepted=Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id&&a.task_revision===task.revision&&a.status==='accepted'&&a.acceptance?.schema==='development-acceptance@1').sort((a,b)=>String(a.id).localeCompare(String(b.id)));
+  const accepted=Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id&&a.status==='accepted'&&a.acceptance?.schema==='development-acceptance@1').sort((a,b)=>String(a.id).localeCompare(String(b.id)));
   if(!accepted.length)return '';
   const parts=accepted.map(a=>{
     const run=Object.values(a.test_runs??{}).find(r=>r.run_id===a.acceptance.run_id);

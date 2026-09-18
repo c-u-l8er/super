@@ -213,7 +213,6 @@ defmodule Ampd.DevelopmentTaskTest do
     state = %{"development_tasks" => %{t["id"] => t}, "development_attempts" => %{a["id"] => a}}
 
     for bad <- [
-          Map.put(a, "task_revision", 0),
           Map.delete(a, "acceptance"),
           Map.put(a, "status", "recorded"),
           Map.put(a, "test_runs", %{"unfinished" => %{"state" => "started"}})
@@ -248,6 +247,20 @@ defmodule Ampd.DevelopmentTaskTest do
 
     assert completed["revision"] == 2 and
              List.last(completed["history"])["note"] == "Meets the plan criteria"
+
+    # Criteria are immutable, so a result accepted at an EARLIER revision of
+    # the plan is a result for this plan. The revision the plan has moved to
+    # since — a note, a blocker, an unblock — does not orphan it.
+    older = %{a | "task_revision" => 0, "acceptance" => %{a["acceptance"] | "task_revision" => 0}}
+
+    assert {:ok, done, _} =
+             DevelopmentTask.update(
+               t["id"],
+               {1, "completed", "Meets the plan criteria"},
+               put_in(state, ["development_attempts", a["id"]], older)
+             )
+
+    assert done["completion"]["accepted_attempt_refs"] == ["accepted-one"]
 
     assert {:ok, ^completed, ^next} =
              DevelopmentTask.update(t["id"], {1, "completed", "Meets the plan criteria"}, next)

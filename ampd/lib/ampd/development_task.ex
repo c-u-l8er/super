@@ -227,6 +227,14 @@ defmodule Ampd.DevelopmentTask do
 
   def update(_, _, _), do: refuse("task-update-invalid", "Use a versioned task update.")
 
+  # A plan's title and criteria cannot change after creation — `update/3`
+  # takes a status and a note, nothing else — so no revision of an open plan
+  # judges a review differently from any other. `revision` counts updates and
+  # fences concurrent ones; it is not what evidence binds to. Ruled 2026-09-18
+  # after a planning note moved dt_0052 to revision 6 and orphaned da_0062,
+  # accepted at revision 5, so that the plan showed "Prepare" again. Every
+  # attempt of the plan counts: an unresolved one, whatever revision it was
+  # recorded against, still has to be accepted or dismissed before completion.
   defp completion_refs(task, s) do
     attempts =
       s
@@ -234,7 +242,7 @@ defmodule Ampd.DevelopmentTask do
       |> Map.values()
       |> Enum.filter(&(&1["task_ref"] == task["id"]))
 
-    current = Enum.filter(attempts, &(&1["task_revision"] == task["revision"]))
+    current = attempts
     pending = Enum.any?(current, &(&1["status"] not in ~w(accepted dismissed)))
 
     running =
@@ -245,8 +253,7 @@ defmodule Ampd.DevelopmentTask do
     accepted =
       Enum.filter(current, fn a ->
         a["status"] == "accepted" and
-          get_in(a, ["acceptance", "schema"]) == "development-acceptance@1" and
-          get_in(a, ["acceptance", "task_revision"]) == task["revision"]
+          get_in(a, ["acceptance", "schema"]) == "development-acceptance@1"
       end)
 
     if pending or running, do: [], else: accepted |> Enum.map(& &1["id"]) |> Enum.sort()

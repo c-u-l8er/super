@@ -1,4 +1,6 @@
 defmodule Ampd.Loci do
+  require Logger
+
   @moduledoc """
   `workspace@1` · `goal@1` · `lane@1` · `worker@1` · `worktree-cap@1` — the
   durable semantic objects, and the store that outlives every Carrier.
@@ -202,8 +204,36 @@ defmodule Ampd.Loci do
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
-      {:ok, tab, s} -> {:ok, %{tab: tab, s: shape(s), sealed: nil}}
+      {:ok, tab, s} -> {:ok, %{tab: tab, s: stage_review_bodies(shape(s), tab), sealed: nil}}
       {:sealed, reason} -> {:ok, %{tab: nil, s: sealed_state(), sealed: reason}}
+    end
+  end
+
+  # Review bodies recorded inline before content was published separately move
+  # into the content store as the world opens — phase one publishes them
+  # (addressed by bytes, so repeating it is a no-op), phase two rewrites only
+  # the members whose bodies read back under their digests, and the store is
+  # written only when a record changed. This is a rewrite of an authority
+  # store, so it earns its place the way `shape/1` does: it can only move
+  # bytes the record itself carries, under the digests the record already
+  # names, and a body the content store refuses stays exactly where it was.
+  defp stage_review_bodies(s, tab) do
+    {next, report} = Ampd.DevelopmentAttempt.stage_inline(s)
+
+    if report["refused"] != [] do
+      Logger.warning(
+        "ampd: review bodies left inline, refused by the content store: #{inspect(report["refused"])}"
+      )
+    end
+
+    if report["migrated"] > 0 do
+      Logger.info(
+        "ampd: staged the bodies of #{report["migrated"]} review record(s); #{report["published"]} blob(s), #{report["bytes"]} bytes published"
+      )
+
+      Ampd.Store.save(tab, next)
+    else
+      s
     end
   end
 
@@ -727,7 +757,8 @@ defmodule Ampd.Loci do
   # next `create` would crash on rather than refuse.
   def handle_ordered({:load_state, s}, st) do
     tab = st.tab || Ampd.Store.open!(@store)
-    {:reply, :ok, %{st | tab: tab, s: Ampd.Store.save(tab, shape(s)), sealed: nil}}
+    loaded = Ampd.Store.save(tab, shape(s))
+    {:reply, :ok, %{st | tab: tab, s: stage_review_bodies(loaded, tab), sealed: nil}}
   end
 
   def handle_ordered(:reset, %{tab: tab} = st),

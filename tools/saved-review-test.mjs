@@ -38,7 +38,6 @@ test('a recorded, open combined review on its own plan revision is staged; nothi
     ['another plan',f=>{f.task.id='dt_0002';}],
     ['a cancelled plan',f=>{f.task.status='cancelled';}],
     ['a completed plan',f=>{f.task.status='completed';}],
-    ['a plan revision that moved',f=>{f.task.revision=3;}],
     ['one member',f=>{f.attempt.files=f.attempt.files.slice(0,1);}],
     ['a member with no basis',f=>{delete f.attempt.files[1].source.basis_id;}],
     ['a member with no result',f=>{delete f.attempt.files[1].source.result_sha256;}],
@@ -47,8 +46,8 @@ test('a recorded, open combined review on its own plan revision is staged; nothi
   ]){const g=fixture();mutate(g);assert.throws(()=>savedReviewSet(g.attempt,g.task),undefined,why);}
 });
 
-test('the plan revision refusal names both revisions and the file refusals name the file',()=>{
-  const f=fixture();f.task.revision=3;assert.throws(()=>savedReviewSet(f.attempt,f.task),/recorded against plan revision 2; the plan is at revision 3/);
+test('a plan revision that moved is not a refusal, and the file refusals name the file',()=>{
+  const f=fixture();f.task.revision=3;assert.equal(savedReviewSet(f.attempt,f.task).length,2,'criteria are immutable: a later plan revision does not stale a saved review');
   const g=fixture();delete g.attempt.files[1].source.result_sha256;assert.throws(()=>savedReviewSet(g.attempt,g.task),/^Error: cockpit\.js: /);
 });
 
@@ -112,6 +111,7 @@ test('the items it yields are exactly what the combined-review check accepts, bo
   assert.deepEqual(checkProposalSet(items,current),[{path:'index.html',text:'<h1>After</h1>\n'},{path:'cockpit.js',text:'// blue\n'}]);
   assert.deepEqual(items[1].reference.source,f.files[1].source);
   assert.throws(()=>checkProposalSet(items,r=>({...current(r),generation:4})),/repository changed/);
-  assert.throws(()=>checkProposalSet(items,r=>({...current(r),task:{id:'dt_0001',revision:3,status:'planned'}})),/plan changed/);
+  assert.deepEqual(checkProposalSet(items,r=>({...current(r),task:{id:'dt_0001',revision:3,status:'planned'}})).map(i=>i.path),['index.html','cockpit.js'],'a later plan revision is the same plan');
+  assert.throws(()=>checkProposalSet(items,r=>({...current(r),task:{id:'dt_0001',revision:2,status:'cancelled'}})),/plan changed/);
   assert.throws(()=>savedReviewItems(members,bodies,new Map([...files].slice(0,1)),ctx),/cockpit\.js: not every file was read/);
 });

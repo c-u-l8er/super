@@ -263,7 +263,14 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       if(origin!==reference.task.world)throw Error('The runtime changed. Reopen the review.');
       reference.attemptRequests??={};
       const client_ref=reference.attemptRequests[source.result_sha256]??=crypto.randomUUID();
-      const args={client_ref,task_ref:reference.task.id,task_revision:reference.task.revision,source,shared_draft:reference.draft,proposed_text:e.detail.proposal.content};
+      /* Publish FIRST, then name: the bodies go to the content store under the
+         digests the source already carries, and the record is its basis alone —
+         the shape a change-set member has — so the attempt directory holds
+         metadata, not 40 KB of text per review. Without `putContent` (an older
+         runtime) the inline shape is sent, and is still accepted. */
+      const args={client_ref,task_ref:reference.task.id,task_revision:reference.task.revision,source};
+      if(putContent){await stageContent(putContent,source.draft_sha256,reference.draft);if(e.detail.proposal.content!==null)await stageContent(putContent,source.result_sha256,e.detail.proposal.content);}
+      else Object.assign(args,{shared_draft:reference.draft,proposed_text:e.detail.proposal.content});
       if(!await recordAttempt(args))throw Error('The runtime did not confirm the review record. Check Activity; retrying keeps the same request identity.');
       let saved;await waitForBot(current,origin,p=>{saved=Object.values(p.development_attempts??{}).find(a=>a.client_ref===client_ref);return !!saved;});
       return saved.id;
