@@ -2,6 +2,8 @@ import {fleetRecords} from './fleet-records.js';
 import {renderRecordGuidance} from './record-guidance.js';
 import {recordTab} from './record-tabs.js';
 import { reference, referenceText, readable } from './references.js';
+import {bindDisclosure} from './app-shell.js';
+const cancelledFolds=new Map();
 const names={id:'Record ID',ref:'Reference',actor:'Assigned actor',locus_ref:'Lane',workspace_ref:'Workspace',goal_ref:'Goal',repository_ref:'Repository',worker_ref:'Worker',purpose:'Purpose',occupancy:'Connection',world_ref:'World',schema:'Record format',created_at:'Created',public_message:'What happened',operator_detail:'Details',requires_human:'Needs your attention',ticket_id:'Attempt ID',authority_basis:'Authority basis',profile_basis:'Profile basis',terminal:'Terminal'};
 export const fieldName=k=>names[k]??k.replaceAll('_',' ').replace(/\b\w/g,c=>c.toUpperCase());
 export function describeRecord(record,key,label){
@@ -40,7 +42,7 @@ export function renderRecordPage({node,entry,frame,backLabel,detail}){
     if(open.length&&(completed.length||cancelled.length))plans.append(node('h3','Open'));
     for(const x of open)plans.append(planRow(x));
     if(completed.length){plans.append(node('h3','Completed'));for(const x of completed)plans.append(planRow(x));}
-    if(cancelled.length){const folded=node('details');folded.append(node('summary',`Cancelled (${cancelled.length})`));for(const x of cancelled)folded.append(planRow(x));plans.append(folded);}
+    if(cancelled.length){const foldKey=key;const folded=node('details');folded.append(node('summary',`Cancelled (${cancelled.length})`));for(const x of cancelled)folded.append(planRow(x));folded.open=cancelledFolds.get(foldKey)??false;plans.append(folded);bindDisclosure(folded,open=>cancelledFolds.set(foldKey,open));}
     page.append(plans);
   }
   const values=k=>Object.values(p[k]??{});
