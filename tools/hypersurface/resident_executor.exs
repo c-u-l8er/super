@@ -124,6 +124,9 @@ defmodule HyperSurface.ResidentExecutor do
     :ok
   end
 
+  # The guardian's reaped statuses: 42 = killed on the stop byte and waited; 0/67/68/69 = the child ended on its own
+  # and was waited (67 = a non-zero exit, which is what a SIGKILLed daemon reports). A signalled GUARDIAN shows here as
+  # 128+signal from the port, and that is no reap of the daemon at all: `stop_unconfirmed`.
   defp confirmed_reply(status) when status in [0, 42, 67, 68, 69], do: :ok
   defp confirmed_reply(_), do: {:error, :stop_unconfirmed}
 
@@ -200,8 +203,14 @@ defmodule HyperSurface.ResidentJob do
   end
 
   def handle_info({:tcp_closed, sock}, %{sock: sock, done: false} = st) do
-    # the daemon went away under the job: no host word, so the executor's reaped status is the only witness
-    {:noreply, %{st | done: true} |> conclude(:closed)}
+    # The connection closed under the job with no host word: the daemon died, or it dropped the connection. Either
+    # way the job's stop is exactly as unconfirmed as a cancel the host never answered, so it takes the same road --
+    # the kernel's witness through the executor (a stop byte, then the guardian's reaped status for the daemon as a
+    # whole; if the daemon is already dead the guardian has that status within its poll). A reaped status confirms
+    # the absence and the slot ends `executor_failed`, never a result; anything else stays `stop_unconfirmed`.
+    Process.cancel_timer(st.timer)
+    answer = HyperSurface.ResidentExecutor.kill(st.config.executor)
+    {:noreply, %{st | done: true} |> conclude({:closed, answer})}
   end
 
   def handle_info({:DOWN, _, :process, bridge, _}, %{bridge: bridge} = st) do
@@ -268,7 +277,8 @@ defmodule HyperSurface.ResidentJob do
         :confirmed -> {{:resident_confirmed, st.op}, :ok}
         {:killed, :ok} -> {{:resident_confirmed, st.op}, :ok}
         {:killed, other} -> {{:resident_unconfirmed, st.op}, other}
-        :closed -> {{:resident_unconfirmed, st.op}, {:error, :stop_unconfirmed}}
+        {:closed, :ok} -> {{:resident_confirmed, st.op}, :ok}
+        {:closed, other} -> {{:resident_unconfirmed, st.op}, other}
         :unconfirmed -> {{:resident_unconfirmed, st.op}, {:error, :stop_unconfirmed}}
       end
 
