@@ -43,9 +43,11 @@ export function completionReason(p,task,{limit=250}={}){
     return `${a.id}${file?` (${file})`:''}: ${tests}${snap?` on snapshot ${snap}`:''}`;
   });
   const others=Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id).length;
-  let text=`Accepted at revision ${task.revision} — ${parts.join('; ')}. ${others} review attempt${others===1?'':'s'} recorded. Criteria met.`;
+  /* The revision the result was accepted AT, not the plan's current one: a note since then moved the plan on, and evidence binds to the plan, not its revision. */
+  const at=[...new Set(accepted.map(a=>a.acceptance?.task_revision??a.task_revision))].join(', ');
+  let text=`Accepted at revision ${at} — ${parts.join('; ')}. ${others} review attempt${others===1?'':'s'} recorded. Criteria met.`;
   if(text.length>limit){
-    text=`Accepted at revision ${task.revision} — ${accepted.map(a=>a.id).join(', ')}: tests passed. ${others} review attempt${others===1?'':'s'} recorded. Criteria met.`;
+    text=`Accepted at revision ${at} — ${accepted.map(a=>a.id).join(', ')}: tests passed. ${others} review attempt${others===1?'':'s'} recorded. Criteria met.`;
     if(text.length>limit)text=text.slice(0,limit-1)+'…';
   }
   return text;

@@ -38,6 +38,7 @@ test('the drafted reason names the accepted attempt, file, test count and snapsh
  const p={development_attempts:{da_0062:accepted,da_0030:{id:'da_0030',task_ref:'dt_0052',task_revision:3,status:'recorded'}}};
  const text=completionReason(p,task());
  assert.equal(text,'Accepted at revision 5 — da_0062 (mobile/ui/conversations.js): 45 tests passed on snapshot 2cf7be6cfafa. 2 review attempts recorded. Criteria met.');
+ assert.ok(completionReason(p,task({revision:6})).startsWith('Accepted at revision 5 — da_0062'),'the reason names the revision the result was accepted at, not the plan\'s current one (dt_0052 read "revision 6" on 2026-09-18)');
  assert.ok(text.length<=250);
 });
 test('no accepted result, no draft; and a long draft falls back to ids and still fits',()=>{

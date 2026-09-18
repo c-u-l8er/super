@@ -197,3 +197,84 @@ at all — the directory was full. So this slice was written directly, tested
 as above, committed in `super-live`, pulled into the worktree, built and
 restarted; the *next* slice is the first single-file round through Super on
 the installed binary, which is the proof that the directory takes it.
+
+## After the install
+
+**Installed** as commit `84a5585` on `review-content-staging`, binary
+`745e9d99d367ccfb…` running as `super-desktop`, proven from
+`/proc/<MainPID>/exe`; gateway 4318 and Expo 8081 answered 200. The world was
+backed up before the install (`default-20260918T212229Z`) and again before the
+round below (`default-20260918T212932Z`).
+
+**The migration ran on the first open**, from the journal:
+`ampd: staged the bodies of 5 review record(s); 11 blob(s), 80070 bytes published`.
+The live `loci` store, read with `:dets` from a copy, before and after:
+
+| | before (18:21 backup) | after the open | after the round |
+|---|---|---|---|
+| `development_attempts` as JSON | 130 720 (8 records) | 30 881 (8) | 42 079 (10, from the page) |
+| whole `loci` state as JSON | 183 595 | 85 277 | — |
+| `da_0062` (single file, accepted) | 43 567 | 6 268 | — |
+| `da_0030` (three-file inline set) | 30 631 | 3 384 | — |
+| blobs in the content store | 16 | 21 | 23 |
+
+**The first single-file round through Super on the installed binary — plan
+`dt_0069`, "The Cancelled fold on record pages keeps its state across frames"
+— went record → note → text check → test run → accept → finish**, driven by
+`outputs/cancelled-fold/driver.mjs` against the real world with the desktop
+stopped (screenshots `01`–`08` beside it):
+
+* Claude Opus 5 (`opus[1m]`, `xhigh`) proposed `cockpit/ui/record-page.js`
+  in 92 s: 3 added · 1 removed, exactly the asked change (`bindDisclosure`
+  imported from `app-shell.js`, a module-level `Map` keyed by the record key,
+  open state read before append and stored in the click-committed callback).
+  Reviewed by the supervisor from the diff before recording.
+* **`da_0070` was recorded staged** — `content.held = "staged"`, the record
+  about 4.3 KB — with the directory at 35 107 bytes before and 39 422 after.
+  This is the proof the ruling was for: the directory that refused every
+  single-file review the day before took one, and the review note, the text
+  check (pass) and the test run all wrote into it.
+* Test run `run-579383-…`: **pass, 48 tests, snapshot `a37eb44274be`**.
+  Accepted at 21:48:06Z with the reason in the record. The plan was finished
+  from the wizard: `finish:current`, `finishable = true`, the button reading
+  *Approve and finish plan*, the reason prefilled — **the finishable wizard
+  rendering, seen on a real screen for the first time** (`07-finishable.png`),
+  then `finish:done` (`08-completed.png`). `dt_0069` completed at revision 2
+  naming `da_0070`.
+
+**Three findings from driving it, each costing one run:**
+
+1. *The first reply in a new conversation was the title header alone.* The
+   page asks the model to begin its first reply's text field with
+   `<conversation-title>…</conversation-title>`; Opus returned
+   `<conversation-title>Persist the Cancelled fold state on record pages (dt_0069)`
+   — unterminated, no note, no action — in 25 s, and the round produced
+   nothing. The same request resent in that (now titled) conversation
+   produced the proposal in 92 s. Not yet understood; recorded here so the
+   next session does not rediscover it. Sign-in was proved separately by a
+   real CLI request.
+2. *Saving the proposal before the test run is refused.* The JavaScript
+   profile applies the recorded proposal to a snapshot of the unchanged
+   source; a source already saved on disk fails
+   `The selected source file changed: … Prepare a fresh review.` The order is
+   record → check → test → save → accept, as `development-acceptance-smoke`
+   already does.
+3. *After a restart, a single-file proposal cannot be staged from its card* —
+   the card holds no live Editor reference, and `saved-review.js` re-stages
+   combined reviews only. The exact reviewed bytes were read from the content
+   store by the record's `result_sha256` (host `review_content`), hash-checked,
+   and written to the file; acceptance then verified the saved file against
+   the tested snapshot as it would after Save. Said plainly: that write did not
+   go through the Editor's *Use as editor draft*. A test run also needs the
+   Editor in the same process holding the plan's repository
+   (`cockpit.openRepository('rp_0003')`), restart or not.
+
+**`dt_0052` was completed** from the same Finish control, at revision 7,
+naming `da_0062`, with this reason recorded on the plan: completed under the
+ruling that evidence binds to the plan, not its revision — `da_0062` accepted
+at revision 5 is the one run the plan asked to prove; the criteria named
+Fable 5.1 as proposer, the proposal came from Claude Opus 5 after every bot was
+pinned to `opus[1m]`/`xhigh`, so that clause could never again be met as
+written. One wording defect surfaced there: the prefilled reason read
+"Accepted at revision 6", the plan's revision, where the result was accepted at
+revision 5 — fixed in `plan-steps.js` to name the attempt's revision.
