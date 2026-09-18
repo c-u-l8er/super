@@ -641,3 +641,9 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .plan-step-button:disabled { cursor:default; }
 .plan-step-state { font-size:11px; color:var(--dim); }
 .plan-step[data-state=current] .plan-step-state, .plan-step[data-state=blocked] .plan-step-state { color:inherit; font-weight:600; }
+.plan-step-active { background:var(--bg); }
+.plan-wizard-all { display:inline-flex; align-items:center; gap:6px; font-size:11px; color:var(--dim); margin:0 0 12px; }
+.plan-wizard-all input { width:14px; height:14px; }
+.plan-part { display:block; }
+.plan-history { margin:16px 0 0; border-top:1px solid var(--line); padding-top:8px; }
+.plan-history > summary { cursor:pointer; font-size:12px; color:var(--dim); }

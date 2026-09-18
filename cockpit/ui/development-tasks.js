@@ -49,59 +49,85 @@ export function initDevelopmentTasks({invoke,actions,current}){
   const savedReviewNotes=new Map();
   const button=(label,fn)=>{const b=node('button',label,'subtle');b.type='button';b.onclick=fn;return b;};
   const record=(label,kind,id)=>{const b=node('button',label,'subtle');b.type='button';b.dataset.recordOpen=kind+':'+id;return b;};
+  // The detail page is a WIZARD: one step's sections at a time. planSteps() decides
+  // the steps; the person may revisit a done step or switch on every section at once.
+  const wizard={task:null,step:null,all:false};
+  const PARTS_BY_STEP={prepare:['brief','next','prepare','editor','session'],review:['next','attempts','session'],checks:['next','attempts','runs','fleet'],accept:['next','attempts','screens','runs'],finish:['next','finish','completed','attempts']};
   function show(task){
-    selection=task?{id:task.id,revision:task.revision,world:runtimeWorld(current)}:null;form.hidden=!!task;list.hidden=!!task;details.replaceChildren();if(!task)return;details.append(button('← All development plans',()=>show(null)));
-    const focus=button('Focus on this task',()=>document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:task.id}})));focus.id='task-focus';details.append(focus);
-    const p=heldProjection(current);details.append(node('h2',task.title),node('span',task.status,'status-chip'),node('p',task.criteria),node('p',`Plan ${task.id} · revision ${task.revision} · lane base: ${task.base_revision||'not selected'} (not a validated result)`,'availability-note'));
-    details.append(node('p',task.required_checks?'Required checks: '+task.required_checks.profiles.map(p=>p.includes('javascript')?'JavaScript':p.includes('elixir')?'Elixir':'Rust').join(', '):'Legacy plan: no required checks selected. Every profile run must pass.','directory-note'));
-    details.append(record('Open goal' ,'goal',task.goal_ref),record('Open lane','lane',task.lane_ref),record('Open repository','repository',task.repository_ref));
-    const bot=p?.bots?.[task.bot_ref];if(bot)details.append(button('Open '+bot.name,()=>navigate('bot:'+bot.client_ref,true)));
-    const progress=taskProgress(p,task),next=node('section',undefined,'attempt-checks');next.dataset.taskNextAction=task.id;
-    next.append(node('h3','Next action'),node('p',progress.reason));
+    selection=task?{id:task.id,revision:task.revision,world:runtimeWorld(current)}:null;form.hidden=!!task;list.hidden=!!task;details.replaceChildren();if(!task)return;
+    if(wizard.task!==task.id){wizard.task=task.id;wizard.step=null;wizard.all=false;}
+    const p=heldProjection(current);
+    const plan=planSteps(p,task),progress=plan.progress;
+    const allowed=new Set(plan.steps.filter(s=>s.state!=='todo').map(s=>s.key));
+    const defaultStep=plan.current??'finish';
+    if(!wizard.step||!allowed.has(wizard.step))wizard.step=defaultStep;
+    // --- head: always visible
+    const head=node('div',undefined,'plan-head');head.dataset.planPanel='head';
+    head.append(button('← All development plans',()=>show(null)));
+    const focus=button('Focus on this task',()=>document.dispatchEvent(new CustomEvent('focus-development-task',{detail:{taskId:task.id}})));focus.id='task-focus';head.append(focus);
+    head.append(node('h2',task.title),node('span',task.status,'status-chip'),node('p',`Plan ${task.id} · revision ${task.revision} · lane base: ${task.base_revision||'not selected'} (not a validated result)`,'availability-note'));
+    const stepper=node('ol',undefined,'plan-steps');stepper.id='task-steps';stepper.setAttribute('aria-label','Plan steps');
+    for(const s of plan.steps){const li=node('li',undefined,'plan-step');li.dataset.step=s.key;li.dataset.state=s.state;const b=node('button',s.label,'plan-step-button');b.type='button';b.disabled=s.state==='todo';b.setAttribute('aria-current',s.state==='current'||s.state==='blocked'?'step':'false');b.onclick=()=>{wizard.step=s.key;wizard.all=false;apply();};
+      li.append(b,node('span',{done:'done',current:'now',blocked:'blocked',todo:'to do'}[s.state],'plan-step-state'));stepper.append(li);}
+    const allLabel=node('label',undefined,'plan-wizard-all'),allBox=node('input');allBox.type='checkbox';allBox.id='task-wizard-all';allBox.checked=wizard.all;allBox.onchange=()=>{wizard.all=allBox.checked;apply();};allLabel.append(allBox,node('span','Show every section'));
+    head.append(stepper,allLabel);details.append(head);
+    const parts={};const part=key=>{const d=node('div',undefined,'plan-part');d.dataset.planPanel=key;parts[key]=d;details.append(d);return d;};
+    // --- brief: what the plan is
+    const brief=part('brief');brief.append(node('p',task.criteria),node('p',task.required_checks?'Required checks: '+task.required_checks.profiles.map(p=>p.includes('javascript')?'JavaScript':p.includes('elixir')?'Elixir':'Rust').join(', '):'Legacy plan: no required checks selected. Every profile run must pass.','directory-note'),record('Open goal' ,'goal',task.goal_ref),record('Open lane','lane',task.lane_ref),record('Open repository','repository',task.repository_ref));
+    const bot=p?.bots?.[task.bot_ref];if(bot)brief.append(button('Open '+bot.name,()=>navigate('bot:'+bot.client_ref,true)));
+    // --- next: the one action that matters now
+    const next=node('section',undefined,'attempt-checks');next.dataset.taskNextAction=task.id;next.append(node('h3','Next action'),node('p',progress.reason));
     if(progress.target)next.append(button(progress.label,()=>{
       if(progress.target==='prepare'){details.querySelector('#task-prepare-file')?.click();return;}
       const target=progress.target==='review'?[...details.querySelectorAll('[data-attempt-id]')].find(n=>n.dataset.attemptId===progress.attempt):details.querySelector(progress.target==='completion'?'#task-completion-reason':'#task-note');
-      if(target){if(progress.target==='review')target.open=true;target.scrollIntoView({block:'center'});const focus=target.querySelector?.('summary')||target;focus.focus();}
+      if(target){if(progress.target==='review')target.open=true;const owner=target.closest('[data-plan-panel]');if(owner?.hidden){wizard.all=true;apply();}else if(target.closest('details.plan-history'))target.closest('details.plan-history').open=true;target.scrollIntoView({block:'center'});const focus=target.querySelector?.('summary')||target;focus.focus();}
     }));else next.append(node('p',progress.label));
-    const plan=planSteps(p,task);const stepper=node('ol',undefined,'plan-steps');stepper.id='task-steps';stepper.setAttribute('aria-label','Plan steps');
-    for(const s of plan.steps){const li=node('li',undefined,'plan-step');li.dataset.step=s.key;li.dataset.state=s.state;const b=node('button',s.label,'plan-step-button');b.type='button';b.disabled=s.state==='todo';b.setAttribute('aria-current',s.state==='current'||s.state==='blocked'?'step':'false');
-      b.onclick=()=>{const target=s.key==='finish'?details.querySelector('#task-completion-reason'):s.key==='prepare'?details.querySelector('#task-prepare-file'):[...details.querySelectorAll('[data-attempt-id]')].find(n=>n.dataset.attemptId===progress.attempt)||details.querySelector('[data-attempt-id]');if(!target)return;if(target.tagName==='DETAILS')target.open=true;target.scrollIntoView({block:'center'});(target.querySelector?.('summary')||target).focus();};
-      li.append(b,node('span',{done:'done',current:'now',blocked:'blocked',todo:'to do'}[s.state],'plan-step-state'));stepper.append(li);}
-    details.append(stepper,next);
-    details.append(taskScreenshots({task,world:current().frame.world,invoke,current}));
-    details.append(taskRunEvidence({task,invoke,current}));
-    const editorPanel=node('section',undefined,'attempt-checks');editorPanel.id='task-editor-context';details.append(editorPanel);renderEditor();
-    const sessionPanel=node('section',undefined,'attempt-checks');sessionPanel.id='task-provider-session';details.append(sessionPanel);renderSession();
-    initFleetChecks({root:details,invoke,context:()=>({world:runtimeWorld(current),task:heldProjection(current)?.development_tasks?.[task.id]})});
-    details.append(node('h3','Plan history'));
-    for(const event of task.history)details.append(node('p',`${event.at} · ${event.status} · ${event.note}`,'availability-note'));
-    renderAttempts(task);
-    if(task.status==='completed'){details.append(node('h3','Plan completed'),node('p','This is your planning decision based on the linked accepted results. It does not certify later source changes.','availability-note'));const receipt=node('p',`Completed ${task.completion?.at??''} · Accepted reviews: ${(task.completion?.accepted_attempt_refs??[]).join(', ')}`,'directory-note');receipt.dataset.planCompletion=task.id;details.append(receipt);return;}
-    if(task.status==='cancelled')return;
-    const prepare=button('Prepare file request',()=>{const event=new CustomEvent('prepare-task-file',{cancelable:true,detail:{id:task.id,revision:task.revision,world:runtimeWorld(current)}});if(!document.dispatchEvent(event))notice.textContent='Reopen the latest plan and finish any current editor operation before preparing a file request.';});prepare.id='task-prepare-file';details.append(prepare);
-
-    const complete=node('button','Mark plan complete','subtle');complete.type='button';complete.id='task-complete';
-    const reason=node('input');reason.id='task-completion-reason';reason.maxLength=250;reason.placeholder='Explain why this plan is finished';reason.setAttribute('aria-label','Plan completion reason');
-    const completionField=node('label','Completion reason','field');completionField.append(reason);
-    const section=node('section',undefined,'attempt-checks');section.id='task-finish';section.dataset.finishable=String(plan.finishable);
-    if(plan.finishable){const draft=completionReason(p,task);if(draft&&!reason.value)reason.value=draft;complete.textContent='Approve and finish plan';complete.className='primary';
-      section.append(node('h3','Finish this plan'),node('p','A tested result for this plan revision is accepted. The reason below was drafted from it — edit it or approve it as written. Finishing records your planning decision; it does not certify later source changes.','directory-note'),completionField,complete);
-      next.after(section);}
-    else{complete.hidden=true;reason.readOnly=true;reason.placeholder='Available once a tested result for this revision is accepted';
-      section.append(node('h3','Finish this plan'),node('p',`Not yet: ${progress.label.toLowerCase()} first. Finishing needs an accepted result for the current plan revision with no open reviews or unfinished test runs.`,'directory-note'),completionField,complete);details.append(section);}
-    if(plan.current==='prepare'&&!plan.cancelled)next.after(prepare);
-    const finishRevision=task.revision;
-    complete.onclick=async()=>{if(pending)return;if(!reason.value.trim()){notice.textContent='Explain why the plan is finished before completing it.';reason.focus();return;}if([...details.querySelectorAll('textarea')].some(n=>n.value)){notice.textContent='Save your unfinished review or planning note before completing the plan.';return;}await send('update',{task_ref:task.id,revision:finishRevision,status:'completed',note:reason.value},p=>p.development_tasks?.[task.id]?.status==='completed',()=>show(heldProjection(current)?.development_tasks?.[task.id]));};
-
-    const update=node('form',undefined,'bot-profile-form');update.id='development-plan-update';const status=node('select');status.id='task-status';for(const s of ['planned','blocked','cancelled']){const o=node('option',s);o.value=s;status.append(o);}status.value=task.status;
-    const note=node('textarea');note.id='task-note';note.required=true;note.maxLength=250;note.rows=3;
-    const save=node('button','Save planning update','primary');save.type='submit';update.append(field('Planning status',status),field('Reason / progress note',note),save);details.append(update);
-    const captured={...selection};
-    update.onsubmit=async e=>{e.preventDefault();if(pending||!update.reportValidity())return;
-      const latest=heldProjection(current)?.development_tasks?.[captured.id];
-      if(runtimeWorld(current)!==captured.world||!latest||latest.revision!==captured.revision){notice.textContent='The task changed or the runtime disconnected. Reopen the task to review its latest state. Your note remains here.';return;}
-      await send('update',{task_ref:captured.id,revision:captured.revision,status:status.value,note:note.value},p=>p.development_tasks?.[captured.id]?.revision===captured.revision+1,()=>show(heldProjection(current)?.development_tasks?.[captured.id]));
-    };
+    part('next').append(next);
+    // --- prepare
+    const prep=part('prepare');
+    if(!plan.completed&&!plan.cancelled){const prepare=button('Prepare file request',()=>{const event=new CustomEvent('prepare-task-file',{cancelable:true,detail:{id:task.id,revision:task.revision,world:runtimeWorld(current)}});if(!document.dispatchEvent(event))notice.textContent='Reopen the latest plan and finish any current editor operation before preparing a file request.';});prepare.id='task-prepare-file';prep.append(prepare);}
+    // --- editor & provider context
+    const editorPanel=node('section',undefined,'attempt-checks');editorPanel.id='task-editor-context';part('editor').append(editorPanel);renderEditor();
+    const sessionPanel=node('section',undefined,'attempt-checks');sessionPanel.id='task-provider-session';part('session').append(sessionPanel);renderSession();
+    // --- attempts, runs, fleet, screenshots
+    renderAttempts(task,part('attempts'));
+    part('runs').append(taskRunEvidence({task,invoke,current}));
+    initFleetChecks({root:part('fleet'),invoke,context:()=>({world:runtimeWorld(current),task:heldProjection(current)?.development_tasks?.[task.id]})});
+    part('screens').append(taskScreenshots({task,world:current().frame.world,invoke,current}));
+    // --- finish
+    const fin=part('finish');
+    if(!plan.completed&&!plan.cancelled){
+      const complete=node('button','Mark plan complete','subtle');complete.type='button';complete.id='task-complete';
+      const reason=node('input');reason.id='task-completion-reason';reason.maxLength=250;reason.placeholder='Explain why this plan is finished';reason.setAttribute('aria-label','Plan completion reason');
+      const completionField=node('label','Completion reason','field');completionField.append(reason);
+      const section=node('section',undefined,'attempt-checks');section.id='task-finish';section.dataset.finishable=String(plan.finishable);
+      if(plan.finishable){const draft=completionReason(p,task);if(draft&&!reason.value)reason.value=draft;complete.textContent='Approve and finish plan';complete.className='primary';
+        section.append(node('h3','Finish this plan'),node('p','A tested result for this plan revision is accepted. The reason below was drafted from it — edit it or approve it as written. Finishing records your planning decision; it does not certify later source changes.','directory-note'),completionField,complete);}
+      else{complete.hidden=true;reason.readOnly=true;reason.placeholder='Available once a tested result for this revision is accepted';
+        section.append(node('h3','Finish this plan'),node('p',`Not yet: ${progress.label.toLowerCase()} first. Finishing needs an accepted result for the current plan revision with no open reviews or unfinished test runs.`,'directory-note'),completionField,complete);}
+      fin.append(section);
+      const finishRevision=task.revision;
+      complete.onclick=async()=>{if(pending)return;if(!reason.value.trim()){notice.textContent='Explain why the plan is finished before completing it.';reason.focus();return;}if([...details.querySelectorAll('textarea')].some(n=>n.value)){notice.textContent='Save your unfinished review or planning note before completing the plan.';return;}await send('update',{task_ref:task.id,revision:finishRevision,status:'completed',note:reason.value},p=>p.development_tasks?.[task.id]?.status==='completed',()=>show(heldProjection(current)?.development_tasks?.[task.id]));};
+    }
+    const done=part('completed');
+    if(task.status==='completed'){done.append(node('h3','Plan completed'),node('p','This is your planning decision based on the linked accepted results. It does not certify later source changes.','availability-note'));const receipt=node('p',`Completed ${task.completion?.at??''} · Accepted reviews: ${(task.completion?.accepted_attempt_refs??[]).join(', ')}`,'directory-note');receipt.dataset.planCompletion=task.id;done.append(receipt);}
+    // --- history & planning note: one collapsed line, always reachable
+    const hist=node('details',undefined,'plan-history');hist.dataset.planPanel='history';hist.append(node('summary',`Plan history (${task.history.length})${plan.completed||plan.cancelled?'':' · planning note'}`));
+    for(const event of task.history)hist.append(node('p',`${event.at} · ${event.status} · ${event.note}`,'availability-note'));
+    if(!plan.completed&&!plan.cancelled){
+      const update=node('form',undefined,'bot-profile-form');update.id='development-plan-update';const status=node('select');status.id='task-status';for(const s of ['planned','blocked','cancelled']){const o=node('option',s);o.value=s;status.append(o);}status.value=task.status;
+      const note=node('textarea');note.id='task-note';note.required=true;note.maxLength=250;note.rows=3;
+      const save=node('button','Save planning update','primary');save.type='submit';update.append(field('Planning status',status),field('Reason / progress note',note),save);hist.append(node('p','A planning note moves the plan to a new revision; an accepted result is bound to the revision it was accepted at.','directory-note'),update);
+      const captured={...selection};
+      update.onsubmit=async e=>{e.preventDefault();if(pending||!update.reportValidity())return;
+        const latest=heldProjection(current)?.development_tasks?.[captured.id];
+        if(runtimeWorld(current)!==captured.world||!latest||latest.revision!==captured.revision){notice.textContent='The task changed or the runtime disconnected. Reopen the task to review its latest state. Your note remains here.';return;}
+        await send('update',{task_ref:captured.id,revision:captured.revision,status:status.value,note:note.value},p=>p.development_tasks?.[captured.id]?.revision===captured.revision+1,()=>show(heldProjection(current)?.development_tasks?.[captured.id]));
+      };
+    }
+    details.append(hist);
+    function apply(){const visible=wizard.all?null:new Set(PARTS_BY_STEP[wizard.step]??[]);for(const [key,el] of Object.entries(parts))el.hidden=visible?!visible.has(key):false;stepper.querySelectorAll('li').forEach(li=>li.classList.toggle('plan-step-active',!wizard.all&&li.dataset.step===wizard.step));allBox.checked=wizard.all;details.dataset.wizardStep=wizard.all?'all':wizard.step;}
+    apply();
   }
   function renderEditor(){
     const panel=details.querySelector('#task-editor-context');if(!panel||!selection)return;
@@ -128,7 +154,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
 
   }
   document.addEventListener('task-session-changed',renderSession);
-  function renderAttempts(task){
+  function renderAttempts(task,into){
     const rows=Object.values(heldProjection(current)?.development_attempts??{}).filter(a=>a.task_ref===task.id);
     const section=node('section',undefined,'development-attempts');section.id='development-attempts';
     section.append(node('h3',`Review attempts (${rows.length})`),node('p','Retained review material and human notes. Recording does not save a file, run checks or accept a result.','directory-note'));
@@ -217,7 +243,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
       guideReview({card,material,attempt,task,current});
       section.append(card);
     }
-    details.append(section);
+    (into||details).append(section);
   }
   async function send(intent,args,confirmed,done){
     const origin=runtimeWorld(current);pending=true;refresh();notice.textContent=intent==='checkAttempt'?'Checking retained proposed text…':'Saving…';

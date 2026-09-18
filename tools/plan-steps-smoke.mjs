@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-/* plan-steps-smoke — a fresh plan shows its steps, with Prepare current and Finish
-   disabled for a stated reason; the current step's control sits under Next action.
+/* plan-steps-smoke — the plan detail is a wizard: a fresh plan opens on Prepare and shows
+   only that step's sections; Finish exists but is off screen with its button hidden; the
+   "Show every section" toggle brings the long view back; choosing a step narrows again.
    Real cockpit, throwaway world (SUPER_COCKPIT_CARRIER=1 seeds workspace/goal/repo).
      node tools/plan-steps-smoke.mjs                                          */
 import {open} from './lib/cockpit-control.mjs';
@@ -24,10 +25,16 @@ try {
   await c.until(() => c.page(`return !!document.querySelector('#task-steps')`), 15_000, 'stepper');
   const states = await c.page(`return [...document.querySelectorAll('#task-steps li')].map(l=>l.dataset.step+':'+l.dataset.state).join(' ')`);
   check('a fresh plan shows five steps with Prepare current and the rest to do', states === 'prepare:current review:todo checks:todo accept:todo finish:todo', states);
-  check('the stepper sits above Next action', await c.page(`const s=document.querySelector('#task-steps');return s.nextElementSibling?.dataset.taskNextAction===${q(plan.id)}`));
-  check('the current step\'s control (Prepare file request) sits directly under Next action', await c.page(`return document.querySelector('[data-task-next-action]').nextElementSibling?.id==='task-prepare-file'`));
-  check('Finish this plan is present but its button is hidden and the reason read-only, and it says which step comes first', await c.page(`const f=document.querySelector('#task-finish');return f?.dataset.finishable==='false'&&document.querySelector('#task-complete').hidden&&document.querySelector('#task-completion-reason').readOnly&&f.textContent.includes('Not yet: prepare file request first')`));
+  const visible = () => c.page(`return [...document.querySelectorAll('#development-task-detail [data-plan-panel]')].filter(n=>!n.hidden).map(n=>n.dataset.planPanel).join(' ')`);
+  check('the wizard opens on the current step and shows only its sections', await visible() === 'head brief next prepare editor session history', await visible());
+  check('attempts, evidence and Finish are not on screen at Prepare', await c.page(`return ['attempts','runs','fleet','screens','finish'].every(k=>document.querySelector('[data-plan-panel='+k+']').hidden)`));
+  check('Finish this plan exists, hidden, with its button hidden and the reason read-only, saying which step comes first', await c.page(`const f=document.querySelector('#task-finish');return f?.dataset.finishable==='false'&&document.querySelector('#task-complete').hidden&&document.querySelector('#task-completion-reason').readOnly&&f.textContent.includes('Not yet: prepare file request first')`));
   check('to-do steps are not clickable; the current step is', await c.page(`return document.querySelector('#task-steps [data-step=finish] button').disabled&&!document.querySelector('#task-steps [data-step=prepare] button').disabled`));
+  check('history and the planning note are one collapsed line', await c.page(`const h=document.querySelector('details.plan-history');return !!h&&!h.open&&h.querySelector('summary').textContent.startsWith('Plan history (1)')&&!!h.querySelector('#task-note')`));
+  await c.page(`document.querySelector('#task-wizard-all').click()`);
+  check('"Show every section" reveals all of them', await c.page(`return [...document.querySelectorAll('#development-task-detail [data-plan-panel]')].every(n=>!n.hidden)`) && await c.page(`return document.querySelector('#development-task-detail').dataset.wizardStep==='all'`));
+  await c.page(`document.querySelector('#task-steps [data-step=prepare] button').click()`);
+  check('choosing a step turns the long view back into that step', await visible() === 'head brief next prepare editor session history' && await c.page(`return document.querySelector('#development-task-detail').dataset.wizardStep==='prepare'`));
   check('the drafted reason is empty because nothing is accepted', await c.page(`return document.querySelector('#task-completion-reason').value===''`));
 } catch (e) { check('the smoke ran to completion', false, String(e).slice(0, 300)); }
 finally { if (c) { try { await c.close(); } catch {} } }
