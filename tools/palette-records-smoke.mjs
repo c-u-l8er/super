@@ -16,8 +16,9 @@
    HOW IT GETS RECORDS WITHOUT A CHOOSER
 
      `SUPER_COCKPIT_CARRIER=1` seeds a workspace, goal, lane, worker and the
-     repository `d13b2f-repo`; the plan is created through the same intent the
-     plan form sends.
+     repository `d13b2f-repo`. A plan needs a lane whose actor is a registered
+     bot, so the smoke registers one and opens a lane for it — the same three
+     intents the app's own forms send — then creates the plan.
 
      node tools/palette-records-smoke.mjs                                    */
 import {open} from './lib/cockpit-control.mjs';
@@ -40,7 +41,12 @@ try {
   const lane = await c.until(async () => (await c.list('lanes'))[0], 60_000, 'a lane in the fixture world');
   const ws = (await c.list('workspaces'))[0], repo = (await c.list('repositories'))[0];
   check('the carrier witness seeded a workspace, a lane and a repository', !!ws && !!lane && !!repo, `${ws?.id} ${lane?.id} ${repo?.ref}`);
-  const plan = (await c.create('create_development_task', {client_ref: 'palette-smoke', lane_ref: lane.id, title: TITLE, criteria: 'Found from the palette by id and by title.', required_checks: {profiles: ['super-javascript-behavior@1']}}, {kind: 'development_tasks', field: 'title', value: TITLE})).record;
+  // a plan needs a lane whose actor is a registered bot; the carrier lane's actor is not, so make both
+  const goal = (await c.list('goals'))[0];
+  const bot = (await c.create('register_bot', {client_ref: 'palette-smoke-bot', workspace_ref: ws.id, name: 'Palette smoke bot', role: 'Reviewer', group: 'Smoke', provider: 'ollama', instructions: 'Exists so a plan can be created in this throwaway world.'}, {kind: 'bots', field: 'name', value: 'Palette smoke bot'})).record;
+  await c.intent('open_lane', {goal_ref: goal.id, actor: bot.actor, repository_ref: repo.ref});
+  const botLane = await c.until(async () => (await c.list('lanes')).find(l => l.actor === bot.actor), 20_000, 'a lane held by the smoke bot');
+  const plan = (await c.create('create_development_task', {client_ref: 'palette-smoke', lane_ref: botLane.id, title: TITLE, criteria: 'Found from the palette by id and by title.', required_checks: {profiles: ['super-javascript-behavior@1']}}, {kind: 'development_tasks', field: 'title', value: TITLE})).record;
   check('a plan exists to be found', /^dt_\d+$/.test(plan.id), plan.id);
 
   // pin the workspace filter to a value that would hide nothing here but proves the clearing path runs
