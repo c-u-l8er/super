@@ -8,6 +8,7 @@ import {taskEditorView} from './task-editor.js';
 import {botConversationHistory,taskHistoryLinks} from './task-conversations.js';
 import {taskSessionView} from './task-session.js';
 import {taskProgress} from './task-progress.js';
+import {planSteps,completionReason} from './plan-steps.js';
 import {reviewTestPanel} from './review-test-panel.js';
 import {node,navigate,selectedWorkspace} from './app-shell.js';
 import {heldProjection,runtimeWorld,waitForBot} from './runtime-bots.js';
@@ -62,7 +63,11 @@ export function initDevelopmentTasks({invoke,actions,current}){
       const target=progress.target==='review'?[...details.querySelectorAll('[data-attempt-id]')].find(n=>n.dataset.attemptId===progress.attempt):details.querySelector(progress.target==='completion'?'#task-completion-reason':'#task-note');
       if(target){if(progress.target==='review')target.open=true;target.scrollIntoView({block:'center'});const focus=target.querySelector?.('summary')||target;focus.focus();}
     }));else next.append(node('p',progress.label));
-    details.append(next);
+    const plan=planSteps(p,task);const stepper=node('ol',undefined,'plan-steps');stepper.id='task-steps';stepper.setAttribute('aria-label','Plan steps');
+    for(const s of plan.steps){const li=node('li',undefined,'plan-step');li.dataset.step=s.key;li.dataset.state=s.state;const b=node('button',s.label,'plan-step-button');b.type='button';b.disabled=s.state==='todo';b.setAttribute('aria-current',s.state==='current'||s.state==='blocked'?'step':'false');
+      b.onclick=()=>{const target=s.key==='finish'?details.querySelector('#task-completion-reason'):s.key==='prepare'?details.querySelector('#task-prepare-file'):[...details.querySelectorAll('[data-attempt-id]')].find(n=>n.dataset.attemptId===progress.attempt)||details.querySelector('[data-attempt-id]');if(!target)return;if(target.tagName==='DETAILS')target.open=true;target.scrollIntoView({block:'center'});(target.querySelector?.('summary')||target).focus();};
+      li.append(b,node('span',{done:'done',current:'now',blocked:'blocked',todo:'to do'}[s.state],'plan-step-state'));stepper.append(li);}
+    details.append(stepper,next);
     details.append(taskScreenshots({task,world:current().frame.world,invoke,current}));
     details.append(taskRunEvidence({task,invoke,current}));
     const editorPanel=node('section',undefined,'attempt-checks');editorPanel.id='task-editor-context';details.append(editorPanel);renderEditor();
@@ -78,7 +83,13 @@ export function initDevelopmentTasks({invoke,actions,current}){
     const complete=node('button','Mark plan complete','subtle');complete.type='button';complete.id='task-complete';
     const reason=node('input');reason.id='task-completion-reason';reason.maxLength=250;reason.placeholder='Explain why this plan is finished';reason.setAttribute('aria-label','Plan completion reason');
     const completionField=node('label','Completion reason','field');completionField.append(reason);
-    const section=node('section',undefined,'attempt-checks');section.append(node('h3','Finish this plan'),node('p','Requires an accepted result for the current plan revision. Resolve other open reviews and test runs first.','directory-note'),completionField,complete);details.append(section);
+    const section=node('section',undefined,'attempt-checks');section.id='task-finish';section.dataset.finishable=String(plan.finishable);
+    if(plan.finishable){const draft=completionReason(p,task);if(draft&&!reason.value)reason.value=draft;complete.textContent='Approve and finish plan';complete.className='primary';
+      section.append(node('h3','Finish this plan'),node('p','A tested result for this plan revision is accepted. The reason below was drafted from it — edit it or approve it as written. Finishing records your planning decision; it does not certify later source changes.','directory-note'),completionField,complete);
+      next.after(section);}
+    else{complete.disabled=true;reason.disabled=true;reason.placeholder='Available once a tested result for this revision is accepted';
+      section.append(node('h3','Finish this plan'),node('p',`Not yet: ${progress.label.toLowerCase()} first. Finishing needs an accepted result for the current plan revision with no open reviews or unfinished test runs.`,'directory-note'),completionField,complete);details.append(section);}
+    if(plan.current==='prepare'&&!plan.cancelled)next.after(prepare);
     const finishRevision=task.revision;
     complete.onclick=async()=>{if(pending)return;if(!reason.value.trim()){notice.textContent='Explain why the plan is finished before completing it.';reason.focus();return;}if([...details.querySelectorAll('textarea')].some(n=>n.value)){notice.textContent='Save your unfinished review or planning note before completing the plan.';return;}await send('update',{task_ref:task.id,revision:finishRevision,status:'completed',note:reason.value},p=>p.development_tasks?.[task.id]?.status==='completed',()=>show(heldProjection(current)?.development_tasks?.[task.id]));};
 
