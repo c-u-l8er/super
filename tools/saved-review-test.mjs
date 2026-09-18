@@ -115,3 +115,47 @@ test('the items it yields are exactly what the combined-review check accepts, bo
   assert.throws(()=>checkProposalSet(items,r=>({...current(r),task:{id:'dt_0001',revision:2,status:'cancelled'}})),/plan changed/);
   assert.throws(()=>savedReviewItems(members,bodies,new Map([...files].slice(0,1)),ctx),/cockpit\.js: not every file was read/);
 });
+
+// ---- a single-file review, staged again through the single-file dialog (2026-09-18)
+import {savedReviewFile} from '../cockpit/ui/saved-review.js';
+import {checkFileProposal} from '../cockpit/ui/file-proposal.js';
+function fileFixture(opts={}){
+  const m=member('record-page.js','// before\n','// after\n',opts);
+  const attempt={id:'da_0070',schema:'development-review-attempt@1',status:'recorded',revision:1,task_ref:'dt_0001',task_revision:1,client_ref:'c',source:m.source,...(opts.inline?{shared_draft:m.shared_draft,proposed_text:m.proposed_text}:{})};
+  const task={id:'dt_0001',revision:2,status:'planned'};
+  const store=new Map([[m.source.draft_sha256,'// before\n'],[m.source.result_sha256,'// after\n']]);
+  const reads=[];const read=async d=>{reads.push(d);if(!store.has(d))throw Error('This file’s reviewed content is no longer stored. Stage the proposal again; it cannot be shown or accepted.');return store.get(d);};
+  return {attempt,task,store,reads,read};
+}
+test('a recorded, open single-file review is one member; a combined review, a closed one and a deletion are refused by name',()=>{
+  const f=fileFixture();const [m]=savedReviewFile(f.attempt,f.task);
+  assert.equal(m.path,'record-page.js');assert.equal(m.inline,null);assert.equal(m.deletion,false);assert.equal(m.source,f.attempt.source);
+  for(const [why,mutate,pattern] of [
+    ['no attempt',f=>{f.attempt=null;},/no longer in the runtime projection/],
+    ['a combined review',f=>{f.attempt.schema='development-review-set@1';f.attempt.files=[];},/Only a single-file review/],
+    ['no source',f=>{delete f.attempt.source;},/Only a single-file review/],
+    ['an accepted review',f=>{f.attempt.status='accepted';},/accepted and retained as history/],
+    ['a dismissed review',f=>{f.attempt.status='dismissed';},/dismissed/],
+    ['another plan',f=>{f.task.id='dt_0002';},/no longer available/],
+    ['a completed plan',f=>{f.task.status='completed';},/is completed/],
+    ['no basis',f=>{delete f.attempt.source.basis_id;},/^Error: record-page\.js: the retained source basis is incomplete/],
+    ['no result',f=>{delete f.attempt.source.result_sha256;},/^Error: record-page\.js: the retained member names no proposed result/],
+    ['a deletion',f=>{f.attempt.source.schema='selected-file-deletion-basis@1';},/^Error: record-page\.js: a single-file review cannot stage a deletion/],
+  ]){const g=fileFixture();mutate(g);assert.throws(()=>savedReviewFile(g.attempt,g.task),pattern,why);}
+  const later=fileFixture();later.task.revision=9;assert.equal(savedReviewFile(later.attempt,later.task).length,1,'a later plan revision does not stale it');
+  assert.throws(()=>savedReviewSet(f.attempt,f.task),/Only a combined review/);
+});
+test('its bodies are read by digest through the host, and the item it yields is what the single-file dialog accepts',async()=>{
+  const f=fileFixture();const members=savedReviewFile(f.attempt,f.task);
+  const bodies=await savedReviewBodies(members,f.read,sha256Text);
+  assert.deepEqual(bodies,[{path:'record-page.js',current:'// before\n',proposed:'// after\n'}]);assert.equal(f.reads.length,2);
+  const item=savedReviewItem(members[0],bodies[0],{original:'// before\n',draft:'// before\n'},sha('// before\n'),ctx);
+  assert.deepEqual(item.proposal,{path:'record-page.js',content:'// after\n'});
+  assert.equal(item.reference.kind,'editor');assert.equal(item.reference.source,f.attempt.source);assert.equal(item.reference.draft,'// before\n');
+  const current={session:'s1',generation:3,file:{path:'record-page.js',draft:'// before\n'},task:{id:'dt_0001',status:'planned'},world:ctx.task.world};
+  assert.equal(checkFileProposal(item.reference,item.proposal,current),'// after\n');
+  assert.throws(()=>checkFileProposal(item.reference,item.proposal,{...current,file:{path:'record-page.js',draft:'// edited\n'}}),/draft changed after it was shared/);
+  assert.throws(()=>savedReviewItem(members[0],bodies[0],{original:'// moved\n',draft:'// moved\n'},sha('// moved\n'),ctx),/changed on disk since it was reviewed/);
+  const inline=fileFixture({inline:true});const im=savedReviewFile(inline.attempt,inline.task);assert.deepEqual(im[0].inline,{current:'// before\n',proposed:'// after\n'});
+  const ib=await savedReviewBodies(im,inline.read,sha256Text);assert.equal(inline.reads.length,0);assert.equal(ib[0].proposed,'// after\n');
+});

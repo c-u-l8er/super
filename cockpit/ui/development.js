@@ -1,6 +1,6 @@
 import {REVIEW_FILE_BYTES,bytesOf} from './review-limits.js';
 import {stageContent,readContent,sha256Text} from './review-content.js';
-import {savedReviewSet,savedReviewBodies,savedReviewItems} from './saved-review.js';
+import {savedReviewSet,savedReviewFile,savedReviewBodies,savedReviewItems} from './saved-review.js';
 import {reviewProposalSet} from './file-proposal-set-review.js';
 import {checkProposalSet} from './file-proposal-set.js';
 import {publishTaskEditor,canOpenTaskEditor} from './task-editor.js';
@@ -216,14 +216,16 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       const attempt=heldProjection(current)?.development_attempts?.[d.attemptId];
       if(!attempt||attempt.revision!==d.revision)throw Error('The review changed. Reopen the plan.');
       if(stagedSet||pendingSet)throw Error('Apply or finish the change set already staged in the Editor first.');
-      const members=savedReviewSet(attempt,task);
-      d.started=stageSavedReview(attempt,members,task,d.report??(()=>{}));
+      // A single-file review goes back through the single-file dialog: the same
+      // read, the same repository check, then "Use as editor draft" pinned to the
+      // recorded source basis, and Save is still the step that writes.
+      if(attempt.schema==='development-review-attempt@1')d.started=stageSavedFile(attempt,savedReviewFile(attempt,task),task,d.report??(()=>{}));
+      else d.started=stageSavedReview(attempt,savedReviewSet(attempt,task),task,d.report??(()=>{}));
     }catch(error){d.error=String(error.message||error);e.preventDefault();}
   });
-  async function stageSavedReview(attempt,members,task,say){
-    const capturedTask=activeTask,capturedGeneration=generation;
-    busy=true;sync();
-    try{
+  // The recorded bodies of a saved review, read back and checked against the
+  // repository as it is NOW; shared by the combined and the single-file resume.
+  async function readSavedReview(attempt,members,task,say,capturedTask,capturedGeneration){
       say('Reading the recorded review content…');report('editor','Reading the recorded review content of '+attempt.id+'…');
       const bodies=await savedReviewBodies(members,digest=>readContent(invoke,digest),sha256Text);
       // Every file as the repository holds it NOW, read from disk before any
@@ -253,9 +255,32 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
         if(f.draft!==item.reference.draft){f.draft=item.reference.draft;f.state=editor.state(path,f.draft);}
       }
       review.hide();file=files.get(items[0].proposal.path);editor.show(file.state);editor.readonly(!!file.pendingDeletion);paintFiles();
+      return items;
+  }
+  async function stageSavedReview(attempt,members,task,say){
+    const capturedTask=activeTask,capturedGeneration=generation;
+    busy=true;sync();
+    try{
+      const items=await readSavedReview(attempt,members,task,say,capturedTask,capturedGeneration);
       busy=false;sync();
       say('Recorded content read and checked against its digests and the repository. Stage all drafts in the Editor; Apply staged change set is the step that writes.');
       openProposalSet(items,attempt.id);
+    }catch(error){busy=false;sync();say(String(error.message||error));report('editor',String(error.message||error));}
+  }
+  // A saved single-file review, back in the single-file dialog. Nothing is
+  // recorded again (`recordAttempt` is null: the record exists) and nothing is
+  // written: "Use as editor draft" re-verifies the plan and pins the file to the
+  // recorded source basis exactly as it did for the proposal when it arrived,
+  // and Save in the Editor is the step that writes.
+  async function stageSavedFile(attempt,members,task,say){
+    const capturedTask=activeTask,capturedGeneration=generation;
+    busy=true;sync();
+    try{
+      const [item]=await readSavedReview(attempt,members,task,say,capturedTask,capturedGeneration);
+      busy=false;sync();
+      const reference=item.reference,target=files.get(reference.key);
+      say('Recorded content read and checked against its digests and the repository. Use as editor draft in the Editor; Save is the step that writes.');
+      reviewFileProposal({reference,proposal:item.proposal,verify:()=>verifyPlan(reference,item.proposal.content),onIdentity:null,recordAttempt:null,current:()=>({session:surfaceSession,generation,file:files.get(reference.key),task:heldProjection(current)?.development_tasks?.[reference.task.id],world:runtimeWorld(current)}),stage:text=>{if(busy)throw Error('The editor is busy. Try again.');review.hide();selectFile(target);editor.replace(text);report('editor',target.path+' · Saved review '+attempt.id+' staged as unsaved draft · Review, then Save');},navigate,el,button});
     }catch(error){busy=false;sync();say(String(error.message||error));report('editor',String(error.message||error));}
   }
   document.addEventListener('review-file-proposal',e=>{try{if(busy)throw Error('Finish the current file operation first.');const reference=e.detail.reference;const target=files.get(reference?.key);reviewFileProposal({reference,proposal:e.detail.proposal,verify:()=>verifyPlan(reference,e.detail.proposal.content),onIdentity:e.detail.onIdentity,recordAttempt:reference?.task&&recordAttempt?async source=>{
