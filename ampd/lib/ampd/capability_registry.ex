@@ -16,7 +16,7 @@ defmodule Ampd.CapabilityRegistry do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state install_postgres install_worktree update_github reset)a
+  @participant_mutations ~w(close_store load_state install_postgres install_worktree install_trvm update_github reset)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -35,6 +35,7 @@ defmodule Ampd.CapabilityRegistry do
       {:sealed, reason} -> {:ok, %{tab: nil, s: sealed_state(), sealed: reason}}
     end
   end
+
   @doc """
   What a sealed registry serves: nothing. A sealed store's persisted
   truth is unknown or untrusted, so projecting `initial/0` would hand
@@ -48,28 +49,45 @@ defmodule Ampd.CapabilityRegistry do
   def sealed, do: ask(:sealed)
   def close_store, do: ask(:close_store)
   def load_state(s), do: ask({:load_state, s})
+
   def initial do
-    %{"github" => %{"installation" => "installed", "version" => "1.4.2",
-        "policy" => %{"source_data" => "private",
-                      "secret" => %{"ref" => "github.oauth", "residency" => ["local", "fleet"]}},
+    %{
+      "github" => %{
+        "installation" => "installed",
+        "version" => "1.4.2",
+        "policy" => %{
+          "source_data" => "private",
+          "secret" => %{"ref" => "github.oauth", "residency" => ["local", "fleet"]}
+        },
         "surface" => %{
-          "repo.read"  => %{"cls" => "observe"},
+          "repo.read" => %{"cls" => "observe"},
           "issue.read" => %{"cls" => "observe"},
-          "pr.draft"   => %{"cls" => "local_mutate"},
-          "pr.create"  => %{"cls" => "remote_commit", "approval" => "every_effect"},
-          "pr.merge"   => %{"cls" => "destructive_admin", "deny" => true}}},
-      "browser" => %{"installation" => "installed", "version" => "0.9.0",
+          "pr.draft" => %{"cls" => "local_mutate"},
+          "pr.create" => %{"cls" => "remote_commit", "approval" => "every_effect"},
+          "pr.merge" => %{"cls" => "destructive_admin", "deny" => true}
+        }
+      },
+      "browser" => %{
+        "installation" => "installed",
+        "version" => "0.9.0",
         "surface" => %{
           "public.navigate" => %{"cls" => "observe"},
-          "inspect"         => %{"cls" => "observe"},
-          "form.submit"     => %{"cls" => "remote_commit", "approval" => "every_effect"}}},
-      "postgres" => %{"installation" => "available", "version" => "0.9.1",
+          "inspect" => %{"cls" => "observe"},
+          "form.submit" => %{"cls" => "remote_commit", "approval" => "every_effect"}
+        }
+      },
+      "postgres" => %{
+        "installation" => "available",
+        "version" => "0.9.1",
         "policy" => %{"source_data" => "private"},
         "surface" => %{
           "schema.read" => %{"cls" => "observe"},
-          "query.read"  => %{"cls" => "observe"},
-          "query.write" => %{"cls" => "remote_write", "deny" => true}}},
-      "mcpimport" => %{"installation" => "builtin"}}
+          "query.read" => %{"cls" => "observe"},
+          "query.write" => %{"cls" => "remote_write", "deny" => true}
+        }
+      },
+      "mcpimport" => %{"installation" => "builtin"}
+    }
   end
 
   @doc """
@@ -102,15 +120,40 @@ defmodule Ampd.CapabilityRegistry do
     }
   end
 
+  @doc """
+  The `trvm` pack — one surface, `reduce`: a bounded pure computation on the
+  checked reducer host Super already possesses (`wek/b2/NEXT_COMPUTATION_PROPOSAL.md`
+  §3.1). `local_mutate`, no approval, no deny: with a one-shot grant the effect
+  lands on branch B2. Not in `initial/0` for the same reason `worktree` is not
+  (the frozen authority-snapshot parity vector); it arrives by an ordered
+  install, which declares the surface and confers zero authority.
+  """
+  def trvm_pack do
+    %{
+      "installation" => "installed",
+      "version" => "0.1",
+      "policy" => %{"source_data" => "private"},
+      "surface" => %{"reduce" => %{"cls" => "local_mutate"}}
+    }
+  end
+
   def get(pack), do: ask({:get, pack})
   def all, do: ask(:all)
   def install_postgres, do: ask(:install_postgres)
   def install_worktree, do: ask(:install_worktree)
+  def install_trvm, do: ask(:install_trvm)
   def update_github, do: ask(:update_github)
   def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
-  @ordered_ops [:install_postgres, :install_worktree, :update_github, :reset, :load_state]
+  @ordered_ops [
+    :install_postgres,
+    :install_worktree,
+    :install_trvm,
+    :update_github,
+    :reset,
+    :load_state
+  ]
   @impl true
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
@@ -130,15 +173,17 @@ defmodule Ampd.CapabilityRegistry do
         handle_ordered(msg, st)
     end
   end
+
   @impl true
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
+
   def handle_call(:close_store, _f, st) do
     if st.tab, do: :dets.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
+
   def handle_call({:get, pack}, _f, %{s: s} = st), do: {:reply, Map.get(s, pack), st}
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s, st}
-
 
   # --- ordered implementations (reached only via the guard above) ----
   # These were `handle_cast` until C1.1.0. A cast carries no caller, so the
@@ -146,17 +191,27 @@ defmodule Ampd.CapabilityRegistry do
   # authority, because `source_data` and secret residency decide where an
   # effect may run. A mutation that cannot be attributed cannot be ordered.
   def handle_ordered(:install_postgres, %{tab: tab, s: s} = st),
-    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, put_in(s, ["postgres", "installation"], "installed"))}}
+    do:
+      {:reply, :ok,
+       %{st | s: Ampd.Store.save(tab, put_in(s, ["postgres", "installation"], "installed"))}}
 
   # Installing it declares the surface and grants nothing — the runtime's
   # first law, and `Ampd.LocusTest` asserts it rather than trusting it.
   def handle_ordered(:install_worktree, %{tab: tab, s: s} = st),
     do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, Map.put(s, "worktree", worktree_pack()))}}
 
+  def handle_ordered(:install_trvm, %{tab: tab, s: s} = st),
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, Map.put(s, "trvm", trvm_pack()))}}
+
   def handle_ordered(:update_github, %{tab: tab, s: s} = st) do
     s = put_in(s, ["github", "version"], "1.5.0")
-    s = put_in(s, ["github", "surface", "issue.write"],
-          %{"cls" => "remote_draft", "introduced" => "1.5.0"})
+
+    s =
+      put_in(s, ["github", "surface", "issue.write"], %{
+        "cls" => "remote_draft",
+        "introduced" => "1.5.0"
+      })
+
     {:reply, :ok, %{st | s: Ampd.Store.save(tab, s)}}
   end
 
@@ -165,5 +220,6 @@ defmodule Ampd.CapabilityRegistry do
     {:reply, :ok, %{st | tab: tab, s: Ampd.Store.save(tab, s), sealed: nil}}
   end
 
-  def handle_ordered(:reset, %{tab: tab} = st), do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, initial())}}
+  def handle_ordered(:reset, %{tab: tab} = st),
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, initial())}}
 end

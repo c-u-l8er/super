@@ -536,6 +536,7 @@ defmodule Ampd.Authority do
   # an effect may run, so changing them is ordered like a grant change.
   def install_postgres, do: tx(fn -> CapabilityRegistry.install_postgres() end)
   def install_worktree, do: tx(fn -> CapabilityRegistry.install_worktree() end)
+  def install_trvm, do: tx(fn -> CapabilityRegistry.install_trvm() end)
   def update_github, do: tx(fn -> CapabilityRegistry.update_github() end)
 
   # -------------------------------------------------------------- consent

@@ -536,7 +536,7 @@ defmodule Ampd.Gateway do
           })
 
         _committed ->
-          case emit_receipt(cap, auth, e["id"], attempt, ctx, lease) do
+          case emit_receipt(cap, auth, e["id"], attempt, ctx, lease, result) do
             {:ok, rcpt} ->
               Map.merge(auth, %{"effect_id" => e["id"], "receipt" => rcpt})
 
@@ -581,9 +581,24 @@ defmodule Ampd.Gateway do
   # effect's own consumption has landed. A one-shot moves between them,
   # and the pair is the evidence: X authorized this, the effect consumed
   # its use, Y is what remains.
-  defp emit_receipt(cap, auth, effect_id, attempt, ctx, lease) do
+  # **The committed result reaches the receipt through an allowlist, per
+  # capability, merged UNDER the fixed fields.** `perform_attempt/7` commits the
+  # adapter's result and then builds the receipt; before this arity the receipt
+  # was a fixed map and the result never reached it, so a computation's
+  # outcome could be COMMITTED and unreceipted. `Ampd.TrvmReduce.allowlist/1`
+  # names the fields a capability may carry (empty for every capability but
+  # `trvm.reduce`, so existing receipts are byte-identical); each value is
+  # checked by shape before the merge; an unknown key is dropped, never
+  # appended; and the fixed map is merged LAST, so adapter-controlled data can
+  # never overwrite actor, capability, pack, grant, approval, placement,
+  # effect or authority fields. Result HONESTY is not established here: the
+  # boundary guarantees only that what was committed is what landed, once,
+  # under a live lease. Honesty is the harness's reference comparison
+  # (`wek/b2/NEXT_COMPUTATION_PROPOSAL.md` §3.4, falsifier F-D).
+  defp emit_receipt(cap, auth, effect_id, attempt, ctx, lease, result) do
     pk = Core.pack_of(cap)
     pv = (CapabilityRegistry.get(pk) || %{})["version"] || "0"
+    carried = Ampd.TrvmReduce.receipt_fields(cap, result)
 
     # `actor` is on the receipt so a receipt can be projected to the actor
     # it belongs to. Without it the ledger is all-or-nothing: either every
@@ -592,21 +607,24 @@ defmodule Ampd.Gateway do
     # Ticketed (E3-1): the ledger appends a receipt naming this effect only
     # under the journal owner's ticket, and reports the landing back.
     ticketed(lease, "emit_receipt", effect_id, fn t ->
-      Receipts.emit(t, %{
-        "actor" => ctx["actor"],
-        "capability" => cap,
-        "pack" => pk <> "@" <> pv,
-        "grant_ref" => auth["grant_ref"],
-        "approval_ref" => auth["approval_ref"],
-        "approval_digest" => auth["request_hash"],
-        "placement" => auth["placement"],
-        "effect_ref" => effect_id,
-        "effect_key" => auth["effect_key"],
-        "idempotency_key" => attempt["idempotency_key"],
-        "authority_snapshot_at_entry" => auth["authority_snapshot_at_entry"],
-        "authority_snapshot_after" => GrantRegistry.snapshot(),
-        "secret_material_exposed_to_engine" => false
-      })
+      Receipts.emit(
+        t,
+        Map.merge(carried, %{
+          "actor" => ctx["actor"],
+          "capability" => cap,
+          "pack" => pk <> "@" <> pv,
+          "grant_ref" => auth["grant_ref"],
+          "approval_ref" => auth["approval_ref"],
+          "approval_digest" => auth["request_hash"],
+          "placement" => auth["placement"],
+          "effect_ref" => effect_id,
+          "effect_key" => auth["effect_key"],
+          "idempotency_key" => attempt["idempotency_key"],
+          "authority_snapshot_at_entry" => auth["authority_snapshot_at_entry"],
+          "authority_snapshot_after" => GrantRegistry.snapshot(),
+          "secret_material_exposed_to_engine" => false
+        })
+      )
     end)
   end
 end
