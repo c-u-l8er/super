@@ -114,6 +114,111 @@ fn world_dir(data: &Path, world: &[Value; 3]) -> Result<PathBuf, String> {
     fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).map_err(err)?;
     Ok(path)
 }
+
+// ── Device-local test history: retention, not a wall ─────────────────────────
+//
+// Every run RETAINS its snapshot — a full copy of the reviewed repository — which
+// is the only reason the count was ever capped. Measured on this machine
+// 2026-09-19: **202 MB across three worlds, 184 MB in ten runs of the live one**,
+// 8–18 MB per run. The cap was a bare `>= 32` with nothing behind it, so when the
+// live world reached it EVERY profile run was refused until 24 records were moved
+// out by hand — the app stopped being able to test at all, and the only way back
+// was a person with a shell.
+//
+// A cap with no retention is a wall. What history needs is what was run and what
+// it decided: the record. What it does not need is a second copy of a repository
+// that `verify_acceptance` never reads — that re-captures the checkout and
+// compares digests, and nothing reads a retained snapshot after its run finishes.
+//
+// So the newest few finished runs keep their snapshot and the rest are RELEASED:
+// the record stays, and says `snapshot_retained: false`, which is the literal
+// truth of the promise the old refusal made. Records themselves move to
+// `archive/` — still on disk, out of the count — once the live directory passes
+// its high-water mark, oldest first. Both run on every start, so a world already
+// at the cap heals on its next run instead of being stuck exactly where nothing
+// can be tested. The arithmetic: 4 x ~18 MB retained + 128 x ~60 KB of records is
+// about 80 MB per world, against the 184 MB that ten runs held before.
+const RETAINED_SNAPSHOTS: usize = 4;
+const RECORDS_HIGH: usize = 128;
+const RECORDS_LOW: usize = 96;
+
+/// A run id is `run-<pid>-<nanos>`, so the NANOS orders it. Sorting the file name
+/// would order by pid, which is neither time nor anything else.
+fn run_order(stem: &str) -> u128 {
+    stem.rsplit('-').next().and_then(|n| n.parse().ok()).unwrap_or(0)
+}
+
+/// A run still in flight owns its snapshot; anything else is finished, including a
+/// record this build cannot read.
+fn in_flight(record: &Value) -> bool {
+    matches!(record["state"].as_str(), Some("starting") | Some("running"))
+}
+
+/// Every record in one world's history, newest first.
+fn history(base: &Path) -> Result<Vec<(PathBuf, Value)>, String> {
+    let mut rows = Vec::new();
+    for entry in fs::read_dir(base).map_err(err)? {
+        let path = entry.map_err(err)?.path();
+        if path.extension().is_some_and(|x| x == "json") {
+            let record = read(&path).unwrap_or_else(|_| json!({"state": "unreadable"}));
+            rows.push((path, record));
+        }
+    }
+    rows.sort_by_key(|(path, _)| {
+        std::cmp::Reverse(run_order(path.file_stem().and_then(|s| s.to_str()).unwrap_or("")))
+    });
+    Ok(rows)
+}
+
+/// Release what history does not need and archive what the live directory cannot
+/// hold. Never touches a run in flight, and is idempotent.
+fn retire_history(base: &Path) -> Result<usize, String> {
+    let rows = history(base)?;
+    let mut finished = 0usize;
+    for (path, record) in &rows {
+        if in_flight(record) {
+            continue;
+        }
+        finished += 1;
+        if finished <= RETAINED_SNAPSHOTS {
+            continue;
+        }
+        let snapshot = path.with_extension("");
+        if snapshot.is_dir() {
+            fs::remove_dir_all(&snapshot).map_err(err)?;
+            let mut released = record.clone();
+            if released["result"].is_object() {
+                released["result"]["snapshot_retained"] = json!(false);
+            }
+            released["snapshot_released"] = json!(true);
+            save(path, &released)?;
+        }
+    }
+    if rows.len() >= RECORDS_HIGH {
+        let archive = base.join("archive");
+        fs::create_dir_all(&archive).map_err(err)?;
+        fs::set_permissions(&archive, fs::Permissions::from_mode(0o700)).map_err(err)?;
+        let mut over = rows.len().saturating_sub(RECORDS_LOW);
+        for (path, record) in rows.iter().rev() {
+            if over == 0 {
+                break;
+            }
+            if in_flight(record) {
+                continue;
+            }
+            let name = path.file_name().ok_or("Invalid history record name.")?;
+            fs::rename(path, archive.join(name)).map_err(err)?;
+            let snapshot = path.with_extension("");
+            if snapshot.is_dir() {
+                let to = archive.join(snapshot.file_name().ok_or("Invalid history run name.")?);
+                fs::rename(&snapshot, to).map_err(err)?;
+            }
+            over -= 1;
+        }
+    }
+    Ok(history(base)?.len())
+}
+
 fn save(path: &Path, value: &Value) -> Result<(), String> {
     let temp = path.with_extension("tmp");
     fs::write(&temp, serde_json::to_vec(value).map_err(err)?).map_err(err)?;
@@ -221,14 +326,11 @@ impl Runs {
         if !active.is_empty() {
             return Err("Finish or cancel the active test run first.".into());
         }
-        if fs::read_dir(&base)
-            .map_err(err)?
-            .filter_map(Result::ok)
-            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
-            .count()
-            >= 32
-        {
-            return Err("Local test history reached its 32-run limit for this world. Existing records are preserved.".into());
+        let records = retire_history(&base)?;
+        if records >= RECORDS_HIGH {
+            return Err(format!(
+                "Local test history holds {records} runs for this world and none of them can be retired — finish or recover the runs still in flight. Existing records are preserved."
+            ));
         }
         let id = format!(
             "run-{}-{}",
@@ -447,6 +549,138 @@ impl Runs {
             | Request::Accept { .. }
             | Request::Start { .. } => Err("Start requires native repository verification.".into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    /// One world's history directory, private to one test.
+    fn world(name: &str) -> PathBuf {
+        let d = std::env::temp_dir()
+            .join(format!("super-review-tests-retention-{}", std::process::id()))
+            .join(name);
+        let _ = fs::remove_dir_all(&d);
+        fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// A finished run and the snapshot it retained, or one still in flight.
+    fn run(base: &Path, pid: u32, nanos: u128, state: &str) -> String {
+        let id = format!("run-{pid}-{nanos}");
+        let dir = base.join(&id);
+        fs::create_dir_all(dir.join("snapshot")).unwrap();
+        fs::write(dir.join("snapshot/value.mjs"), "export const value = 1;\n").unwrap();
+        save(
+            &base.join(format!("{id}.json")),
+            &json!({"schema":"device-review-tests@1","run_id":id,"state":state,
+                    "result":{"state":state,"verdict":"pass","snapshot_retained":true}}),
+        )
+        .unwrap();
+        id
+    }
+
+    fn json_count(base: &Path) -> usize {
+        fs::read_dir(base)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
+            .count()
+    }
+
+    #[test]
+    fn a_run_is_ordered_by_its_nanos_and_not_by_the_pid_in_front_of_them() {
+        // The pid comes first in the name, so sorting the name sorts by pid. The
+        // first version of this did exactly that and retired the newest run.
+        assert!(run_order("run-9-200") > run_order("run-1000-100"));
+        assert_eq!(run_order("nonsense"), 0);
+    }
+
+    #[test]
+    fn the_newest_snapshots_are_kept_and_the_rest_released_with_their_records_intact() {
+        let base = world("release");
+        let ids: Vec<_> = (1..=7)
+            .map(|n| run(&base, 1000 + n as u32, 100 + n as u128, "completed"))
+            .collect();
+
+        assert_eq!(retire_history(&base).unwrap(), 7);
+
+        // Every record is still here — that is the promise the old refusal made.
+        assert_eq!(json_count(&base), 7);
+        for (i, id) in ids.iter().enumerate() {
+            let newest_four = i >= ids.len() - RETAINED_SNAPSHOTS;
+            let record = read(&base.join(format!("{id}.json"))).unwrap();
+            assert_eq!(
+                base.join(id).is_dir(),
+                newest_four,
+                "{id}: snapshot retention is wrong"
+            );
+            assert_eq!(
+                record["result"]["snapshot_retained"].as_bool().unwrap(),
+                newest_four,
+                "{id}: the record does not say what is on disk"
+            );
+            assert_eq!(record["result"]["verdict"], "pass", "{id}: the verdict is gone");
+        }
+
+        // Retiring twice is retiring once.
+        let before: Vec<_> = ids.iter().map(|i| base.join(i).is_dir()).collect();
+        retire_history(&base).unwrap();
+        let after: Vec<_> = ids.iter().map(|i| base.join(i).is_dir()).collect();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn a_run_in_flight_keeps_its_snapshot_however_old_it_is() {
+        let base = world("in-flight");
+        let stuck = run(&base, 1, 1, "running");
+        let starting = run(&base, 2, 2, "starting");
+        for n in 3..=9 {
+            run(&base, 100 + n as u32, n as u128, "completed");
+        }
+        retire_history(&base).unwrap();
+        assert!(base.join(&stuck).is_dir(), "a running run lost its snapshot");
+        assert!(base.join(&starting).is_dir(), "a starting run lost its snapshot");
+    }
+
+    #[test]
+    fn the_oldest_records_move_to_archive_when_the_directory_passes_its_mark_and_are_still_there() {
+        let base = world("archive");
+        let ids: Vec<_> = (1..=RECORDS_HIGH)
+            .map(|n| run(&base, 1000 + n as u32, 100 + n as u128, "completed"))
+            .collect();
+
+        let left = retire_history(&base).unwrap();
+        assert_eq!(left, RECORDS_LOW);
+        assert_eq!(json_count(&base), RECORDS_LOW);
+
+        let moved = RECORDS_HIGH - RECORDS_LOW;
+        for id in ids.iter().take(moved) {
+            assert!(!base.join(format!("{id}.json")).exists(), "{id} is still live");
+            assert!(
+                base.join("archive").join(format!("{id}.json")).exists(),
+                "{id} was destroyed rather than archived"
+            );
+        }
+        for id in ids.iter().skip(moved) {
+            assert!(base.join(format!("{id}.json")).exists(), "{id} was archived too early");
+        }
+        // The archive is out of the count, so the next run is admitted.
+        assert!(retire_history(&base).unwrap() < RECORDS_HIGH);
+    }
+
+    #[test]
+    fn an_unreadable_record_is_retired_rather_than_pinning_a_snapshot_forever() {
+        let base = world("unreadable");
+        for n in 1..=6 {
+            run(&base, 100 + n as u32, n as u128, "completed");
+        }
+        fs::write(base.join("run-1-1.json"), "{not json").unwrap();
+        fs::create_dir_all(base.join("run-1-1/snapshot")).unwrap();
+        retire_history(&base).unwrap();
+        assert!(!base.join("run-1-1").is_dir(), "an unreadable record pinned its snapshot");
+        assert!(base.join("run-1-1.json").exists(), "an unreadable record was destroyed");
     }
 }
 
