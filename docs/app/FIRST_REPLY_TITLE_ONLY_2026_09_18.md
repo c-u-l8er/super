@@ -115,7 +115,13 @@ provider in Super; a browser sign-in, which no script may perform).
 ## After the install — 2026-09-18 23:39Z
 
 Installed with the change above as binary `1be00b791212054f…` at `48aa9d1`
-(see `SAVED_SINGLE_FILE_REVIEW_2026_09_18.md`, *After the install*). The
-guard itself has not been seen on a real screen: producing a title-only reply
-needs the provider, and the CLI sign-in is expired. Its unit tests are the
-evidence (`tools/conversation-title-test.mjs`, 5/5 in the 288/288 suite).
+(see `SAVED_SINGLE_FILE_REVIEW_2026_09_18.md`, *After the install*). The smoke
+above was then run **from the installed checkout, against that installed
+binary**: 16 held · 0 failed, the same as from the source clone — so the
+behaviour proven on screen is the behaviour that is installed. The smoke adds
+no source: the binary is byte-identical before and after
+(`1be00b791212054f…` from `/proc/<MainPID>/exe`, unchanged). Unit evidence
+beside it: `tools/conversation-title-test.mjs`, 5/5 in the 288/288 suite.
+
+What is still **not** shown on any screen is a title-only reply from the real
+provider — that is the cause, and it waits on the sign-in.
