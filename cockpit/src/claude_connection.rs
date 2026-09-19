@@ -122,6 +122,21 @@ fn observe_reply(state: &mut ReplyState, event: &Value) {
     } else if event["type"] == "system" && event["subtype"] == "init" {
         state.phase = "Provider started".into();
     } else if event["type"] == "stream_event" && event["event"]["type"] == "content_block_start" {
+        // A NEW tool_use block is a new structured reply: the CLI refused the
+        // previous one against the schema and the model is writing another.
+        // `partial` is a raw-JSON accumulator, so without clearing it here the
+        // buffer holds `{…}{…}` and `structured_prefix` keeps answering with the
+        // FIRST, abandoned object's text for the rest of the turn.
+        //
+        // Measured 2026-09-18 (opus[1m], xhigh, a request shaped like real work):
+        // the model's first call carried only `{"text": "<conversation-title>…"}`
+        // — 92 bytes, no `actions` — was refused "must have required property
+        // 'actions'", and its second call was the complete 2 832-byte answer plus
+        // a 13.7 KB file proposal. The page would have sat on the 79-character
+        // header, and on "79 bytes received", for the ~60 s that took.
+        if event["event"]["content_block"]["type"] == "tool_use" {
+            state.partial.clear();
+        }
         state.phase = "Preparing reply".into();
     } else if event["type"] == "result" {
         state.phase = "Checking reply".into();
@@ -817,6 +832,38 @@ mod streaming_tests {
         assert_eq!(status["text"], "Fixing the latch.\nIt is stale.");
         assert!(status.get("partial").is_none());
         assert!(!status.to_string().contains("SECRET FILE BODY"));
+    }
+    #[test]
+    fn a_refused_structured_reply_does_not_freeze_the_one_that_replaces_it() {
+        // Measured 2026-09-18 (opus[1m] at xhigh, the cancelled-fold request):
+        // the model's FIRST StructuredOutput call was 92 bytes carrying only the
+        // opening title header and no `actions`; the CLI refused it against the
+        // schema and the model wrote a second, complete call. Both calls' raw
+        // JSON arrive on this one accumulator, so the buffer is `{…}{…}` and the
+        // prefix parser answers from the FIRST object unless the new tool_use
+        // block clears it. Before this, the page showed the abandoned header —
+        // and its byte count — for the whole of the retry.
+        let mut s = ReplyState::default();
+        let start = |kind: &str| json!({"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":kind}}});
+        let chunk = |j: &str| json!({"type":"stream_event","event":{"delta":{"type":"input_json_delta","partial_json":j}}});
+        observe_reply(&mut s, &start("thinking"));
+        observe_reply(&mut s, &start("tool_use"));
+        observe_reply(&mut s, &chunk("{\"text\": \"<conversation-title>A title"));
+        assert_eq!(s.text, "<conversation-title>A title");
+        assert_eq!(s.bytes, s.text.len());
+        // Refused for the missing `actions`. The model starts a second call.
+        observe_reply(&mut s, &start("thinking"));
+        observe_reply(&mut s, &start("tool_use"));
+        observe_reply(&mut s, &chunk("{\"text\": \"<conversation-title>A title</conversation-title>"));
+        observe_reply(&mut s, &chunk("\\nThe real answer.\", \"actions\": [{\"name\": \"propose_file_edit\", \"args\": {\"content\": \"SECRET\"}}]}"));
+        assert_eq!(s.text, "<conversation-title>A title</conversation-title>\nThe real answer.");
+        assert_eq!(s.bytes, s.text.len());
+        // The argument side of the reply never crosses, then or now.
+        assert!(!s.text.contains("SECRET"));
+        assert!(!s.text.contains("propose_file_edit"));
+        // A thinking block inside one call leaves the accumulator alone.
+        observe_reply(&mut s, &start("thinking"));
+        assert_eq!(s.text, "<conversation-title>A title</conversation-title>\nThe real answer.");
     }
     #[test]
     fn a_structured_reply_that_is_not_prose_yet_crosses_nothing() {

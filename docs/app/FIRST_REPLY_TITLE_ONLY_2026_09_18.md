@@ -1,9 +1,11 @@
 # The first reply that was only its title — 2026-09-18
 
-**Status: the page now refuses such a reply and restores the draft — driven on
-a real screen against a local provider fixture, 16 held · 0 failed; the CAUSE
-is NOT reproduced, because the machine's Claude CLI sign-in was expired when
-the reproduction was attempted.** Finding 1 of
+**Status: the page refuses such a reply and restores the draft, driven on a
+real screen against a local provider fixture (16 held · 0 failed); and the
+CAUSE is now reproduced and measured — the model's first structured call can
+carry only the opening title header. A second defect the stream exposed, a
+streaming accumulator never reset between tool calls, is fixed here too.**
+Finding 1 of
 `REVIEW_EVIDENCE_RULINGS_2026_09_18.md` *After the install*.
 
 ## What was measured
@@ -86,31 +88,84 @@ model catalog, the missing API key). Dropping it is a one-line change to how
 that file renders **every** failure, so it is left for the owner rather than
 made here for one message.
 
-## Reproduction, prepared and blocked
+## The cause, measured — 2026-09-18 evening, once the sign-in was restored
 
-`outputs/title-only/run.mjs` (this session's outputs folder) replays the turn
-outside the cockpit with the same flags, schema and prompt assembly, against
-the same request and pre-fix file, with bt_0034's real role and instructions,
-and keeps the **full stream-json** the cockpit never keeps — so a rerun can
-say whether the header came as prose or as the tool's `text`, whether the CLI
-nudged, and how many turns there were. All three runs on 2026-09-18 ended in
-1–2 s with `Failed to authenticate: OAuth session expired and could not be
-refreshed`; a trivial `claude -p` on haiku fails the same way, and
-`claude auth status --json` still reports `loggedIn: true`, which is all the
-cockpit's status probe reads — so Super will show *connected* and fail on the
-first send until someone signs the CLI in again (`claude login`, or Connect
-provider in Super; a browser sign-in, which no script may perform).
+`outputs/title-only/run.mjs` replays the turn outside the cockpit with the same
+flags, schema and prompt assembly, against the same request and pre-fix file,
+with bt_0034's real role and instructions, and keeps the **full stream-json**
+the cockpit never keeps. Three runs, opus[1m] at xhigh:
+
+| run | title asked | turns | prose block | what happened |
+|---|---|---|---|---|
+| T1 | yes | 3 | none | **the failure, reproduced on the first try** |
+| T2 | yes | 2 | none | one complete call |
+| C1 | no  | 2 | 2 942 bytes | one complete call |
+
+**T1 is the cause.** The model's FIRST `StructuredOutput` call was 92 bytes and
+carried one key:
+
+    {"text": "<conversation-title>Persist Cancelled plans fold state on record pages (dt_0069)"}
+
+The title header, unterminated, and nothing else — the exact 79-character shape
+Super was left with on 2026-09-18. The CLI refused it against the schema,
+*"Output does not match required schema: root: must have required property
+`actions`"*, fed that back as a tool result, and the model's second call was
+the complete answer: the closed title, 2 832 bytes of prose, and a
+`propose_file_edit` of 13 693 bytes. 85 seconds, and the person would have got
+a correct reply.
+
+So the model does sometimes end a call having written only the opening header.
+**What decided the 09-18 outcome was `actions`.** Super's `bots.rs` requires
+`actions` to be an array and refuses the reply outright when it is not, so the
+call that reached the page must have carried `actions: []` — schema-valid,
+nothing for the CLI to refuse, nothing upstream to retry. The same premature
+call is caught when it omits `actions` and lands as an empty reply when it
+includes an empty one. **No schema can express "the text must be more than its
+own header", which is why the page-side guard is the fix and not a workaround.**
+
+Two observations that are *not* established, at n = 2 and n = 1:
+
+* One of the two title-requesting runs made the premature call. That is a
+  reproduction, not a rate.
+* Only the run that was **not** asked for a title wrote a prose block at all
+  (2 942 bytes) before its tool call; both title-requesting runs emitted no
+  `text_delta` and wrote straight into the schema. Suggestive that the
+  instruction changes the shape of the turn; one control is not a finding.
+
+Summaries and the complete streams are in `outputs/title-only/runs/`.
+
+## A second defect the stream exposed, and its fix
+
+`ReplyState.partial` in `claude_connection.rs` is one raw-JSON accumulator for
+the whole turn, and **nothing reset it between tool calls**. T1 streamed two
+`StructuredOutput` calls, so the buffer held `{…}{…}` and `structured_prefix`
+kept parsing the FIRST object — the abandoned header. Replaying T1's own
+deltas through the accumulator: what the page would have shown for the whole
+turn is the 79-character header, while the reply being written was 2 832 bytes
+plus a 13.7 KB proposal. The person watches *"Receiving Claude reply… 79
+bytes"* sit still for about a minute, then the right answer appears at the end.
+
+Fixed in `observe_reply`: a `content_block_start` whose block is a `tool_use`
+clears the accumulator, because a new tool call is a new structured reply.
+`a_refused_structured_reply_does_not_freeze_the_one_that_replaces_it` pins it
+(and that the argument side still never crosses); with the clear disabled the
+test fails with the stale header, which is how it was checked.
 
 ## Not done
 
-* The cause. Candidates the stream would settle: the header emitted as a
-  prose block and the tool call carrying only what the model had already
-  written; a schema-side stop after the header; a model fallback. Rerun the
-  three runs once signed in and record the summaries beside the README.
-* Moving the title out of `text` into its own optional schema field would
-  make the failure shape impossible rather than merely caught; it touches the
-  Rust schema for both providers and is not worth doing until the cause is
-  seen.
+* **Whether the title should move out of `text` into its own optional schema
+  field.** The measurement sharpens the case rather than settling it: the model
+  writes the header as a *prefix of the prose*, so a call that ends early
+  leaves something that reads like a reply. With its own field an early call
+  would leave `text: ""`, which is obviously nothing. It does not remove the
+  premature call, only its disguise, and it touches the Rust schema for both
+  local providers. Still the owner's call.
+* A rate for the premature call. Two title-requesting runs, one of them
+  premature, is not one.
+* The failing shape has not been produced **through Super's own UI** against
+  the real provider — only outside it. The page-side guard is covered by
+  `tools/first-reply-title-only-smoke.mjs` instead, which drives the identical
+  reply shape through a fixture provider.
 
 ## After the install — 2026-09-18 23:39Z
 
