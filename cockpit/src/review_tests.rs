@@ -207,6 +207,7 @@ impl Runs {
             "super-elixir-review@1",
             "super-rust-review@1",
             "repository-document-review@1",
+            "repository-python-gate@1",
         ]
         .contains(&profile.as_str())
         {

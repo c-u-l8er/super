@@ -230,3 +230,51 @@ test('the document profile refuses a file that is not a document',async t=>{
  f.attempt.source.basis_id=hash(JSON.stringify(['selected-file-basis@1',f.attempt.source.head,'many/f0.bin',f.attempt.source.disk_sha256,f.attempt.source.draft_sha256]));
  await assert.rejects(runProposalTests(f),/Markdown or text documents/);
 });
+
+// repository-python-gate@1: a repository's OWN gate, run in the same sandbox, chosen
+// by the runner from its allowlist. A gate that refuses is a fail; a gate that never
+// reaches its last line is an execution failure.
+async function gateRepository(t,{gate,count=1500,reviewed='compiled/laws.py',proposed='LAW = 2\n'}={}){
+ const work=await mkdtemp(join(base,'runner-gate-'));t.after(()=>rm(work,{recursive:true,force:true}));
+ const repository=join(work,'repo'),runRoot=join(work,'runs');
+ await mkdir(join(repository,'bench/data'),{recursive:true});await mkdir(join(repository,'compiled'),{recursive:true});
+ await mkdir(join(repository,'forge'),{recursive:true});await mkdir(join(repository,'runtime/c'),{recursive:true});await mkdir(runRoot);
+ await Promise.all(Array.from({length:count},(_,i)=>writeFile(join(repository,'bench/data',`f${i}.json`),`{"i":${i}}\n`)));
+ await writeFile(join(repository,'compiled/laws_gate.py'),gate);
+ await writeFile(join(repository,'forge/spinner_bench.py'),'WIDTH = 16\n');
+ await writeFile(join(repository,'runtime/c/ic32.c'),'int main(void){return 0;}\n');
+ const draft='LAW = 1\n';await writeFile(join(repository,reviewed),draft);
+ const git=args=>execFileSync('/usr/bin/git',['-C',repository,...args],{encoding:'utf8'}).trim();git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture']);
+ const source={schema:'selected-file-basis@1',scope:'selected-file-only',head:git(['rev-parse','HEAD']),path:reviewed,disk_sha256:hash(draft),draft_sha256:hash(draft),draft_bytes:Buffer.byteLength(draft),result_sha256:hash(proposed),result_bytes:Buffer.byteLength(proposed)};
+ source.basis_id=hash(JSON.stringify(['selected-file-basis@1',source.head,source.path,source.disk_sha256,source.draft_sha256]));
+ return {repository,runRoot,attempt:{id:'da_gate',source,shared_draft:draft,proposed_text:proposed},profile:'repository-python-gate@1',timeoutMs:120000};
+}
+const readsTheProposal="import sys\nsys.exit(0 if open('compiled/laws.py').read().strip()=='LAW = 2' else 1)\n";
+test('a 1500-file repository runs its own gate over the gate scope and the reviewed file',async t=>{
+ const f=await gateRepository(t,{gate:readsTheProposal}),r=await runProposalTests(f);
+ assert.equal(r.record.state,'completed');assert.equal(r.record.verdict,'pass');
+ assert.equal(r.record.snapshot_scope,'gate-scope-and-reviewed-paths');assert.equal(r.record.listed_files,1504);
+ assert.deepEqual(r.record.tests,['compiled/laws_gate.py']);
+ assert.match(r.record.output,/# gate compiled\/laws_gate\.py ok\n# gates complete\n/);
+ assert.deepEqual(JSON.parse(await readFile(join(r.directory,'manifest.json'))).files.map(x=>x.path),
+   ['compiled/laws.py','compiled/laws_gate.py','forge/spinner_bench.py']);
+});
+test('a gate that refuses is a failed verdict, not a broken run',async t=>{
+ const f=await gateRepository(t,{gate:readsTheProposal,proposed:'LAW = 3\n'}),r=await runProposalTests(f);
+ assert.equal(r.record.state,'completed');assert.equal(r.record.verdict,'fail');
+ assert.match(r.record.output,/# gate compiled\/laws_gate\.py failed\n# gates complete\n/);
+});
+test('a gate killed before its last line is an execution failure with no verdict',async t=>{
+ const f=await gateRepository(t,{gate:'import time\ntime.sleep(60)\n'}),r=await runProposalTests({...f,timeoutMs:2000});
+ assert.equal(r.record.state,'failed');assert.equal(r.record.reason,'timeout');assert.equal(r.record.verdict,undefined);
+});
+test('the gate sandbox has no network and no host home, and cannot write the snapshot',async t=>{
+ const gate="import os,socket,sys\nassert not os.path.exists('/home/travis/.profile')\ntry:\n    socket.create_connection(('1.1.1.1',53),timeout=2); sys.exit(1)\nexcept OSError:\n    pass\ntry:\n    open('compiled/laws.py','a'); sys.exit(1)\nexcept OSError:\n    pass\nopen('/tmp/scratch','w').write('ok')\n";
+ assert.equal((await runProposalTests(await gateRepository(t,{gate,count:20}))).record.verdict,'pass');
+});
+test('a repository with no gate the profile knows is refused before anything runs',async t=>{
+ const f=await gateRepository(t,{gate:'import sys\nsys.exit(0)\n',count:20});
+ await rm(join(f.repository,'compiled/laws_gate.py'));
+ execFileSync('/usr/bin/git',['-C',f.repository,'rm','-q','--cached','compiled/laws_gate.py'],{encoding:'utf8'});
+ await assert.rejects(runProposalTests(f),/No gate this profile knows is in this repository/);
+});

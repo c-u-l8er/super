@@ -33,11 +33,11 @@ defmodule Ampd.DevelopmentTask do
 
   @fields ~w(client_ref lane_ref title criteria)
   def fields, do: @fields ++ ["required_checks"]
-  @profiles ~w(super-javascript-behavior@1 super-elixir-review@1 super-rust-review@1 repository-document-review@1)
+  @profiles ~w(super-javascript-behavior@1 super-elixir-review@1 super-rust-review@1 repository-document-review@1 repository-python-gate@1)
   defp checks?(nil), do: true
 
   defp checks?(%{"profiles" => profiles} = checks) when is_list(profiles) do
-    map_size(checks) == 1 and length(profiles) in 1..4 and
+    map_size(checks) == 1 and length(profiles) in 1..5 and
       Enum.uniq(profiles) == profiles and Enum.all?(profiles, &(&1 in @profiles))
   end
 

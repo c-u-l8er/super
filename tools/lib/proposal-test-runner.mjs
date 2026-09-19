@@ -90,12 +90,36 @@ async function execute(args,timeoutMs,signal){
   });
 }
 
-const profiles=['super-javascript-behavior@1','super-elixir-review@1','super-rust-review@1','repository-document-review@1'];
-// The snapshot each profile is entitled to. Super's own three read the whole
-// repository because their suites import across it; the document profile reads
-// only the documents under review and executes none of the repository's code.
-const scopeOf=(profile,members)=>profile===profiles[3]?new Set(members.map(m=>m.source.path)):null;
+const profiles=['super-javascript-behavior@1','super-elixir-review@1','super-rust-review@1','repository-document-review@1','repository-python-gate@1'];
 const checkerUrl=new URL('./document-review-check.mjs',import.meta.url);
+// A repository that is not Super has its own gate, and running it is the only way
+// Super can check its code. The CLOSED part is this table: the runner picks the
+// gates by their own paths, with fixed arguments and a fixed scope. A caller names
+// no command, no path and no directory — adding a repository here is a change to
+// Super, reviewed like any other.
+const gates=[
+  {path:'tools/succession_laws_gate.py',args:['--check'],scope:['tools/','laws/','cd-core/','receipts/SUCCESSION-LAWS.md']},
+  {path:'compiled/laws_gate.py',args:['--check'],scope:['compiled/','forge/','runtime/python/']},
+];
+export const gatePaths=()=>gates.map(g=>g.path);
+const inScope=(path,scope)=>scope.some(s=>s.endsWith('/')?path.startsWith(s):path===s);
+export const gatesIn=listed=>gates.filter(g=>listed.includes(g.path));
+// The snapshot each profile is entitled to. Super's own three read the whole
+// repository because their suites import across it; the document profile reads only
+// the documents under review and executes none of the repository's code; the gate
+// profile reads what its gates declare, plus the reviewed paths.
+function scopeOf(profile,members,listed){
+  const reviewed=members.map(m=>m.source.path);
+  if(profile===profiles[3])return new Set(reviewed);
+  if(profile===profiles[4]){
+    const present=gatesIn(listed);
+    assert(present.length,'No gate this profile knows is in this repository: '+gatePaths().join(', ')+'.');
+    const scope=present.flatMap(g=>g.scope);
+    return new Set([...listed.filter(path=>inScope(path,scope)),...reviewed]);
+  }
+  return null;
+}
+const scopeName=profile=>profile===profiles[3]?'reviewed-documents-only':profile===profiles[4]?'gate-scope-and-reviewed-paths':'whole-repository';
 async function pinElixirTools(run){
   const roots={elixir:execFileSync('asdf',['where','elixir'],{encoding:'utf8',timeout:10000}).trim(),erlang:execFileSync('asdf',['where','erlang'],{encoding:'utf8',timeout:10000}).trim()};
   async function inventory(root){
@@ -154,7 +178,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   const rootIdentity=await lstat(root);assert(rootIdentity.isDirectory(),'Choose a repository directory.');
   assert(git(root,['rev-parse','--show-toplevel']).trim()===root,'Choose the repository root.');
   assert(git(root,['rev-parse','--verify','HEAD^{commit}']).trim()===source.head,'The source commit changed. Prepare a fresh review.');
-  const scope=scopeOf(profile,members),listed=listPaths(root);
+  const listed=listPaths(root),scope=scopeOf(profile,members,listed);
   const files=await capture(root,scope);
   for(const member of members){
     const s=member.source,disk=files.get(s.path)?.data;
@@ -169,13 +193,13 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   const entries=manifest(files),snapshotDigest=digest(files);
   assert(entries.length<=maxFiles&&entries.reduce((n,f)=>n+f.bytes,0)<=maxBytes,'Proposed snapshot exceeds its bounds.');
   // Closed profiles: no caller-provided command or test path.
-  const tests=profile===profiles[0]?entries.map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):profile===profiles[1]?['ampd/test/development_task_test.exs','ampd/test/development_attempt_test.exs']:profile===profiles[2]?['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs']:members.filter(m=>m.proposed_text!==null).map(m=>m.source.path);
-  assert(tests.every(p=>files.has(p)),profile===profiles[3]?'A document review needs the documents it reviews.':'The selected profile requires the Super files for that test profile.');
-  assert(tests.length>0&&tests.length<=64,profile===profiles[3]?'A document review needs at least one document that is not a deletion.':'No supported JavaScript behavior suites found (tools/*-test.mjs, maximum 64).');
+  const tests=profile===profiles[0]?entries.map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):profile===profiles[1]?['ampd/test/development_task_test.exs','ampd/test/development_attempt_test.exs']:profile===profiles[2]?['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs']:profile===profiles[4]?gatesIn(listed).map(g=>g.path):members.filter(m=>m.proposed_text!==null).map(m=>m.source.path);
+  assert(tests.every(p=>files.has(p)),profile===profiles[3]?'A document review needs the documents it reviews.':profile===profiles[4]?'The snapshot is missing the gate it would run.':'The selected profile requires the Super files for that test profile.');
+  assert(tests.length>0&&tests.length<=64,profile===profiles[3]?'A document review needs at least one document that is not a deletion.':profile===profiles[4]?'No gate this profile knows is in this repository.':'No supported JavaScript behavior suites found (tools/*-test.mjs, maximum 64).');
   if(profile===profiles[3]){const {isDocumentPath}=await import(checkerUrl.href);assert(tests.every(isDocumentPath),'The document profile reviews Markdown or text documents (.md, .markdown, .txt).');}
   const executable=await realpath(nodePath),nodeStat=await lstat(executable);assert(nodeStat.isFile()&&nodeStat.size<=128*1024*1024,'Node executable exceeds the runner limit.');const node=await readFile(executable);assert(node.length===nodeStat.size,'Node executable changed during capture.');
   const run=await mkdtemp(join(base,'proposal-tests-')),snapshot=join(run,'snapshot');await mkdir(snapshot,{mode:0o700});
-  const record={schema:'local-proposal-test@1',provenance:'human-operated-local-runner',scope:members.length===1?'captured-git-listed-source-with-one-proposal':'captured-git-listed-source-with-proposal-set',snapshot_scope:scope?'reviewed-documents-only':'whole-repository',listed_files:listed.length,profile,attempt_ref:attempt.id??null,source_basis_id:source.basis_id,source_head:source.head,source_capture_sha256:before,result_sha256:source.result_sha256,result_path:source.path??null,result_paths:members.map(m=>m.source.path),snapshot_sha256:snapshotDigest,node_sha256:hash(node),tests,timeout_ms:timeoutMs,started_at:new Date().toISOString(),state:'preparing'};
+  const record={schema:'local-proposal-test@1',provenance:'human-operated-local-runner',scope:members.length===1?'captured-git-listed-source-with-one-proposal':'captured-git-listed-source-with-proposal-set',snapshot_scope:scopeName(profile),listed_files:listed.length,profile,attempt_ref:attempt.id??null,source_basis_id:source.basis_id,source_head:source.head,source_capture_sha256:before,result_sha256:source.result_sha256,result_path:source.path??null,result_paths:members.map(m=>m.source.path),snapshot_sha256:snapshotDigest,node_sha256:hash(node),tests,timeout_ms:timeoutMs,started_at:new Date().toISOString(),state:'preparing'};
   await atomic(join(run,'manifest.json'),{schema:'proposal-test-snapshot@1',sha256:snapshotDigest,files:entries});
   try{
     for(const [path,f] of files){const target=join(snapshot,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}
@@ -202,6 +226,15 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
       args.splice(args.indexOf('--'));
       args.push('--symlink','usr/bin','/bin',...toolchain.binds,'--setenv','PATH','/rust/bin:/usr/bin','--setenv','CARGO_HOME','/tmp/cargo','--setenv','CARGO_TARGET_DIR','/tmp/target','--setenv','CARGO_BUILD_JOBS','2','--setenv','RUSTUP_TOOLCHAIN','stable','--','/bin/sh','-c','mkdir -p /tmp/cargo && cp -a /registry /tmp/cargo/registry && cp -a /snapshot /tmp/source && cd /tmp/source && exec cargo test --offline --locked --manifest-path tools/native-review/Cargo.toml --lib -- --test-threads=1');
     }
+    if(profile===profiles[4]){
+      // The repository's own gate, with the runner's arguments, in the same sandbox:
+      // no network, no host home, a read-only snapshot and a tmpfs. A gate that
+      // refuses is a FAILED verdict; only a gate that never reaches its last line is
+      // an execution failure.
+      args.splice(args.indexOf('--'));
+      const script=gatesIn(listed).map(g=>`if python3 ${JSON.stringify(g.path)} ${g.args.join(' ')}; then echo "# gate ${g.path} ok"; else echo "# gate ${g.path} failed"; status=1; fi`).join('; ');
+      args.push('--symlink','usr/bin','/bin','--setenv','PYTHONDONTWRITEBYTECODE','1','--','/bin/sh','-c',`status=0; ${script}; echo "# gates complete"; exit $status`);
+    }
     if(profile===profiles[3]){
       args.splice(args.indexOf('--'));
       args.push('--ro-bind',checkPath,'/runtime/check.mjs','--ro-bind',reviewPath,'/runtime/review.json','--setenv','SUPER_DOCUMENT_REVIEW','/runtime/review.json','--','/runtime/node','--test','--test-reporter=tap','/runtime/check.mjs');
@@ -210,14 +243,14 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
       const baselineArgs=args.map(a=>a===snapshot?baselineSnapshot:a),baselineTests=profile===profiles[0]?manifest(baselineFiles).map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):tests;
       if(profile===profiles[0])baselineArgs.splice(baselineArgs.indexOf('--test-reporter=tap')+1,tests.length,...baselineTests);
       const b=signal?.aborted?{code:null,output:'',omitted_bytes:0}:baselineTests.length?await execute(baselineArgs,timeoutMs,signal):{code:null,output:'No baseline test suites found.',omitted_bytes:0};
-      const complete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(b.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(b.output):/# tests \d+\r?\n/.test(b.output)&&/# fail \d+\r?\n/.test(b.output);
+      const complete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(b.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(b.output):profile===profiles[4]?/# gates complete\r?\n/.test(b.output):/# tests \d+\r?\n/.test(b.output)&&/# fail \d+\r?\n/.test(b.output);
       const completed=complete&&!signal?.aborted&&!b.timedOut&&!b.launchError&&!b.signal;
       record.baseline={snapshot_sha256:before,tests:baselineTests,same_suites:JSON.stringify(baselineTests)===JSON.stringify(tests),state:completed?'completed':'failed',verdict:completed?(b.code===0?'pass':'fail'):null,exit_code:b.code,output:b.output,omitted_bytes:b.omitted_bytes,finished_at:new Date().toISOString()};
       await atomic(join(run,'baseline-outcome.json'),record.baseline);
     }
     const result=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:null,output:'',omitted_bytes:0}:await execute(args,timeoutMs,signal);
     const unchanged=await Promise.all(entries.map(async e=>{const f=await exactFile(snapshot,e.path);return hash(f.data)===e.sha256&&f.mode===e.mode;})).then(xs=>xs.every(Boolean));
-    const tapComplete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(result.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(result.output):/# tests \d+\r?\n/.test(result.output)&&/# fail \d+\r?\n/.test(result.output);
+    const tapComplete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(result.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(result.output):profile===profiles[4]?/# gates complete\r?\n/.test(result.output):/# tests \d+\r?\n/.test(result.output)&&/# fail \d+\r?\n/.test(result.output);
     // A sandbox/loader error is not a failed application assertion.
     const state=signal?.aborted||!unchanged||result.timedOut||result.launchError||result.signal||!tapComplete?'failed':'completed';
     Object.assign(record,{state,finished_at:new Date().toISOString(),exit_code:result.code,signal:result.signal,output:result.output,omitted_bytes:result.omitted_bytes});
@@ -241,10 +274,10 @@ export async function verifyTestedCheckout({repository,attempt,run}){
   // the scope is read back from the run's own profile.
   const profile=run?.profile??outcome.profile??profiles[0];
   assert(profiles.includes(profile),'Unsupported test profile.');
-  const scope=scopeOf(profile,members);
   assert(git(root,['rev-parse','--show-toplevel']).trim()===root,'Choose the repository root.');
   const identity=await lstat(root),head=git(root,['rev-parse','--verify','HEAD^{commit}']).trim();
   assert(head===source.head,'The source commit changed. Prepare a fresh review.');
+  const scope=scopeOf(profile,members,listPaths(root));
   const files=await capture(root,scope);
   for(const member of members)assert(member.proposed_text===null?!files.has(member.source.path):files.has(member.source.path)&&hash(files.get(member.source.path).data)===member.source.result_sha256,'Save the exact reviewed proposal before accepting it. The selected file differs: '+member.source.path);
   const snapshot=digest(files);assert(snapshot===outcome.snapshot_sha256,'The repository files differ from the passing test snapshot. Prepare a fresh review and test again.');
@@ -254,7 +287,7 @@ export async function verifyTestedCheckout({repository,attempt,run}){
 }
 
 // Shared bounded capture and isolation primitives for accepted-source builds.
-export {capture,manifest,digest,execute,pinRustTools,atomic};
+export {capture,manifest,digest,execute,pinRustTools,atomic,listPaths,scopeOf as snapshotScope};
 
 // Fixed benchmark protocol, executed only by the isolated proposal runner.
 export function benchmarkMetrics(text){
