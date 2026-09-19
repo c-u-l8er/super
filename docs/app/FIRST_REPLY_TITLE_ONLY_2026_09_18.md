@@ -167,7 +167,19 @@ test fails with the stale header, which is how it was checked.
   `tools/first-reply-title-only-smoke.mjs` instead, which drives the identical
   reply shape through a fixture provider.
 
-## After the install — 2026-09-18 23:39Z
+## After the install — 2026-09-19 01:05Z
+
+The streaming fix is installed: `2db9d36` built in `~/build/super-review-content`
+(33.9 s) and running as `super-desktop`, binary `e4882fd044666223…` proven from
+`/proc/<MainPID>/exe`, after `~/build/backup-world.sh`
+(`default-20260919T010452Z`). Gateway 4318 → 200, Expo 8081 → 200, connector
+4320 → 403 without the identity header. No error line in the unit's journal.
+Driven against that binary from the installed checkout: `first-reply-title-only`
+16/16, `saved-file-review-resume` 13/13, `plan-steps` 9/9. Suites on the source:
+`cargo test --bin super-cockpit` 105 passed · 1 ignored, `node --test
+tools/*-test.mjs` 288/288, `bash tools/gates.sh` 7 held · 2 pre-existing failed.
+
+### Earlier — 2026-09-18 23:39Z (the guard itself)
 
 Installed with the change above as binary `1be00b791212054f…` at `48aa9d1`
 (see `SAVED_SINGLE_FILE_REVIEW_2026_09_18.md`, *After the install*). The smoke
