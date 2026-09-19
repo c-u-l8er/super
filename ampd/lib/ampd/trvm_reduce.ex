@@ -34,11 +34,22 @@ defmodule Ampd.TrvmReduce do
   @allowlist %{
     "trvm.reduce" =>
       ~w(term_sha256 nf_sha256 nf_bytes interactions worker_exited job_retired guardian_status sem scenario_digest epoch
-         executor host port module_sha256)
+         executor host port module_sha256
+         kind child_reaped plan_sha256 control_sha256 state_sha256 backend_id source_sha256 so_sha256 flags)
   }
   # The executor's identity: which kind produced the result, and -- for a daemon on another host -- where and which
   # module it reports. Present when the executor says so; a receipt without them is the managed one-shot kind's.
-  @optional ~w(host port module_sha256)
+  @optional ~w(host port module_sha256
+               kind child_reaped plan_sha256 control_sha256 state_sha256 backend_id source_sha256 so_sha256 flags)
+
+  # The compiled kind (T8) keys its intent on the PLAN, the control and the previous payload -- never on a term (the
+  # Golden demo's term is 9.5 MB because the step is unrolled, and not carrying the step is the whole point). These
+  # are the identities it must re-hash to; `term_sha256` is the calculus kind's and is absent here.
+  @compiled_identities ~w(plan_sha256 control_sha256 state_sha256)
+
+  # `@optional` says which allowlisted fields MAY be absent; it is not a list of things a host may volunteer. The
+  # calculus kind merges only the remote executor's three, as it did before T8 widened the allowlist.
+  @remote_optional ~w(host port module_sha256)
 
   @doc "The receipt-carried result fields a capability may carry; `[]` for all others."
   def allowlist(cap), do: Map.get(@allowlist, cap, [])
@@ -66,7 +77,24 @@ defmodule Ampd.TrvmReduce do
   defp shaped?("sem", v), do: is_binary(v) and String.starts_with?(v, "sem-")
   defp shaped?("scenario_digest", v), do: is_binary(v)
   defp shaped?("epoch", v), do: is_integer(v) and v >= 1
-  defp shaped?("executor", v), do: v in ~w(managed resident remote)
+  defp shaped?("executor", v), do: v in ~w(managed resident remote compiled)
+  defp shaped?("kind", v), do: v in ~w(compiled.c.step.v1 compiled.c.step.v2)
+  defp shaped?("child_reaped", v), do: v == true
+  defp shaped?("plan_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
+  defp shaped?("control_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
+  defp shaped?("state_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
+  defp shaped?("source_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
+  defp shaped?("so_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
+  # `cbknd-` (v1) hashes sem, profile and source; `cbknd2-` (v2) also hashes the flags AND the toolchain
+  # (`TRVM/compiled/FLAGS_POLICY.md`, ruled 2026-09-19) -- which is why v1's receipt must carry `flags` separately
+  # and v2's need not.
+  defp shaped?("backend_id", v),
+    do: is_binary(v) and Regex.match?(~r/\A(cbknd|cbknd2)-[0-9a-f]{64}\z/, v)
+
+  defp shaped?("flags", v),
+    do:
+      is_list(v) and length(v) <= 16 and
+        Enum.all?(v, &(is_binary(&1) and byte_size(&1) in 1..64))
   defp shaped?("host", v), do: is_binary(v) and byte_size(v) in 1..253
   defp shaped?("port", v), do: is_integer(v) and v in 1..65535
   defp shaped?("module_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
@@ -113,7 +141,7 @@ defmodule Ampd.TrvmReduce do
         "epoch" => params["epoch"],
         "executor" => c["executor"] || "managed"
       }
-      |> Map.merge(Map.take(c, @optional)),
+      |> Map.merge(Map.take(c, @remote_optional)),
       params
     )
   end
@@ -129,6 +157,102 @@ defmodule Ampd.TrvmReduce do
 
   def result_from(other, _term, _params),
     do: raise("trvm.reduce: unrecognised executor outcome #{inspect(other)}")
+
+  @doc """
+  The compiled kind's adapter (T8). `reduce` is `(bundle_bytes -> outcome)`; `bundle` is the ONE file the
+  guardian-owned child is handed (`TRVM/compiled/executor.py`'s `bundle_bytes`: the request, the sealed plan, the
+  epoch's control text and the previous normal form, each base64'd). There is no term, so there is no
+  `term_sha256`: this is the first `trvm.reduce` intent that names an epoch of a world rather than a text, and the
+  two kinds therefore do not share idempotency keys, by construction (proposal §3).
+  """
+  def compiled_adapter(reduce, params, bundle)
+      when is_function(reduce, 1) and is_map(params) and is_binary(bundle) do
+    fn _attempt -> compiled_result_from(reduce.(bundle), params) end
+  end
+
+  @doc """
+  The result map from a bridge outcome for the COMPILED kind, or a raise naming the host outcome.
+
+  Only a reaped child carrying a `candidate` becomes a result. `nf_sha256` is recomputed here from the bytes the
+  executor printed -- never taken from the executor's own account of them -- exactly as the calculus kind does, so
+  the unchanged reference gate still owns honesty (F-D′).
+  """
+  def compiled_result_from({:ok, %{candidate: %{"status" => "candidate"} = c}}, params)
+      when :erlang.map_get("childReaped", c) == true do
+    output = c["output"]
+
+    unless is_binary(output), do: raise("trvm.reduce: compiled candidate without output")
+
+    validate_compiled!(
+      %{
+        "nf_sha256" => sha256(output),
+        "nf_bytes" => byte_size(output),
+        "guardian_status" => 0,
+        "sem" => params["sem"],
+        "scenario_digest" => params["scenario_digest"],
+        "epoch" => params["epoch"],
+        "executor" => "compiled",
+        "child_reaped" => true,
+        "kind" => c["kind"],
+        "plan_sha256" => c["plan_sha256"],
+        "control_sha256" => c["control_sha256"],
+        "state_sha256" => c["state_sha256"],
+        "backend_id" => c["backend_id"],
+        "source_sha256" => c["source_sha256"],
+        "so_sha256" => c["so_sha256"],
+        "flags" => c["flags"]
+      },
+      params
+    )
+  end
+
+  # A refusal that kept its name (the sidecar path of `HyperSurface.CompiledExecutor`). It raises, like every other
+  # non-result, so `perform_attempt` journals UNKNOWN with `crash_phase nil` and never calls `emit_receipt` -- but
+  # it journals WHICH check refused, which is the whole reason the sidecar exists.
+  def compiled_result_from({:ok, %{candidate: %{"status" => "refused", "reason" => reason}}}, _params),
+    do: raise("trvm.reduce: the compiled executor refused before any step: #{reason}")
+
+  def compiled_result_from({:ok, %{candidate: c}}, _params),
+    do:
+      raise(
+        "trvm.reduce: compiled host outcome #{inspect(c["status"])} is not a candidate with a reaped child"
+      )
+
+  def compiled_result_from({:refused, reason}, _params),
+    do: raise("trvm.reduce: compiled executor refused: #{inspect(reason)}")
+
+  def compiled_result_from(other, _params),
+    do: raise("trvm.reduce: unrecognised compiled executor outcome #{inspect(other)}")
+
+  @doc """
+  The compiled kind's `validate!`: the same shape discipline, with the plan/control/state identities standing where
+  the calculus kind's `term_sha256` stands. A field the compiled kind does not produce (`term_sha256`,
+  `interactions`, `worker_exited`, `job_retired`, the remote kind's three) is absent, not false.
+  """
+  def validate_compiled!(result, params) do
+    for {k, v} <- result do
+      unless shaped?(k, v),
+        do: raise("trvm.reduce: result field #{k} is not shaped: #{inspect(v)}")
+    end
+
+    for k <- @compiled_identities do
+      unless is_binary(result[k]) and result[k] == params[k],
+        do:
+          raise(
+            "trvm.reduce: the compiled executor read a different #{k} than the request named"
+          )
+    end
+
+    for k <- ~w(sem scenario_digest epoch) do
+      unless result[k] == params[k],
+        do: raise("trvm.reduce: result #{k} does not equal the request's")
+    end
+
+    unless result["kind"] == params["kind"],
+      do: raise("trvm.reduce: the executor's kind is not the request's")
+
+    result
+  end
 
   @doc "Refuse to commit (raise) unless every field is shaped and the identities match the request."
   def validate!(result, params) do

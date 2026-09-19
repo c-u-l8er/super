@@ -1,5 +1,6 @@
 Code.require_file("node_executor.exs", __DIR__)
 Code.require_file("resident_executor.exs", __DIR__)
+Code.require_file("compiled_executor.exs", __DIR__)
 
 defmodule HyperSurface.ReducerBridge do
   @moduledoc """
@@ -139,6 +140,7 @@ defmodule HyperSurface.ReducerBridge do
       cond do
         slot.stop_unconfirmed -> {:error, :stop_unconfirmed}
         slot.exited -> :ok
+        slot.managed and slot.compiled -> HyperSurface.CompiledExecutor.cancel(slot.pid)
         slot.managed -> HyperSurface.NodeExecutor.cancel(slot.pid)
         # the resident adapter answers :ok only on the host's own stop witness (workerExited after terminate,
         # or jobRetired before the cancel arrived) or on the daemon's reaped status after a kill
@@ -311,7 +313,11 @@ defmodule HyperSurface.ReducerBridge do
               result: nil,
               exited: false,
               cancelled: false,
-              managed: match?({:managed_node, _}, executor),
+              # the compiled kind is guardian-owned exactly as the Node kind is, so it carries the SAME exit
+              # witness (`node_reaped`) and the same uncertainty rule; `compiled` only says which owner to cancel
+              managed:
+                match?({:managed_node, _}, executor) or match?({:managed_compiled, _}, executor),
+              compiled: match?({:managed_compiled, _}, executor),
               resident:
                 match?({:managed_resident, _}, executor) or
                   match?({:remote_resident, _}, executor),
@@ -330,6 +336,17 @@ defmodule HyperSurface.ReducerBridge do
     config = Map.put(config, :fence_key, lane)
 
     case HyperSurface.NodeExecutor.start(parent, op, input, config) do
+      {:ok, pid} -> {:ok, pid, Process.monitor(pid)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # T8, the compiled kind: a guardian-owned one-shot child folding one epoch from the plan, the control and the
+  # previous payload (COMPILED_EXECUTOR_PROPOSAL.md; `input` is the bundle, not a term).
+  defp start_executor({:managed_compiled, config}, parent, op, input, lane) do
+    config = Map.put(config, :fence_key, lane)
+
+    case HyperSurface.CompiledExecutor.start(parent, op, input, config) do
       {:ok, pid} -> {:ok, pid, Process.monitor(pid)}
       {:error, reason} -> {:error, reason}
     end
