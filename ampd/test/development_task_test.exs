@@ -196,6 +196,114 @@ defmodule Ampd.DevelopmentTaskTest do
     refute Ampd.Worktree.matches_repository?(t["repository_ref"], path <> "-missing")
   end
 
+  # A finished plan's records become history, and history is bounded. Measured
+  # on the live world 2026-09-19: the attempt directory was 141 381 bytes
+  # against its 131 072 budget so no test run could start, the plan directory
+  # 69 745 against 65 536 so no plan could be created, and the two were 92 % of
+  # an operator projection frame at 228 538 of 262 144 — four more accepted
+  # reviews from a runtime that could not answer a projection at all.
+  test "closing a plan retires its attempts in the same write and keeps the evidence", c do
+    t = create(c)
+
+    a = %{
+      "id" => "accepted-one",
+      "task_ref" => t["id"],
+      "task_revision" => 1,
+      "status" => "accepted",
+      "criteria" => String.duplicate("plan criteria, copied onto every attempt. ", 30),
+      "acceptance" => %{"schema" => "development-acceptance@1", "task_revision" => 1},
+      "history" => [%{"revision" => 1, "status" => "recorded", "note" => "Why this is right"}],
+      "files" => [
+        %{
+          "source" => %{
+            "path" => "a.ex",
+            "result_sha256" => String.duplicate("a", 64),
+            "result_bytes" => 12,
+            "basis_id" => String.duplicate("b", 64),
+            "draft_sha256" => String.duplicate("c", 64),
+            "head" => String.duplicate("d", 40),
+            "world" => [1, 2, 3]
+          }
+        }
+      ],
+      "test_runs" => %{
+        "run-1" => %{
+          "run_id" => "run-1",
+          "profile" => "super-javascript-behavior@1",
+          "state" => "completed",
+          "started_at" => "2026-09-19T00:00:00Z",
+          "path" => "/home/somebody/a/very/long/repository/path",
+          "world" => [1, 2, 3],
+          "revision" => 1,
+          "outcome" => %{
+            "verdict" => "pass",
+            "test_count" => 49,
+            "snapshot_sha256" => String.duplicate("e", 64),
+            "output" => String.duplicate("TAP output that nothing can act on now. ", 10)
+          }
+        }
+      }
+    }
+
+    open_plan = %{a | "id" => "still-open", "task_ref" => "dt_open"}
+
+    state = %{
+      "development_tasks" => %{t["id"] => t, "dt_open" => %{"id" => "dt_open", "status" => "planned"}},
+      "development_attempts" => %{a["id"] => a, open_plan["id"] => open_plan}
+    }
+
+    assert {:ok, _completed, next} =
+             DevelopmentTask.update(t["id"], {1, "completed", "Meets the plan criteria"}, state)
+
+    retired = next["development_attempts"]["accepted-one"]
+
+    # The evidence stays, whole.
+    assert retired["acceptance"] == a["acceptance"]
+    assert retired["history"] == a["history"]
+    assert retired["status"] == "accepted" and retired["task_revision"] == 1
+    assert retired["test_runs"]["run-1"]["outcome"]["verdict"] == "pass"
+    assert retired["test_runs"]["run-1"]["outcome"]["test_count"] == 49
+    assert retired["test_runs"]["run-1"]["outcome"]["snapshot_sha256"] == String.duplicate("e", 64)
+    assert retired["files"] == [%{"source" => %{"path" => "a.ex", "result_sha256" => String.duplicate("a", 64), "result_bytes" => 12}}]
+
+    # The working material goes, and with it most of the bytes.
+    refute Map.has_key?(retired, "criteria")
+    refute Map.has_key?(retired["test_runs"]["run-1"], "path")
+    refute Map.has_key?(retired["test_runs"]["run-1"]["outcome"], "output")
+
+    assert byte_size(:erlang.term_to_binary(retired)) <
+             div(byte_size(:erlang.term_to_binary(a)), 2)
+
+    # An attempt on a plan that is still open is not touched, and retiring
+    # twice is retiring once.
+    assert next["development_attempts"]["still-open"] == open_plan
+    assert Ampd.DevelopmentAttempt.retire(retired) == retired
+  end
+
+  test "a closed plan keeps the note it opened with and the last three", c do
+    t = create(c)
+
+    long =
+      Enum.map(1..9, &%{"revision" => &1, "status" => "planned", "note" => "note #{&1}"})
+
+    state = %{
+      "development_tasks" => %{t["id"] => Map.put(t, "history", long)},
+      "development_attempts" => %{}
+    }
+
+    assert {:ok, cancelled, _} =
+             DevelopmentTask.update(t["id"], {1, "cancelled", "Superseded"}, state)
+
+    notes = Enum.map(cancelled["history"], & &1["note"])
+    assert notes == ["note 1", "note 8", "note 9", "Superseded"]
+
+    # An open plan keeps every note; only a finished one is capped.
+    assert {:ok, planned, _} =
+             DevelopmentTask.update(t["id"], {1, "planned", "Still open"}, state)
+
+    assert length(planned["history"]) == 10
+  end
+
   test "completion requires current accepted evidence and no unresolved review or run", c do
     t = create(c)
 

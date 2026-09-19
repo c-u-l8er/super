@@ -259,17 +259,45 @@ defmodule Ampd.DevelopmentTask do
     if pending or running, do: [], else: accepted |> Enum.map(& &1["id"]) |> Enum.sort()
   end
 
+  # **The directory budget, and the arithmetic that sets it.** The operator
+  # projection is ONE `Ampd.Frame`, capped at 256 KB, and it carries both
+  # development directories whole. Measured on the live world 2026-09-19:
+  # attempts 141 381 bytes (over their own 131 072), plans 69 745 (over this),
+  # everything else in the projection 15 939 — a frame at 228 538 of 262 144,
+  # with the two directories 92 % of it. `Ampd.DevelopmentAttempt.retire/1`
+  # gives most of the attempt side back, which is what pays for 80 KB here:
+  # 128 (attempts) + 80 (plans) + ~16 (the rest) = 224 KB of the 256 KB frame,
+  # the same ~32 KB of slack the 128 + 64 pair had. Raising either without
+  # shrinking what the projection carries would spend that slack instead.
+  @directory_bytes 80 * 1024
+
+  # A finished plan keeps the note it was created with and the last three —
+  # which always include the one that closed it — and lets the working middle
+  # go. `history` is capped at 32 entries of up to 1000 characters each, so an
+  # old plan can hold 32 KB on its own.
+  defp retire_plan(%{"status" => status, "history" => history} = task)
+       when status in ~w(completed cancelled) and length(history) > 4,
+       do: Map.put(task, "history", [hd(history) | Enum.take(history, -3)])
+
+  defp retire_plan(task), do: task
+
   defp persist(task, s) do
+    task = retire_plan(task)
     tasks = Map.put(s["development_tasks"], task["id"], task)
 
-    case Ampd.Frame.logical_size(tasks, 64 * 1024) do
+    # Closing a plan retires its attempts in the same write that closes it.
+    attempts =
+      Ampd.DevelopmentAttempt.retire_finished(s["development_attempts"] || %{}, tasks)
+
+    case Ampd.Frame.logical_size(tasks, @directory_bytes) do
       {:ok, _} ->
-        {:ok, task, Map.put(s, "development_tasks", tasks)}
+        {:ok, task,
+         s |> Map.put("development_tasks", tasks) |> Map.put("development_attempts", attempts)}
 
       _ ->
         refuse(
           "task-directory-full",
-          "Development plans exceed the 64 KB directory limit. Existing records are preserved."
+          "Development plans exceed the #{div(@directory_bytes, 1024)} KB directory limit. Existing records are preserved."
         )
     end
   end

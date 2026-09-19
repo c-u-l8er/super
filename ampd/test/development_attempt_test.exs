@@ -303,6 +303,43 @@ defmodule Ampd.DevelopmentAttemptTest do
              DevelopmentAttempt.update(a["id"], {1, "needs_changes", "Bounded"}, s)
   end
 
+  # Retirement is an invariant of the directory, not a migration: it runs on
+  # every write, so a world that is ALREADY over its budget heals on its next
+  # one rather than being stuck at exactly the point where nothing can be
+  # recorded. That was the live world on 2026-09-19 — 141 381 bytes against
+  # 131 072, and no test run could start.
+  test "a directory already over its budget heals on the next write", c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+
+    bulky =
+      Map.new(1..24, fn n ->
+        id = "da_bulk_#{n}"
+
+        {id,
+         a
+         |> Map.put("id", id)
+         |> Map.put("task_ref", "dt_done")
+         |> Map.put("criteria", String.duplicate("working material that history cannot act on. ", 140))}
+      end)
+
+    s =
+      Loci.initial()
+      |> Map.put("development_tasks", %{"dt_done" => %{"id" => "dt_done", "status" => "completed"}})
+      |> Map.put("development_attempts", Map.put(bulky, a["id"], a))
+
+    refute match?({:ok, _}, Ampd.Frame.logical_size(s["development_attempts"], 128 * 1024))
+
+    assert {:ok, _record, next} =
+             DevelopmentAttempt.update(a["id"], {1, "needs_changes", "Bounded"}, s)
+
+    assert match?({:ok, _}, Ampd.Frame.logical_size(next["development_attempts"], 128 * 1024))
+    refute Map.has_key?(next["development_attempts"]["da_bulk_1"], "criteria")
+
+    # The attempt whose own plan is still open keeps everything.
+    assert next["development_attempts"][a["id"]]["criteria"] == a["criteria"]
+  end
+
   # What a record keeps across a world open: everything but the bodies, which
   # move to the content store on open and read back through `member_content/1`
   # (proved by "store restart retains draft, result and notes").

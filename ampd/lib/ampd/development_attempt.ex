@@ -1339,8 +1339,78 @@ defmodule Ampd.DevelopmentAttempt do
       "at" => DateTime.to_iso8601(DateTime.utc_now())
     }
 
+
+  # ── Retirement ───────────────────────────────────────────────────────────
+  #
+  # **A finished plan's attempts stop being working records and become
+  # history.** What history needs is what was decided and on what: the
+  # identity, the acceptance, the notes that explain it, and the verdict of
+  # every run. What it does not need is the working material — the plan's
+  # criteria copied onto every attempt, the basis block of every reviewed
+  # member, and the request fields of every run — none of which can be acted
+  # on once the plan is closed, because every path that reads them refuses on
+  # a completed or cancelled plan first.
+  #
+  # This is not an optimisation. `@directory_bytes` bounds the stored map and
+  # `Ampd.Frame` bounds the projection that carries it, and on 2026-09-19 the
+  # two development directories were 92 % of an operator projection frame that
+  # was itself at 87 % of its 256 KB cap — 141 381 bytes of attempts against
+  # this 131 072 budget, so no test run could start at all, and about four more
+  # accepted reviews before the runtime could not answer a projection.
+  #
+  # It is applied on EVERY write rather than as a migration, so it is an
+  # invariant of the directory rather than a step someone has to remember, and
+  # a world that is already over heals on its first write. It is idempotent:
+  # retiring a retired record yields the same record.
+  @retired_run ~w(run_id profile state started_at finished_at)
+  @retired_outcome ~w(state verdict reason test_count snapshot_sha256 node_sha256
+                      toolchain_sha256 checker_sha256 source_basis_id result_sha256)
+  @retired_member ~w(path result_sha256 result_bytes)
+
+  @doc false
+  def retire(a) when is_map(a) do
+    a
+    |> Map.delete("criteria")
+    |> retire_key("files", fn files ->
+      Enum.map(files, &%{"source" => Map.take(&1["source"] || %{}, @retired_member)})
+    end)
+    |> retire_key("test_runs", fn runs ->
+      Map.new(runs, fn {id, r} ->
+        {id,
+         r
+         |> Map.take(@retired_run)
+         |> Map.put("outcome", Map.take(r["outcome"] || %{}, @retired_outcome))}
+      end)
+    end)
+  end
+
+  defp retire_key(a, key, f) do
+    case Map.get(a, key) do
+      nil -> a
+      value -> Map.put(a, key, f.(value))
+    end
+  end
+
+  @doc false
+  # Every attempt whose plan is finished, retired. Public because
+  # `Ampd.DevelopmentTask` closes a plan and must retire its attempts in the
+  # same write that closes it.
+  def retire_finished(attempts, tasks) when is_map(attempts) and is_map(tasks) do
+    Map.new(attempts, fn {id, a} ->
+      {id, if(finished?(Map.get(tasks, a["task_ref"])), do: retire(a), else: a)}
+    end)
+  end
+
+  defp finished?(%{"status" => status}), do: status in ~w(completed cancelled)
+  defp finished?(_), do: false
+
   defp persist(record, s) do
-    attempts = Map.put(s["development_attempts"], record["id"], record)
+    attempts =
+      s["development_attempts"]
+      |> Map.put(record["id"], record)
+      |> retire_finished(s["development_tasks"] || %{})
+
+    record = Map.get(attempts, record["id"], record)
 
     # Reserve a bounded final outcome for every admitted, unfinished run.
     reserved =
