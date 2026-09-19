@@ -37,7 +37,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
   const title=node('input');title.id='task-title';title.maxLength=80;title.required=true;
   const criteria=node('textarea');criteria.id='task-criteria';criteria.maxLength=1000;criteria.rows=4;criteria.required=true;
   const checks=node('fieldset');checks.id='task-required-checks';checks.append(node('legend','Required checks'),node('p','Choose at least one. These checks stay with this plan; create a new plan to change them.','directory-note'));
-  const checkInputs=[['super-javascript-behavior@1','JavaScript'],['super-elixir-review@1','Elixir'],['super-rust-review@1','Rust']].map(([value,label],i)=>{const input=node('input');input.type='checkbox';input.value=value;input.checked=i===0;checks.append(field(label,input));return input;});
+  const checkInputs=[['super-javascript-behavior@1','JavaScript'],['super-elixir-review@1','Elixir'],['super-rust-review@1','Rust'],['repository-document-review@1','Documents']].map(([value,label],i)=>{const input=node('input');input.type='checkbox';input.value=value;input.checked=i===0;checks.append(field(label,input));return input;});
   const create=node('button','Create development plan','primary');create.type='submit';
   form.append(field('Assigned lane',lane),field('Task title',title),field('Acceptance criteria',criteria),checks,create);
   const notice=node('p','','bot-status');notice.setAttribute('role','status');

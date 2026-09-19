@@ -206,6 +206,7 @@ impl Runs {
             "super-javascript-behavior@1",
             "super-elixir-review@1",
             "super-rust-review@1",
+            "repository-document-review@1",
         ]
         .contains(&profile.as_str())
         {
@@ -248,6 +249,13 @@ impl Runs {
         fs::write(
             dir.join("lib/proposal-test-runner.mjs"),
             include_str!("../../tools/lib/proposal-test-runner.mjs"),
+        )
+        .map_err(err)?;
+        // The document profile's check runs from Super's own pinned bytes, so it
+        // travels with the runner rather than out of the repository under review.
+        fs::write(
+            dir.join("lib/document-review-check.mjs"),
+            include_str!("../../tools/lib/document-review-check.mjs"),
         )
         .map_err(err)?;
         fs::write(

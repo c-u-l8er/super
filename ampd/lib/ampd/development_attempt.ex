@@ -826,7 +826,7 @@ defmodule Ampd.DevelopmentAttempt do
     cond do
       Enum.sort(Map.keys(Map.delete(fields, "profile"))) !=
         Enum.sort(~w(run_id revision path world)) or
-        profile not in ~w(super-javascript-behavior@1 super-elixir-review@1 super-rust-review@1) or
+        profile not in ~w(super-javascript-behavior@1 super-elixir-review@1 super-rust-review@1 repository-document-review@1) or
           not nonempty?(run_id, 100) ->
         refuse("test-start-invalid", "Invalid test-start request.")
 

@@ -7,7 +7,7 @@ import {mkdir,mkdtemp,readFile,writeFile,rename,rm,realpath,open,lstat,cp,readdi
 import {resolve,dirname,join,relative,sep} from 'node:path';
 
 const hash=b=>createHash('sha256').update(b).digest('hex');
-const maxFiles=1024,maxFile=2*1024*1024,maxBytes=32*1024*1024,maxOutput=128*1024;
+const maxFiles=1024,maxFile=2*1024*1024,maxBytes=32*1024*1024,maxOutput=128*1024,maxListed=65536;
 // One reviewed member's body: the runtime's Ampd.ReviewContent.file_bytes/0. The
 // page limits what it will attach or accept from a bot (256 KiB); the runner
 // checks what the runtime recorded.
@@ -30,9 +30,19 @@ async function exactFile(root,path){
     return {data,mode:before.mode&0o111?0o755:0o644};
   }finally{await fd.close();}
 }
-async function capture(root){
-  const paths=[...new Set(git(root,['ls-files','-z','--cached','--others','--exclude-standard']).split('\0').filter(Boolean))].sort();
-  assert(paths.length&&paths.length<=maxFiles,'Snapshot must contain 1–1024 Git-listed source files.');
+function listPaths(root){
+  const listed=[...new Set(git(root,['ls-files','-z','--cached','--others','--exclude-standard']).split('\0').filter(Boolean))].sort();
+  assert(listed.length&&listed.length<=maxListed,'A repository of 1–65536 Git-listed files is required.');
+  return listed;
+}
+// `only` SCOPES the snapshot to a named set of paths. The scope is the profile's,
+// never a caller's: unscoped (null) captures the whole repository exactly as
+// before, and the document profile captures the reviewed documents alone — which
+// is what lets a repository far larger than Super take a review at all. Git-listed,
+// bounded and hashed either way.
+async function capture(root,only=null){
+  const paths=listPaths(root).filter(path=>!only||only.has(path));
+  assert(paths.length<=maxFiles&&(only||paths.length),'Snapshot must contain 1–1024 Git-listed source files.');
   const files=new Map();let total=0;
   for(const path of paths){let file;try{file=await exactFile(root,path);}catch(e){if(e.code==='ENOENT')continue;throw e;}total+=file.data.length;assert(total<=maxBytes,'Snapshot exceeds 32 MiB.');files.set(path,file);}
   return files;
@@ -80,7 +90,12 @@ async function execute(args,timeoutMs,signal){
   });
 }
 
-const profiles=['super-javascript-behavior@1','super-elixir-review@1','super-rust-review@1'];
+const profiles=['super-javascript-behavior@1','super-elixir-review@1','super-rust-review@1','repository-document-review@1'];
+// The snapshot each profile is entitled to. Super's own three read the whole
+// repository because their suites import across it; the document profile reads
+// only the documents under review and executes none of the repository's code.
+const scopeOf=(profile,members)=>profile===profiles[3]?new Set(members.map(m=>m.source.path)):null;
+const checkerUrl=new URL('./document-review-check.mjs',import.meta.url);
 async function pinElixirTools(run){
   const roots={elixir:execFileSync('asdf',['where','elixir'],{encoding:'utf8',timeout:10000}).trim(),erlang:execFileSync('asdf',['where','erlang'],{encoding:'utf8',timeout:10000}).trim()};
   async function inventory(root){
@@ -139,26 +154,28 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   const rootIdentity=await lstat(root);assert(rootIdentity.isDirectory(),'Choose a repository directory.');
   assert(git(root,['rev-parse','--show-toplevel']).trim()===root,'Choose the repository root.');
   assert(git(root,['rev-parse','--verify','HEAD^{commit}']).trim()===source.head,'The source commit changed. Prepare a fresh review.');
-  const files=await capture(root);
+  const scope=scopeOf(profile,members),listed=listPaths(root);
+  const files=await capture(root,scope);
   for(const member of members){
     const s=member.source,disk=files.get(s.path)?.data;
     // Missing and empty files have distinct identities; ignored members refuse.
     if(!disk){try{await lstat(join(root,s.path));throw Error('The selected file is excluded from the source snapshot: '+s.path);}catch(e){if(e.code!=='ENOENT')throw e;}}
     assert((disk?hash(disk):null)===s.disk_sha256,'The selected source file changed: '+s.path+'. Prepare a fresh review.');
   }
-  const before=digest(files),second=await capture(root),afterRoot=await lstat(root);
+  const before=digest(files),second=await capture(root,scope),afterRoot=await lstat(root);
   assert(before===digest(second)&&rootIdentity.dev===afterRoot.dev&&rootIdentity.ino===afterRoot.ino&&git(root,['rev-parse','--verify','HEAD^{commit}']).trim()===source.head,'Source changed during capture. Retry with a fresh review.');
   const baselineFiles=new Map(files);
   for(const member of members){if(member.proposed_text===null)files.delete(member.source.path);else files.set(member.source.path,{data:Buffer.from(member.proposed_text),mode:files.get(member.source.path)?.mode??0o644});}
   const entries=manifest(files),snapshotDigest=digest(files);
   assert(entries.length<=maxFiles&&entries.reduce((n,f)=>n+f.bytes,0)<=maxBytes,'Proposed snapshot exceeds its bounds.');
   // Closed profiles: no caller-provided command or test path.
-  const tests=profile===profiles[0]?entries.map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):profile===profiles[1]?['ampd/test/development_task_test.exs','ampd/test/development_attempt_test.exs']:['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs'];
-  assert(tests.every(p=>files.has(p)),'The selected profile requires the Super files for that test profile.');
-  assert(tests.length>0&&tests.length<=64,'No supported JavaScript behavior suites found (tools/*-test.mjs, maximum 64).');
+  const tests=profile===profiles[0]?entries.map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):profile===profiles[1]?['ampd/test/development_task_test.exs','ampd/test/development_attempt_test.exs']:profile===profiles[2]?['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs']:members.filter(m=>m.proposed_text!==null).map(m=>m.source.path);
+  assert(tests.every(p=>files.has(p)),profile===profiles[3]?'A document review needs the documents it reviews.':'The selected profile requires the Super files for that test profile.');
+  assert(tests.length>0&&tests.length<=64,profile===profiles[3]?'A document review needs at least one document that is not a deletion.':'No supported JavaScript behavior suites found (tools/*-test.mjs, maximum 64).');
+  if(profile===profiles[3]){const {isDocumentPath}=await import(checkerUrl.href);assert(tests.every(isDocumentPath),'The document profile reviews Markdown or text documents (.md, .markdown, .txt).');}
   const executable=await realpath(nodePath),nodeStat=await lstat(executable);assert(nodeStat.isFile()&&nodeStat.size<=128*1024*1024,'Node executable exceeds the runner limit.');const node=await readFile(executable);assert(node.length===nodeStat.size,'Node executable changed during capture.');
   const run=await mkdtemp(join(base,'proposal-tests-')),snapshot=join(run,'snapshot');await mkdir(snapshot,{mode:0o700});
-  const record={schema:'local-proposal-test@1',provenance:'human-operated-local-runner',scope:members.length===1?'captured-git-listed-source-with-one-proposal':'captured-git-listed-source-with-proposal-set',profile,attempt_ref:attempt.id??null,source_basis_id:source.basis_id,source_head:source.head,source_capture_sha256:before,result_sha256:source.result_sha256,result_path:source.path??null,result_paths:members.map(m=>m.source.path),snapshot_sha256:snapshotDigest,node_sha256:hash(node),tests,timeout_ms:timeoutMs,started_at:new Date().toISOString(),state:'preparing'};
+  const record={schema:'local-proposal-test@1',provenance:'human-operated-local-runner',scope:members.length===1?'captured-git-listed-source-with-one-proposal':'captured-git-listed-source-with-proposal-set',snapshot_scope:scope?'reviewed-documents-only':'whole-repository',listed_files:listed.length,profile,attempt_ref:attempt.id??null,source_basis_id:source.basis_id,source_head:source.head,source_capture_sha256:before,result_sha256:source.result_sha256,result_path:source.path??null,result_paths:members.map(m=>m.source.path),snapshot_sha256:snapshotDigest,node_sha256:hash(node),tests,timeout_ms:timeoutMs,started_at:new Date().toISOString(),state:'preparing'};
   await atomic(join(run,'manifest.json'),{schema:'proposal-test-snapshot@1',sha256:snapshotDigest,files:entries});
   try{
     for(const [path,f] of files){const target=join(snapshot,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}
@@ -167,6 +184,14 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     // Pin the executable bytes too; do not run a mutable installation path.
     const runtime=join(run,'node');await writeFile(runtime,node,{flag:'wx',mode:0o700});
     const toolchain=profile===profiles[1]?await pinElixirTools(run):profile===profiles[2]?await pinRustTools(run):null;if(toolchain)record.toolchain_sha256=toolchain.sha256;
+    // The document profile runs Super's own pinned check over the snapshot, never
+    // anything from the repository under review; its bytes are hashed into the record.
+    let checkPath=null,reviewPath=null;
+    if(profile===profiles[3]){
+      const checker=await readFile(checkerUrl);record.checker_sha256=hash(checker);
+      checkPath=join(run,'check.mjs');await writeFile(checkPath,checker,{flag:'wx',mode:0o400});
+      reviewPath=join(run,'review.json');await atomic(reviewPath,{schema:'document-review-manifest@1',documents:tests,paths:[...new Set([...listed,...tests])].sort()});
+    }
     record.state='started';record.snapshot_retained=true;await atomic(join(run,'started.json'),record);
     const args=['--unshare-all','--die-with-parent','--new-session','--cap-drop','ALL','--ro-bind','/usr','/usr','--symlink','usr/lib','/lib','--symlink','usr/lib','/lib64','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--dir','/runtime','--ro-bind',runtime,'/runtime/node','--ro-bind',snapshot,'/snapshot','--chdir','/snapshot','--clearenv','--setenv','PATH','/usr/bin','--setenv','HOME','/tmp','--setenv','LANG','C.UTF-8','--','/runtime/node','--test','--test-reporter=tap',...tests];
     if(profile===profiles[1]){
@@ -176,6 +201,10 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     if(profile===profiles[2]){
       args.splice(args.indexOf('--'));
       args.push('--symlink','usr/bin','/bin',...toolchain.binds,'--setenv','PATH','/rust/bin:/usr/bin','--setenv','CARGO_HOME','/tmp/cargo','--setenv','CARGO_TARGET_DIR','/tmp/target','--setenv','CARGO_BUILD_JOBS','2','--setenv','RUSTUP_TOOLCHAIN','stable','--','/bin/sh','-c','mkdir -p /tmp/cargo && cp -a /registry /tmp/cargo/registry && cp -a /snapshot /tmp/source && cd /tmp/source && exec cargo test --offline --locked --manifest-path tools/native-review/Cargo.toml --lib -- --test-threads=1');
+    }
+    if(profile===profiles[3]){
+      args.splice(args.indexOf('--'));
+      args.push('--ro-bind',checkPath,'/runtime/check.mjs','--ro-bind',reviewPath,'/runtime/review.json','--setenv','SUPER_DOCUMENT_REVIEW','/runtime/review.json','--','/runtime/node','--test','--test-reporter=tap','/runtime/check.mjs');
     }
     if(compare){
       const baselineArgs=args.map(a=>a===snapshot?baselineSnapshot:a),baselineTests=profile===profiles[0]?manifest(baselineFiles).map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):tests;
@@ -208,13 +237,18 @@ export async function verifyTestedCheckout({repository,attempt,run}){
   const {source,members}=checkAttempt(attempt),root=await realpath(repository),outcome=run?.outcome;
   assert(run?.state==='completed'&&outcome?.verdict==='pass','A completed passing test run is required.');
   assert(outcome.result_sha256===source.result_sha256&&outcome.source_basis_id===source.basis_id,'The test result belongs to different review material.');
+  // The checkout is compared against the snapshot the run actually captured, so
+  // the scope is read back from the run's own profile.
+  const profile=run?.profile??outcome.profile??profiles[0];
+  assert(profiles.includes(profile),'Unsupported test profile.');
+  const scope=scopeOf(profile,members);
   assert(git(root,['rev-parse','--show-toplevel']).trim()===root,'Choose the repository root.');
   const identity=await lstat(root),head=git(root,['rev-parse','--verify','HEAD^{commit}']).trim();
   assert(head===source.head,'The source commit changed. Prepare a fresh review.');
-  const files=await capture(root);
+  const files=await capture(root,scope);
   for(const member of members)assert(member.proposed_text===null?!files.has(member.source.path):files.has(member.source.path)&&hash(files.get(member.source.path).data)===member.source.result_sha256,'Save the exact reviewed proposal before accepting it. The selected file differs: '+member.source.path);
   const snapshot=digest(files);assert(snapshot===outcome.snapshot_sha256,'The repository files differ from the passing test snapshot. Prepare a fresh review and test again.');
-  const second=await capture(root),after=await lstat(root);
+  const second=await capture(root,scope),after=await lstat(root);
   assert(digest(second)===snapshot&&identity.dev===after.dev&&identity.ino===after.ino&&git(root,['rev-parse','--verify','HEAD^{commit}']).trim()===head,'Files changed during the acceptance check. Try again.');
   return {snapshot_sha256:snapshot,result_sha256:source.result_sha256,head};
 }

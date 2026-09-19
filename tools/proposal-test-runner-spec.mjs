@@ -190,3 +190,43 @@ test('paired execution retains the unchanged baseline and three benchmark sample
 });
 test('baseline comparison reports missing benchmark explicitly',async t=>{const f=await fixture(t);const r=await runProposalTests({...f,compare:true});assert.equal(r.record.benchmark.state,'not-configured');assert.equal(r.record.verdict,'pass');});
 test('incompatible metric units never produce a benchmark delta',async t=>{const f=await fixture(t);await writeFile(join(f.repository,'tools/task-benchmark.mjs'),"import {value} from '../value.mjs';console.log(JSON.stringify({metrics:[{name:'latency',value,unit:value===1?'ms':'s',direction:'lower'}]}));");const r=await runProposalTests({...f,compare:true});assert.equal(r.record.benchmark.state,'failed');assert.equal(r.record.benchmark.metrics,undefined);assert.match(r.record.benchmark.reason,/units/);});
+
+// repository-document-review@1: the profile that admits a repository Super is
+// not. The snapshot is the reviewed documents alone, so a repository far past
+// the 1024-file bound takes a review; the check is Super's own pinned bytes and
+// nothing from the repository executes.
+async function documents(t,{text,count=1200}={}){
+ const work=await mkdtemp(join(base,'runner-doc-'));t.after(()=>rm(work,{recursive:true,force:true}));
+ const repository=join(work,'repo'),runRoot=join(work,'runs');await mkdir(join(repository,'many'),{recursive:true});await mkdir(runRoot);
+ await Promise.all(Array.from({length:count},(_,i)=>writeFile(join(repository,'many',`f${i}.txt`),`file ${i}\n`)));
+ const draft='# Packet\n\nA first draft.\n';await writeFile(join(repository,'PACKET.md'),draft);
+ const git=args=>execFileSync('/usr/bin/git',['-C',repository,...args],{encoding:'utf8'}).trim();git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','fixture']);
+ const proposed=text??'# Packet\n\nThe ruling, and [the files](many).\n';
+ const source={schema:'selected-file-basis@1',scope:'selected-file-only',head:git(['rev-parse','HEAD']),path:'PACKET.md',disk_sha256:hash(draft),draft_sha256:hash(draft),draft_bytes:Buffer.byteLength(draft),result_sha256:hash(proposed),result_bytes:Buffer.byteLength(proposed)};
+ source.basis_id=hash(JSON.stringify(['selected-file-basis@1',source.head,source.path,source.disk_sha256,source.draft_sha256]));
+ return {repository,runRoot,attempt:{id:'da_doc',source,shared_draft:draft,proposed_text:proposed},profile:'repository-document-review@1'};
+}
+test('a repository past the whole-repository bound takes a scoped document review',async t=>{
+ const f=await documents(t),r=await runProposalTests(f);
+ assert.equal(r.record.state,'completed');assert.equal(r.record.verdict,'pass');
+ assert.equal(r.record.snapshot_scope,'reviewed-documents-only');assert.equal(r.record.listed_files,1201);
+ assert.deepEqual(r.record.tests,['PACKET.md']);assert.match(r.record.checker_sha256,/^[a-f0-9]{64}$/);
+ assert.deepEqual(JSON.parse(await readFile(join(r.directory,'manifest.json'))).files.map(x=>x.path),['PACKET.md']);
+ await assert.rejects(runProposalTests({...f,profile:'super-javascript-behavior@1'}),/1–1024 Git-listed source files/);
+});
+test('a document whose links do not resolve fails the check',async t=>{
+ const f=await documents(t,{text:'# Packet\n\nSee [the note](docs/absent.md).\n',count:20}),r=await runProposalTests(f);
+ assert.equal(r.record.state,'completed');assert.equal(r.record.verdict,'fail');assert.match(r.record.output,/not in the repository/);
+});
+test('the document profile refuses a file that is not a document',async t=>{
+ const f=await documents(t,{count:20});f.attempt.source.path='many/f0.txt';
+ const draft='file 0\n',proposed='file 0 changed\n';
+ Object.assign(f.attempt.source,{disk_sha256:hash(draft),draft_sha256:hash(draft),draft_bytes:Buffer.byteLength(draft),result_sha256:hash(proposed),result_bytes:Buffer.byteLength(proposed)});
+ f.attempt.source.basis_id=hash(JSON.stringify(['selected-file-basis@1',f.attempt.source.head,'many/f0.txt',f.attempt.source.disk_sha256,f.attempt.source.draft_sha256]));
+ f.attempt.shared_draft=draft;f.attempt.proposed_text=proposed;
+ const r=await runProposalTests(f);assert.equal(r.record.verdict,'pass');
+ await writeFile(join(f.repository,'many/f0.bin'),draft);
+ f.attempt.source.path='many/f0.bin';
+ f.attempt.source.basis_id=hash(JSON.stringify(['selected-file-basis@1',f.attempt.source.head,'many/f0.bin',f.attempt.source.disk_sha256,f.attempt.source.draft_sha256]));
+ await assert.rejects(runProposalTests(f),/Markdown or text documents/);
+});
