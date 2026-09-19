@@ -59,9 +59,16 @@ if not x.XGetGeometry(d,window,c.byref(root),c.byref(gx),c.byref(gy),c.byref(wid
 rx=c.c_int();ry=c.c_int();child=W()
 x.XTranslateCoordinates(d,window,x.XDefaultRootWindow(d),int(width.value*.87),int(height.value*.08),c.byref(rx),c.byref(ry),c.byref(child))
 x.XRaiseWindow(d,window);x.XSetInputFocus(d,window,1,0);x.XFlush(d);time.sleep(.4)
-if len(sys.argv)==2:
+def header_click(fx,fy):
+ x.XTranslateCoordinates(d,window,x.XDefaultRootWindow(d),int(width.value*fx),int(height.value*fy),c.byref(rx),c.byref(ry),c.byref(child))
  t.XTestFakeMotionEvent(d,-1,rx.value,ry.value,0);x.XFlush(d);time.sleep(.1)
  t.XTestFakeButtonEvent(d,1,1,0);x.XFlush(d);time.sleep(.1);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d);time.sleep(.5)
+if len(sys.argv)==2:
+ # The accept button sits in the header bar, right-aligned; its height as a fraction of the dialog depends on
+ # scale and CSD margins, so try the header band top-down and stop as soon as the dialog is gone.
+ for fy in (.04,.065,.09):
+  header_click(.93,fy)
+  if not find(x.XDefaultRootWindow(d)):break
 class Data(c.Union):_fields_=[('b',c.c_char*20),('s',c.c_short*10),('l',c.c_long*5)]
 class Client(c.Structure):_fields_=[('type',c.c_int),('serial',W),('send_event',c.c_int),('display',P),('window',W),('message_type',W),('format',c.c_int),('data',Data)]
 class Event(c.Union):_fields_=[('client',Client),('pad',c.c_long*24)]
@@ -88,7 +95,8 @@ if len(sys.argv)>2:
   if shift:key('Shift_L',0)
  if os.environ.get('SUPER_CHOOSER_DEBUG'):
   import subprocess
-  subprocess.run(['import','-window',str(window),os.environ['SUPER_CHOOSER_DEBUG']],check=True,timeout=10)
+  # `import` is broken on some hosts ("missing an image filename" for every path); the root capture is what works.
+  subprocess.run(['magick','x:0x%x'%window,os.environ['SUPER_CHOOSER_DEBUG']],check=True,timeout=15)
  # Activate the dialog button, not the location entry. Return in the entry
  # navigates into the selected child (often .git) instead of choosing this folder.
  x.XTranslateCoordinates(d,window,x.XDefaultRootWindow(d),int(width.value*.87),height.value-22,c.byref(rx),c.byref(ry),c.byref(child))
@@ -101,9 +109,9 @@ while find(x.XDefaultRootWindow(d)) and time.time()<deadline:time.sleep(.1)
 # Under a desktop whose settings daemon sets gtk-dialogs-use-header (GNOME), the dialog's accept
 # button is in the HEADER BAR, top-right, not at the bottom: click there when the dialog survived.
 if len(sys.argv)>2 and find(x.XDefaultRootWindow(d)):
- x.XTranslateCoordinates(d,window,x.XDefaultRootWindow(d),int(width.value*.87),int(height.value*.08),c.byref(rx),c.byref(ry),c.byref(child))
- t.XTestFakeMotionEvent(d,-1,rx.value,ry.value,0);x.XFlush(d);time.sleep(.1)
- t.XTestFakeButtonEvent(d,1,1,0);x.XFlush(d);time.sleep(.1);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d)
+ for fy in (.04,.065,.09):
+  header_click(.93,fy)
+  if not find(x.XDefaultRootWindow(d)):break
  deadline=time.time()+5
  while find(x.XDefaultRootWindow(d)) and time.time()<deadline:time.sleep(.1)
 if find(x.XDefaultRootWindow(d)):raise RuntimeError('Test chooser did not confirm the requested folder')
