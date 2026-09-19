@@ -248,7 +248,10 @@ defmodule Ampd.DevelopmentTaskTest do
     open_plan = %{a | "id" => "still-open", "task_ref" => "dt_open"}
 
     state = %{
-      "development_tasks" => %{t["id"] => t, "dt_open" => %{"id" => "dt_open", "status" => "planned"}},
+      "development_tasks" => %{
+        t["id"] => t,
+        "dt_open" => %{"id" => "dt_open", "status" => "planned"}
+      },
       "development_attempts" => %{a["id"] => a, open_plan["id"] => open_plan}
     }
 
@@ -269,8 +272,19 @@ defmodule Ampd.DevelopmentTaskTest do
     assert retired["status"] == "accepted" and retired["task_revision"] == 1
     assert retired["test_runs"]["run-1"]["outcome"]["verdict"] == "pass"
     assert retired["test_runs"]["run-1"]["outcome"]["test_count"] == 49
-    assert retired["test_runs"]["run-1"]["outcome"]["snapshot_sha256"] == String.duplicate("e", 64)
-    assert retired["files"] == [%{"source" => %{"path" => "a.ex", "result_sha256" => String.duplicate("a", 64), "result_bytes" => 12}}]
+
+    assert retired["test_runs"]["run-1"]["outcome"]["snapshot_sha256"] ==
+             String.duplicate("e", 64)
+
+    assert retired["files"] == [
+             %{
+               "source" => %{
+                 "path" => "a.ex",
+                 "result_sha256" => String.duplicate("a", 64),
+                 "result_bytes" => 12
+               }
+             }
+           ]
 
     # The working material goes, and with it most of the bytes.
     refute Map.has_key?(retired, "criteria")
@@ -381,5 +395,64 @@ defmodule Ampd.DevelopmentTaskTest do
 
     assert {:refused, %{"code" => "task-completed"}} =
              DevelopmentTask.update(t["id"], {2, "planned", "Reopen"}, next)
+  end
+
+  # ── T16: the plan directory's exit ───────────────────────────────────────────
+  #
+  # The attempt directory got one at T14 and settled at 11 % of its budget. The plan directory had
+  # none and reached 80,527 bytes of 81,920 in the live world — 1,393 bytes of headroom against a
+  # median plan record of 1,804 — so the next plan could not be created, and neither could the plan
+  # for the work that would fix it.
+
+  test "a cancelled plan LEAVES the live directory and is still read by everything that reads plans",
+       c do
+    t = create(c)
+    assert map_size(Loci.development_tasks_live()) == 1
+    Authority.update_development_task(t["id"], 1, "cancelled", "Changed priorities")
+
+    assert map_size(Loci.development_tasks_live()) == 0, "a finished plan does not hold the bound"
+    assert map_size(Loci.development_tasks_archive()) == 1
+    # out of the BOUND, not out of view: every reader still sees it
+    assert Loci.development_tasks()[t["id"]]["status"] == "cancelled"
+    assert Projection.operator()["development_tasks"][t["id"]]["status"] == "cancelled"
+  end
+
+  # Without `plan/2` at the lookup this refuses `task-unknown`, which says the plan never existed
+  # rather than that it is finished — a different fact, and the wrong one.
+  test "an archived plan refuses further updates BY NAME, not as an unknown plan", c do
+    t = create(c)
+    Authority.update_development_task(t["id"], 1, "cancelled", "Changed priorities")
+
+    assert {:refused, %{"code" => "task-cancelled"}} =
+             Authority.update_development_task(t["id"], 2, "planned", "Revive")
+  end
+
+  # The obvious-but-wrong version searches only the live half and creates a TWIN with the same
+  # client_ref, which every driver in this tree relies on not happening.
+  test "creation stays idempotent by client_ref after the plan has been archived", c do
+    t = create(c)
+    Authority.update_development_task(t["id"], 1, "cancelled", "Changed priorities")
+
+    again = create(c)
+
+    assert again["id"] == t["id"],
+           "a request whose plan was archived must not create a second one"
+
+    assert map_size(Loci.development_tasks()) == 1
+    assert map_size(Loci.development_tasks_live()) == 0
+  end
+
+  test "a plan that is still open stays live, and finishing one frees a slot rather than a byte only",
+       c do
+    open_plan = create(c)
+    assert map_size(Loci.development_tasks_live()) == 1
+
+    other =
+      Authority.create_development_task(%{c.fields | "client_ref" => "request-two"})
+
+    assert map_size(Loci.development_tasks_live()) == 2
+    Authority.update_development_task(other["id"], 1, "completed-not-a-status", "nope")
+    assert map_size(Loci.development_tasks_live()) == 2, "a refused update archives nothing"
+    assert Loci.development_tasks_live()[open_plan["id"]]["status"] == "planned"
   end
 end

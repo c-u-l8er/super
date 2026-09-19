@@ -100,7 +100,7 @@ defmodule Ampd.DevelopmentAttempt do
     # the projection, the host's resolver, the downgrade — already reads it.
     # Inline is the older shape, still accepted and still bounded by its caps.
     fields = Map.reject(fields, fn {k, v} -> k in @bodies and v == nil end)
-    task = s["development_tasks"][fields["task_ref"]]
+    task = Ampd.DevelopmentTask.plan(s, fields["task_ref"])
     source = fields["source"]
     keys = Enum.sort(Map.keys(fields))
 
@@ -200,7 +200,7 @@ defmodule Ampd.DevelopmentAttempt do
   def max_members, do: @max_members
 
   defp create_set(f, s) do
-    task = s["development_tasks"][f["task_ref"]]
+    task = Ampd.DevelopmentTask.plan(s, f["task_ref"])
     files = if is_map(f["material"]), do: f["material"]["files"], else: nil
     keys = ~w(schema client_ref task_ref task_revision material)
 
@@ -821,7 +821,7 @@ defmodule Ampd.DevelopmentAttempt do
     run_id = fields["run_id"]
     runs = if a, do: Map.get(a, "test_runs", %{}), else: %{}
     old = runs[run_id]
-    task = if a, do: s["development_tasks"][a["task_ref"]]
+    task = if a, do: Ampd.DevelopmentTask.plan(s, a["task_ref"])
 
     cond do
       Enum.sort(Map.keys(Map.delete(fields, "profile"))) !=
@@ -1196,7 +1196,7 @@ defmodule Ampd.DevelopmentAttempt do
   end
 
   defp acceptance_ready?(a, run, revision, s) do
-    task = if a, do: s["development_tasks"][a["task_ref"]]
+    task = if a, do: Ampd.DevelopmentTask.plan(s, a["task_ref"])
     runs = if a, do: Map.values(Map.get(a, "test_runs", %{})), else: []
     latest = Enum.max_by(runs, &{&1["started_at"], &1["run_id"]}, fn -> nil end)
 
@@ -1339,7 +1339,6 @@ defmodule Ampd.DevelopmentAttempt do
       "at" => DateTime.to_iso8601(DateTime.utc_now())
     }
 
-
   # ── Retirement ───────────────────────────────────────────────────────────
   #
   # **A finished plan's attempts stop being working records and become
@@ -1448,7 +1447,8 @@ defmodule Ampd.DevelopmentAttempt do
         a["status"] in @terminal and finished?(Map.get(tasks, a["task_ref"]))
       end)
 
-    {Map.new(live), Enum.reduce(done, archive, fn {id, a}, acc -> Map.put(acc, id, retire(a)) end)}
+    {Map.new(live),
+     Enum.reduce(done, archive, fn {id, a}, acc -> Map.put(acc, id, retire(a)) end)}
   end
 
   defp finished?(%{"status" => status}), do: status in ~w(completed cancelled)
@@ -1458,7 +1458,12 @@ defmodule Ampd.DevelopmentAttempt do
     {attempts, archive} =
       s["development_attempts"]
       |> Map.put(record["id"], record)
-      |> archive_finished(s["development_attempts_archive"] || %{}, s["development_tasks"] || %{})
+      |> archive_finished(
+        s["development_attempts_archive"] || %{},
+        # T16: the WHOLE plan directory. A finished plan is archived, and `finished?(nil)` is false,
+        # so the live half alone would stop archiving the attempts of every plan already closed.
+        Ampd.DevelopmentTask.plans(s)
+      )
 
     # The record being written is itself archivable when its plan is already
     # closed; it is then the archive's copy that is authoritative, not the input.

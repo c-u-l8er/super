@@ -380,11 +380,16 @@ defmodule Ampd.DevelopmentAttemptTest do
     a = Authority.record_development_attempt(f)
     tasks = %{"dt_done" => %{"id" => "dt_done", "status" => "completed"}}
 
-    prior = %{"da_prior" => %{"id" => "da_prior", "task_ref" => "dt_done", "status" => "accepted"}}
+    prior = %{
+      "da_prior" => %{"id" => "da_prior", "task_ref" => "dt_done", "status" => "accepted"}
+    }
 
     {live, archive} =
       DevelopmentAttempt.archive_finished(
-        %{"da_x" => Map.merge(a, %{"id" => "da_x", "task_ref" => "dt_done", "status" => "accepted"})},
+        %{
+          "da_x" =>
+            Map.merge(a, %{"id" => "da_x", "task_ref" => "dt_done", "status" => "accepted"})
+        },
         prior,
         tasks
       )
@@ -434,7 +439,9 @@ defmodule Ampd.DevelopmentAttemptTest do
 
     s =
       Loci.initial()
-      |> Map.put("development_tasks", %{"dt_open" => %{"id" => "dt_open", "status" => "in_progress"}})
+      |> Map.put("development_tasks", %{
+        "dt_open" => %{"id" => "dt_open", "status" => "in_progress"}
+      })
       |> Map.put("development_attempts", %{
         "da_orphan" => Map.merge(a, %{"id" => "da_orphan", "task_ref" => "dt_vanished"}),
         a["id"] => Map.put(a, "task_ref", "dt_open")
@@ -458,12 +465,17 @@ defmodule Ampd.DevelopmentAttemptTest do
          |> Map.put("id", id)
          |> Map.put("task_ref", "dt_done")
          |> Map.put("status", "accepted")
-         |> Map.put("criteria", String.duplicate("working material that history cannot act on. ", 140))}
+         |> Map.put(
+           "criteria",
+           String.duplicate("working material that history cannot act on. ", 140)
+         )}
       end)
 
     s =
       Loci.initial()
-      |> Map.put("development_tasks", %{"dt_done" => %{"id" => "dt_done", "status" => "completed"}})
+      |> Map.put("development_tasks", %{
+        "dt_done" => %{"id" => "dt_done", "status" => "completed"}
+      })
       |> Map.put("development_attempts", Map.put(bulky, a["id"], a))
 
     refute match?({:ok, _}, Ampd.Frame.logical_size(s["development_attempts"], 128 * 1024))
@@ -1429,5 +1441,68 @@ defmodule Ampd.DevelopmentAttemptTest do
                  %{"files" => [a, bad]}
                ])
     end
+  end
+
+  # ── T16: the plan directory got an exit too, and it changes what "the plan directory" IS ──────
+  #
+  # T14's predicate is PLAN COMPLETION, read out of `s["development_tasks"]`. After T16 a finished
+  # plan is not in that map any more — it is in `development_tasks_archive` — and `finished?(nil)`
+  # is false. Handed only the live half, the attempt side would stop archiving the attempts of
+  # every plan already closed, which is the exact opposite of what closing a plan does.
+
+  test "T16 · attempts of a plan that is ARCHIVED still archive — the predicate reads the whole directory",
+       c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+
+    s =
+      Loci.initial()
+      # the closed plan is ONLY in the archive, which is where T16 puts it
+      |> Map.put("development_tasks", %{
+        "dt_open" => %{"id" => "dt_open", "status" => "in_progress"}
+      })
+      |> Map.put("development_tasks_archive", %{
+        "dt_done" => %{"id" => "dt_done", "status" => "completed"}
+      })
+      |> Map.put("development_attempts", %{
+        "da_done" =>
+          Map.merge(a, %{"id" => "da_done", "task_ref" => "dt_done", "status" => "accepted"}),
+        a["id"] => Map.put(a, "task_ref", "dt_open")
+      })
+
+    assert {:ok, _r, next} = DevelopmentAttempt.update(a["id"], {1, "needs_changes", "B"}, s)
+
+    refute Map.has_key?(next["development_attempts"], "da_done"),
+           "an attempt whose plan is archived was stranded in the live directory"
+
+    assert Map.has_key?(next["development_attempts_archive"], "da_done")
+    assert Map.has_key?(next["development_attempts"], a["id"]), "the open plan's attempt stays"
+  end
+
+  test "T16 · cancelling a plan archives the PLAN and its attempts in one write", c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+
+    task = %{
+      "id" => "dt_x",
+      "status" => "planned",
+      "revision" => 1,
+      "history" => [%{"revision" => 1, "status" => "planned", "note" => "opened"}]
+    }
+
+    s =
+      Loci.initial()
+      |> Map.put("development_tasks", %{"dt_x" => task})
+      |> Map.put("development_attempts", %{
+        "da_x" => Map.merge(a, %{"id" => "da_x", "task_ref" => "dt_x", "status" => "dismissed"})
+      })
+
+    assert {:ok, _t, next} =
+             Ampd.DevelopmentTask.update("dt_x", {1, "cancelled", "Changed priorities"}, s)
+
+    refute Map.has_key?(next["development_tasks"], "dt_x"), "the finished plan held the bound"
+    assert next["development_tasks_archive"]["dt_x"]["status"] == "cancelled"
+    refute Map.has_key?(next["development_attempts"], "da_x")
+    assert Map.has_key?(next["development_attempts_archive"], "da_x")
   end
 end

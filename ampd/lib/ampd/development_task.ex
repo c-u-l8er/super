@@ -33,6 +33,7 @@ defmodule Ampd.DevelopmentTask do
 
   @fields ~w(client_ref lane_ref title criteria)
   def fields, do: @fields ++ ["required_checks"]
+
   @profiles ~w(super-javascript-behavior@1 super-elixir-review@1 super-rust-review@1 repository-document-review@1 repository-python-gate@1)
   defp checks?(nil), do: true
 
@@ -73,8 +74,11 @@ defmodule Ampd.DevelopmentTask do
     bot =
       lane && Enum.find_value(s["bots"], fn {_id, b} -> if b["actor"] == lane["actor"], do: b end)
 
+    # Over the WHOLE directory, archived plans included. A creation request is idempotent by
+    # `client_ref`, and a request whose plan had been archived would otherwise create a second plan
+    # with the same ref — every driver in this tree relies on that idempotency.
     old =
-      Enum.find_value(s["development_tasks"], fn {_id, t} ->
+      Enum.find_value(plans(s), fn {_id, t} ->
         if t["client_ref"] == fields["client_ref"], do: t
       end)
 
@@ -110,8 +114,11 @@ defmodule Ampd.DevelopmentTask do
       not is_binary(lane["repository_ref"]) or Ampd.Worktree.repo(lane["repository_ref"]) == nil ->
         refuse("task-repository-missing", "The lane needs a registered repository.")
 
+      # LIVE plans. Like `@directory_bytes` this is a directory guard, and T16 gave the directory
+      # an exit: finishing a plan frees a slot exactly as it frees the bytes. A world may hold more
+      # than 50 plans in total; it may not have more than 50 open at once.
       map_size(s["development_tasks"]) >= 50 ->
-        refuse("task-limit", "This world supports up to 50 development plans.")
+        refuse("task-limit", "This world supports up to 50 open development plans.")
 
       true ->
         seq = s["seq"] + 1
@@ -146,8 +153,45 @@ defmodule Ampd.DevelopmentTask do
 
   def create(_, _), do: refuse("task-fields-invalid", "Task fields must be an object.")
 
+  @doc false
+  # T16 — **the plan directory needs an exit for the same reason the attempt directory did.**
+  #
+  # T14 gave `development_attempts` one and the attempt side settled at 11 % of its budget. The
+  # plan side had none, and on 2026-09-19 it reached **80,527 bytes of 81,920 — 1,393 bytes of
+  # headroom against a median plan record of 1,804** — so the next plan could not be created, and
+  # neither could the plan for the work that would fix it.
+  #
+  # **A finished plan is terminal and provably so.** `update/3` refuses every further change to a
+  # `cancelled` plan (`task-cancelled`) and to a `completed` one (`task-completed`), so nothing
+  # returns from either and the exit is a bound rather than a delay. That is the same argument T14
+  # makes for `dismissed`/`accepted` attempts.
+  #
+  # **The archive is out of the BOUND, not out of view.** `Ampd.Loci.development_tasks/0` merges it
+  # back, so the plan list, the nav badge, `reveal()` and every attempt's route to its plan are
+  # unchanged; only the budget and the 50-plan cap count the live map. Every lookup INSIDE the
+  # runtime goes through `plan/2` for the same reason — a finished plan that read as missing would
+  # turn `task-completed` into `task-unknown` and change what a refusal means.
+  # The two statuses `update/3` refuses every further change to, and there are no others.
+  defp finished?(%{"status" => status}), do: status in ~w(completed cancelled)
+  defp finished?(_), do: false
+
+  def archive_finished(tasks, archive) when is_map(tasks) and is_map(archive) do
+    {done, live} = Enum.split_with(tasks, fn {_id, t} -> finished?(t) end)
+    {Map.new(live), Enum.into(done, archive)}
+  end
+
+  @doc false
+  # A plan by reference, live or archived. Every read of a plan from the state must use this:
+  # `s["development_tasks"][ref]` alone stopped being the whole directory at T16.
+  def plan(s, ref),
+    do: s["development_tasks"][ref] || (s["development_tasks_archive"] || %{})[ref]
+
+  @doc false
+  def plans(s),
+    do: Map.merge(s["development_tasks_archive"] || %{}, s["development_tasks"] || %{})
+
   def update(id, {revision, status, note}, s) do
-    task = s["development_tasks"][id]
+    task = plan(s, id)
 
     cond do
       task == nil ->
@@ -292,11 +336,21 @@ defmodule Ampd.DevelopmentTask do
     # no round could run at all. The records leave, retired on the way out, into
     # a collection `@directory_bytes` does not count and `Ampd.Projection` does
     # not publish. Nothing is deleted.
+    # T16: a finished plan leaves the live directory in the same write that finishes it. The record
+    # being written is itself archivable when this IS that write, and the archive's copy is then the
+    # authoritative one.
+    {tasks, task_archive} = archive_finished(tasks, s["development_tasks_archive"] || %{})
+    task = Map.get(tasks, task["id"]) || Map.get(task_archive, task["id"]) || task
+
+    # The attempt side decides by PLAN COMPLETION (T14), so it must be given the whole directory.
+    # Handed only the live half it would see a just-archived plan as MISSING, and
+    # `finished?(nil)` is false — the attempts of every plan this write closes would stay live for
+    # ever, which is the opposite of what closing a plan is supposed to do.
     {attempts, archive} =
       Ampd.DevelopmentAttempt.archive_finished(
         s["development_attempts"] || %{},
         s["development_attempts_archive"] || %{},
-        tasks
+        Map.merge(task_archive, tasks)
       )
 
     case Ampd.Frame.logical_size(tasks, @directory_bytes) do
@@ -304,6 +358,7 @@ defmodule Ampd.DevelopmentTask do
         {:ok, task,
          s
          |> Map.put("development_tasks", tasks)
+         |> Map.put("development_tasks_archive", task_archive)
          |> Map.put("development_attempts", attempts)
          |> Map.put("development_attempts_archive", archive)}
 

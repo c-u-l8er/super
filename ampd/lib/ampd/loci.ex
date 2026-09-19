@@ -281,6 +281,7 @@ defmodule Ampd.Loci do
       "workers" => %{},
       "bots" => %{},
       "development_tasks" => %{},
+      "development_tasks_archive" => %{},
       "development_attempts" => %{},
       # T14: finished plans' attempts, out of the live directory and off the frame.
       # Not published by `Ampd.Projection` and not counted by `@directory_bytes` —
@@ -305,6 +306,7 @@ defmodule Ampd.Loci do
       "workers" => %{},
       "bots" => %{},
       "development_tasks" => %{},
+      "development_tasks_archive" => %{},
       "development_attempts" => %{},
       "development_attempts_archive" => %{},
       "caps" => %{},
@@ -320,6 +322,16 @@ defmodule Ampd.Loci do
   def workspaces, do: ask({:all, "workspaces"})
   def goals, do: ask({:all, "goals"})
   def lanes, do: ask({:all, "lanes"})
+  # T16: readers see live AND archived plans, for the same reason T14 merges attempts — the plan
+  # list, the badge and every reference link read the projection, and a finished plan that vanished
+  # from it would take its accepted reviews' only route with it. The archive is out of the BOUND,
+  # not out of view. Live wins on the (impossible) overlap.
+  def development_tasks,
+    do: Map.merge(ask({:all, "development_tasks_archive"}), ask({:all, "development_tasks"}))
+
+  def development_tasks_live, do: ask({:all, "development_tasks"})
+  def development_tasks_archive, do: ask({:all, "development_tasks_archive"})
+
   # T14: readers see live AND archived attempts; only `persist/2`'s budget check
   # counts the live directory. The plan card lists a plan's attempts from the
   # projection (`cockpit/ui/development-tasks.js` filters
@@ -328,7 +340,8 @@ defmodule Ampd.Loci do
   # "completed naming da_0108, da_0109" and show nothing. The archive is out of
   # the BOUND, not out of view. Live wins on the (impossible) overlap.
   def development_attempts,
-    do: Map.merge(ask({:all, "development_attempts_archive"}), ask({:all, "development_attempts"}))
+    do:
+      Map.merge(ask({:all, "development_attempts_archive"}), ask({:all, "development_attempts"}))
 
   def development_attempts_live, do: ask({:all, "development_attempts"})
   def development_attempts_archive, do: ask({:all, "development_attempts_archive"})
@@ -357,7 +370,6 @@ defmodule Ampd.Loci do
   def update_development_attempt(id, revision, status, note),
     do: ask({:patch, "development_attempts", id, {revision, status, note}})
 
-  def development_tasks, do: ask({:all, "development_tasks"})
   def create_development_task(fields), do: ask({:create, "development_tasks", "dt_", fields})
 
   def update_development_task(id, revision, status, note),
