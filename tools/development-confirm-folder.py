@@ -98,5 +98,13 @@ else:tap('Return')
 time.sleep(.6)
 deadline=time.time()+5
 while find(x.XDefaultRootWindow(d)) and time.time()<deadline:time.sleep(.1)
+# Under a desktop whose settings daemon sets gtk-dialogs-use-header (GNOME), the dialog's accept
+# button is in the HEADER BAR, top-right, not at the bottom: click there when the dialog survived.
+if len(sys.argv)>2 and find(x.XDefaultRootWindow(d)):
+ x.XTranslateCoordinates(d,window,x.XDefaultRootWindow(d),int(width.value*.87),int(height.value*.08),c.byref(rx),c.byref(ry),c.byref(child))
+ t.XTestFakeMotionEvent(d,-1,rx.value,ry.value,0);x.XFlush(d);time.sleep(.1)
+ t.XTestFakeButtonEvent(d,1,1,0);x.XFlush(d);time.sleep(.1);t.XTestFakeButtonEvent(d,1,0,0);x.XFlush(d)
+ deadline=time.time()+5
+ while find(x.XDefaultRootWindow(d)) and time.time()<deadline:time.sleep(.1)
 if find(x.XDefaultRootWindow(d)):raise RuntimeError('Test chooser did not confirm the requested folder')
 print('Confirmed test chooser',window,'size',width.value,height.value,'root point',rx.value,ry.value)
