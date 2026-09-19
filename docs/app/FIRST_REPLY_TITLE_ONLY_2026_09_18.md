@@ -1,6 +1,7 @@
 # The first reply that was only its title — 2026-09-18
 
-**Status: the page now refuses such a reply and restores the draft; the cause
+**Status: the page now refuses such a reply and restores the draft — driven on
+a real screen against a local provider fixture, 16 held · 0 failed; the CAUSE
 is NOT reproduced, because the machine's Claude CLI sign-in was expired when
 the reproduction was attempted.** Finding 1 of
 `REVIEW_EVIDENCE_RULINGS_2026_09_18.md` *After the install*.
@@ -50,6 +51,40 @@ Why the model stopped inside the header is not known. n = 1.
 
 This turns a lost round into one resend, which is the workaround the driver
 found by hand. It does not prevent the model from doing it again.
+
+## Driven on a real screen — `tools/first-reply-title-only-smoke.mjs`
+
+The decode and the guard run on **every** reply, whatever the provider
+(`bots.js` applies them to the result of `bot_chat`), so the measured reply
+shape can be produced by a local HTTP provider fixture and the Claude CLI is
+not needed to prove what the page does with it. Real cockpit, throwaway world,
+an `ollama` endpoint pointed at a fixture that records what each request asked
+for: **16 held · 0 failed** (screenshots in `outputs/title-only/shots/`).
+
+1. The first send **asks** for a title (the instruction reaches the provider
+   inside the system message). The fixture answers with the measured shape —
+   `<conversation-title>…` unterminated, nothing after it, no tool call.
+2. Nothing lands as an assistant reply: the transcript holds the user message
+   and an *App result* carrying the refusal, the status line carries the same
+   sentence, **the draft is restored in the composer**, and the conversation
+   is titled from the header (`01-title-only-refused.png`; the Activity rail
+   reads *Reply stopped · No live assistant text received* and the sidebar row
+   *Needs attention*).
+3. The resend **does not ask for a title again** — proven from the fixture's
+   own record of the second request — lands a normal reply, empties the
+   composer, and leaves the kept title alone (`02-resend-landed.png`).
+4. The same unterminated header **carrying a proposal** is not refused: it
+   lands with its proposal card on screen, title taken from the header too
+   (`03-header-with-proposal-lands.png`). The guard is about emptiness, not
+   about the header.
+5. A properly closed header still yields the title and the prose.
+
+One observation, not changed: the status line and the result entry read
+*"Error: The reply stopped…"*. Every in-page refusal in `bots.js` renders
+through `String(error)` and so carries that prefix (the attachment limits, the
+model catalog, the missing API key). Dropping it is a one-line change to how
+that file renders **every** failure, so it is left for the owner rather than
+made here for one message.
 
 ## Reproduction, prepared and blocked
 
