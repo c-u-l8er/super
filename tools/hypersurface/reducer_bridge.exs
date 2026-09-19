@@ -312,7 +312,9 @@ defmodule HyperSurface.ReducerBridge do
               exited: false,
               cancelled: false,
               managed: match?({:managed_node, _}, executor),
-              resident: match?({:managed_resident, _}, executor),
+              resident:
+                match?({:managed_resident, _}, executor) or
+                  match?({:remote_resident, _}, executor),
               resident_witness: nil,
               stop_unconfirmed: false,
               node_reaped: false,
@@ -334,6 +336,16 @@ defmodule HyperSurface.ReducerBridge do
   end
 
   defp start_executor({:managed_resident, config}, parent, op, input, _lane) do
+    case HyperSurface.ResidentJob.start(parent, op, input, config) do
+      {:ok, pid} -> {:ok, pid, Process.monitor(pid)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The remote resident kind: the same job over TCP to a daemon on another host, no guardian (RemoteResident's moduledoc).
+  defp start_executor({:remote_resident, config}, parent, op, input, _lane) do
+    config = Map.put(config, :executor_module, HyperSurface.RemoteResident)
+
     case HyperSurface.ResidentJob.start(parent, op, input, config) do
       {:ok, pid} -> {:ok, pid, Process.monitor(pid)}
       {:error, reason} -> {:error, reason}

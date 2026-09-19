@@ -33,8 +33,12 @@ defmodule Ampd.TrvmReduce do
 
   @allowlist %{
     "trvm.reduce" =>
-      ~w(term_sha256 nf_sha256 nf_bytes interactions worker_exited job_retired guardian_status sem scenario_digest epoch)
+      ~w(term_sha256 nf_sha256 nf_bytes interactions worker_exited job_retired guardian_status sem scenario_digest epoch
+         executor host port module_sha256)
   }
+  # The executor's identity: which kind produced the result, and -- for a daemon on another host -- where and which
+  # module it reports. Present when the executor says so; a receipt without them is the managed one-shot kind's.
+  @optional ~w(host port module_sha256)
 
   @doc "The receipt-carried result fields a capability may carry; `[]` for all others."
   def allowlist(cap), do: Map.get(@allowlist, cap, [])
@@ -62,6 +66,10 @@ defmodule Ampd.TrvmReduce do
   defp shaped?("sem", v), do: is_binary(v) and String.starts_with?(v, "sem-")
   defp shaped?("scenario_digest", v), do: is_binary(v)
   defp shaped?("epoch", v), do: is_integer(v) and v >= 1
+  defp shaped?("executor", v), do: v in ~w(managed resident remote)
+  defp shaped?("host", v), do: is_binary(v) and byte_size(v) in 1..253
+  defp shaped?("port", v), do: is_integer(v) and v in 1..65535
+  defp shaped?("module_sha256", v), do: is_binary(v) and Regex.match?(@hex64, v)
   defp shaped?(_, _), do: false
 
   @doc """
@@ -102,8 +110,10 @@ defmodule Ampd.TrvmReduce do
         "guardian_status" => 0,
         "sem" => params["sem"],
         "scenario_digest" => params["scenario_digest"],
-        "epoch" => params["epoch"]
-      },
+        "epoch" => params["epoch"],
+        "executor" => c["executor"] || "managed"
+      }
+      |> Map.merge(Map.take(c, @optional)),
       params
     )
   end
@@ -122,7 +132,7 @@ defmodule Ampd.TrvmReduce do
 
   @doc "Refuse to commit (raise) unless every field is shaped and the identities match the request."
   def validate!(result, params) do
-    for k <- allowlist("trvm.reduce") do
+    for k <- allowlist("trvm.reduce"), not (k in @optional and not Map.has_key?(result, k)) do
       unless shaped?(k, result[k]),
         do: raise("trvm.reduce: result field #{k} is not shaped: #{inspect(result[k])}")
     end

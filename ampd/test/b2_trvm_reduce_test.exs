@@ -220,8 +220,71 @@ defmodule Ampd.B2TrvmReduceTest do
   # one daemon per test, owned by the same guardian, jobs as frames; the warm-path barrier is `jobRetired`, not a
   # worker exit (README §6's forward rule). Unset, the one-shot managed-Node executor of the witness.
   defp resident?, do: System.get_env("B2_TRVM_EXECUTOR") == "resident"
+  defp remote?, do: System.get_env("B2_TRVM_EXECUTOR") == "remote"
+
+  # B2_TRVM_EXECUTOR=remote runs the same cases through a residentd on a TCP endpoint this runtime does not own
+  # (T3): B2_REMOTE_RESIDENT=host:port names one started out of band (a lab host); unset, the test starts TRVM's
+  # residentd on a loopback port of the kernel's choosing and reads the port from its announce line. No guardian
+  # either way -- that is the kind.
+  defp remote_endpoint do
+    case System.get_env("B2_REMOTE_RESIDENT") do
+      nil ->
+        c = config()
+        residentd = Path.join(Path.dirname(c.host), "../resident/residentd.mjs") |> Path.expand()
+
+        port =
+          Port.open({:spawn_executable, c.node}, [
+            :binary,
+            :exit_status,
+            {:line, 4096},
+            args: [
+              residentd,
+              "--port",
+              "0",
+              "--bind",
+              "127.0.0.1",
+              "--pool",
+              "2",
+              "--max-queue",
+              "4"
+            ]
+          ])
+
+        {:os_pid, os_pid} = Port.info(port, :os_pid)
+
+        announce =
+          receive do
+            {^port, {:data, {:eol, line}}} -> JSON.decode!(line)
+          after
+            15_000 -> flunk("residentd did not announce")
+          end
+
+        [host, p] = String.split(announce["residentd"], ":")
+        Process.put(:remote_daemon, {port, os_pid})
+        {host, String.to_integer(p), announce["module_sha256"]}
+
+      hp ->
+        [host, p] = String.split(hp, ":")
+        {host, String.to_integer(p), nil}
+    end
+  end
 
   defp start_bridge(timeout_ms \\ 3000) do
+    if remote?() do
+      {host, port, _} = remote_endpoint()
+      {:ok, ex} = HyperSurface.RemoteResident.start_link(%{host: host, port: port})
+
+      {:ok, server} =
+        Reducer.start_link({:remote_resident, %{executor: ex, timeout_ms: timeout_ms}})
+
+      Process.put(:resident_executor, {HyperSurface.RemoteResident, ex})
+      {:ok, server}
+    else
+      start_bridge_local(timeout_ms)
+    end
+  end
+
+  defp start_bridge_local(timeout_ms) do
     if resident?() do
       c = config(timeout_ms)
 
@@ -238,7 +301,7 @@ defmodule Ampd.B2TrvmReduceTest do
       {:ok, server} =
         Reducer.start_link({:managed_resident, %{executor: ex, timeout_ms: timeout_ms}})
 
-      Process.put(:resident_executor, ex)
+      Process.put(:resident_executor, {HyperSurface.ResidentExecutor, ex})
       {:ok, server}
     else
       Reducer.start_link({:managed_node, config(timeout_ms)})
@@ -250,7 +313,16 @@ defmodule Ampd.B2TrvmReduceTest do
 
     case Process.delete(:resident_executor) do
       nil -> :ok
-      ex -> HyperSurface.ResidentExecutor.stop(ex)
+      {mod, ex} -> mod.stop(ex)
+    end
+
+    case Process.delete(:remote_daemon) do
+      nil ->
+        :ok
+
+      {port, os_pid} ->
+        System.cmd("kill", ["-TERM", to_string(os_pid)])
+        Port.close(port)
     end
   end
 
@@ -420,9 +492,23 @@ defmodule Ampd.B2TrvmReduceTest do
     assert rc["idempotency_key"] == e["idempotency_key"]
     assert rc["guardian_status"] == 0
 
-    if resident?(),
-      do: assert(rc["job_retired"] == true and rc["worker_exited"] == false),
-      else: assert(rc["worker_exited"] == true and rc["job_retired"] == false)
+    cond do
+      remote?() ->
+        assert rc["job_retired"] == true and rc["worker_exited"] == false
+
+        # the receipt names the executor that produced it: which kind, where, and the module the daemon reports
+        assert rc["executor"] == "remote" and is_binary(rc["host"]) and is_integer(rc["port"])
+        assert rc["module_sha256"] =~ ~r/^[0-9a-f]{64}$/
+
+      resident?() ->
+        assert rc["job_retired"] == true and rc["worker_exited"] == false
+        assert rc["executor"] == "resident" and rc["module_sha256"] =~ ~r/^[0-9a-f]{64}$/
+        refute Map.has_key?(rc, "host")
+
+      true ->
+        assert rc["worker_exited"] == true and rc["job_retired"] == false
+        assert rc["executor"] == "managed" and not Map.has_key?(rc, "module_sha256")
+    end
 
     assert rc["sem"] == @sem and rc["scenario_digest"] == @scenario_digest and rc["epoch"] == 1
     assert rc["interactions"] == reference(@world)["wasm_interactions"]
@@ -572,6 +658,7 @@ defmodule Ampd.B2TrvmReduceTest do
           "interactions" => 1,
           "worker_exited" => true,
           "job_retired" => false,
+          "executor" => "managed",
           "guardian_status" => 0,
           "sem" => @sem,
           "scenario_digest" => @scenario_digest,

@@ -28,6 +28,9 @@ defmodule HyperSurface.ResidentExecutor do
 
   def stop(pid), do: GenServer.stop(pid)
 
+  @doc "What a job's reply carries about the executor that produced it."
+  def identity(_pid), do: %{"executor" => "resident"}
+
   def init(config) do
     dir =
       Path.join(
@@ -137,6 +140,60 @@ defmodule HyperSurface.ResidentExecutor do
   end
 end
 
+defmodule HyperSurface.RemoteResident do
+  @moduledoc """
+  Lab-only owner of a RESIDENT daemon this runtime did NOT start: TRVM's `residentd.mjs --port N --bind ADDR` on another
+  host (a lab machine over the LAN), started out of band. Same frames as the private-socket kind; two things are different
+  by construction and are said, not hidden. (1) There is no guardian, so there is NO kernel witness for the daemon: a
+  cancel the host does not confirm, or a connection that closes with no host word, is `stop_unconfirmed` -- `kill/1`
+  cannot kill anything and says so. (2) Nothing on the remote host is trusted: the receipt names the host and the module
+  digest the daemon reports, and the reference gate + film oracle are what decide whether its bytes are right (F-D).
+  Readiness is a connect probe, bounded by the connect timeout; the endpoint is re-probed on every `socket/1`.
+  """
+  use GenServer
+
+  def start_link(config), do: GenServer.start_link(__MODULE__, config)
+
+  @doc "The TCP endpoint a job connects to, after a connect probe; `{:error, :not_ready}` when the host does not answer."
+  def socket(pid), do: GenServer.call(pid, :socket, 15_000)
+
+  @doc "There is no kernel witness for a remote daemon: a kill is never confirmed."
+  def kill(_pid), do: {:error, :stop_unconfirmed}
+
+  @doc "What a job's reply carries about the executor that produced it."
+  def identity(pid), do: GenServer.call(pid, :identity)
+
+  def stop(pid), do: GenServer.stop(pid)
+
+  def init(config) do
+    {:ok,
+     %{
+       host: to_charlist(config.host),
+       port: config.port,
+       connect_timeout_ms: config[:connect_timeout_ms] || 2_000
+     }}
+  end
+
+  def handle_call(:socket, _, st) do
+    case :gen_tcp.connect(
+           st.host,
+           st.port,
+           [:binary, packet: 4, active: false],
+           st.connect_timeout_ms
+         ) do
+      {:ok, s} ->
+        :gen_tcp.close(s)
+        {:reply, {:ok, {:tcp, st.host, st.port}}, st}
+
+      {:error, reason} ->
+        {:reply, {:error, {:not_ready, reason}}, st}
+    end
+  end
+
+  def handle_call(:identity, _, st),
+    do: {:reply, %{"executor" => "remote", "host" => to_string(st.host), "port" => st.port}, st}
+end
+
 defmodule HyperSurface.ResidentJob do
   @moduledoc """
   One job on the resident daemon: its own connection, one `{id, term}` frame, one reply. The reply's `jobRetired: true`
@@ -156,12 +213,21 @@ defmodule HyperSurface.ResidentJob do
     :exit, _ -> {:error, :stop_unconfirmed}
   end
 
+  # The executor a job talks to: the private-socket kind (a daemon this runtime owns through the guardian) or the remote
+  # kind (a daemon on another host, no guardian). Both answer `socket/1`, `kill/1` and `identity/1`.
+  defp executor_module(config), do: config[:executor_module] || HyperSurface.ResidentExecutor
+
+  defp connect({:tcp, host, port}),
+    do: :gen_tcp.connect(host, port, [:binary, packet: 4, active: true], 500)
+
+  defp connect(path) when is_binary(path),
+    do: :gen_tcp.connect({:local, path}, 0, [:binary, packet: 4, active: true], 500)
+
   def init({bridge, op, input, config}) do
     Process.monitor(bridge)
 
-    with {:ok, path} <- HyperSurface.ResidentExecutor.socket(config.executor),
-         {:ok, sock} <-
-           :gen_tcp.connect({:local, path}, 0, [:binary, packet: 4, active: true], 500) do
+    with {:ok, endpoint} <- executor_module(config).socket(config.executor),
+         {:ok, sock} <- connect(endpoint) do
       :ok = :gen_tcp.send(sock, JSON.encode!(%{id: 1, term: input}))
       timer = Process.send_after(self(), :deadline, config[:timeout_ms] || 2_000)
 
@@ -209,7 +275,7 @@ defmodule HyperSurface.ResidentJob do
     # whole; if the daemon is already dead the guardian has that status within its poll). A reaped status confirms
     # the absence and the slot ends `executor_failed`, never a result; anything else stays `stop_unconfirmed`.
     Process.cancel_timer(st.timer)
-    answer = HyperSurface.ResidentExecutor.kill(st.config.executor)
+    answer = executor_module(st.config).kill(st.config.executor)
     {:noreply, %{st | done: true} |> conclude({:closed, answer})}
   end
 
@@ -222,7 +288,7 @@ defmodule HyperSurface.ResidentJob do
 
   def handle_info({:cancel_bound, _}, st) do
     # the host did not answer the cancel within its bound: the kernel's witness instead, at the cost of the pool
-    answer = HyperSurface.ResidentExecutor.kill(st.config.executor)
+    answer = executor_module(st.config).kill(st.config.executor)
     {:noreply, %{st | done: true} |> conclude({:killed, answer})}
   end
 
@@ -249,11 +315,11 @@ defmodule HyperSurface.ResidentJob do
         {:noreply, conclude(st, if(confirmed, do: :confirmed, else: :unconfirmed))}
 
       reply["status"] == "candidate" and reply["jobRetired"] == true ->
-        send(st.bridge, {:result, st.op, reply})
+        send(st.bridge, {:result, st.op, with_identity(reply, st)})
         {:noreply, conclude(st, :retired)}
 
       reply["status"] == "candidate" and reply["workerExited"] == true ->
-        send(st.bridge, {:result, st.op, reply})
+        send(st.bridge, {:result, st.op, with_identity(reply, st)})
         {:noreply, conclude(st, :confirmed)}
 
       reply["workerExited"] == true ->
@@ -267,6 +333,9 @@ defmodule HyperSurface.ResidentJob do
         {:noreply, conclude(st, :unconfirmed)}
     end
   end
+
+  defp with_identity(reply, st),
+    do: Map.merge(reply, executor_module(st.config).identity(st.config.executor))
 
   defp conclude(st, how) do
     :gen_tcp.close(st.sock)
