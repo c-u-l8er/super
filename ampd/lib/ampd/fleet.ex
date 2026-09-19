@@ -8,7 +8,37 @@ defmodule Ampd.Fleet do
   use GenServer
   @limit 65_536
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-  def projection, do: GenServer.call(__MODULE__, :projection)
+
+  # **Converted (T9).** This process owns no world state — its view is a
+  # bounded, ephemeral read of the collector's snapshot file — but
+  # `Ampd.Projection` reads it at `"fleet"` while building the operator
+  # projection, which runs inside an ordered observation. So the client call
+  # crosses the total order's process boundary exactly like any participant's,
+  # and `tools/check-ordered-closure.mjs` is right to have said so: a bare
+  # `GenServer.call` exit here would leave the coordinator's narrow
+  # `rescue ... in Ampd.Participant.Failure` untouched and take the whole
+  # observation down as an exit rather than a classified refusal.
+  #
+  # Nothing a client sends mutates anything, so the list is empty. It stays
+  # declared rather than deleted because `tools/check-ordered-boundary.mjs`
+  # names this file, so a module that stopped declaring one would stop being
+  # censused quietly; and the membership test is `Enum.member?/2` rather than
+  # `in`, because `tag in []` folds to a constant `false` that
+  # `--warnings-as-errors` turns into a build failure (see Ampd.Carrier.Reaper,
+  # which is empty for its own reason).
+  @participant_mutations ~w()a
+
+  defp ask(msg, timeout \\ 5_000) do
+    tag = if is_tuple(msg), do: elem(msg, 0), else: msg
+    Ampd.Participant.call(__MODULE__, msg, class(tag), timeout: timeout)
+  end
+
+  @doc false
+  # Public so the closure gate and the falsifiers read the classification
+  # rather than infer it.
+  def class(tag), do: if(Enum.member?(@participant_mutations, tag), do: :mutate, else: :read)
+
+  def projection, do: ask(:projection)
 
   def init(_) do
     path = snapshot_path()

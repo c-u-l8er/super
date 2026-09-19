@@ -183,6 +183,9 @@ for (const [rel, mod] of [
   ['lib/ampd/subscriptions.ex', 'Ampd.Subscriptions'],
   ['lib/ampd/embodiment.ex', 'Ampd.Embodiment'],
   ['lib/ampd/carrier/reaper.ex', 'Ampd.Carrier.Reaper'],
+  // T9: reached at `"fleet"` from the operator projection, which is built inside
+  // an ordered observation. It owns no world state and declares no mutation.
+  ['lib/ampd/fleet.ex', 'Ampd.Fleet'],
 ])
   CONVERTED[rel] = { mod, attr: /@participant_mutations ~w\(([^)]*)\)a/ }
 

@@ -5,9 +5,9 @@
   },
   "converted": {
     "Ampd.Peer": {
-      "sends": 25,
+      "sends": 26,
       "mutations": 13,
-      "reads": 12,
+      "reads": 13,
       "declared_mutations": 13,
       "dead": [],
       "bare": 0
@@ -21,34 +21,34 @@
       "bare": 0
     },
     "Ampd.GrantRegistry": {
-      "sends": 16,
-      "mutations": 13,
-      "reads": 3,
-      "declared_mutations": 13,
+      "sends": 20,
+      "mutations": 16,
+      "reads": 4,
+      "declared_mutations": 16,
       "dead": [],
       "bare": 0
     },
     "Ampd.CapabilityRegistry": {
-      "sends": 9,
-      "mutations": 6,
+      "sends": 10,
+      "mutations": 7,
       "reads": 3,
-      "declared_mutations": 6,
+      "declared_mutations": 7,
       "dead": [],
       "bare": 0
     },
     "Ampd.Approvals": {
-      "sends": 8,
-      "mutations": 6,
-      "reads": 2,
-      "declared_mutations": 6,
+      "sends": 12,
+      "mutations": 9,
+      "reads": 3,
+      "declared_mutations": 9,
       "dead": [],
       "bare": 0
     },
     "Ampd.Effects": {
-      "sends": 9,
-      "mutations": 7,
-      "reads": 2,
-      "declared_mutations": 7,
+      "sends": 16,
+      "mutations": 13,
+      "reads": 3,
+      "declared_mutations": 13,
       "dead": [],
       "bare": 0
     },
@@ -77,10 +77,10 @@
       "bare": 0
     },
     "Ampd.Receipts": {
-      "sends": 8,
-      "mutations": 6,
-      "reads": 2,
-      "declared_mutations": 6,
+      "sends": 12,
+      "mutations": 9,
+      "reads": 3,
+      "declared_mutations": 9,
       "dead": [],
       "bare": 0
     },
@@ -112,6 +112,14 @@
       "sends": 2,
       "mutations": 0,
       "reads": 2,
+      "declared_mutations": 0,
+      "dead": [],
+      "bare": 0
+    },
+    "Ampd.Fleet": {
+      "sends": 1,
+      "mutations": 0,
+      "reads": 1,
       "declared_mutations": 0,
       "dead": [],
       "bare": 0
