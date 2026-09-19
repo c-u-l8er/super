@@ -285,14 +285,27 @@ defmodule Ampd.DevelopmentTask do
     task = retire_plan(task)
     tasks = Map.put(s["development_tasks"], task["id"], task)
 
-    # Closing a plan retires its attempts in the same write that closes it.
-    attempts =
-      Ampd.DevelopmentAttempt.retire_finished(s["development_attempts"] || %{}, tasks)
+    # Closing a plan ARCHIVES its attempts in the same write that closes it (T14).
+    # It used to retire them in place, which compacted them and left them in the
+    # live directory; a directory with no exit has no bound at any compaction
+    # ratio, and on 2026-09-19 ten accepted reviews put it back over budget and
+    # no round could run at all. The records leave, retired on the way out, into
+    # a collection `@directory_bytes` does not count and `Ampd.Projection` does
+    # not publish. Nothing is deleted.
+    {attempts, archive} =
+      Ampd.DevelopmentAttempt.archive_finished(
+        s["development_attempts"] || %{},
+        s["development_attempts_archive"] || %{},
+        tasks
+      )
 
     case Ampd.Frame.logical_size(tasks, @directory_bytes) do
       {:ok, _} ->
         {:ok, task,
-         s |> Map.put("development_tasks", tasks) |> Map.put("development_attempts", attempts)}
+         s
+         |> Map.put("development_tasks", tasks)
+         |> Map.put("development_attempts", attempts)
+         |> Map.put("development_attempts_archive", archive)}
 
       _ ->
         refuse(

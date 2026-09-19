@@ -1401,16 +1401,68 @@ defmodule Ampd.DevelopmentAttempt do
     end)
   end
 
+  @doc false
+  # T14 — **retirement compacted, and a directory with no exit has no bound at
+  # any compaction ratio.**
+  #
+  # `retire_finished/2` is real work: a retired record goes from 8-10 KB to
+  # 5-6 KB, about 40 %. But compaction scales with the SIZE of a record and the
+  # problem scales with the NUMBER of them, so ten accepted reviews on
+  # 2026-09-19 (T3, T5b, T7, T8, T13) walked straight back through it -- 32
+  # attempts, 146 455 bytes against this 131 072 budget, and no test run could
+  # start in the world at all. T12 bought a constant factor where a bound was
+  # needed.
+  #
+  # So a finished plan's attempts LEAVE the live directory. They are retired on
+  # the way out (the archive has no reason to be fat either) and land in
+  # `development_attempts_archive`, which `@directory_bytes` does not count and
+  # `Ampd.Projection` does not publish -- so the evidence stays in the world and
+  # stops pressing on either bound. Nothing is deleted, which is what keeps the
+  # refusal's own promise ("Existing records are preserved") literally true.
+  #
+  # **The predicate is PLAN COMPLETION, never age or insertion order.** The
+  # obvious implementation -- evict oldest-first until under budget -- would
+  # archive a LIVE plan's attempts whenever they happened to be the oldest, and
+  # that plan could then neither be tested nor accepted. `attempts_of_a_live_plan`
+  # in the test file is that case, and it fails against the obvious version.
+  #
+  # An attempt whose plan is absent from `tasks` stays LIVE, deliberately: the
+  # same predicate as before, so this change moves records without widening what
+  # counts as finished. It is a known residual (such a record pins bytes it can
+  # never release) and is pinned by a test rather than left to be discovered.
+  #
+  # **The predicate is TERMINAL STATUS AND a finished plan, not a finished plan
+  # alone** -- strictly narrower than `retire_finished/2`'s, so this can only
+  # move records that were already being compacted. Cancelling a plan does NOT
+  # end its attempts: an attempt still `recorded` or `needs_changes` under a
+  # cancelled plan can legitimately be DISMISSED, and archiving on plan-close
+  # alone made that write refuse `attempt-unknown` instead. It is still a bound,
+  # because every attempt reaches `dismissed` or `accepted` and nothing returns
+  # from either.
+  @terminal ~w(dismissed accepted)
+
+  def archive_finished(attempts, archive, tasks)
+      when is_map(attempts) and is_map(archive) and is_map(tasks) do
+    {done, live} =
+      Enum.split_with(attempts, fn {_id, a} ->
+        a["status"] in @terminal and finished?(Map.get(tasks, a["task_ref"]))
+      end)
+
+    {Map.new(live), Enum.reduce(done, archive, fn {id, a}, acc -> Map.put(acc, id, retire(a)) end)}
+  end
+
   defp finished?(%{"status" => status}), do: status in ~w(completed cancelled)
   defp finished?(_), do: false
 
   defp persist(record, s) do
-    attempts =
+    {attempts, archive} =
       s["development_attempts"]
       |> Map.put(record["id"], record)
-      |> retire_finished(s["development_tasks"] || %{})
+      |> archive_finished(s["development_attempts_archive"] || %{}, s["development_tasks"] || %{})
 
-    record = Map.get(attempts, record["id"], record)
+    # The record being written is itself archivable when its plan is already
+    # closed; it is then the archive's copy that is authoritative, not the input.
+    record = Map.get(attempts, record["id"]) || Map.get(archive, record["id"]) || record
 
     # Reserve a bounded final outcome for every admitted, unfinished run.
     reserved =
@@ -1424,7 +1476,10 @@ defmodule Ampd.DevelopmentAttempt do
     with {:ok, _} <- Ampd.Frame.logical_size(attempts, @directory_bytes),
          {:ok, encoded} <- Ampd.Frame.encode(attempts),
          true <- byte_size(encoded) + reserved <= @directory_bytes do
-      {:ok, record, Map.put(s, "development_attempts", attempts)}
+      {:ok, record,
+       s
+       |> Map.put("development_attempts", attempts)
+       |> Map.put("development_attempts_archive", archive)}
     else
       _ ->
         refuse(

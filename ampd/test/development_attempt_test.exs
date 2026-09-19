@@ -308,6 +308,143 @@ defmodule Ampd.DevelopmentAttemptTest do
   # one rather than being stuck at exactly the point where nothing can be
   # recorded. That was the live world on 2026-09-19 — 141 381 bytes against
   # 131 072, and no test run could start.
+  # ------------------------------------------------------------------ T14
+  # `retire_finished/2` compacted a finished plan's attempts and left them in
+  # the live directory: 8-10 KB became 5-6 KB, about 40 %. Real work, and not a
+  # bound -- compaction scales with the SIZE of a record while the problem
+  # scales with the NUMBER of them, so ten accepted reviews on 2026-09-19 put
+  # the directory back over (32 attempts, 146 455 bytes against 131 072) and no
+  # round could run in the world at all. A directory with no exit has no bound
+  # at any compaction ratio.
+
+  test "T14 · attempts of a LIVE plan are never archived, whatever their age or the budget", c do
+    # The obvious-but-wrong implementation -- evict oldest-first until under
+    # budget -- passes every other case in this file and fails this one. A live
+    # plan whose attempts were archived could then be neither tested nor
+    # accepted, and the suite would still be green.
+    f = fields(c)
+    live = Authority.record_development_attempt(f)
+
+    # the OLDEST records belong to an OPEN plan; the bulk that can be freed
+    # belongs to a CLOSED one and is newer. Oldest-first eviction frees the
+    # budget too -- by evicting the live plan's records, which is the bug.
+    old_and_live =
+      Map.new(1..3, fn n ->
+        {"da_aaa_#{n}",
+         live
+         |> Map.put("id", "da_aaa_#{n}")
+         |> Map.put("task_ref", "dt_open")
+         |> Map.put("criteria", String.duplicate("a live plan's working material. ", 200))}
+      end)
+
+    bulk_done =
+      Map.new(1..20, fn n ->
+        {"da_zzz_#{n}",
+         live
+         |> Map.put("id", "da_zzz_#{n}")
+         |> Map.put("task_ref", "dt_done")
+         |> Map.put("status", "accepted")
+         |> Map.put("criteria", String.duplicate("a closed plan's working material. ", 200))}
+      end)
+
+    s =
+      Loci.initial()
+      |> Map.put("development_tasks", %{
+        "dt_open" => %{"id" => "dt_open", "status" => "in_progress"},
+        "dt_done" => %{"id" => "dt_done", "status" => "completed"}
+      })
+      |> Map.put(
+        "development_attempts",
+        Map.merge(old_and_live, bulk_done)
+        |> Map.put(live["id"], Map.put(live, "task_ref", "dt_open"))
+      )
+
+    assert {:ok, _r, next} =
+             DevelopmentAttempt.update(live["id"], {1, "needs_changes", "Bounded"}, s)
+
+    # every OLDEST record belongs to an open plan and is still live, whole
+    for n <- 1..3 do
+      assert Map.has_key?(next["development_attempts"], "da_aaa_#{n}"), "da_aaa_#{n} was evicted"
+      assert next["development_attempts"]["da_aaa_#{n}"]["criteria"] != nil
+    end
+
+    # every record of the CLOSED plan left, and none of them is in the directory
+    for n <- 1..20 do
+      refute Map.has_key?(next["development_attempts"], "da_zzz_#{n}")
+      assert Map.has_key?(next["development_attempts_archive"], "da_zzz_#{n}")
+    end
+  end
+
+  test "T14 · archiving is idempotent and the archive accumulates rather than replacing", c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+    tasks = %{"dt_done" => %{"id" => "dt_done", "status" => "completed"}}
+
+    prior = %{"da_prior" => %{"id" => "da_prior", "task_ref" => "dt_done", "status" => "accepted"}}
+
+    {live, archive} =
+      DevelopmentAttempt.archive_finished(
+        %{"da_x" => Map.merge(a, %{"id" => "da_x", "task_ref" => "dt_done", "status" => "accepted"})},
+        prior,
+        tasks
+      )
+
+    assert live == %{}
+    assert Map.keys(archive) |> Enum.sort() == ["da_prior", "da_x"]
+
+    # running it again over the same archive changes nothing
+    assert {%{}, ^archive} = DevelopmentAttempt.archive_finished(%{}, archive, tasks)
+  end
+
+  test "T14 · a cancelled plan's attempts archive too, and the evidence survives the move", c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+
+    s =
+      Loci.initial()
+      |> Map.put("development_tasks", %{
+        "dt_cancelled" => %{"id" => "dt_cancelled", "status" => "cancelled"},
+        "dt_open" => %{"id" => "dt_open", "status" => "in_progress"}
+      })
+      |> Map.put("development_attempts", %{
+        "da_c" =>
+          Map.merge(a, %{
+            "id" => "da_c",
+            "task_ref" => "dt_cancelled",
+            "status" => "accepted",
+            "history" => [%{"revision" => 1, "status" => "recorded", "note" => "why"}]
+          }),
+        a["id"] => Map.put(a, "task_ref", "dt_open")
+      })
+
+    assert {:ok, _r, next} = DevelopmentAttempt.update(a["id"], {1, "needs_changes", "B"}, s)
+    refute Map.has_key?(next["development_attempts"], "da_c")
+    moved = next["development_attempts_archive"]["da_c"]
+    assert moved["status"] == "accepted"
+    assert moved["history"] == [%{"revision" => 1, "status" => "recorded", "note" => "why"}]
+  end
+
+  test "T14 · an attempt whose plan is ABSENT stays live — the predicate did not widen", c do
+    # Recorded rather than fixed. Such a record can never be acted on and can
+    # never release its bytes, but archiving on a missing plan would mean an
+    # empty `development_tasks` archived EVERYTHING, so the predicate is left
+    # exactly as it was and the residual is pinned here instead of discovered.
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+
+    s =
+      Loci.initial()
+      |> Map.put("development_tasks", %{"dt_open" => %{"id" => "dt_open", "status" => "in_progress"}})
+      |> Map.put("development_attempts", %{
+        "da_orphan" => Map.merge(a, %{"id" => "da_orphan", "task_ref" => "dt_vanished"}),
+        a["id"] => Map.put(a, "task_ref", "dt_open")
+      })
+
+    assert {:ok, _r, next} = DevelopmentAttempt.update(a["id"], {1, "needs_changes", "B"}, s)
+    assert Map.has_key?(next["development_attempts"], "da_orphan")
+    refute Map.has_key?(next["development_attempts_archive"] || %{}, "da_orphan")
+  end
+
   test "a directory already over its budget heals on the next write", c do
     f = fields(c)
     a = Authority.record_development_attempt(f)
@@ -320,6 +457,7 @@ defmodule Ampd.DevelopmentAttemptTest do
          a
          |> Map.put("id", id)
          |> Map.put("task_ref", "dt_done")
+         |> Map.put("status", "accepted")
          |> Map.put("criteria", String.duplicate("working material that history cannot act on. ", 140))}
       end)
 
@@ -334,9 +472,16 @@ defmodule Ampd.DevelopmentAttemptTest do
              DevelopmentAttempt.update(a["id"], {1, "needs_changes", "Bounded"}, s)
 
     assert match?({:ok, _}, Ampd.Frame.logical_size(next["development_attempts"], 128 * 1024))
-    refute Map.has_key?(next["development_attempts"]["da_bulk_1"], "criteria")
 
-    # The attempt whose own plan is still open keeps everything.
+    # T14: the finished plan's attempts LEAVE the directory rather than being
+    # compacted inside it. They are still in the world, retired, in a collection
+    # `@directory_bytes` does not count and `Ampd.Projection` does not publish.
+    refute Map.has_key?(next["development_attempts"], "da_bulk_1")
+    assert Map.has_key?(next["development_attempts_archive"], "da_bulk_1")
+    refute Map.has_key?(next["development_attempts_archive"]["da_bulk_1"], "criteria")
+    assert map_size(next["development_attempts_archive"]) == 24
+
+    # The attempt whose own plan is still open keeps everything, and stays.
     assert next["development_attempts"][a["id"]]["criteria"] == a["criteria"]
   end
 

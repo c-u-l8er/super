@@ -255,7 +255,13 @@ defmodule Ampd.DevelopmentTaskTest do
     assert {:ok, _completed, next} =
              DevelopmentTask.update(t["id"], {1, "completed", "Meets the plan criteria"}, state)
 
-    retired = next["development_attempts"]["accepted-one"]
+    # T14: a terminal attempt of a closed plan LEAVES the live directory in the
+    # same write, retired on the way out. The test's subject is unchanged -- the
+    # evidence survives -- but it survives in the archive, which
+    # `@directory_bytes` does not count and which readers still see through
+    # `Loci.development_attempts/0`.
+    refute Map.has_key?(next["development_attempts"], "accepted-one")
+    retired = next["development_attempts_archive"]["accepted-one"]
 
     # The evidence stays, whole.
     assert retired["acceptance"] == a["acceptance"]

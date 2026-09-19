@@ -282,6 +282,10 @@ defmodule Ampd.Loci do
       "bots" => %{},
       "development_tasks" => %{},
       "development_attempts" => %{},
+      # T14: finished plans' attempts, out of the live directory and off the frame.
+      # Not published by `Ampd.Projection` and not counted by `@directory_bytes` —
+      # the evidence stays in the world, it stops pressing on the two bounds.
+      "development_attempts_archive" => %{},
       "caps" => %{},
       "carrier_attempts" => %{},
       "seq" => 0
@@ -302,6 +306,7 @@ defmodule Ampd.Loci do
       "bots" => %{},
       "development_tasks" => %{},
       "development_attempts" => %{},
+      "development_attempts_archive" => %{},
       "caps" => %{},
       "carrier_attempts" => %{},
       "seq" => 0
@@ -315,7 +320,18 @@ defmodule Ampd.Loci do
   def workspaces, do: ask({:all, "workspaces"})
   def goals, do: ask({:all, "goals"})
   def lanes, do: ask({:all, "lanes"})
-  def development_attempts, do: ask({:all, "development_attempts"})
+  # T14: readers see live AND archived attempts; only `persist/2`'s budget check
+  # counts the live directory. The plan card lists a plan's attempts from the
+  # projection (`cockpit/ui/development-tasks.js` filters
+  # `development_attempts` by `task_ref`), so archiving them out of what readers
+  # see would blank every COMPLETED plan's card -- the record would still say
+  # "completed naming da_0108, da_0109" and show nothing. The archive is out of
+  # the BOUND, not out of view. Live wins on the (impossible) overlap.
+  def development_attempts,
+    do: Map.merge(ask({:all, "development_attempts_archive"}), ask({:all, "development_attempts"}))
+
+  def development_attempts_live, do: ask({:all, "development_attempts"})
+  def development_attempts_archive, do: ask({:all, "development_attempts_archive"})
 
   def record_development_attempt(fields),
     do: ask({:create, "development_attempts", "da_", fields})
