@@ -1,4 +1,7 @@
 // One-shot host inventory over an already trusted SSH connection. No enrollment.
+// A host observation says what the host IS (OS, capacity, tools, guests); it never
+// says whether a Super worker on it answers — that is a separate question the
+// collector asks the guest's own check endpoint (fleet-collector.mjs `readiness`).
 import {execFile} from 'node:child_process';
 import {promisify} from 'node:util';
 import {pathToFileURL} from 'node:url';
@@ -21,7 +24,16 @@ for tool in git node elixir erl cargo; do
 done
 if command -v bhyve >/dev/null 2>&1; then
  printf 'hypervisor=bhyve\\n'
- printf 'guest_names=%s\\n' "$(ls /dev/vmm 2>/dev/null | paste -sd, - || true)"
+ json='['; sep=''
+ for n in $(ls /dev/vmm 2>/dev/null); do
+  case "$n" in *[!A-Za-z0-9_.-]*) continue;; esac
+  # A vmm device is a guest that was created; only a bhyve process is a guest that runs.
+  # The bracket keeps this shell's own command line out of the match.
+  first=$(printf '%s' "$n" | cut -c1); rest=$(printf '%s' "$n" | cut -c2-)
+  if pgrep -qf "bhyve: [$first]$rest" 2>/dev/null; then st=running; else st=stopped; fi
+  json="$json$sep{\\"id\\":\\"$n\\",\\"label\\":\\"$n\\",\\"status\\":\\"$st\\"}"; sep=','
+ done
+ printf 'guests_json=%s\\n' "$json]"
 fi
 printf 'end=super-host-probe@1\n'
 `;
@@ -52,9 +64,9 @@ export async function probe(target,run=execute,options={}){
  const args=sshArguments(target,options),started=Date.now();
  try{
   const {stdout}=await run('ssh',args,{timeout:12000,killSignal:'SIGKILL',maxBuffer:16384,encoding:'utf8'});
-  return {schema:'super-host-observation@1',target,observedAt:new Date().toISOString(),durationMs:Date.now()-started,status:'observed',inventory:parseInventory(stdout),workerReady:false};
+  return {schema:'super-host-observation@1',target,observedAt:new Date().toISOString(),durationMs:Date.now()-started,status:'observed',inventory:parseInventory(stdout)};
  }catch(error){
-  return {schema:'super-host-observation@1',target,observedAt:new Date().toISOString(),durationMs:Date.now()-started,status:'unavailable',reason:String(error.stderr||error.message).slice(0,1000),workerReady:false};
+  return {schema:'super-host-observation@1',target,observedAt:new Date().toISOString(),durationMs:Date.now()-started,status:'unavailable',reason:String(error.stderr||error.message).slice(0,1000)};
  }
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href){
