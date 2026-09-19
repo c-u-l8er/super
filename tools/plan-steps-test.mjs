@@ -28,7 +28,12 @@ test('a blocked plan is blocked at the first step; completed and cancelled plans
  assert.equal(states(planSteps({development_attempts:{}},task({status:'blocked'}))),'blocked todo todo todo todo');
  const done=planSteps({development_attempts:{da_0062:accepted}},task({status:'completed'}));
  assert.equal(states(done),'done done done done done');assert.equal(done.current,null);assert.equal(done.completed,true);
- assert.equal(planSteps({development_attempts:{}},task({status:'cancelled'})).cancelled,true);
+ // A cancelled plan took the completed branch until 2026-09-19 and rendered five DONE steps — indistinguishable from a finished plan, claiming five steps it never completed (dt_0071/da_0072, proposed through Super by Claude Opus 5).
+ for(const p of [{development_attempts:{}},{development_attempts:{da_0062:accepted}}]){
+  const stopped=planSteps(p,task({status:'cancelled'}));
+  assert.equal(states(stopped),'todo todo todo todo todo','a cancelled plan claims no step, even with an accepted result behind it');
+  assert.equal(stopped.cancelled,true);assert.equal(stopped.current,null);assert.equal(stopped.completed,false);assert.equal(stopped.finishable,false);
+ }
 });
 test('an accepted result at an OLDER revision still finishes the plan: criteria are immutable, a note only bumps the revision',()=>{
  const r=planSteps({development_attempts:{da_0062:accepted}},task({revision:6}));

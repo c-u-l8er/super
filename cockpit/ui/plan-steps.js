@@ -12,11 +12,11 @@
 import {taskProgress} from './task-progress.js';
 
 export const STEPS=[
- ['prepare','Prepare file'],
- ['review','Review proposal'],
- ['checks','Run checks'],
- ['accept','Accept result'],
- ['finish','Finish plan'],
+  ['prepare','Prepare file'],
+  ['review','Review proposal'],
+  ['checks','Run checks'],
+  ['accept','Accept result'],
+  ['finish','Finish plan'],
 ];
 /* progress.state → index of the current step, and whether it is blocked there. */
 const CURRENT={prepare:[0,false],needs_changes:[1,false],checks_missing:[2,false],checks_attention:[2,true],waiting:[2,true],decision:[3,false],finish:[4,false],blocked:[0,true],unavailable:[0,true]};
@@ -24,9 +24,11 @@ const CURRENT={prepare:[0,false],needs_changes:[1,false],checks_missing:[2,false
 export function planSteps(p,task){
   const progress=taskProgress(p,task);
   const done=progress.state==='completed';
-  const [at,blocked]=done||progress.state==='cancelled'?[STEPS.length,false]:(CURRENT[progress.state]??[0,true]);
+  const cancelled=progress.state==='cancelled';
+  /* A cancelled plan finished no step, so it claims none: index -1 sits before every step, leaving all of them to do with nothing done, current or blocked. */
+  const [at,blocked]=done?[STEPS.length,false]:cancelled?[-1,false]:(CURRENT[progress.state]??[0,true]);
   const steps=STEPS.map(([key,label],i)=>({key,label,state:i<at?'done':i===at?(blocked?'blocked':'current'):'todo'}));
-  return {steps,current:at<STEPS.length?steps[at].key:null,progress,finishable:progress.state==='finish',cancelled:progress.state==='cancelled',completed:done};
+  return {steps,current:at>=0&&at<STEPS.length?steps[at].key:null,progress,finishable:progress.state==='finish',cancelled,completed:done};
 }
 
 const short=s=>typeof s==='string'&&s.length>=12?s.slice(0,12):'';
