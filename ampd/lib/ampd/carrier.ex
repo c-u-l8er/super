@@ -220,7 +220,8 @@ defmodule Ampd.Carrier do
          :ok <- no_live_carrier(peer),
          :ok <- no_pending_attempt(worker["id"]),
          :ok <- machine_synchronized(),
-         {:ok, basis} <- execution_basis() do
+         {:ok, basis} <- execution_basis(),
+         {:ok, surface} <- surface_preflight(basis) do
       att = Peer.attachment(peer["id"])
 
       ticket = %{
@@ -259,6 +260,7 @@ defmodule Ampd.Carrier do
         # Both are needed and this is the second one. It is the Carrier
         # equivalent of D.1.1's embodiment-basis problem, one object down.
         "carrier_basis" => basis,
+        "surface_binding" => surface,
         "state" => "START_ADMITTED",
         "admitted_at" => DateTime.utc_now() |> DateTime.to_iso8601()
       }
@@ -325,34 +327,73 @@ defmodule Ampd.Carrier do
     # cheapest structural facts first, the authority basis last.
     reason =
       cond do
-        lane == nil -> "locus-unknown"
-        worker == nil -> "worker-unknown"
-        peer == nil -> "carrier-peer-gone"
-        att == nil -> "carrier-not-attached"
-        att["peer_epoch"] != ticket["peer_epoch"] -> "attachment-epoch-stale"
-        att["locus_ref"] != ticket["locus_ref"] -> "carrier-attached-elsewhere"
-        World.lineage() != ticket["world_ref"] -> "carrier-world-generation-stale"
-        (worker["generation"] || 1) != ticket["worker_generation"] -> "carrier-worker-generation-stale"
-        worker["status"] != "open" -> "worker-not-open"
-        peer["actor"] != ticket["actor"] -> "carrier-actor-drift"
-        Locus.profile_digest() != ticket["profile_basis"] -> "carrier-profile-basis-changed"
+        lane == nil ->
+          "locus-unknown"
+
+        worker == nil ->
+          "worker-unknown"
+
+        peer == nil ->
+          "carrier-peer-gone"
+
+        att == nil ->
+          "carrier-not-attached"
+
+        att["peer_epoch"] != ticket["peer_epoch"] ->
+          "attachment-epoch-stale"
+
+        att["locus_ref"] != ticket["locus_ref"] ->
+          "carrier-attached-elsewhere"
+
+        World.lineage() != ticket["world_ref"] ->
+          "carrier-world-generation-stale"
+
+        (worker["generation"] || 1) != ticket["worker_generation"] ->
+          "carrier-worker-generation-stale"
+
+        worker["status"] != "open" ->
+          "worker-not-open"
+
+        peer["actor"] != ticket["actor"] ->
+          "carrier-actor-drift"
+
+        Locus.profile_digest() != ticket["profile_basis"] ->
+          "carrier-profile-basis-changed"
+
         # The observation must be *this* start. A stale observation from a
         # prior Carrier satisfying a later one is the cross-incarnation
         # acceptance D.1.3a refused one layer down.
-        obs["carrier_ref"] != ticket["carrier_ref"] -> "carrier-observation-cross-incarnation"
-        obs["carrier_epoch"] != ticket["carrier_epoch"] -> "carrier-observation-cross-incarnation"
+        obs["carrier_ref"] != ticket["carrier_ref"] ->
+          "carrier-observation-cross-incarnation"
+
+        obs["carrier_epoch"] != ticket["carrier_epoch"] ->
+          "carrier-observation-cross-incarnation"
+
         # Bind the floor VERSION as well as the result: changing the floor
         # must invalidate an admission accepted under the previous one rather
         # than silently applying a new rule to it.
-        Ampd.Carrier.Floor.digest() != ticket["floor_basis"] -> "carrier-floor-basis-changed"
+        Ampd.Carrier.Floor.digest() != ticket["floor_basis"] ->
+          "carrier-floor-basis-changed"
+
         # **Before the floor, not after.** The floor asks whether this is a
         # Carrier; this asks whether it is the one we agreed to. Asking the
         # cheaper, more specific question first means a payload swap is
         # refused as a payload swap rather than as whichever floor row the
         # replacement happened to also miss.
-        basis_moved(ticket, obs) != nil -> "carrier-execution-basis-changed"
-        floor_failures(obs) != nil -> "carrier-confinement-unacceptable"
-        true -> nil
+        basis_moved(ticket, obs) != nil ->
+          "carrier-execution-basis-changed"
+
+        not Ampd.SurfaceProfile.binding_current?(
+          ticket["surface_binding"],
+          ticket["carrier_basis"]
+        ) ->
+          "surface-profile-binding-changed"
+
+        floor_failures(obs) != nil ->
+          "carrier-confinement-unacceptable"
+
+        true ->
+          nil
       end
 
     if reason do
@@ -396,6 +437,7 @@ defmodule Ampd.Carrier do
         # continuity, which is the D.1.1 error in a new setting.
         "host_process_ref" => obs["host_process_ref"],
         "observed_profile_digest" => Core.intent_digest(obs["observed"] || %{}),
+        "surface_binding" => ticket["surface_binding"],
         "status" => "RUNNING"
       }
 
@@ -422,7 +464,12 @@ defmodule Ampd.Carrier do
           {:ok, stored}
 
         {:taken, why} ->
-          _ = Loci.patch_attempt(ticket["ticket_id"], %{"state" => "STALE", "refused_as" => to_string(why)})
+          _ =
+            Loci.patch_attempt(ticket["ticket_id"], %{
+              "state" => "STALE",
+              "refused_as" => to_string(why)
+            })
+
           {:refused, refuse("carrier-already-live", ticket)}
       end
     end
@@ -457,9 +504,7 @@ defmodule Ampd.Carrier do
           #
           require Logger
 
-          Logger.warning(
-            "ampd: carrier start #{ticket["carrier_ref"]} is INDETERMINATE — #{why}"
-          )
+          Logger.warning("ampd: carrier start #{ticket["carrier_ref"]} is INDETERMINATE — #{why}")
 
           # Wrapped in its own transaction: `carrier_attempts` is a collection
           # of an ordered store, so a bare `patch_attempt` from out here is
@@ -468,7 +513,10 @@ defmodule Ampd.Carrier do
           # the boot sweep would then have reported a phantom in-flight attempt
           # forever.
           AuthorityCoordinator.transact(fn ->
-            Loci.patch_attempt(ticket["ticket_id"], %{"state" => "INDETERMINATE", "refused_as" => why})
+            Loci.patch_attempt(ticket["ticket_id"], %{
+              "state" => "INDETERMINATE",
+              "refused_as" => why
+            })
           end)
 
           # The machine's own words, carried through. A refusal that says only
@@ -569,7 +617,11 @@ defmodule Ampd.Carrier do
         :ok
 
       inc ->
-        result = Ampd.Carrier.Machine.Gate.terminate_carrier(inc, %{"host_process_ref" => inc["host_process_ref"]})
+        result =
+          Ampd.Carrier.Machine.Gate.terminate_carrier(inc, %{
+            "host_process_ref" => inc["host_process_ref"]
+          })
+
         Peer.detach_carrier(peer_ref)
 
         case result do
@@ -763,7 +815,9 @@ defmodule Ampd.Carrier do
   """
   def reap_orphans(incarnations) when is_list(incarnations) do
     Enum.map(incarnations, fn inc ->
-      case Ampd.Carrier.Machine.Gate.terminate_carrier(inc, %{"host_process_ref" => inc["host_process_ref"]}) do
+      case Ampd.Carrier.Machine.Gate.terminate_carrier(inc, %{
+             "host_process_ref" => inc["host_process_ref"]
+           }) do
         :ok -> {:ok, inc["carrier_ref"]}
         {:error, why} -> {:error, inc["carrier_ref"], why}
       end
@@ -786,6 +840,23 @@ defmodule Ampd.Carrier do
     |> case do
       nil -> "OFFLINE"
       c -> if still_current?(c, worker), do: c["status"], else: "OFFLINE"
+    end
+  end
+
+  @doc "Bounded surface evidence derived from membership and existing attempts."
+  def surface_of(worker) do
+    member =
+      Enum.find(Peer.carriers(), fn c ->
+        c["worker_ref"] == worker["id"] and still_current?(c, worker)
+      end)
+
+    if member do
+      Ampd.SurfaceProfile.project(member["surface_binding"], member["status"])
+    else
+      attempt = Enum.find(unresolved(), &(&1["worker_ref"] == worker["id"]))
+      # A preflight binding is not accepted-instance evidence.
+      status = if attempt, do: attempt["state"], else: "OFFLINE"
+      Ampd.SurfaceProfile.project(nil, status)
     end
   end
 
@@ -882,8 +953,13 @@ defmodule Ampd.Carrier do
       w -> {:ok, w}
     end
     |> case do
-      {:ok, w} -> if w["locus_ref"] == lane["id"], do: {:ok, w}, else: {:refused, refuse("worker-lane-actor-drift", %{})}
-      other -> other
+      {:ok, w} ->
+        if w["locus_ref"] == lane["id"],
+          do: {:ok, w},
+          else: {:refused, refuse("worker-lane-actor-drift", %{})}
+
+      other ->
+        other
     end
   end
 
@@ -1000,6 +1076,13 @@ defmodule Ampd.Carrier do
   # `carrier-execution-basis-unavailable` in that one case — a real loss of
   # diagnosis, and a smaller one than losing the control plane. The
   # channel-present-but-empty case still refuses by the name below.
+  defp surface_preflight(basis) do
+    case Ampd.SurfaceProfile.preflight(Ampd.SurfaceProfile.requirement(), basis) do
+      {:ok, binding} -> {:ok, binding}
+      {:error, code} -> {:refused, refuse(code, %{})}
+    end
+  end
+
   defp execution_basis do
     case machine().execution_basis() do
       {:ok, b} when is_map(b) ->
@@ -1012,8 +1095,7 @@ defmodule Ampd.Carrier do
       # refuses rather than raising. A raise here would be inside
       # `AuthorityCoordinator.transact/1`, and a crash masks a probe.
       other ->
-        {:refused,
-         refuse("carrier-execution-basis-unavailable", %{"reason" => inspect(other)})}
+        {:refused, refuse("carrier-execution-basis-unavailable", %{"reason" => inspect(other)})}
     end
   end
 

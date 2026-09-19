@@ -1,0 +1,15 @@
+# CONTROL no-epoch-or-key-check-b: second half of no-epoch-or-key-check (applied together with it)
+# Applied with `git apply`; the harness must FAIL and the verifier must go RED.
+diff --git a/ampd/lib/ampd/fence.ex b/ampd/lib/ampd/fence.ex
+index fcf8e06..2e21408 100644
+--- a/ampd/lib/ampd/fence.ex
++++ b/ampd/lib/ampd/fence.ex
+@@ -106,7 +106,7 @@ defmodule Ampd.Fence do
+         {:refused, "write-lease-stale",
+          "ticket epoch #{ticket["epoch"]} is not this resource's epoch #{fence["epoch"]} — the journal owner restarted since it was issued"}
+ 
+-      not ticket_valid?(fence["key"], ticket) ->
++      false and not ticket_valid?(fence["key"], ticket) ->
+         {:refused, "write-unmediated",
+          "the ticket was not issued by the journal owner of this epoch"}
+ 

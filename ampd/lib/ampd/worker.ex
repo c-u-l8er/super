@@ -461,16 +461,43 @@ defmodule Ampd.Worker do
   attachment tests the clause instead of the cleanup.
   """
   def occupancy_of(att, peer, lane) do
-    case occupancy_reason(att, peer, lane) do
-      :ok -> :ok
+    case occupancy_reason(att, peer, lane, World.lineage()) do
+      {:ok, _worker} -> :ok
       {:refused, {code, detail}} -> {:refused, refuse(code, detail)}
     end
   end
 
   @doc "Revalidate occupancy for a status read without recording a refused action."
-  def occupancy_matches?(att, peer, lane), do: occupancy_reason(att, peer, lane) == :ok
+  def occupancy_matches?(att, peer, lane),
+    do: match?({:ok, _}, occupancy_reason(att, peer, lane, World.lineage()))
 
-  defp occupancy_reason(att, peer, lane) do
+  @doc "The occupancy decision and the exact Worker row it validated."
+  def occupancy_worker(att, peer, lane), do: occupancy_worker(att, peer, lane, World.lineage())
+
+  @doc """
+  The same decision against a world lineage the caller sampled itself.
+
+  A caller that records the lineage its decision was made under must record
+  the lineage *this check validated*, not a second read taken microseconds
+  later: two reads of the manifest inside one ordered decision can differ
+  when the file is replaced between them, and then the recorded basis names
+  a world the attachment was never checked against. Sampling once and
+  passing it here removes that gap. It is not a cache — the caller reads the
+  manifest fresh for every decision; it only stops reading it twice.
+  """
+  def occupancy_worker(att, peer, lane, world) do
+    case occupancy_reason(att, peer, lane, world) do
+      {:ok, _} = ok -> ok
+      {:refused, {code, detail}} -> {:refused, refuse(code, detail)}
+    end
+  end
+
+  # The one decision, as a REASON — `{:ok, worker}` or `{:refused, {code, detail}}`
+  # with nothing recorded. The four public readings above differ only in what
+  # they do with it: `occupancy_of/3` and `occupancy_worker/3,4` build the
+  # refusal (2026-09-19 merge of the live lane's unrecorded status read with
+  # B2's sampled-lineage decision); `occupancy_matches?/3` builds nothing.
+  defp occupancy_reason(att, peer, lane, world) do
     cond do
       not is_map(peer) or peer["actor"] == nil ->
         {:refused, no_actor(peer, &reason/2)}
@@ -501,7 +528,7 @@ defmodule Ampd.Worker do
          })}
 
       true ->
-        still_standing(att, lane)
+        still_standing(att, lane, world)
     end
   end
 
@@ -510,7 +537,7 @@ defmodule Ampd.Worker do
   # code, because "you are not there any more" and "you were never there"
   # are different facts and an operator reading a refusal log needs them
   # apart.
-  defp still_standing(att, lane) do
+  defp still_standing(att, lane, world) do
     w = Loci.worker(att["worker_ref"])
 
     cond do
@@ -520,21 +547,19 @@ defmodule Ampd.Worker do
            "hint" => "the channel incarnation that took up this assignment has ended"
          })}
 
-      att["world_ref"] != World.lineage() ->
+      att["world_ref"] != world ->
         {:refused,
          reason("attachment-generation-stale", %{
            "attached_in" => att["world_ref"],
-           "current" => World.lineage(),
-           "hint" =>
-             "occupancy does not cross a world discontinuity — re-attach on the far side"
+           "current" => world,
+           "hint" => "occupancy does not cross a world discontinuity — re-attach on the far side"
          })}
 
       w == nil ->
         {:refused, reason("worker-unknown", %{"worker_ref" => att["worker_ref"]})}
 
       w["status"] != "open" ->
-        {:refused,
-         reason("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
+        {:refused, reason("worker-not-open", %{"worker_ref" => w["id"], "status" => w["status"]})}
 
       (w["generation"] || 1) != att["worker_generation"] ->
         {:refused,
@@ -555,7 +580,7 @@ defmodule Ampd.Worker do
          })}
 
       true ->
-        :ok
+        {:ok, w}
     end
   end
 
@@ -604,6 +629,7 @@ defmodule Ampd.Worker do
          w
          |> Map.put("occupancy", status_of(w))
          |> Map.put("carrier", Ampd.Carrier.status_of(w))
+         |> Map.put("surface", Ampd.Carrier.surface_of(w))
          # **A status, and deliberately never an identity.** D.1.3c·2c·1a
          # rules that the operator may observe a current Worker's terminal,
          # so the operator-visible World may say whether there is one. What
@@ -627,7 +653,7 @@ defmodule Ampd.Worker do
   # Keeps D.1.1's code word for the stranger case, so a caller that could
   # already handle `locus-not-occupied` still can, and the D.1.1 falsifiers
   # that assert it still hold. What changed is only *when* it is produced.
-  defp not_occupied(peer, lane, _detail, build \\ &refuse/2) do
+  defp not_occupied(peer, lane, _detail, build) do
     build.("locus-not-occupied", %{
       "locus_ref" => lane["id"],
       "bound_actor" => peer && peer["actor"]
@@ -640,8 +666,7 @@ defmodule Ampd.Worker do
     Refusal.new(code,
       component: "Ampd.Worker",
       retryable: false,
-      requires_human:
-        code in ~w(worker-not-open attachment-generation-stale
+      requires_human: code in ~w(worker-not-open attachment-generation-stale
                    attachment-worker-generation-stale worker-lane-actor-drift),
       operator_detail: detail
     )

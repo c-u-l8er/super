@@ -1,0 +1,15 @@
+# CONTROL no-gather-at-retirement: retirement acknowledges but ignores the landings the participant reports: a landing whose report was delayed is logged AFTER the retirement (F6b) -> E-LATE retired-before-landing; arrival order masquerades as mutation order
+# Applied with `git apply`; the harness must FAIL and the verifier must go RED.
+diff --git a/ampd/lib/ampd/effects.ex b/ampd/lib/ampd/effects.ex
+index 6409740..34b6503 100644
+--- a/ampd/lib/ampd/effects.ex
++++ b/ampd/lib/ampd/effects.ex
+@@ -760,7 +760,7 @@ defmodule Ampd.Effects do
+       Enum.reduce(Contract.sets(l.branch)["declared"], st, fn p, st ->
+         case participant(p).fence_retire(lease_id, "closed") do
+           {:ok, landed} when is_list(landed) ->
+-            Enum.reduce(landed, st, fn w, st ->
++            Enum.reduce([], st, fn w, st ->
+               ticket = w["ticket"]
+ 
+               # A gathered landing is the resource's word: a compact ticket

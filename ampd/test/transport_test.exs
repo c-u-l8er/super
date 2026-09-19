@@ -87,8 +87,14 @@ defmodule Ampd.TransportTest do
   # this call's answer where `push_after/3` can find it.
   defp call(s, command, args \\ %{}, crid \\ nil) do
     id = crid || "t#{System.unique_integer([:positive])}"
-    body = JSON.encode!(%{"schema" => "command@1", "command" => command, "args" => args,
-                          "client_request_id" => id})
+
+    body =
+      JSON.encode!(%{
+        "schema" => "command@1",
+        "command" => command,
+        "args" => args,
+        "client_request_id" => id
+      })
 
     :socket.send(s, <<byte_size(body)::big-32>> <> body)
     await_reply(s, id, 60)
@@ -194,8 +200,12 @@ defmodule Ampd.TransportTest do
     # rejected as a frame.
     for field <- ~w(actor peer_id channel) do
       bad =
-        raw(s, %{"schema" => "command@1", "command" => "agent_projection",
-                 "args" => %{}, field => "mallory"})
+        raw(s, %{
+          "schema" => "command@1",
+          "command" => "agent_projection",
+          "args" => %{},
+          field => "mallory"
+        })
 
       refute bad["result"]["allow"]
       assert bad["result"]["refusal"]["code"] == "identity-not-claimable"
@@ -337,7 +347,6 @@ defmodule Ampd.TransportTest do
     end
   end
 
-
   test "binding a channel requires the channel, not just its name" do
     # The bridge protocol has no shape in which an actor is named without
     # the descriptor it names being handed over in the same message.
@@ -373,7 +382,8 @@ defmodule Ampd.TransportTest do
     {s, _hello, _} = control_channel()
     base = call(s, "subscribe")["result"]["revision"]
 
-    for i <- 1..6, do: Authority.mint(%{"capability" => "github.pr.create", "actor" => "burst#{i}"})
+    for i <- 1..6,
+        do: Authority.mint(%{"capability" => "github.pr.create", "actor" => "burst#{i}"})
 
     push = push_after(s, base)
     # Coalesced pushes, uncoalesced revisions: the client is not told six
@@ -492,9 +502,15 @@ defmodule Ampd.TransportTest do
       JSON.encode!(%{"schema" => "command@1", "command" => "Elixir.System", "args" => ["halt"]}),
       JSON.encode!(%{"schema" => "command@1", "command" => "preflight", "args" => 42}),
       JSON.encode!(%{"schema" => "command@9", "command" => "runtime_status"}),
-      JSON.encode!(%{"schema" => "command@1", "command" => "request_grant",
-                     "args" => %{"capability" => "github.pr.draft", "resource" => "traaviis/trvm",
-                                 "options" => %{"reason" => String.duplicate("A", 100_000)}}})
+      JSON.encode!(%{
+        "schema" => "command@1",
+        "command" => "request_grant",
+        "args" => %{
+          "capability" => "github.pr.draft",
+          "resource" => "traaviis/trvm",
+          "options" => %{"reason" => String.duplicate("A", 100_000)}
+        }
+      })
     ]
 
     for bytes <- hostile do
@@ -554,8 +570,12 @@ defmodule Ampd.TransportTest do
     call(h, "subscribe")
 
     # The agent asks. It receives no authority.
-    q = call(k, "request_grant", %{"capability" => "github.pr.create", "resource" => "traaviis/trvm",
-                                   "options" => %{"duration" => "run", "reason" => "close the argv boundary"}})["result"]
+    q =
+      call(k, "request_grant", %{
+        "capability" => "github.pr.create",
+        "resource" => "traaviis/trvm",
+        "options" => %{"duration" => "run", "reason" => "close the argv boundary"}
+      })["result"]
 
     refute q["allow"]
     assert q["held"]
@@ -599,7 +619,11 @@ defmodule Ampd.TransportTest do
     scope = %{"capability" => "github.repo.read"}
     ids = GrantRegistry.matching(scope) |> Enum.map(& &1["id"]) |> Enum.sort()
 
-    stale = call(h, "revoke_capability_domain", %{"scope" => scope, "expected_ids" => [hd(ids)]})["result"]
+    stale =
+      call(h, "revoke_capability_domain", %{"scope" => scope, "expected_ids" => [hd(ids)]})[
+        "result"
+      ]
+
     refute stale["allow"]
     assert stale["refusal"]["code"] == "bulk-scope-changed"
 
@@ -609,7 +633,6 @@ defmodule Ampd.TransportTest do
 
     :socket.close(h)
   end
-
 
   # ------------------------------------------------ projection continuity
   # **`revision` is not a fact about the world on its own.** `ops/0` counts
@@ -639,6 +662,7 @@ defmodule Ampd.TransportTest do
     # The revision did go backwards. That is allowed, and it is exactly why
     # it cannot be the only continuity field.
     assert now["revision"] < before["revision"]
+
     assert now["world_generation"] == before["world_generation"],
            "the durable world did not change, so its generation must not"
 
@@ -663,7 +687,6 @@ defmodule Ampd.TransportTest do
     :socket.close(s)
   end
 
-
   # ------------------------------------------------ a bounded live projection
   #
   # **This is not about corrupt data.** `operator-projection@1` carried
@@ -680,16 +703,26 @@ defmodule Ampd.TransportTest do
     big = String.duplicate("x", 4_000)
     n = 140
 
+    # B2: these are fake history rows, not effect receipts. A record that names
+    # an effect (`effect_ref`) is a mediated write since the B2 write boundary and
+    # `Receipts.emit/1` refuses it, so the fake reference rides under another key —
+    # the paging under test never read it.
+
     for i <- 1..n do
       Ampd.AuthorityCoordinator.transact(fn ->
-        Ampd.Receipts.emit(%{"actor" => "kestrel", "capability" => "github.pr.create",
-                               "effect_ref" => "ef_#{i}", "note" => big})
+        Ampd.Receipts.emit(%{
+          "actor" => "kestrel",
+          "capability" => "github.pr.create",
+          "history_ref" => "ef_#{i}",
+          "note" => big
+        })
       end)
     end
 
     assert Ampd.Receipts.count() == n
 
     op = call(s, "operator_projection")
+
     assert op["result"]["schema"] == "operator-projection@2",
            "the projection did not survive a world with real history"
 
@@ -733,8 +766,8 @@ defmodule Ampd.TransportTest do
 
     for i <- 1..5 do
       Ampd.AuthorityCoordinator.transact(fn ->
-        Ampd.Receipts.emit(%{"actor" => "kestrel", "effect_ref" => "ef_k#{i}"})
-        Ampd.Receipts.emit(%{"actor" => "mallory", "effect_ref" => "ef_m#{i}"})
+        Ampd.Receipts.emit(%{"actor" => "kestrel", "history_ref" => "ef_k#{i}"})
+        Ampd.Receipts.emit(%{"actor" => "mallory", "history_ref" => "ef_m#{i}"})
       end)
     end
 
@@ -744,7 +777,6 @@ defmodule Ampd.TransportTest do
 
     :socket.close(k)
   end
-
 
   # **Isolates the `Ampd.Subscriptions` half of the fix.** When
   # `Ampd.Peer` dies, the connection's own monitor closes the socket — so
@@ -791,7 +823,6 @@ defmodule Ampd.TransportTest do
     :socket.close(s)
   end
 
-
   # **Evidence paging must be lossless.** The previous version of the test
   # above asserted the pages did not overlap and did not repeat — and both
   # were true while one record per page boundary was being dropped, because
@@ -807,7 +838,7 @@ defmodule Ampd.TransportTest do
 
     for i <- 1..n do
       Ampd.AuthorityCoordinator.transact(fn ->
-        Ampd.Receipts.emit(%{"actor" => "kestrel", "effect_ref" => "ef_#{i}"})
+        Ampd.Receipts.emit(%{"actor" => "kestrel", "history_ref" => "ef_#{i}"})
       end)
     end
 
@@ -845,7 +876,7 @@ defmodule Ampd.TransportTest do
 
     for i <- 1..70 do
       Ampd.AuthorityCoordinator.transact(fn ->
-        Ampd.Receipts.emit(%{"actor" => "kestrel", "effect_ref" => "ef_w#{i}"})
+        Ampd.Receipts.emit(%{"actor" => "kestrel", "history_ref" => "ef_w#{i}"})
       end)
     end
 
@@ -856,6 +887,7 @@ defmodule Ampd.TransportTest do
     shown = Enum.map(w["recent"], & &1["id"])
 
     all = Ampd.Receipts.all() |> Enum.map(& &1["id"]) |> Enum.sort(:desc)
+
     assert shown ++ rest == all,
            "the window's cursor skipped #{inspect(all -- (shown ++ rest))}"
 
@@ -870,8 +902,11 @@ defmodule Ampd.TransportTest do
     {k, _, _} = agent_channel("kestrel")
 
     for _ <- 1..80 do
-      q = call(k, "request_grant", %{"capability" => "github.pr.create",
-                                     "resource" => "traaviis/trvm"})["result"]
+      q =
+        call(k, "request_grant", %{
+          "capability" => "github.pr.create",
+          "resource" => "traaviis/trvm"
+        })["result"]
 
       call(h, "deny_grant_request", %{"request_id" => q["grant_request"]["id"], "note" => "no"})
     end
@@ -892,7 +927,6 @@ defmodule Ampd.TransportTest do
     :socket.close(h)
     :socket.close(k)
   end
-
 
   # Descriptor *ownership* is measured where it actually happens — in
   # `super-host verify`, against `/proc/<ampd>/fd` across real SCM_RIGHTS

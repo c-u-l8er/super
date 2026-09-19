@@ -1,0 +1,15 @@
+# CONTROL no-retired-check: the participant stops checking its retired set: a held write released after an acknowledged retirement LANDS (F1) -> E-LATE retired-before-landing
+# Applied with `git apply`; the harness must FAIL and the verifier must go RED.
+diff --git a/ampd/lib/ampd/fence.ex b/ampd/lib/ampd/fence.ex
+index fcf8e06..5e53f4a 100644
+--- a/ampd/lib/ampd/fence.ex
++++ b/ampd/lib/ampd/fence.ex
+@@ -110,7 +110,7 @@ defmodule Ampd.Fence do
+         {:refused, "write-unmediated",
+          "the ticket was not issued by the journal owner of this epoch"}
+ 
+-      retired?(fence, ticket["lease_id"]) ->
++      false and retired?(fence, ticket["lease_id"]) ->
+         code =
+           if fence["retired"][ticket["lease_id"]] == "completed",
+             do: "write-lease-retired",

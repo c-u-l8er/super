@@ -1,0 +1,15 @@
+# CONTROL no-transition-legality: admit/3 stops consulting the transition table — a premature CLAIMED -> COMMITTED and a COMMITTED -> ATTEMPTED re-entry are journaled (F10) -> the verifier must refuse the history under L-2, the harness must fail
+# Applied with `git apply`; the harness must FAIL and the verifier must go RED.
+diff --git a/ampd/lib/ampd/effects.ex b/ampd/lib/ampd/effects.ex
+index 8775a62..37a33de 100644
+--- a/ampd/lib/ampd/effects.ex
++++ b/ampd/lib/ampd/effects.ex
+@@ -689,7 +689,7 @@ defmodule Ampd.Effects do
+         {:refused, transition_refusal("effect-unknown", id, nil, state)}
+ 
+       e ->
+-        if Contract.legal_transition?(e["state"], state),
++        if true or Contract.legal_transition?(e["state"], state),
+           do: {:ok, e},
+           else:
+             {:refused, transition_refusal("journal-transition-illegal", id, e["state"], state)}

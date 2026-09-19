@@ -24,14 +24,20 @@ defmodule Ampd.EffectTest do
   defp wait_up(mod, probe, n) do
     ok =
       Process.whereis(mod) != nil and
-        (try do
-           probe.()
-           true
-         catch
-           :exit, _ -> false
-         end)
+        try do
+          probe.()
+          true
+        catch
+          :exit, _ -> false
+        end
 
-    if ok, do: :ok, else: (Process.sleep(20); wait_up(mod, probe, n - 1))
+    if ok,
+      do: :ok,
+      else:
+        (
+          Process.sleep(20)
+          wait_up(mod, probe, n - 1)
+        )
   end
 
   test "a committed effect walks the whole ladder in order" do
@@ -62,29 +68,67 @@ defmodule Ampd.EffectTest do
 
     assert attempt["kind"] == "effect-attempt@1"
     assert attempt["idempotency_key"] == e["idempotency_key"]
+
     assert String.starts_with?(e["idempotency_key"], "sha256:"),
            "the idempotency key must be the real intent digest, not a label"
 
     # The key an external adapter would deduplicate on is the same digest
     # consent was bound to — that is the only reason UNKNOWN is recoverable.
-    assert attempt["idempotency_key"] == Receipts.last_of_kind("capability-effect-receipt@1")["idempotency_key"]
+    assert attempt["idempotency_key"] ==
+             Receipts.last_of_kind("capability-effect-receipt@1")["idempotency_key"]
   end
 
+  # B2: this used to re-enter ATTEMPTED on a COMMITTED effect and die there.
+  # `COMMITTED → ATTEMPTED` is not a legal journal transition (E3-1 L-2), and
+  # `Effects.attempt/2` now takes the lease and refuses it. The crash is
+  # injected where it really happens instead: inside the adapter, after
+  # ATTEMPTED is durable and before COMMITTED.
   test "an effect in flight at crash time recovers as UNKNOWN, never as committed or absent" do
     Ampd.reset_demo()
     grant_pr_create()
     Ampd.Conformance.exercise("pr.create")
-    Ampd.Conformance.approve_last()
-    e = List.last(Effects.all())
+    p = Approvals.last_pending()
+    Ampd.Authority.grant_approval(p["id"])
+    me = self()
 
-    # Re-enter ATTEMPTED, then die there.
-    Effects.attempt(e["id"], "github.rest")
+    adapter = fn _attempt ->
+      send(me, {:in_adapter, self()})
+
+      receive do
+        :go -> :did_the_thing
+      end
+    end
+
+    task =
+      Task.async(fn ->
+        Ampd.Gateway.perform(
+          p["capability"],
+          p["resource"],
+          p["held_ctx"],
+          %{
+            "er" => p["envelope"]["request_id"],
+            "rev" => p["envelope"]["request_revision"],
+            "params" => p["envelope"]["request"]
+          },
+          adapter
+        )
+      end)
+
+    assert_receive {:in_adapter, pid}, 5_000
+    e = Enum.find(Effects.all(), &(&1["state"] == "ATTEMPTED"))
+    assert e, "the attempt must be durable before the adapter runs"
+
     Process.exit(Process.whereis(Effects), :kill)
     wait_up(Effects, fn -> Effects.all() end)
+    send(pid, :go)
+    r = Task.await(task, 10_000)
+    refute r["allow"], "a commit under a lease the restarted owner never issued must be refused"
 
     recovered = Effects.get(e["id"])
     assert recovered != nil, "the effect vanished with the process"
-    assert recovered["state"] == "ATTEMPTED", "the durable state before recovery should be what was written"
+
+    assert recovered["state"] == "ATTEMPTED",
+           "the durable state before recovery should be what was written"
 
     moved = Effects.recover!()
     assert e["id"] in moved
@@ -96,16 +140,32 @@ defmodule Ampd.EffectTest do
     assert Effects.reconcile_queue() |> Enum.map(& &1["id"]) == [e["id"]]
   end
 
+  # B2: same correction as above — UNKNOWN is reached the way the runtime
+  # reaches it (the adapter raises after ATTEMPTED is durable), not by
+  # re-entering ATTEMPTED on a settled effect.
   test "an UNKNOWN effect cannot be re-claimed — that is the double-effect bug" do
     Ampd.reset_demo()
     grant_pr_create()
     Ampd.Conformance.exercise("pr.create")
-    Ampd.Conformance.approve_last()
-    e = List.last(Effects.all())
+    p = Approvals.last_pending()
+    Ampd.Authority.grant_approval(p["id"])
 
-    Effects.attempt(e["id"], "github.rest")
-    Effects.recover!()
-    assert Effects.get(e["id"])["state"] == "UNKNOWN"
+    r =
+      Ampd.Gateway.perform(
+        p["capability"],
+        p["resource"],
+        p["held_ctx"],
+        %{
+          "er" => p["envelope"]["request_id"],
+          "rev" => p["envelope"]["request_revision"],
+          "params" => p["envelope"]["request"]
+        },
+        fn _ -> raise "connection died" end
+      )
+
+    refute r["allow"]
+    e = Effects.get(r["effect_id"])
+    assert e["state"] == "UNKNOWN"
 
     assert {:error, why} =
              Ampd.AuthorityCoordinator.transact(fn -> Effects.claim(e["id"]) end)

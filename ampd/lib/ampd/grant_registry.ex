@@ -17,7 +17,7 @@ defmodule Ampd.GrantRegistry do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state mint draft request_grant resolve_request dur revoke_domain revoke_one revoke_matching consume commit reset)a
+  @participant_mutations ~w(close_store load_state mint draft request_grant resolve_request dur revoke_domain revoke_one revoke_matching consume consume_ticket fence_epoch fence_retire commit reset)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -45,16 +45,39 @@ defmodule Ampd.GrantRegistry do
   see `Ampd.TestFixture.seed_demo!/0`.
   """
   def initial do
-    %{"grants" => [], "seq" => 193, "dur" => "workspace", "requests" => [], "req_seq" => 1,
-      "draft" => %{"repo.read" => false, "issue.read" => false, "pr.draft" => false,
-                   "pr.create" => false, "pr.merge" => false}}
+    %{
+      "grants" => [],
+      "seq" => 193,
+      "dur" => "workspace",
+      "requests" => [],
+      "req_seq" => 1,
+      "draft" => %{
+        "repo.read" => false,
+        "issue.read" => false,
+        "pr.draft" => false,
+        "pr.create" => false,
+        "pr.merge" => false
+      }
+    }
   end
 
   @doc false
   def demo_state do
-    base = %{"grants" => [], "seq" => 193, "dur" => "workspace", "requests" => [], "req_seq" => 1,
-             "draft" => %{"repo.read" => true, "issue.read" => true, "pr.draft" => true,
-                          "pr.create" => false, "pr.merge" => false}}
+    base = %{
+      "grants" => [],
+      "seq" => 193,
+      "dur" => "workspace",
+      "requests" => [],
+      "req_seq" => 1,
+      "draft" => %{
+        "repo.read" => true,
+        "issue.read" => true,
+        "pr.draft" => true,
+        "pr.create" => false,
+        "pr.merge" => false
+      }
+    }
+
     Enum.reduce(["github.repo.read", "github.issue.read", "github.pr.draft"], base, fn cap, s ->
       elem(do_mint(s, %{"capability" => cap}), 1)
     end)
@@ -69,25 +92,52 @@ defmodule Ampd.GrantRegistry do
   named refusal before any of it is reachable.
   """
   def sealed_state,
-    do: %{"grants" => [], "seq" => 0, "dur" => nil, "draft" => %{}, "requests" => [], "req_seq" => 0}
+    do: %{
+      "grants" => [],
+      "seq" => 0,
+      "dur" => nil,
+      "draft" => %{},
+      "requests" => [],
+      "req_seq" => 0
+    }
 
   def sealed, do: ask(:sealed)
   def close_store, do: ask(:close_store)
   def load_state(s), do: ask({:load_state, s})
+
   defp do_mint(s, f) do
-    g = Map.merge(%{"id" => "gr_" <> String.pad_leading(Integer.to_string(s["seq"]), 4, "0"),
-        "actor" => "kestrel", "resource" => "traaviis/trvm", "duration" => "workspace",
-        "status" => "active", "placement" => ["local", "fleet"],
-        "workspace" => "trvm", "run" => Session.run_or("run-b51")}, f)
+    g =
+      Map.merge(
+        %{
+          "id" => "gr_" <> String.pad_leading(Integer.to_string(s["seq"]), 4, "0"),
+          "actor" => "kestrel",
+          "resource" => "traaviis/trvm",
+          "duration" => "workspace",
+          "status" => "active",
+          "placement" => ["local", "fleet"],
+          "workspace" => "trvm",
+          "run" => Session.run_or("run-b51"),
+          # The consumption witness (E3-1): which effects spent this grant,
+          # by ticket. Present from mint so a row is never LEGACY_UNWITNESSED.
+          "consumptions" => []
+        },
+        f
+      )
+
     {g, %{s | "grants" => s["grants"] ++ [g], "seq" => s["seq"] + 1}}
   end
+
   def mint(f), do: ask({:mint, f})
+
   def one_shot(cap),
     do: mint(%{"capability" => cap, "duration" => "once", "uses_remaining" => 1})
+
   def list, do: ask(:list)
+
   def snapshot do
     Ampd.Core.snapshot_of(list(), Ampd.CapabilityRegistry.all())
   end
+
   def set_draft(k, v), do: ask({:draft, k, v})
 
   @doc """
@@ -152,13 +202,54 @@ defmodule Ampd.GrantRegistry do
         Enum.all?(filter, fn {k, v} -> v == nil or g[k] == v end)
     end)
   end
-  def consume_one_shot(id), do: ask({:consume, id})
+
+  @doc """
+  Spend one use of a one-shot grant.
+
+  **Two arities, one boundary.** `consume_one_shot(ticket)` is the mediated
+  write of E3-1: the ticket must have been signed by the journal owner of
+  this epoch for `consume_grant` on this row, the lease must not be retired
+  here, and the consumption must not already be witnessed — all checked by
+  `Ampd.Fence.check/4` in this process, before the mutation, and persisted
+  with it in one `Store.save`. The row gains the effect in `consumptions`
+  and the ticket in `consumption_witness`.
+
+  `consume_one_shot(id)` is the LEGACY, UNMEDIATED arity. It survives for
+  exactly one caller — `Ampd.Conformance.authorize/4`, the journal-less
+  C1.0a interface the frozen vectors are written against — and it records
+  no witness. It is coordinator-only like every other authority mutation,
+  and it is OUTSIDE E3-1's claim: E3-1 covers `Ampd.Gateway.perform/5`,
+  which never calls it.
+  """
+  def consume_one_shot(ticket) when is_map(ticket), do: ask({:consume_ticket, ticket})
+  def consume_one_shot(id) when is_binary(id), do: ask({:consume, id})
+
+  @doc "Journal-owner only: install this incarnation's fence (`Ampd.Fence`)."
+  def fence_epoch(epoch, key), do: ask({:fence_epoch, epoch, key})
+  @doc "This resource's fence as persisted — epoch and retired leases, never the key. A read."
+  def fence, do: ask(:fence)
+
+  @doc "Journal-owner only: retire a lease at this resource; replies with the landings held under it."
+  def fence_retire(lease_id, reason), do: ask({:fence_retire, lease_id, reason})
   def commit(surface), do: ask({:commit, surface})
   def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
-  @ordered_ops [:mint, :draft, :dur, :revoke_domain, :consume, :commit, :reset, :load_state,
-                :request_grant, :resolve_request, :revoke_one, :revoke_matching]
+  @ordered_ops [
+    :mint,
+    :draft,
+    :dur,
+    :revoke_domain,
+    :consume,
+    :consume_ticket,
+    :commit,
+    :reset,
+    :load_state,
+    :request_grant,
+    :resolve_request,
+    :revoke_one,
+    :revoke_matching
+  ]
   @impl true
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
@@ -178,19 +269,44 @@ defmodule Ampd.GrantRegistry do
         handle_ordered(msg, st)
     end
   end
+
   @impl true
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
+
   def handle_call(:close_store, _f, st) do
     if st.tab, do: :dets.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
+
   def handle_call(:list, _f, %{s: s} = st), do: {:reply, s["grants"], st}
+
+  # The write fence (E3-1). Guarded by "from the journal owner", not by the
+  # total order — see `Ampd.Ordered.from_journal_owner?/1`.
+  def handle_call({:fence_epoch, _, _} = msg, from, st),
+    do: Ampd.Fence.handle_owner_call(msg, from, st, __MODULE__, &landed_under/2)
+
+  def handle_call({:fence_retire, _, _} = msg, from, st),
+    do: Ampd.Fence.handle_owner_call(msg, from, st, __MODULE__, &landed_under/2)
+
   def handle_call(:requests, _f, %{s: s} = st), do: {:reply, Map.get(s, "requests", []), st}
+
+  # A read of this resource's fence — epoch and retired set, never the key.
+  def handle_call(:fence, _f, %{s: s} = st),
+    do: {:reply, if(is_map(s["fence"]), do: Map.delete(s["fence"], "key"), else: nil), st}
+
+  defp landed_under(s, lease_id) do
+    s["grants"]
+    |> Enum.flat_map(&(&1["consumption_witness"] || []))
+    |> Enum.filter(&(&1["lease_id"] == lease_id))
+    |> Enum.map(&Map.put(&1, "op", "consume_grant"))
+  end
 
   # --- ordered implementations (reached only via the guard above) ----
   def handle_ordered({:load_state, s}, st) do
     tab = st.tab || Ampd.Store.open!(@store)
-    {:reply, :ok, %{st | tab: tab, s: Ampd.Store.save(tab, s), sealed: nil}}
+
+    {:reply, :ok,
+     %{st | tab: tab, s: Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s)), sealed: nil}}
   end
 
   # A grant whose duration this system cannot enforce must never reach the
@@ -218,15 +334,19 @@ defmodule Ampd.GrantRegistry do
     end
   end
 
-
   def handle_ordered({:revoke_one, id}, %{tab: tab, s: s} = st) do
     case Enum.find(s["grants"], &(&1["id"] == id and &1["status"] == "active")) do
       nil ->
         {:reply, {:refused, unknown_grant(id)}, st}
 
       g ->
-        grants = Enum.map(s["grants"], fn x -> if x["id"] == id, do: %{x | "status" => "revoked"}, else: x end)
-        {:reply, %{g | "status" => "revoked"}, %{st | s: Ampd.Store.save(tab, %{s | "grants" => grants})}}
+        grants =
+          Enum.map(s["grants"], fn x ->
+            if x["id"] == id, do: %{x | "status" => "revoked"}, else: x
+          end)
+
+        {:reply, %{g | "status" => "revoked"},
+         %{st | s: Ampd.Store.save(tab, %{s | "grants" => grants})}}
     end
   end
 
@@ -245,9 +365,7 @@ defmodule Ampd.GrantRegistry do
     expected = Enum.sort(expected_ids)
 
     if current != expected do
-      {:reply,
-       {:refused,
-        bulk_scope_changed(filter, expected, current)}, st}
+      {:reply, {:refused, bulk_scope_changed(filter, expected, current)}, st}
     else
       hit = MapSet.new(current)
 
@@ -260,7 +378,8 @@ defmodule Ampd.GrantRegistry do
     end
   end
 
-  def handle_ordered({:draft, k, v}, %{tab: tab, s: s} = st), do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, put_in(s, ["draft", k], v))}}
+  def handle_ordered({:draft, k, v}, %{tab: tab, s: s} = st),
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, put_in(s, ["draft", k], v))}}
 
   # `Map.get`/`Map.put` rather than the `%{s | …}` update syntax: a store
   # written before `requests` existed has no such key, and a registry that
@@ -301,10 +420,14 @@ defmodule Ampd.GrantRegistry do
       true ->
         q =
           Map.merge(
-            %{"schema" => "grant-request@1", "id" => id, "status" => "pending",
+            %{
+              "schema" => "grant-request@1",
+              "id" => id,
+              "status" => "pending",
               "resource" => "traaviis/trvm",
               "reason" => nil,
-              "created_at" => DateTime.utc_now() |> DateTime.to_iso8601()},
+              "created_at" => DateTime.utc_now() |> DateTime.to_iso8601()
+            },
             f
           )
           |> Map.put("requested_duration", dur)
@@ -318,7 +441,6 @@ defmodule Ampd.GrantRegistry do
         {:reply, q, %{st | s: Ampd.Store.save(tab, s2)}}
     end
   end
-
 
   def handle_ordered({:resolve_request, id, status, note}, %{tab: tab, s: s} = st) do
     rs =
@@ -334,24 +456,94 @@ defmodule Ampd.GrantRegistry do
     {:reply, found, %{st | s: Ampd.Store.save(tab, Map.put(s, "requests", rs))}}
   end
 
-  def handle_ordered({:dur, d}, %{tab: tab, s: s} = st), do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, %{s | "dur" => d})}}
+  def handle_ordered({:dur, d}, %{tab: tab, s: s} = st),
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, %{s | "dur" => d})}}
 
   def handle_ordered({:revoke_domain, cap}, %{tab: tab, s: s} = st) do
-    grants = Enum.map(s["grants"], fn g ->
-      if g["capability"] == cap and g["status"] == "active", do: %{g | "status" => "revoked"}, else: g
-    end)
+    grants =
+      Enum.map(s["grants"], fn g ->
+        if g["capability"] == cap and g["status"] == "active",
+          do: %{g | "status" => "revoked"},
+          else: g
+      end)
+
     {:reply, :ok, %{st | s: Ampd.Store.save(tab, %{s | "grants" => grants})}}
   end
 
-  def handle_ordered({:consume, id}, %{tab: tab, s: s} = st) do
-    grants = Enum.map(s["grants"], fn g ->
-      if g["id"] == id do
-        left = (g["uses_remaining"] || 0) - 1
-        %{g | "uses_remaining" => left, "status" => if(left == 0, do: "consumed", else: g["status"])}
-      else
-        g
+  # The mediated consumption. Fence first, then the row's own witness,
+  # then the mutation and the witness in ONE save.
+  def handle_ordered({:consume_ticket, ticket}, %{tab: tab, s: s} = st) do
+    target = if is_map(ticket), do: ticket["target"], else: nil
+    g = target && Enum.find(s["grants"], &(&1["id"] == target))
+
+    verdict =
+      with :ok <- Ampd.Fence.check(s["fence"], ticket, "consume_grant", target) do
+        cond do
+          g == nil ->
+            {:refused, "write-unscoped", "no grant #{inspect(target)}"}
+
+          ticket["effect"] in (g["consumptions"] || []) or
+              Enum.any?(g["consumption_witness"] || [], &(&1["ticket_id"] == ticket["ticket_id"])) ->
+            {:refused, "write-duplicate",
+             "#{ticket["effect"]}'s consumption of #{target} is already witnessed"}
+
+          true ->
+            :ok
+        end
       end
-    end)
+
+    case verdict do
+      {:refused, code, why} ->
+        {:reply,
+         {:refused, Ampd.Fence.refusal(s["fence"], code, why, ticket, "Ampd.GrantRegistry")}, st}
+
+      :ok ->
+        grants =
+          Enum.map(s["grants"], fn x ->
+            if x["id"] == target do
+              left = (x["uses_remaining"] || 0) - 1
+
+              x
+              |> Map.put("uses_remaining", left)
+              |> Map.put("status", if(left == 0, do: "consumed", else: x["status"]))
+              |> Map.put("consumptions", (x["consumptions"] || []) ++ [ticket["effect"]])
+              |> Map.put(
+                "consumption_witness",
+                (x["consumption_witness"] || []) ++ [Ampd.Fence.witness_of(ticket)]
+              )
+            else
+              x
+            end
+          end)
+
+        st = %{st | s: Ampd.Store.save(tab, %{s | "grants" => grants})}
+
+        witness = %{
+          "ticket_id" => ticket["ticket_id"],
+          "proof" => Ampd.Fence.proof(s["fence"], ticket, "landed")
+        }
+
+        {:reply, {:ok, witness}, st}
+    end
+  end
+
+  # LEGACY, UNMEDIATED (see `consume_one_shot/1`): no witness is recorded.
+  def handle_ordered({:consume, id}, %{tab: tab, s: s} = st) do
+    grants =
+      Enum.map(s["grants"], fn g ->
+        if g["id"] == id do
+          left = (g["uses_remaining"] || 0) - 1
+
+          %{
+            g
+            | "uses_remaining" => left,
+              "status" => if(left == 0, do: "consumed", else: g["status"])
+          }
+        else
+          g
+        end
+      end)
+
     {:reply, :ok, %{st | s: Ampd.Store.save(tab, %{s | "grants" => grants})}}
   end
 
@@ -363,46 +555,65 @@ defmodule Ampd.GrantRegistry do
         else
           cap = "github." <> key
           want = !!get_in(s, ["draft", key])
-          domain = Enum.filter(s["grants"], fn g ->
-            g["status"] == "active" and g["capability"] == cap and
-              g["actor"] == "kestrel" and g["resource"] == "traaviis/trvm"
-          end)
+
+          domain =
+            Enum.filter(s["grants"], fn g ->
+              g["status"] == "active" and g["capability"] == cap and
+                g["actor"] == "kestrel" and g["resource"] == "traaviis/trvm"
+            end)
+
           cond do
             not want and domain != [] ->
               ids = Enum.map(domain, & &1["id"]) |> MapSet.new()
-              grants = Enum.map(s["grants"], fn g ->
-                if MapSet.member?(ids, g["id"]), do: %{g | "status" => "revoked"}, else: g
-              end)
+
+              grants =
+                Enum.map(s["grants"], fn g ->
+                  if MapSet.member?(ids, g["id"]), do: %{g | "status" => "revoked"}, else: g
+                end)
+
               {%{s | "grants" => grants}, ch ++ ["-" <> cap]}
-            not want -> {s, ch}
+
+            not want ->
+              {s, ch}
+
             true ->
-              keep = Enum.find(domain, fn g ->
-                g["duration"] == s["dur"] and
-                  (g["duration"] != "once" or (g["uses_remaining"] || 0) > 0) and
-                  g["placement"] == ["local", "fleet"]
-              end)
+              keep =
+                Enum.find(domain, fn g ->
+                  g["duration"] == s["dur"] and
+                    (g["duration"] != "once" or (g["uses_remaining"] || 0) > 0) and
+                    g["placement"] == ["local", "fleet"]
+                end)
+
               drop = Enum.filter(domain, &(&1 != keep)) |> Enum.map(& &1["id"]) |> MapSet.new()
-              grants = Enum.map(s["grants"], fn g ->
-                if MapSet.member?(drop, g["id"]), do: %{g | "status" => "revoked"}, else: g
-              end)
+
+              grants =
+                Enum.map(s["grants"], fn g ->
+                  if MapSet.member?(drop, g["id"]), do: %{g | "status" => "revoked"}, else: g
+                end)
+
               s = %{s | "grants" => grants}
               ch = ch ++ if(MapSet.size(drop) > 0, do: ["~" <> cap], else: [])
+
               if keep do
                 {s, ch}
               else
-                f = if s["dur"] == "once",
-                  do: %{"capability" => cap, "duration" => "once", "uses_remaining" => 1},
-                  else: %{"capability" => cap, "duration" => s["dur"]}
+                f =
+                  if s["dur"] == "once",
+                    do: %{"capability" => cap, "duration" => "once", "uses_remaining" => 1},
+                    else: %{"capability" => cap, "duration" => s["dur"]}
+
                 {g, s2} = do_mint(s, f)
                 {s2, ch ++ ["+" <> g["id"]]}
               end
           end
         end
       end)
+
     {:reply, changed, %{st | s: Ampd.Store.save(tab, s)}}
   end
 
-  def handle_ordered(:reset, %{tab: tab} = st), do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, initial())}}
+  def handle_ordered(:reset, %{tab: tab} = st),
+    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, Ampd.Fence.carry(initial(), st.s))}}
 
   # --- what the ordered implementations check and raise ---------------
 
@@ -428,9 +639,11 @@ defmodule Ampd.GrantRegistry do
         %{}
 
       pk ->
-        %{"pack" => name,
+        %{
+          "pack" => name,
           "pack_version" => pk["version"],
-          "pack_digest" => Ampd.Core.pack_digest(pk)}
+          "pack_digest" => Ampd.Core.pack_digest(pk)
+        }
     end
   end
 

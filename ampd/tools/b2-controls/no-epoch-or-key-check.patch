@@ -1,0 +1,15 @@
+# CONTROL no-epoch-or-key-check: the participant stops checking the epoch (with -b, also the signature; the key rotates with the epoch so both must go): an old-epoch ticket LANDS after the owner restart (F3) -> E-LATE by epoch
+# Applied with `git apply`; the harness must FAIL and the verifier must go RED.
+diff --git a/ampd/lib/ampd/fence.ex b/ampd/lib/ampd/fence.ex
+index fcf8e06..c7046f0 100644
+--- a/ampd/lib/ampd/fence.ex
++++ b/ampd/lib/ampd/fence.ex
+@@ -102,7 +102,7 @@ defmodule Ampd.Fence do
+         {:refused, "write-unmediated",
+          "this resource has not been synchronized by a journal owner"}
+ 
+-      ticket["epoch"] != fence["epoch"] ->
++      false and ticket["epoch"] != fence["epoch"] ->
+         {:refused, "write-lease-stale",
+          "ticket epoch #{ticket["epoch"]} is not this resource's epoch #{fence["epoch"]} — the journal owner restarted since it was issued"}
+ 

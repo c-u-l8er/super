@@ -9,18 +9,32 @@ defmodule Ampd.Core do
   def sites, do: @sites
 
   def params do
-    %{"pr.draft"  => %{"repo" => "traaviis/trvm", "branch" => "lane-a", "title" => "close the argv boundary"},
-      "pr.create" => %{"repo" => "traaviis/trvm", "branch" => "lane-a", "title" => "close the argv boundary"}}
+    %{
+      "pr.draft" => %{
+        "repo" => "traaviis/trvm",
+        "branch" => "lane-a",
+        "title" => "close the argv boundary"
+      },
+      "pr.create" => %{
+        "repo" => "traaviis/trvm",
+        "branch" => "lane-a",
+        "title" => "close the argv boundary"
+      }
+    }
   end
 
   # ---------- canonical form: JS JSON.stringify parity ----------
   def canon(v) when is_map(v) do
     inner =
-      v |> Map.keys() |> Enum.sort()
-        |> Enum.map(fn k -> jstr(k) <> ":" <> canon(Map.get(v, k)) end)
-        |> Enum.join(",")
+      v
+      |> Map.keys()
+      |> Enum.sort()
+      |> Enum.map(fn k -> jstr(k) <> ":" <> canon(Map.get(v, k)) end)
+      |> Enum.join(",")
+
     "{" <> inner <> "}"
   end
+
   def canon(v) when is_list(v), do: "[" <> Enum.map_join(v, ",", &canon/1) <> "]"
   def canon(true), do: "true"
   def canon(false), do: "false"
@@ -28,26 +42,27 @@ defmodule Ampd.Core do
   def canon(v) when is_integer(v), do: Integer.to_string(v)
   def canon(v) when is_binary(v), do: jstr(v)
 
-  defp jstr(s) do
-    body =
-      s |> String.to_charlist()
-        |> Enum.map(fn
-          ?"  -> "\\\""
-          ?\\ -> "\\\\"
-          ?\n -> "\\n"
-          ?\r -> "\\r"
-          ?\t -> "\\t"
-          8   -> "\\b"
-          12  -> "\\f"
-          c when c < 0x20 -> "\\u" <> String.pad_leading(Integer.to_string(c, 16), 4, "0")
-          c -> <<c::utf8>>
-        end)
-        |> IO.iodata_to_binary()
-    "\"" <> body <> "\""
-  end
+  # Use the standard string encoder without changing map ordering or the
+  # canonical bytes consumed by existing authority and effect digests.
+  defp jstr(s), do: JSON.encode!(s)
 
   def sha256_hex(msg), do: :crypto.hash(:sha256, msg) |> Base.encode16(case: :lower)
-  def intent_digest(env), do: "sha256:" <> sha256_hex(canon(env))
+  def intent_digest(env), do: "sha256:" <> sha256_hex(canon_io(env))
+
+  # The digest of a canonical form, without materializing it when the value is
+  # one plain-ASCII string. Such a string's canonical bytes are exactly the
+  # quoted input (the standard encoder escapes only `"`, `\\` and control
+  # characters), so hashing `["\"", s, "\""]` as iodata yields the same digest
+  # as hashing `canon(s)` while copying nothing. Anything else — any byte
+  # outside 0x20..0x7E, a quote, a backslash, or a non-string — takes the
+  # materialized path, so invalid UTF-8 still raises exactly as before.
+  # `intent_digest/1 == "sha256:" <> sha256_hex(canon(v))` is a tested property.
+  @plain_ascii_breaker ~r/[^\x20-\x7e]|["\\]/
+  defp canon_io(v) when is_binary(v) do
+    if Regex.match?(@plain_ascii_breaker, v), do: jstr(v), else: [?", v, ?"]
+  end
+
+  defp canon_io(v), do: canon(v)
 
   # ---------- effect identity ≠ consent identity ----------
   # `effect-intent@1` says *what should happen*. `approval-intent@1` says
@@ -59,8 +74,14 @@ defmodule Ampd.Core do
   # an unrelated grant change would present the far side with a *different*
   # key for the same desired effect — and deduplicate against nothing.
   def effect_intent(cap, resource, er, rev, params) do
-    %{"schema" => "effect-intent@1", "capability" => cap, "resource" => resource,
-      "request_id" => er, "request_revision" => rev, "request" => params}
+    %{
+      "schema" => "effect-intent@1",
+      "capability" => cap,
+      "resource" => resource,
+      "request_id" => er,
+      "request_revision" => rev,
+      "request" => params
+    }
   end
 
   def effect_key(cap, resource, er, rev, params),
@@ -69,41 +90,72 @@ defmodule Ampd.Core do
   # ---------- placement is derived, not asserted ----------
   def pack_policy_deny(pack, site) do
     pol = Map.get(pack, "policy", %{})
+
     cond do
       site == "cloud" and Map.get(pol, "source_data") == "private" ->
         "data-policy: source_data private — hosted cloud excluded"
+
       is_map(pol["secret"]) and not Enum.member?(pol["secret"]["residency"] || @sites, site) ->
-        "secret " <> pol["secret"]["ref"] <> " residency: " <> Enum.join(pol["secret"]["residency"], "·")
-      true -> nil
+        "secret " <>
+          pol["secret"]["ref"] <> " residency: " <> Enum.join(pol["secret"]["residency"], "·")
+
+      true ->
+        nil
     end
   end
 
   def derive_placement(pack, g, ctx) do
     gsites = Map.get(g, "placement", ["local", "fleet"])
+
     {eligible, denied} =
       Enum.reduce(@sites, {[], %{}}, fn site, {el, dn} ->
         pd = pack_policy_deny(pack, site)
         ge = Enum.member?(gsites, site)
+
         cond do
           pd != nil ->
-            cause = pd <> if(ge, do: "", else: " · grant " <> g["id"] <> " eligibility: " <> Enum.join(gsites, "·"))
+            cause =
+              pd <>
+                if(ge,
+                  do: "",
+                  else: " · grant " <> g["id"] <> " eligibility: " <> Enum.join(gsites, "·")
+                )
+
             {el, Map.put(dn, site, cause)}
+
           not ge ->
-            {el, Map.put(dn, site, "grant " <> g["id"] <> " eligibility: " <> Enum.join(gsites, "·"))}
-          true -> {el ++ [site], dn}
+            {el,
+             Map.put(dn, site, "grant " <> g["id"] <> " eligibility: " <> Enum.join(gsites, "·"))}
+
+          true ->
+            {el ++ [site], dn}
         end
       end)
+
     cited =
       ["grant " <> g["id"] <> " eligibility: " <> Enum.join(gsites, "·")] ++
         Enum.map(denied, fn {k, v} -> k <> " denied: " <> v end)
+
     req = ctx["placement"]
+
     cond do
       is_binary(req) and not Enum.member?(eligible, req) ->
-        %{"ok" => false, "cited" => cited,
-          "reason" => "placement-denied · " <> req <> " — " <> Map.get(denied, req, "ineligible for this grant")}
-      is_binary(req) -> %{"ok" => true, "site" => req, "cited" => cited}
-      eligible == [] -> %{"ok" => false, "cited" => cited, "reason" => "placement-denied · no eligible site"}
-      true -> %{"ok" => true, "site" => hd(eligible), "cited" => cited}
+        %{
+          "ok" => false,
+          "cited" => cited,
+          "reason" =>
+            "placement-denied · " <>
+              req <> " — " <> Map.get(denied, req, "ineligible for this grant")
+        }
+
+      is_binary(req) ->
+        %{"ok" => true, "site" => req, "cited" => cited}
+
+      eligible == [] ->
+        %{"ok" => false, "cited" => cited, "reason" => "placement-denied · no eligible site"}
+
+      true ->
+        %{"ok" => true, "site" => hd(eligible), "cited" => cited}
     end
   end
 
@@ -159,19 +211,26 @@ defmodule Ampd.Core do
 
   def near_miss(grants, cap, resource, ctx, retired?) do
     c = Enum.filter(grants, fn g -> g["status"] == "active" and g["capability"] == cap end)
+
     cond do
-      c == [] -> "authority-missing · " <> cap
+      c == [] ->
+        "authority-missing · " <> cap
+
       not Enum.any?(c, &(&1["actor"] == ctx["actor"])) ->
         "actor-mismatch · grant is not " <> ctx["actor"] <> "'s"
+
       not Enum.any?(c, &(&1["resource"] == resource)) ->
         "scope-mismatch · grant is for " <> hd(c)["resource"] <> ", not " <> resource
+
       not Enum.any?(c, &duration_ok(&1, ctx, retired?)) ->
         case hd(c)["duration"] do
           "once" -> "one-shot-consumed · " <> cap
           "run" -> "run-expired · grant was scoped to " <> hd(c)["run"]
           _ -> "workspace-mismatch · grant lives in " <> hd(c)["workspace"]
         end
-      true -> "authority-missing · " <> cap
+
+      true ->
+        "authority-missing · " <> cap
     end
   end
 
@@ -207,9 +266,15 @@ defmodule Ampd.Core do
 
       not Enum.any?(c, &duration_ok(&1, ctx, retired?)) ->
         case hd(c)["duration"] do
-          "once" -> {"one-shot-consumed", %{"capability" => cap}}
-          "run" -> {"run-expired", %{"capability" => cap, "grant_run" => hd(c)["run"]}}
-          _ -> {"workspace-mismatch", %{"capability" => cap, "grant_workspace" => hd(c)["workspace"]}}
+          "once" ->
+            {"one-shot-consumed", %{"capability" => cap}}
+
+          "run" ->
+            {"run-expired", %{"capability" => cap, "grant_run" => hd(c)["run"]}}
+
+          _ ->
+            {"workspace-mismatch",
+             %{"capability" => cap, "grant_workspace" => hd(c)["workspace"]}}
         end
 
       true ->
@@ -222,15 +287,27 @@ defmodule Ampd.Core do
       grants
       |> Enum.filter(&(&1["status"] == "active"))
       |> Enum.map(fn g ->
-        %{"id" => g["id"], "actor" => g["actor"], "capability" => g["capability"],
-          "resource" => g["resource"], "duration" => g["duration"],
-          "placement" => g["placement"], "workspace" => g["workspace"], "run" => g["run"],
-          "uses_remaining" => Map.get(g, "uses_remaining", nil)}
+        %{
+          "id" => g["id"],
+          "actor" => g["actor"],
+          "capability" => g["capability"],
+          "resource" => g["resource"],
+          "duration" => g["duration"],
+          "placement" => g["placement"],
+          "workspace" => g["workspace"],
+          "run" => g["run"],
+          "uses_remaining" => Map.get(g, "uses_remaining", nil)
+        }
       end)
       |> Enum.sort_by(& &1["id"])
-    env = %{"schema" => "authority-snapshot@1", "grants" => gs,
+
+    env = %{
+      "schema" => "authority-snapshot@1",
+      "grants" => gs,
       "pack_versions" => Map.new(packs, fn {k, p} -> {k, Map.get(p, "version", nil)} end),
-      "policies" => Map.new(packs, fn {k, p} -> {k, Map.get(p, "policy", nil)} end)}
+      "policies" => Map.new(packs, fn {k, p} -> {k, Map.get(p, "policy", nil)} end)
+    }
+
     "sha256:" <> sha256_hex(canon(env))
   end
 

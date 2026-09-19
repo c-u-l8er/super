@@ -528,9 +528,11 @@ defmodule Ampd.Control do
   defp dispatch_mutation(peer, :start_carrier, [locus_ref]) do
     case Ampd.Carrier.start(peer["id"], locus_ref) do
       {:ok, inc} ->
-        # The incarnation, minus nothing — it carries no authority-shaped key
-        # by construction and `E2` reads it back recursively to prove it.
-        %{"allow" => true, "carrier" => inc}
+        # Keep the admission binding internal; the caller receives only the
+        # bounded profile projection alongside the existing incarnation fields.
+        surface = Ampd.SurfaceProfile.project(inc["surface_binding"], inc["status"])
+        public = inc |> Map.delete("surface_binding") |> Map.put("surface", surface)
+        %{"allow" => true, "carrier" => public}
 
       {:refused, r} ->
         %{"allow" => false, "refusal" => r}
