@@ -341,7 +341,7 @@ defmodule Ampd.DevelopmentTask do
       "max" => @directory_bytes,
       "records" => map_size(tasks),
       "archived" => map_size(Ampd.Loci.development_tasks_archive()),
-      "measures" => "recursive term weight, which is what this directory's guard checks"
+      "measures" => "term weight, the measure this directory's guard uses"
     }
   end
 

@@ -157,7 +157,11 @@ function bar(row) {
     node('p', `${bytes(row.used)} of ${bytes(row.max)}` +
       (row.records !== null ? ` · ${row.records} live` : '') +
       (row.archived ? ` · ${row.archived} archived` : ''), 'directory-note'));
-  if (row.note) wrap.append(node('p', row.note, 'availability-note'));
+  // A footnote, not a warning. `availability-note` is a bordered callout in
+  // this app's CSS, and two of them under two green bars read as two
+  // problems — looked at in the running app, which is the only way that
+  // was going to be noticed.
+  if (row.note) wrap.append(node('p', row.note, 'directory-note'));
   return wrap;
 }
 

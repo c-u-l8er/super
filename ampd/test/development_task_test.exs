@@ -609,7 +609,7 @@ defmodule Ampd.DevelopmentTaskTest do
 
     # It says what it is not counting. A frame figure that silently excluded its
     # own block would be almost right, which is the worst kind of right.
-    assert cap["frame"]["measures"] =~ "excluding the capacity block"
+    assert cap["frame"]["measures"] =~ "not counting this block"
   end
 
   # The property T16 exists for, read off the bar a person looks at: finishing a

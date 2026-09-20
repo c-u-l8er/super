@@ -326,7 +326,7 @@ defmodule Ampd.Projection do
       "frame" => %{
         "bytes" => base,
         "max" => Ampd.Frame.max_bytes(),
-        "measures" => "this projection, excluding the capacity block itself"
+        "measures" => "the encoded projection, not counting this block"
       },
       "attempts" => Ampd.DevelopmentAttempt.directory_usage(),
       "plans" => Ampd.DevelopmentTask.directory_usage()
