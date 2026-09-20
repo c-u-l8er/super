@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createWorkbenchRecovery,recoveryFile,patchAttachment,RECOVERY_KEY} from '../cockpit/ui/workbench-recovery.js';
+import {createWorkbenchRecovery,recoveryFile,patchAttachment,tabDirty,RECOVERY_KEY} from '../cockpit/ui/workbench-recovery.js';
 const memory=()=>{const data=new Map();return {getItem:k=>data.get(k),setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};};
 const draft=(root='/repo')=>({root,selected:'a.js',files:[{path:'a.js',dirty:true,original:'before',draft:'unsaved'}]});
 test('restart recovers drafts separately for each selected repository',()=>{const storage=memory(),store=createWorkbenchRecovery(storage);store.saveProject(draft());store.saveProject(draft('/other'));store.saveSurfaces(['http://localhost:8080'],2);const reopened=createWorkbenchRecovery(storage);assert.equal(reopened.get('/repo').files[0].draft,'unsaved');assert.equal(reopened.get('/missing'),null);assert.equal(reopened.snapshot().shells,2);assert.deepEqual(reopened.snapshot().browsers,['http://localhost:8080/']);assert.equal(reopened.snapshot().commands,undefined);});
@@ -14,3 +14,67 @@ test('patch sharing names its actual disk sections and clearly truncates excerpt
 
 test('a recovered draft already saved outside Super becomes clean',()=>{const f=recoveryFile(draft().files[0],'unsaved');assert.equal(f.original,f.draft);assert.equal(f.changed,false);});
 test('an empty untracked patch remains explicitly described',()=>{assert.match(patchAttachment({path:'empty',working:'',staged:'',untracked:''}),/Untracked file\n\(Empty file\)/);});
+
+/* T19 — the tab that could never be clean.
+ *
+ * Measured on this device: three tabs stuck dirty for ever, `original: null`
+ * and `draft: ''` each, two of them in the repository every review round uses.
+ * `draft !== original` is `'' !== null`, and nine places in `development.js`
+ * asked exactly that question. */
+
+test('T19 · an absent file with an empty draft holds nothing unsaved', () => {
+  // The phantom, in one line. This is what staging a review of a file that is
+  // NEW at HEAD leaves behind: the review's "current" side is empty and the
+  // file is not there.
+  assert.equal(tabDirty(null, ''), false);
+  assert.equal(tabDirty(undefined, undefined), false, 'a record that stored neither');
+  assert.equal(tabDirty('', null), false, 'and the same the other way round');
+});
+
+test('T19 · a real draft is still dirty, including the first byte typed into a new file', () => {
+  assert.equal(tabDirty('before', 'after'), true);
+  assert.equal(tabDirty(null, 'x'), true, 'a new file with content is unsaved work');
+  assert.equal(tabDirty('was here', ''), true, 'emptying a file is a change, not a clean tab');
+});
+
+test('T19 · a stored phantom heals instead of restoring itself', () => {
+  // `dirty: true` is what an older build wrote. Re-deriving is what makes the
+  // fix retroactive: reading the flag would restore the phantom and store it
+  // again on the next save, for ever.
+  const stored = {path: 'new.md', dirty: true, original: null, draft: ''};
+  const restored = recoveryFile(stored, null);
+  assert.equal(tabDirty(restored.original, restored.draft), false);
+  assert.equal(restored.draft, '', 'an absent file restores a tab with no content, not a null one');
+  assert.equal(restored.changed, false);
+});
+
+test('T19 · a stored record with nothing unsaved adopts the disk instead of re-asserting stale bytes', () => {
+  // The case that separates re-deriving from reading the flag, and the only one
+  // that does: a record written `dirty: true` whose draft holds nothing unsaved,
+  // for a file that HAS since been written on disk. Reading the flag keeps the
+  // stale empty bytes and reports `changed: true` — a conflict where there is
+  // none. (Found because the mutant that reads `saved.dirty` survived a first
+  // pass of these cases: the phantom alone cannot tell the two branches apart,
+  // since both return exactly `{original: null, draft: ''}` for it.)
+  const stored = {path: 'empty.md', dirty: true, original: '', draft: ''};
+  const restored = recoveryFile(stored, '# written since\n');
+  assert.equal(restored.draft, '# written since\n');
+  assert.equal(restored.original, '# written since\n');
+  assert.equal(restored.changed, false);
+});
+
+test('T19 · a stored draft that really is unsaved still restores dirty', () => {
+  const stored = {path: 'a.js', dirty: true, original: 'before', draft: 'unsaved'};
+  const restored = recoveryFile(stored, 'before');
+  assert.equal(restored.draft, 'unsaved');
+  assert.equal(restored.original, 'before');
+  assert.equal(tabDirty(restored.original, restored.draft), true);
+});
+
+test('T19 · the store still keeps a new file as a new file', () => {
+  // The existing contract one line up from this: `project()` must not turn an
+  // `original: null` into `''`. Dirtiness changed; what is stored did not.
+  const s = createWorkbenchRecovery(memory());
+  s.saveProject({root: '/repo', selected: 'empty', files: [{path: 'empty', dirty: true, original: null, draft: ''}]});
+  assert.deepEqual(s.get('/repo').files[0], {path: 'empty', dirty: true, original: null, draft: ''});
+});

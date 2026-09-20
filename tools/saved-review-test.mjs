@@ -159,3 +159,46 @@ test('its bodies are read by digest through the host, and the item it yields is 
   const inline=fileFixture({inline:true});const im=savedReviewFile(inline.attempt,inline.task);assert.deepEqual(im[0].inline,{current:'// before\n',proposed:'// after\n'});
   const ib=await savedReviewBodies(im,inline.read,sha256Text);assert.equal(inline.reads.length,0);assert.equal(ib[0].proposed,'// after\n');
 });
+
+/* T19 — where the phantom tab comes from, pinned at its source.
+ *
+ * `SUPER_BUILDS_LANE.md` recorded that any later staging of a phantom's path
+ * "must refuse 'has unsaved edits in the Editor'". **That was wrong**, and the
+ * case above at "changed, vanished, appeared, or edited in the Editor" already
+ * said so: it stages `{original: null, draft: ''}` against a new-file member
+ * and asserts it succeeds. When the file is absent the saved side is `''`, so
+ * the phantom's empty draft matches it and nothing is refused. The defect was
+ * always the nine dirtiness comparisons in `development.js`, never this one.
+ *
+ * What the phantom needs is a review whose CURRENT side is empty — a file that
+ * is new at HEAD and had nothing in it — because that is what puts `''` beside
+ * an `original` of `null` in the reference the Editor opens. */
+import {tabDirty} from '../cockpit/ui/workbench-recovery.js';
+
+test('T19 · a review of an empty new file yields a tab with nothing unsaved in it', async () => {
+  const f = fixture();
+  f.attempt.files[1] = member('new.md', '', '# new\n', {disk: null});
+  f.store.set(f.attempt.files[1].source.draft_sha256, '');
+  f.store.set(f.attempt.files[1].source.result_sha256, '# new\n');
+  const m = savedReviewSet(f.attempt, f.task)[1];
+  const b = (await savedReviewBodies([m], f.read, sha256Text))[0];
+
+  const item = savedReviewItem(m, b, {original: null, draft: ''}, null, ctx);
+  assert.equal(item.reference.original, null, 'still truthfully a new file');
+  assert.equal(item.reference.draft, '');
+  // This is the whole defect: the tab the Editor opens from this reference used
+  // to be dirty for ever, because `'' !== null`.
+  assert.equal(tabDirty(item.reference.original, item.reference.draft), false);
+});
+
+test('T19 · a real unsaved edit to a new file is still refused', async () => {
+  const f = fixture();
+  f.attempt.files[1] = member('new.md', '', '# new\n', {disk: null});
+  f.store.set(f.attempt.files[1].source.draft_sha256, '');
+  f.store.set(f.attempt.files[1].source.result_sha256, '# new\n');
+  const m = savedReviewSet(f.attempt, f.task)[1];
+  const b = (await savedReviewBodies([m], f.read, sha256Text))[0];
+
+  assert.throws(() => savedReviewItem(m, b, {original: null, draft: 'typed'}, null, ctx),
+    /new\.md has unsaved edits in the Editor/);
+});

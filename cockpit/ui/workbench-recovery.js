@@ -19,8 +19,42 @@ export function createWorkbenchRecovery(storage){
     clear(){try{storage.removeItem(RECOVERY_KEY);}catch{throw Error('Could not clear recovery data.');}state={version:1,projects:[],browsers:[],shells:0};error=null;}
   };
 }
+/**
+ * Does this tab hold anything unsaved?
+ *
+ * **One predicate, because there were nine copies of it and every one was wrong
+ * in the same way.** `draft !== original` reads a file that does not exist on
+ * disk (`original === null`) with nothing typed into it (`draft === ''`) as an
+ * unsaved change, because `'' !== null`. There is nothing unsaved there: an
+ * absent file and an empty draft are the same content, which is none.
+ *
+ * Measured on this device before the fix — three tabs stuck dirty for ever,
+ * `original: null, draft: ''` each, two of them in the repository every review
+ * round uses. They are created by staging a review of a file that is NEW at
+ * HEAD: the review's "current" side is empty and the file is absent, so the tab
+ * opens `{null, ''}` and can never be clean again. `persistRecovery` stores it,
+ * every later cockpit restores it, and the condition is self-perpetuating.
+ *
+ * What that cost, at all nine call sites: a permanent `●` on the tab, a
+ * "Discard unsaved changes?" prompt with nothing to discard, the same on
+ * reload, a false count in the recovery dialog, "· Unsaved draft" in the
+ * related-files picker, a status line reading "· Unsaved", a window-close
+ * guard, and — the expensive one — **`leaveDrafts()` raising "Switch
+ * repository and close these drafts?" on every repository change**, which is
+ * why a driver cockpit could not use the page's own repository control at all:
+ * WebDriver answers a `confirm` with `unexpected alert open`.
+ */
+export function tabDirty(original,draft){return (draft??'')!==(original??'');}
+
 export function recoveryFile(saved,disk){
-  if(!saved.dirty||disk===saved.draft)return {path:saved.path,original:disk,draft:disk,changed:false};
+  // **Re-derived, not read from the stored flag.** A record written by a build
+  // that had the nine copies carries `dirty: true` for a tab that never held
+  // anything, so trusting it would restore the phantom and store it again. This
+  // way a world that already has them heals on its next save.
+  if(!tabDirty(saved.original,saved.draft)||disk===saved.draft)
+    // `disk ?? ''` because an absent file restores a tab with no content, not a
+    // tab whose content is `null`.
+    return {path:saved.path,original:disk,draft:disk??'',changed:false};
   // The original bytes must survive: saving will still refuse an external edit.
   return {path:saved.path,original:saved.original,draft:saved.draft,changed:disk!==saved.original};
 }
