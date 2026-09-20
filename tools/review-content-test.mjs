@@ -7,7 +7,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {stageContent, readContent, CHUNK} from '../cockpit/ui/review-content.js';
+import {stageContent, readContent, retainedSide, CHUNK} from '../cockpit/ui/review-content.js';
 
 const sha = s => createHash('sha256').update(Buffer.from(s, 'utf8')).digest('hex');
 
@@ -111,4 +111,44 @@ test('missing and corrupt are different messages, and neither returns bytes', as
   // An unrecognised answer is not treated as success.
   const odd = async () => ({});
   await assert.rejects(() => readContent(odd, sha('x')));
+});
+
+/* ── Which side of a retained member is shown, and how it is decided ──────────
+ *
+ * A retired record keeps `path`, `result_sha256` and `result_bytes` and nothing else, so its
+ * shared draft has no digest. The projection still builds a ref for that side — `content_ref/3`
+ * returns a map whatever it is given — and the object is TRUTHY, so a caller guarding on `!ref`
+ * fell through to the fetch with a null digest and the host's own argument validation was rendered
+ * into the page as the file's content. These pin the four outcomes apart.
+ */
+const REF = d => ({digest: d, bytes: 12, state: d ? 'available' : 'missing'});
+
+test('a body that travelled in the frame is shown inline and is never fetched', () => {
+  assert.deepEqual(retainedSide('the text', REF('a'.repeat(64))), {kind: 'inline', text: 'the text'});
+  assert.deepEqual(retainedSide('', null), {kind: 'inline', text: ''});   // an empty body is a body
+});
+
+test('a digest names bytes to read, and carries the size the reader is told to expect', () => {
+  assert.deepEqual(retainedSide(undefined, REF('b'.repeat(64))), {kind: 'read', digest: 'b'.repeat(64), bytes: 12});
+});
+
+test('no ref at all is "Not recorded." - nothing was kept for this side', () => {
+  assert.deepEqual(retainedSide(undefined, null), {kind: 'absent', text: 'Not recorded.'});
+  assert.equal(retainedSide(undefined, undefined).kind, 'absent');
+});
+
+/* The defect this function exists for: every attempt on a finished plan rendered the host's
+   argument-validation error where its shared draft used to be, from the day retirement shipped. */
+test('a RETIRED side - a truthy ref whose digest is null - is released, never read', () => {
+  const side = retainedSide(undefined, {digest: null, bytes: null, state: 'missing'});
+  assert.equal(side.kind, 'released');
+  assert.match(side.text, /^Released when this plan was finished\./);
+  assert.ok(!('digest' in side), 'a released side offers nothing to fetch');
+});
+
+test('a released side is not confused with a side whose bytes are genuinely gone', () => {
+  // digest present, blob missing: a fault, and still worth fetching so the reader is told which.
+  assert.equal(retainedSide(undefined, {digest: 'c'.repeat(64), bytes: 9, state: 'missing'}).kind, 'read');
+  // digest absent: a design outcome, and fetching it can only produce a type error.
+  assert.equal(retainedSide(undefined, {digest: null, bytes: 9, state: 'missing'}).kind, 'released');
 });

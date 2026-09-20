@@ -79,6 +79,37 @@ export async function readContent(invoke, digest) {
 }
 
 /**
+ * What to show for ONE side of a retained review member, decided before anything is fetched.
+ *
+ * Four outcomes, because they are four different facts and a reader must be able to tell them
+ * apart:
+ *
+ *   * `inline`   — the body travelled in the frame; show it.
+ *   * `read`     — a digest names it in the content store; fetch it.
+ *   * `released` — the record was RETIRED and this side was deliberately dropped. A retired member
+ *     keeps `path`, `result_sha256` and `result_bytes` and nothing else, so the shared draft has no
+ *     digest to fetch. This is a design outcome, not a fault.
+ *   * `absent`   — nothing was recorded for this side at all.
+ *
+ * `released` exists because the projection's `content_ref/3` builds a ref for a side whose digest
+ * is null (`%{"digest" => nil, "bytes" => nil, "state" => "missing"}`), and that object is TRUTHY.
+ * A caller guarding only on `!ref` therefore fell through to the fetch with a null digest, and the
+ * host's own argument validation — `invalid args \`digest\` for command \`review_content\`:
+ * invalid type: null, expected a string` — was painted into the page as the file's content. Every
+ * attempt on a finished plan rendered that from the day retirement shipped.
+ */
+export function retainedSide(inline, ref) {
+  if (typeof inline === 'string') return {kind: 'inline', text: inline};
+  if (!ref) return {kind: 'absent', text: 'Not recorded.'};
+  if (ref.digest === null || ref.digest === undefined)
+    return {
+      kind: 'released',
+      text: 'Released when this plan was finished. Retirement keeps what history needs — the reviewed result, the acceptance, the notes and every run’s verdict — and drops the working copy.',
+    };
+  return {kind: 'read', digest: ref.digest, bytes: ref.bytes};
+}
+
+/**
  * SHA-256 of `text` as lower-case hex — the page's own hash, for checking a
  * body read back against the digest that names it rather than taking the
  * host's word for the bytes it is about to stage.

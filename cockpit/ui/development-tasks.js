@@ -26,7 +26,7 @@ export function taskReviewCounts(p,taskId){
   }
   return counts;
 }
-import {readContent} from './review-content.js';
+import {readContent,retainedSide} from './review-content.js';
 export function initDevelopmentTasks({invoke,actions,current}){
   const root=node('section',undefined,'app-screen');root.dataset.screen='development-tasks';root.hidden=true;root.id='development-tasks';
   root.append(node('p','SUPER / DEVELOPMENT TASKS','eyebrow'),node('h1','Development tasks'),node('p','Keep a development plan, acceptance criteria and blocker history with its assigned bot. Plans do not start execution.','screen-description'));
@@ -178,10 +178,14 @@ export function initDevelopmentTasks({invoke,actions,current}){
           ['Shared draft',row.shared_draft,row.content?.current],
           [deletion?'Delete file':'Proposed text',deletion?'This reviewed result removes the file.':row.proposed_text,deletion?null:row.content?.proposed]]){
           file.append(node('h4',label));
-          if(typeof inline==='string'){file.append(node('pre',inline,'attempt-text'));continue;}
-          if(!ref){file.append(node('p','Not recorded.','availability-note'));continue;}
-          const pre=node('pre',`Reading ${ref.bytes} bytes…`,'attempt-text');pre.dataset.contentDigest=ref.digest;file.append(pre);
-          readContent(invoke,ref.digest).then(t=>{pre.textContent=t;}).catch(e=>{pre.textContent=String(e.message||e);pre.dataset.contentState='unavailable';});
+          /* `retainedSide` decides BEFORE fetching. A retired member has no draft digest, and the
+             projection still builds a truthy ref for it, so guarding on `!ref` alone sent a null
+             digest to the host and painted its argument-validation error into the page. */
+          const side=retainedSide(inline,ref);
+          if(side.kind==='inline'){file.append(node('pre',side.text,'attempt-text'));continue;}
+          if(side.kind!=='read'){const note=node('p',side.text,'availability-note');note.dataset.contentState=side.kind;file.append(note);continue;}
+          const pre=node('pre',`Reading ${side.bytes} bytes…`,'attempt-text');pre.dataset.contentDigest=side.digest;file.append(pre);
+          readContent(invoke,side.digest).then(t=>{pre.textContent=t;}).catch(e=>{pre.textContent=String(e.message||e);pre.dataset.contentState='unavailable';});
         }
         material.append(file);}
 
