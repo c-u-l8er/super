@@ -1,4 +1,5 @@
 import {fleetPanel} from './fleet-view.js';
+import {activityPanel, refreshNow} from './activity.js';
 import {initSchematics} from './schematics-view.js';
 import {initWorkFocus} from './work-focus-view.js';
 import { initDevelopmentTasks } from './development-tasks.js';
@@ -567,7 +568,8 @@ export function render(frame) {
     detail({ world: frame.world, runtime: p.runtime, manifest: p.world }, 'runtime-identity', 'World & frame identity'));
 
   const fleet = fleetPanel(p.fleet);
-  const extra = screens.filter(([id]) => !['continue-work','mission','positions','capabilities','evidence','runtime','bots','new-bot','edit-bot','new-workspace','manage-work','repositories','goals','lanes','runtime-assignments','editor','terminal','browser','development-tasks','mobile','fleet'].includes(id)).map(([id]) => {
+  const activity = activityPanel(p, lastReplySample);
+  const extra = screens.filter(([id]) => !['continue-work','mission','positions','capabilities','evidence','runtime','bots','new-bot','edit-bot','new-workspace','manage-work','repositories','goals','lanes','runtime-assignments','editor','terminal','browser','development-tasks','mobile','fleet','activity'].includes(id)).map(([id]) => {
     const page = panel(id);
     if (id === 'agents') page.append(section('Connected peers', (p.peers ?? []).map(peer => detail(peer, `agent:${peer.peer_id ?? peer.actor}`, peer.actor ?? peer.peer_id ?? 'Peer')), 'No peers are connected.'));
     else if (id === 'authority') page.append(section('Current grants', liveGrants.map(g => detail(g, `authority:${g.id}`, `${g.capability} · ${g.actor}`)), 'No authority is currently granted.'));
@@ -579,7 +581,7 @@ export function render(frame) {
   for (const page of [mission, positions, goalsPage, lanesPage]) page.insertBefore(node('p', `Workspace view: ${scopeName}`, 'scope-note'), page.children[3] ?? null);
   for (const page of [capabilities, evidence, runtime, ...extra]) page.append(node('p', 'Scope: whole runtime', 'scope-note'));
   mission.append(node('p', 'Requests, approvals, and active grant totals cover the whole runtime.', 'availability-note'));
-  presentFrame(el.main, [mission, positions, goalsPage, lanesPage, assignments, newWorkspace, manageWork, repositories, capabilities, evidence, runtime, mobile, fleet, ...extra, recordPage(frame)]);
+  presentFrame(el.main, [mission, positions, goalsPage, lanesPage, assignments, newWorkspace, manageWork, repositories, capabilities, evidence, runtime, mobile, fleet, activity, ...extra, recordPage(frame)]);
   if (focusedDraft) {
     const replacement = [...el.main.querySelectorAll('[data-draft]')].find(n => n.dataset.draft === focusedDraft);
     if (replacement && !replacement.disabled) {
@@ -722,6 +724,18 @@ async function submit(name, args, followCreation=false) {
   if(followCreation)queueMicrotask(followCreatedRecord);
   return accepted;
 }
+
+/* The conversation poll's most recent `reply_status`, held for the Activity
+   screen's Now panel and for nothing else. Session-only and deliberately not
+   persisted: it is a provider's own progress report on one reply, it carries no
+   token count (see activity.js), and a durable series wants a measurement that
+   does not exist in this tree yet. */
+let lastReplySample = null;
+document.addEventListener('reply-sample', event => {
+  lastReplySample = event.detail ?? null;
+  const c = window.cockpit;
+  if (c?.frame?.projection && !c.withdrawn && !c.unavailable && !c.stalled) refreshNow(c.frame.projection, lastReplySample);
+});
 
 let repositoryPickerPending = false;
 document.addEventListener('record-route-change',()=>{const c=window.cockpit;if(c.frame?.projection&&!c.withdrawn&&!c.unavailable&&!c.stalled)render(c.frame);});

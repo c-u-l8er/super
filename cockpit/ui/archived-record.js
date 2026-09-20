@@ -54,15 +54,22 @@ export function fieldState(record, field) {
 /**
  * The sentence that goes where a withheld field would have been.
  *
- * It says three things, and a shorter version of it has been wrong here
- * before: that the record is archived, that the material is kept rather than
- * lost, and which command returns it. `null` for anything not withheld — a
- * caller that renders this note beside a value it did have is stating the
- * opposite of the truth.
+ * It says two things: that the record is archived, and that the material is
+ * kept rather than lost. `null` for anything not withheld — a caller that
+ * renders this note beside a value it did have is stating the opposite of the
+ * truth.
+ *
+ * **It does NOT name the command.** The first version ended *"It is read with
+ * read_development_task"*, which is true of the card and false of the reader:
+ * the cockpit's intent surface carries mutations only (`worker.rs`, enforced by
+ * `tools/check-intent-surface.mjs`), so the page cannot call it and neither can
+ * the person reading the sentence. Naming a door nobody at this surface can open
+ * is a promise, not an explanation. The door stays in the card's data, where a
+ * reader that CAN use it will find it; the sentence stops quoting it until the
+ * page has one of its own.
  */
 export function withheldNote(record, field, subject = 'material') {
   const card = cardOf(record);
   if (!card || fieldState(record, field) !== 'withheld') return null;
-  const door = card.readWith ? ` It is read with ${card.readWith}.` : '';
-  return `This record is archived. Its ${subject} is kept in the world and is not carried on this screen.${door}`;
+  return `This record is archived. Its ${subject} is kept in the world; this screen does not carry it.`;
 }

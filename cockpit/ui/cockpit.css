@@ -649,3 +649,22 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 .plan-part { display:block; }
 .plan-history { margin:16px 0 0; border-top:1px solid var(--line); padding-top:8px; }
 .plan-history > summary { cursor:pointer; font-size:12px; color:var(--dim); }
+
+/* Activity (T18a) — the three bounds, drawn before they refuse.
+   `--live/--wait/--gone` are this app's existing three states, reused rather
+   than restated: a fourth palette for the same three meanings is a fourth
+   thing to keep in step. */
+.capacity-row { margin:0 0 14px; }
+.capacity-head { display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+.capacity-pct { font:600 12px/1 var(--mono); color:var(--dim); }
+.capacity-track { height:8px; border-radius:5px; background:var(--panel2); border:1px solid var(--line); overflow:hidden; margin:6px 0 5px; }
+.capacity-fill { height:100%; background:var(--live); transition:width .25s ease; }
+[data-capacity-state="watch"] .capacity-fill { background:var(--wait); }
+[data-capacity-state="full"] .capacity-fill { background:var(--gone); }
+[data-capacity-state="watch"] .capacity-pct { color:var(--wait); }
+[data-capacity-state="full"] .capacity-pct { color:var(--gone); }
+[data-capacity-summary="watch"] { color:var(--wait); }
+[data-capacity-summary="full"] { color:var(--gone); font-weight:600; }
+[data-activity-kind="reply"] { border-left:2px solid var(--ice); padding-left:10px; }
+[data-activity-verdict="fail"] { border-left:2px solid var(--gone); padding-left:10px; }
+[data-activity-verdict="started"] { border-left:2px solid var(--wait); padding-left:10px; }

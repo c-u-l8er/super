@@ -365,6 +365,47 @@ defmodule Ampd.DevelopmentAttempt do
   # bounds metadata, and is not the thing that decides how much can be reviewed.
   @directory_bytes 128 * 1024
 
+  # Reserve a bounded final outcome for every admitted, unfinished run.
+  #
+  # **One expression, two readers.** `persist/2` refuses on it and
+  # `directory_usage/0` displays it, and a surface that showed a figure the
+  # guard is not keyed to would be a capacity bar that reads comfortable while
+  # the next write refuses. Restating it was the obvious version and is exactly
+  # the second copy of a filter this runtime keeps being bitten by.
+  defp reserved_bytes(attempts) do
+    attempts
+    |> Map.values()
+    |> Enum.flat_map(&(Map.get(&1, "test_runs", %{}) |> Map.values()))
+    |> Enum.count(&(&1["state"] == "started"))
+    |> Kernel.*(4608)
+  end
+
+  @doc """
+  What `persist/2` measures, for a surface that wants to show it BEFORE it refuses.
+
+  Returns the live directory's encoded bytes plus the reserve, against
+  `@directory_bytes` — the exact sum the guard compares. The archive is
+  excluded because the guard excludes it; that is the whole point of T14.
+  """
+  def directory_usage(attempts \\ nil) do
+    attempts = attempts || Ampd.Loci.development_attempts_live()
+    reserved = reserved_bytes(attempts)
+
+    bytes =
+      case Ampd.Frame.encode(attempts) do
+        {:ok, encoded} -> byte_size(encoded)
+        {:error, _, detail} -> detail["bytes"]
+      end
+
+    %{
+      "bytes" => bytes + reserved,
+      "reserved" => reserved,
+      "max" => @directory_bytes,
+      "records" => map_size(attempts),
+      "archived" => map_size(Ampd.Loci.development_attempts_archive())
+    }
+  end
+
   def set_limit, do: @max_members * Ampd.ReviewContent.file_bytes()
 
   defp staged?(row), do: is_map(row) and Map.keys(row) == ["source"]
@@ -1469,13 +1510,7 @@ defmodule Ampd.DevelopmentAttempt do
     # closed; it is then the archive's copy that is authoritative, not the input.
     record = Map.get(attempts, record["id"]) || Map.get(archive, record["id"]) || record
 
-    # Reserve a bounded final outcome for every admitted, unfinished run.
-    reserved =
-      attempts
-      |> Map.values()
-      |> Enum.flat_map(&(Map.get(&1, "test_runs", %{}) |> Map.values()))
-      |> Enum.count(&(&1["state"] == "started"))
-      |> Kernel.*(4608)
+    reserved = reserved_bytes(attempts)
 
     # Bound serialized bytes too: control characters can expand in JSON frames.
     with {:ok, _} <- Ampd.Frame.logical_size(attempts, @directory_bytes),

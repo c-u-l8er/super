@@ -589,4 +589,52 @@ defmodule Ampd.DevelopmentTaskTest do
     assert full_bytes > 8_000
     assert card_bytes < div(full_bytes, 10)
   end
+
+  # ── T18a: the ceilings ride the projection, before they refuse ───────────────
+  #
+  # Every bound in this runtime has announced itself by refusing the work that
+  # reached it — the attempt directory, the plan directory, the device test
+  # history, and the frame, which did it while carrying the review of the change
+  # that bounded the frame. This is the signal arriving earlier than that.
+
+  test "T18a · the operator projection carries what this world has left", c do
+    create(c)
+    cap = Projection.operator()["capacity"]
+
+    assert cap["schema"] == "world-capacity@1"
+    assert cap["frame"]["max"] == Ampd.Frame.max_bytes()
+    assert cap["plans"]["max"] == 80 * 1024
+    assert cap["attempts"]["max"] == 128 * 1024
+    assert cap["plans"]["bytes"] > 0 and cap["plans"]["records"] == 1
+
+    # It says what it is not counting. A frame figure that silently excluded its
+    # own block would be almost right, which is the worst kind of right.
+    assert cap["frame"]["measures"] =~ "excluding the capacity block"
+  end
+
+  # The property T16 exists for, read off the bar a person looks at: finishing a
+  # plan must move the number DOWN, or the surface would show a directory filling
+  # up while the guard it is drawn from sees room.
+  test "T18a · archiving a plan lowers the figure the plan guard is keyed to", c do
+    t = create(c)
+    before = Projection.operator()["capacity"]["plans"]
+
+    Authority.update_development_task(t["id"], 1, "cancelled", "Changed priorities")
+    now = Projection.operator()["capacity"]["plans"]
+
+    assert now["bytes"] < before["bytes"]
+    assert now["records"] == 0 and now["archived"] == 1
+    assert Loci.development_tasks()[t["id"]], "the record itself is still readable"
+  end
+
+  # `with_capacity/1` is reached on exactly the state it exists to report, so it
+  # must not raise there. A projection that will not encode is the emergency, and
+  # a capacity block that crashed on it would remove the only warning.
+  test "T18a · a projection too large to encode still gets a capacity block" do
+    huge = %{"x" => String.duplicate("a", Ampd.Frame.max_bytes() + 1_000)}
+    cap = Projection.with_capacity(huge)["capacity"]
+
+    assert cap["frame"]["bytes"] > Ampd.Frame.max_bytes(),
+           "the block must report the overflow, not hide it"
+  end
 end

@@ -24,6 +24,7 @@ export const screens = [
   ['agents', 'Agents', 'Peers connected to the runtime.'],
   ['routines', 'Routines', 'Scheduled routines are not projected by this runtime yet.'],
   ['fleet', 'Machines', 'Your connected machines and virtual machines.'],
+  ['activity', 'Activity', 'What is running, what has run, and what this world has left before it refuses.'],
   ['gates', 'Gates', 'Build-gate measurements are not delivered to this app yet.'],
   ['rulings', 'Rulings', 'An obligation and ruling directory is not connected yet.'],
   ['authority', 'Authority', 'Authority records supplied by the current runtime.'],
@@ -200,7 +201,7 @@ export function initShell() {
     ['WORK', [['continue-work','Continue work'],['mission','Mission'],['positions','Workspaces'],['goals','Goals'],['development-tasks','Development tasks'],['lanes','Lanes'],['repositories','Repositories'],['editor','Editor'],['terminal','Terminal'],['browser','Browser']]],
     ['SOCIETY', [['agents','Agents'],['capabilities','Capabilities'],['routines','Routines']]],
     ['COMPUTE', [['fleet','Machines']]],
-    ['TRUTH', [['evidence','Evidence'],['gates','Gates'],['rulings','Rulings']]],
+    ['TRUTH', [['activity','Activity'],['evidence','Evidence'],['gates','Gates'],['rulings','Rulings']]],
     ['SYSTEM', [['authority','Authority'],['settings','Settings']]],
   ];
   const link = (id, label) => { const b = node('button', undefined, 'nav-item'); b.append(node('span','·','nav-glyph'),node('span',label,'nav-label'));const count=node('span','','nav-count');count.dataset.navCount=id;count.hidden=true;b.append(count);b.dataset.nav = id; return b; };

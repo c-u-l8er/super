@@ -315,6 +315,36 @@ defmodule Ampd.DevelopmentTask do
   # shrinking what the projection carries would spend that slack instead.
   @directory_bytes 80 * 1024
 
+  @doc """
+  What this module's own guard measures, for a surface that shows it before it refuses.
+
+  **`Ampd.Frame.logical_size/2`, not `encode/1`** — and the difference is not
+  cosmetic. The plan guard checks the recursive term weight; the attempt guard
+  checks the encoded frame plus a reserve. They are two predicates, so these are
+  two measures, and reporting one number for both would give a bar that no
+  refusal is keyed to.
+
+  Live plans only. T16 put finished ones in `development_tasks_archive`, which
+  this guard does not count — again, the point of T16.
+  """
+  def directory_usage(tasks \\ nil) do
+    tasks = tasks || Ampd.Loci.development_tasks_live()
+
+    bytes =
+      case Ampd.Frame.logical_size(tasks, @directory_bytes) do
+        {:ok, n} -> n
+        {:over, n} -> n
+      end
+
+    %{
+      "bytes" => bytes,
+      "max" => @directory_bytes,
+      "records" => map_size(tasks),
+      "archived" => map_size(Ampd.Loci.development_tasks_archive()),
+      "measures" => "recursive term weight, which is what this directory's guard checks"
+    }
+  end
+
   # A finished plan keeps the note it was created with and the last three —
   # which always include the one that closed it — and lets the working middle
   # go. `history` is capped at 32 entries of up to 1000 characters each, so an

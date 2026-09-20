@@ -269,6 +269,68 @@ defmodule Ampd.Projection do
       "validations" => window(validation_records()),
       "effects_history" => window(Enum.filter(Effects.all(), &Effects.terminal?/1))
     }
+    |> with_capacity()
+  end
+
+  @doc """
+  What this world has left, published BEFORE it runs out.
+
+  **Every ceiling in this runtime has announced itself the same way: by refusing
+  the work that reached it.** The attempt directory did it, the plan directory
+  did it, the device test history did it, and the frame did it while carrying
+  the review of the change that bounded the frame. Each time the only signal was
+  a refusal at the moment work stopped.
+
+  So the three bounds a person can do something about ride the projection. They
+  are **derived, never stored** — the same rule the Worker's occupancy follows,
+  and for the same reason: a stored number goes stale in the direction that
+  looks fine.
+
+  **Each figure is asked of the module that owns the limit**, not recomputed
+  here. `DevelopmentAttempt.directory_usage/0` measures what `persist/2` checks,
+  reserve included; `DevelopmentTask.directory_usage/0` measures what its own
+  guard checks, which is a `logical_size` and not an encode. Two measures,
+  because the two guards are two different predicates — and a surface that
+  averaged them into one "bytes used" would show a number no refusal is keyed to.
+
+  **What it costs, because it is not free and the rule is to say so.** Measured
+  on the live world: `with_capacity/1` adds **1.68 ms** to a projection that
+  already takes ~4.2 ms to assemble and ~3.2 ms for the transport to encode —
+  about 23 % more work per frame. Nearly all of it is the second full encode
+  this function does to learn its own size; the two directory figures together
+  are 0.16 ms. That is paid on every world change, and it is paid for the one
+  ceiling that has stopped this app twice: the alternative is threading a byte
+  count out of the transport in Rust, which is more code than the number saves.
+  **A first attempt to measure this reported no cost at all** — the "without"
+  baseline called `operator/0` and deleted the key, so both arms carried the
+  block. A measurement whose baseline contains the thing under test is not a
+  measurement.
+
+  `frame.bytes` is the encoded projection **without this block**, and says so:
+  a block that reported its own contribution would need a fixpoint over its own
+  digits to be exact. The block is a few hundred bytes against 262,144, and
+  naming the exclusion is cheaper and truer than a number that is silently
+  almost right.
+  """
+  def with_capacity(projection) when is_map(projection) do
+    base =
+      case Ampd.Frame.encode(projection) do
+        {:ok, bytes} -> byte_size(bytes)
+        # A projection that will not encode is exactly the state this block
+        # exists to warn about, and it must not raise on the way to saying so.
+        {:error, _, detail} -> detail["bytes"]
+      end
+
+    Map.put(projection, "capacity", %{
+      "schema" => "world-capacity@1",
+      "frame" => %{
+        "bytes" => base,
+        "max" => Ampd.Frame.max_bytes(),
+        "measures" => "this projection, excluding the capacity block itself"
+      },
+      "attempts" => Ampd.DevelopmentAttempt.directory_usage(),
+      "plans" => Ampd.DevelopmentTask.directory_usage()
+    })
   end
 
   @doc false

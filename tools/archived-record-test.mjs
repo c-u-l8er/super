@@ -40,16 +40,22 @@ test('carried is decided by the key, not by the value being truthy', () => {
   assert.equal(withheldNote(c, 'history', 'planning history'), null);
 });
 
-test('the note names the door the card names, and nothing else', () => {
-  const note = withheldNote(card(['history']), 'history', 'planning history');
+test('the note says archived and kept, and does NOT name the door', () => {
+  // The door is real and the card carries it, but the cockpit's intent surface
+  // is mutations only, so the page cannot call it and neither can the person
+  // reading this sentence. Naming it was a promise the reader cannot act on.
+  const c = card(['history']);
+  const note = withheldNote(c, 'history', 'planning history');
   assert.match(note, /archived/);
   assert.match(note, /kept in the world/);
-  assert.match(note, /read_development_task/);
+  assert.doesNotMatch(note, /read_development_task/);
+  assert.equal(cardOf(c).readWith, 'read_development_task', 'the card still names it');
 });
 
-test('an attempt card points at the attempt door', () => {
+test('an attempt card still carries the attempt door in its data', () => {
   const c = card(['history'], 'read_development_attempt', {id: 'da_0001'});
-  assert.match(withheldNote(c, 'history', 'review history'), /read_development_attempt/);
+  assert.equal(cardOf(c).readWith, 'read_development_attempt');
+  assert.doesNotMatch(withheldNote(c, 'history', 'review history'), /read_development_attempt/);
 });
 
 test('a note is refused for a field that is not withheld', () => {
@@ -59,11 +65,12 @@ test('a note is refused for a field that is not withheld', () => {
   assert.equal(withheldNote(c, 'criteria', 'acceptance criteria'), null);
 });
 
-test('a card with no door still says the record is archived', () => {
-  const c = {id: 'dt_1', archived: {schema: CARD_SCHEMA, omitted: ['history']}};
-  const note = withheldNote(c, 'history', 'planning history');
-  assert.match(note, /archived/);
-  assert.doesNotMatch(note, /read with/);
+test('a card with no door reads the same as one with a door', () => {
+  const withDoor = withheldNote(card(['history']), 'history', 'planning history');
+  const none = withheldNote({id: 'dt_1', archived: {schema: CARD_SCHEMA, omitted: ['history']}},
+                            'history', 'planning history');
+  assert.equal(none, withDoor);
+  assert.equal(cardOf({id: 'dt_1', archived: {schema: CARD_SCHEMA, omitted: ['history']}}).readWith, null);
 });
 
 test('a marker of some other schema is not a card', () => {

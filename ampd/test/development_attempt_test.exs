@@ -1634,4 +1634,41 @@ defmodule Ampd.DevelopmentAttemptTest do
     # point.
     assert cards["da_x"]["acceptance"] == record["acceptance"]
   end
+
+  # ── T18a: the attempt directory's own figure ─────────────────────────────────
+
+  # **The reserve is the whole reason this is asked of `DevelopmentAttempt` and
+  # not recomputed in the projection.** `persist/2` refuses on
+  # `encoded + reserved`, so a bar drawn from `encoded` alone would read
+  # comfortable at the exact moment the next write is refused — 4,608 bytes per
+  # started run, and a world with several running is most of a directory away
+  # from where a naive figure would put it.
+  test "T18a · the attempts figure includes the reserve the guard refuses on", c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+
+    plain = DevelopmentAttempt.directory_usage()
+    assert plain["reserved"] == 0
+    assert plain["records"] == 1
+
+    with_started =
+      DevelopmentAttempt.directory_usage(%{
+        a["id"] => Map.put(a, "test_runs", %{"r1" => %{"state" => "started"}})
+      })
+
+    assert with_started["reserved"] == 4608
+    assert with_started["bytes"] >= plain["bytes"] + 4608,
+           "a started run must move the figure the guard is keyed to"
+  end
+
+  test "T18a · the attempts figure counts the live directory and not the archive", c do
+    {_f, a} = archived_attempt(c)
+    usage = DevelopmentAttempt.directory_usage()
+
+    assert usage["records"] == 0 and usage["archived"] == 1
+    assert Projection.operator()["development_attempts"][a["id"]],
+           "archived out of the BOUND, not out of view"
+
+    assert Projection.operator()["capacity"]["attempts"]["archived"] == 1
+  end
 end
