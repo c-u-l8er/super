@@ -42,6 +42,67 @@ defmodule Ampd.Projection do
   @doc "How many history entries a live projection carries."
   def history_window, do: @history_window
 
+  # T17 · what an archived record does NOT carry onto the frame.
+  #
+  # Chosen by weight and by what a card is for, not by taste. Per archived
+  # record on the live world: a plan's `history` is 4 477 B of its 5 734 and
+  # its `criteria` 478 more; an attempt's `history` is 1 749 B of its 5 588,
+  # `test_runs` 589 and `text_check` 576.
+  #
+  # What stays is what a LIST, a REFERENCE and an OUTCOME need: identity,
+  # status, revision, title, every `*_ref`, a plan's `completion` and an
+  # attempt's `acceptance` and `source`. **`acceptance` is deliberately kept.**
+  # It is the reason a finished plan is worth showing — who accepted what, on
+  # which snapshot, under which profile run — and a card that dropped it would
+  # save 25 KB by removing the point.
+  #
+  # **`test_runs` is kept too, and that one cost 6.5 points of frame.** It was
+  # in this list until the renderer was read: `reviewTestCoverage/2` treats a
+  # profile with no run as `missing` and says so on the card, so an archived
+  # attempt without its runs would have told a person that the checks a
+  # completed plan rests on were never run. Omitting it takes the loci block
+  # from 163,415 to 142,431 bytes (62.3 % of a frame to 54.3 %) and buys that
+  # with a false statement on the one surface this record exists to justify.
+  # A later task may take those bytes by teaching the coverage panel the
+  # difference between "not run" and "not carried"; this one will not take
+  # them by asserting the first when the second is true.
+  @archived_plan_omits ~w(history criteria)
+  @archived_attempt_omits ~w(history text_check)
+
+  @doc "What an archived plan's card leaves behind. Public so the suite reads it rather than restating it."
+  def archived_plan_omits, do: @archived_plan_omits
+
+  @doc "What an archived attempt's card leaves behind."
+  def archived_attempt_omits, do: @archived_attempt_omits
+
+  @doc """
+  An archived record as a card that says what it is a card onto.
+
+  **The marker is the whole point, and it is the `member_view/1` move.** A
+  field that is simply absent is indistinguishable from a field that was
+  never written, and a reader cannot tell "not sent in this frame" from
+  "gone" — which is the exact confusion file bodies were given a `content`
+  block to end. So the card carries `archived`, naming the fields left behind
+  and the command that returns them.
+
+  `omitted` lists only the keys the record ACTUALLY had. A card claiming to
+  have withheld a `criteria` that was never recorded sends its reader to a
+  door for nothing, and "the record has no criteria" and "the frame is not
+  carrying the criteria" are different answers.
+  """
+  def archived_cards(records, omits, read_with) when is_map(records) do
+    Map.new(records, fn {id, record} ->
+      {id,
+       record
+       |> Map.drop(omits)
+       |> Map.put("archived", %{
+         "schema" => "archived-record-card@1",
+         "omitted" => Enum.filter(omits, &Map.has_key?(record, &1)),
+         "read_with" => read_with
+       })}
+    end)
+  end
+
   @doc """
   The control room's view. Human control channel only.
 
@@ -99,8 +160,43 @@ defmodule Ampd.Projection do
       # Display only the registered folder's leaf name and stable reference.
       # Full paths remain confined to the host; duplicate names are disambiguated
       # by the reference in lists, pickers and record headers.
-      "development_tasks" => Ampd.Loci.development_tasks(),
-      "development_attempts" => attempt_views(Ampd.Loci.development_attempts()),
+      #
+      # **T17 · an archived record rides as a card, not as the record.**
+      # `Ampd.Loci.development_tasks/0` and `development_attempts/0` merge the
+      # two archives back for readers, which is why finishing a plan does not
+      # blank its card — and it is also why every byte both archives hold has
+      # travelled on every frame since T14 and T16 gave them the exit. Measured
+      # on the live world: the loci block alone weighed 233 916 of the 262 144 a
+      # frame may carry, 89.2 %, and 172 641 of that was archive. Carding them
+      # puts the same block at 163 415, 62.3 % — see `@archived_attempt_omits`
+      # for the 6.5 points `test_runs` costs and why they are worth paying.
+      #
+      # This is not a new rule. It is the one this module already states for
+      # receipts and effects — *current actionable truth in full, history as a
+      # window that says how much it is a window onto* — applied to the one
+      # kind of history that was exempt from it. An archived plan is terminal
+      # by construction (`Ampd.DevelopmentTask.update/3` refuses
+      # `task-completed` and `task-cancelled`), so it is history in exactly the
+      # sense that sentence means.
+      #
+      # The archive merges UNDER the live map, the same direction `Ampd.Loci`
+      # merges it — so if the two ever did disagree these two readers would not
+      # disagree with each other. **No test pins that direction, and it is worth
+      # saying why rather than leaving a silent gap**: `archive_finished/2` is
+      # `Enum.split_with`, a move and never a copy, so the two maps are disjoint
+      # by construction and reversing this merge is an equivalent mutation —
+      # measured, not assumed (the reversed version passes all 78 cases). The
+      # direction is here to match `Loci`, not to resolve a conflict that can
+      # occur.
+      "development_tasks" =>
+        Ampd.Loci.development_tasks_archive()
+        |> archived_cards(@archived_plan_omits, "read_development_task")
+        |> Map.merge(Ampd.Loci.development_tasks_live()),
+      "development_attempts" =>
+        Ampd.Loci.development_attempts_archive()
+        |> archived_cards(@archived_attempt_omits, "read_development_attempt")
+        |> Map.merge(Ampd.Loci.development_attempts_live())
+        |> attempt_views(),
       "bots" => Ampd.Loci.bots(),
       "workspaces" => Ampd.Loci.workspaces(),
       "goals" => Ampd.Loci.goals(),

@@ -455,4 +455,138 @@ defmodule Ampd.DevelopmentTaskTest do
     assert map_size(Loci.development_tasks_live()) == 2, "a refused update archives nothing"
     assert Loci.development_tasks_live()[open_plan["id"]]["status"] == "planned"
   end
+
+  # ── T17: the frame carries the card, not the record ─────────────────────────
+  #
+  # T14 and T16 gave the two directories an exit, and each settled far under its
+  # bound. Neither bounded the FRAME. `Loci.development_tasks/0` merges the
+  # archive back for readers — which is why finishing a plan does not blank its
+  # card — so every archived byte still travelled on every projection. Measured
+  # on the live world the day before this change: the loci block alone weighed
+  # 233,916 of the 262,144 a frame may carry (89.2 %), and 172,641 of that was
+  # archive. Carding both archives puts the same block at 142,431 (54.3 %).
+
+  test "T17 · an archived plan travels as a card that names what it left behind", c do
+    t = create(c)
+    Authority.update_development_task(t["id"], 1, "cancelled", "Changed priorities")
+
+    card = Projection.operator()["development_tasks"][t["id"]]
+
+    # Identity and outcome stay. This is still the plan, and every reference to
+    # it still resolves — the property T16 exists to preserve.
+    assert card["status"] == "cancelled"
+    assert card["title"] == t["title"]
+    assert card["lane_ref"] == t["lane_ref"]
+
+    # The weight goes.
+    refute Map.has_key?(card, "history")
+    refute Map.has_key?(card, "criteria")
+
+    # And the card SAYS it went. That sentence is the whole difference between
+    # a card and a projection that lies by omission: a reader can tell "not
+    # sent in this frame" from "never recorded", and is told where to ask.
+    assert card["archived"] == %{
+             "schema" => "archived-record-card@1",
+             "omitted" => ["history", "criteria"],
+             "read_with" => "read_development_task"
+           }
+  end
+
+  test "T17 · a LIVE plan is untouched — the card is for the archive and nothing else", c do
+    t = create(c)
+    live = Projection.operator()["development_tasks"][t["id"]]
+
+    assert live["criteria"] == c.fields["criteria"]
+    assert is_list(live["history"])
+    refute Map.has_key?(live, "archived")
+  end
+
+  # The rule this runtime already states for its history windows — *a cursor
+  # with nothing to give it to is a promise the protocol does not keep* — in
+  # the shape a card makes it.
+  test "T17 · the door returns exactly what the card left behind", c do
+    t = create(c)
+    Authority.update_development_task(t["id"], 1, "cancelled", "Changed priorities")
+    card = Projection.operator()["development_tasks"][t["id"]]
+
+    assert %{"allow" => true, "development_task" => full} =
+             Control.command(c.human, :read_development_task, [t["id"]])
+
+    for key <- card["archived"]["omitted"] do
+      assert Map.has_key?(full, key), "the door did not return #{key}, which the card promised"
+    end
+
+    assert full["criteria"] == c.fields["criteria"]
+    assert List.last(full["history"])["note"] == "Changed priorities"
+    assert full == Loci.development_tasks()[t["id"]]
+  end
+
+  # A card cannot tell its reader which of the two maps its record is in, so a
+  # door that only opened onto the archive would ask the caller a question the
+  # card does not answer.
+  test "T17 · the door answers for a live plan too", c do
+    t = create(c)
+
+    assert %{"allow" => true, "development_task" => full} =
+             Control.command(c.human, :read_development_task, [t["id"]])
+
+    assert full["status"] == "planned"
+  end
+
+  test "T17 · a ref naming no plan is refused by name, not answered with an empty record", c do
+    assert %{"allow" => false, "refusal" => %{"code" => "record-unknown"}} =
+             Control.command(c.human, :read_development_task, ["dt_9999"])
+  end
+
+  test "T17 · the door is human control only, because the card is only in an operator projection",
+       c do
+    assert %{"allow" => false} = Control.command(c.agent, :read_development_task, ["dt_0001"])
+  end
+
+  # A card claiming to have withheld a field the record never had sends its
+  # reader to a door for nothing, and "the plan has no criteria" and "the frame
+  # is not carrying the criteria" are different answers to different questions.
+  test "T17 · `omitted` names only the fields the record actually had" do
+    cards =
+      Projection.archived_cards(
+        %{"dt_x" => %{"id" => "dt_x", "history" => [%{"note" => "opened"}]}},
+        Projection.archived_plan_omits(),
+        "read_development_task"
+      )
+
+    assert cards["dt_x"]["archived"]["omitted"] == ["history"]
+  end
+
+  # The pinning assertion. Re-adding either omitted field to the card fails it,
+  # which is the failure mode this task exists to prevent recurring.
+  test "T17 · the card weighs a fraction of the record" do
+    record = %{
+      "id" => "dt_x",
+      "status" => "completed",
+      "title" => "A finished plan",
+      "criteria" => String.duplicate("c", 4_000),
+      "history" =>
+        for(
+          _ <- 1..20,
+          do: %{
+            "at" => "2026-09-20T00:00:00Z",
+            "status" => "planned",
+            "note" => String.duplicate("n", 200)
+          }
+        )
+    }
+
+    cards =
+      Projection.archived_cards(
+        %{"dt_x" => record},
+        Projection.archived_plan_omits(),
+        "read_development_task"
+      )
+
+    {:ok, full_bytes} = Ampd.Frame.logical_size(record)
+    {:ok, card_bytes} = Ampd.Frame.logical_size(cards["dt_x"])
+
+    assert full_bytes > 8_000
+    assert card_bytes < div(full_bytes, 10)
+  end
 end

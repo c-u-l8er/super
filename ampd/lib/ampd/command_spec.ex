@@ -282,6 +282,32 @@ defmodule Ampd.CommandSpec do
         %{name: "limit", type: {:count, 200}, required: false, default: 50}
       ]
     },
+    # **T17 · the two doors an archived record's card names.**
+    #
+    # Same rule as the five history pages above, in a different shape: the
+    # projection stopped publishing an archived plan's `history` and
+    # `criteria` and an archived attempt's `history`, `test_runs` and
+    # `text_check`, and named in the record what it left behind. These return
+    # them. `{:id, "dt_"}` and `{:id, "da_"}` are doing the work a `kind`
+    # field plus a runtime prefix check would otherwise do.
+    #
+    # `:human_control`, because the card is only ever in an
+    # `operator-projection@1`, and `retry: :safe` because a read changes
+    # nothing.
+    "read_development_task" => %{
+      cmd: :read_development_task,
+      channel: :human_control,
+      kind: :read,
+      retry: :safe,
+      fields: [%{name: "task_ref", type: {:id, "dt_"}, required: true}]
+    },
+    "read_development_attempt" => %{
+      cmd: :read_development_attempt,
+      channel: :human_control,
+      kind: :read,
+      retry: :safe,
+      fields: [%{name: "attempt_ref", type: {:id, "da_"}, required: true}]
+    },
     "list_effect_history" => %{
       cmd: :list_effect_history,
       channel: :both,

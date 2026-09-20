@@ -10,6 +10,7 @@ import {taskSessionView} from './task-session.js';
 import {taskProgress} from './task-progress.js';
 import {planSteps,completionReason} from './plan-steps.js';
 import {reviewTestPanel} from './review-test-panel.js';
+import {fieldState,withheldNote} from './archived-record.js';
 import {node,navigate,selectedWorkspace} from './app-shell.js';
 import {heldProjection,runtimeWorld,waitForBot} from './runtime-bots.js';
 export function taskScope(p,workspace='',botClient=''){
@@ -73,7 +74,12 @@ export function initDevelopmentTasks({invoke,actions,current}){
     head.append(stepper,allLabel);details.append(head);
     const parts={};const part=key=>{const d=node('div',undefined,'plan-part');d.dataset.planPanel=key;parts[key]=d;details.append(d);return d;};
     // --- brief: what the plan is
-    const brief=part('brief');brief.append(node('p',task.criteria),node('p',task.required_checks?'Required checks: '+task.required_checks.profiles.map(p=>p.includes('javascript')?'JavaScript':p.includes('elixir')?'Elixir':'Rust').join(', '):'Legacy plan: no required checks selected. Every profile run must pass.','directory-note'),record('Open goal' ,'goal',task.goal_ref),record('Open lane','lane',task.lane_ref),record('Open repository','repository',task.repository_ref));
+    const brief=part('brief');
+    // T17: an archived plan's criteria are not on the frame. Rendering
+    // `undefined` here would say the plan recorded none, which is a different
+    // fact and the wrong one.
+    const criteriaNote=withheldNote(task,'criteria','acceptance criteria');
+    brief.append(criteriaNote?node('p',criteriaNote,'availability-note'):node('p',task.criteria),node('p',task.required_checks?'Required checks: '+task.required_checks.profiles.map(p=>p.includes('javascript')?'JavaScript':p.includes('elixir')?'Elixir':'Rust').join(', '):'Legacy plan: no required checks selected. Every profile run must pass.','directory-note'),record('Open goal' ,'goal',task.goal_ref),record('Open lane','lane',task.lane_ref),record('Open repository','repository',task.repository_ref));
     const bot=p?.bots?.[task.bot_ref];if(bot)brief.append(button('Open '+bot.name,()=>navigate('bot:'+bot.client_ref,true)));
     // --- next: the one action that matters now
     const next=node('section',undefined,'attempt-checks');next.dataset.taskNextAction=task.id;next.append(node('h3','Next action'),node('p',progress.reason));
@@ -112,8 +118,15 @@ export function initDevelopmentTasks({invoke,actions,current}){
     const done=part('completed');
     if(task.status==='completed'){done.append(node('h3','Plan completed'),node('p','This is your planning decision based on the linked accepted results. It does not certify later source changes.','availability-note'));const receipt=node('p',`Completed ${task.completion?.at??''} · Accepted reviews: ${(task.completion?.accepted_attempt_refs??[]).join(', ')}`,'directory-note');receipt.dataset.planCompletion=task.id;done.append(receipt);}
     // --- history & planning note: one collapsed line, always reachable
-    const hist=node('details',undefined,'plan-history');hist.dataset.planPanel='history';hist.append(node('summary',`Plan history (${task.history.length})${plan.completed||plan.cancelled?'':' · planning note'}`));
-    for(const event of task.history)hist.append(node('p',`${event.at} · ${event.status} · ${event.note}`,'availability-note'));
+    const hist=node('details',undefined,'plan-history');hist.dataset.planPanel='history';
+    // T17: `task.history.length` was read unconditionally and threw on an
+    // archived plan — the frame stopped carrying it, and this is the read that
+    // proves a renderer must be told, not left to infer from a missing key.
+    const planHistory=fieldState(task,'history');
+    hist.dataset.historyState=planHistory;
+    hist.append(node('summary',planHistory==='carried'?`Plan history (${task.history.length})${plan.completed||plan.cancelled?'':' · planning note'}`:'Plan history · archived'));
+    if(planHistory==='carried')for(const event of task.history)hist.append(node('p',`${event.at} · ${event.status} · ${event.note}`,'availability-note'));
+    else hist.append(node('p',withheldNote(task,'history','planning history')??'No plan history was recorded.','availability-note'));
     if(!plan.completed&&!plan.cancelled){
       const update=node('form',undefined,'bot-profile-form');update.id='development-plan-update';const status=node('select');status.id='task-status';for(const s of ['planned','blocked','cancelled']){const o=node('option',s);o.value=s;status.append(o);}status.value=task.status;
       const note=node('textarea');note.id='task-note';note.required=true;note.maxLength=250;note.rows=3;
@@ -216,6 +229,11 @@ export function initDevelopmentTasks({invoke,actions,current}){
         for(const check of result.checks)checks.append(node('p',`${check.label}: ${check.outcome.replaceAll('_',' ')}. ${check.message}${check.count?' '+check.count+' finding(s). Lines: '+check.lines.join(', '):''}`));
         checks.append(node('p',`Checked ${result.at} · ${result.result_bytes} bytes`,'directory-note'));
         const identity=node('details');identity.append(node('summary','Exact checked result'),node('pre',result.result_sha256,'attempt-text'));checks.append(identity);
+      }else if(fieldState(attempt,'text_check')==='withheld'){
+        // T17: without this the archived attempt fell to the final `else` and
+        // said "No text checks were recorded" about a record whose checks are
+        // in the world and merely off the frame.
+        checks.append(node('p',withheldNote(attempt,'text_check','proposed-text checks'),'availability-note'));
       }else if(!['cancelled','completed'].includes(task.status)&&!['dismissed','accepted'].includes(attempt.status)){
         const check=button('Check proposed text',async()=>{
           if(pending)return;
@@ -232,8 +250,10 @@ export function initDevelopmentTasks({invoke,actions,current}){
         const accepted=node('section',undefined,'attempt-checks');accepted.dataset.acceptedAttempt=attempt.id;
         accepted.append(node('h4','Accepted tested result'),node('p',attempt.acceptance.note),node('p','Accepted: '+attempt.acceptance.accepted_at,'directory-note'),node('p','Test run: '+attempt.acceptance.run_id,'directory-note'),node('p','Tested snapshot: '+attempt.acceptance.snapshot_sha256,'directory-note'),node('p','This decision covers the saved proposal and captured test snapshot. Later edits are not covered, and the plan is not automatically completed.','availability-note'));if(attempt.acceptance.profile_run_refs)for(const [profile,run] of Object.entries(attempt.acceptance.profile_run_refs))accepted.append(node('p','Covered profile: '+profile+' · '+run,'directory-note'));card.append(accepted);if(!['cancelled','completed'].includes(task.status))accepted.append(acceptedResultCheck({attempt,invoke,current}),acceptedBuildPanel({attempt,invoke,current}));
       }
-      card.append(node('h4','Review history'));
-      for(const event of attempt.history)card.append(node('p',`${event.at} · ${event.status.replaceAll('_',' ')} · ${event.note}`,'availability-note'));
+      const attemptHistory=fieldState(attempt,'history');
+      card.append(node('h4',attemptHistory==='carried'?'Review history':'Review history · archived'));
+      if(attemptHistory==='carried')for(const event of attempt.history)card.append(node('p',`${event.at} · ${event.status.replaceAll('_',' ')} · ${event.note}`,'availability-note'));
+      else card.append(node('p',withheldNote(attempt,'history','review history')??'No review history was recorded.','availability-note'));
       if(!['cancelled','completed'].includes(task.status)&&!['dismissed','accepted'].includes(attempt.status)){
         const form=node('form',undefined,'bot-profile-form'),status=node('select'),note=node('textarea');status.id='attempt-status-'+attempt.id;note.id='attempt-note-'+attempt.id;note.required=true;note.maxLength=250;note.rows=3;
         for(const value of ['recorded','needs_changes','dismissed']){const option=node('option',value.replaceAll('_',' '));option.value=value;status.append(option);}status.value=attempt.status;

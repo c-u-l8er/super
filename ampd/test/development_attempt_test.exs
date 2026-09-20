@@ -1505,4 +1505,133 @@ defmodule Ampd.DevelopmentAttemptTest do
     refute Map.has_key?(next["development_attempts"], "da_x")
     assert Map.has_key?(next["development_attempts_archive"], "da_x")
   end
+
+  # ── T17: the frame carries the card, not the record ─────────────────────────
+  #
+  # T14 took finished attempts out of the DIRECTORY's bound and left them in
+  # every reader's view, by merging the archive back in `Loci`. That is right —
+  # a completed plan's card must still list the reviews that closed it — and it
+  # is why 122,551 bytes of archived attempts travelled on every frame in the
+  # live world. The card is what travels now; the record is a command away.
+
+  defp archived_attempt(c) do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+    Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded by a later review")
+    Authority.update_development_task(f["task_ref"], 1, "cancelled", "Changed priorities")
+    {f, a}
+  end
+
+  test "T17 · an archived attempt travels as a card that names what it left behind", c do
+    {_f, a} = archived_attempt(c)
+
+    card = Projection.operator()["development_attempts"][a["id"]]
+    assert card, "archiving must not take the attempt out of the frame — T14 exists to keep it"
+
+    # Identity, outcome and the source the card's own summary line reads.
+    assert card["status"] == "dismissed"
+    assert card["task_ref"] == a["task_ref"]
+    assert card["source"]["path"] == "index.html"
+
+    refute Map.has_key?(card, "history")
+
+    assert card["archived"]["schema"] == "archived-record-card@1"
+    assert card["archived"]["read_with"] == "read_development_attempt"
+    assert "history" in card["archived"]["omitted"]
+
+    # `text_check` is in the omit list and this record has none, so it must
+    # NOT be claimed as withheld: a door offered for nothing is worse than no
+    # door.
+    refute "text_check" in card["archived"]["omitted"]
+
+    # And `test_runs` is not in the omit list at all — see the note on
+    # `@archived_attempt_omits`. `reviewTestCoverage/2` reads a profile with
+    # no run as `missing`, so an archived attempt without its runs would tell
+    # a person the checks its plan completed on were never run.
+    refute "test_runs" in Projection.archived_attempt_omits()
+  end
+
+  test "T17 · a LIVE attempt keeps its history, and carries no card marker", c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+
+    live = Projection.operator()["development_attempts"][a["id"]]
+    assert is_list(live["history"])
+    refute Map.has_key?(live, "archived")
+  end
+
+  test "T17 · the door returns exactly what an archived attempt's card left behind", c do
+    {_f, a} = archived_attempt(c)
+    card = Projection.operator()["development_attempts"][a["id"]]
+
+    assert %{"allow" => true, "development_attempt" => full} =
+             Control.command(c.human, :read_development_attempt, [a["id"]])
+
+    for key <- card["archived"]["omitted"] do
+      assert Map.has_key?(full, key), "the door did not return #{key}, which the card promised"
+    end
+
+    assert List.last(full["history"])["note"] == "Superseded by a later review"
+    assert full == Loci.development_attempts()[a["id"]]
+  end
+
+  test "T17 · a ref naming no attempt is refused by name", c do
+    assert %{"allow" => false, "refusal" => %{"code" => "record-unknown"}} =
+             Control.command(c.human, :read_development_attempt, ["da_9999"])
+  end
+
+  test "T17 · the attempt door is human control only", c do
+    assert %{"allow" => false} = Control.command(c.agent, :read_development_attempt, ["da_0001"])
+  end
+
+  # **The card goes through `attempt_views/1`, not around it.** The two bounds
+  # are independent: carding an archived record removes its history, and
+  # `member_view/1` removes a staged member's bodies. A card that skipped the
+  # view would put file bodies back on the frame while removing history from
+  # it, which is a net loss dressed as a saving.
+  test "T17 · an archived attempt's card is still a member view — no body rides back on", c do
+    {_f, a} = archived_attempt(c)
+    card = Projection.operator()["development_attempts"][a["id"]]
+
+    assert card["content"], "the member view did not run over the card"
+    assert card["archived"], "the card marker did not survive the member view"
+  end
+
+  test "T17 · the card weighs a fraction of the record" do
+    record = %{
+      "id" => "da_x",
+      "status" => "accepted",
+      "task_ref" => "dt_x",
+      "acceptance" => %{"note" => String.duplicate("a", 900)},
+      "text_check" => %{"detail" => String.duplicate("t", 1_500)},
+      "test_runs" => %{"p" => %{"detail" => String.duplicate("r", 500)}},
+      "history" =>
+        for(
+          _ <- 1..12,
+          do: %{
+            "at" => "2026-09-20T00:00:00Z",
+            "status" => "recorded",
+            "note" => String.duplicate("n", 150)
+          }
+        )
+    }
+
+    cards =
+      Projection.archived_cards(
+        %{"da_x" => record},
+        Projection.archived_attempt_omits(),
+        "read_development_attempt"
+      )
+
+    {:ok, full_bytes} = Ampd.Frame.logical_size(record)
+    {:ok, card_bytes} = Ampd.Frame.logical_size(cards["da_x"])
+
+    assert full_bytes > 5_000
+    assert card_bytes < div(full_bytes, 2)
+
+    # The acceptance is kept on purpose: it is why a finished plan is worth
+    # showing at all. A card that dropped it would save bytes by removing the
+    # point.
+    assert cards["da_x"]["acceptance"] == record["acceptance"]
+  end
 end

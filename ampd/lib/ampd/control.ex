@@ -439,6 +439,44 @@ defmodule Ampd.Control do
   defp dispatch_read(peer, :list_grant_requests, [cursor, limit]),
     do: Projection.page(Projection.history_for(:grant_requests, peer["actor"]), cursor, limit)
 
+  # **T17 · the door the archived card promises.**
+  #
+  # This module's history commands exist because of a rule this runtime
+  # already states: *every window a projection hands out has a `next_cursor`,
+  # and every one of them needs a command that can follow it; a cursor with
+  # nothing to give it to is a promise the protocol does not keep.* An
+  # archived record's card makes the same promise in a different shape — it
+  # names the fields it left behind and the command that returns them — and
+  # these are that command.
+  #
+  # **Two commands, not one with a `kind`.** A single `read_development_record
+  # {kind, ref}` would have to check that the ref's prefix matches the kind at
+  # run time, which is a refusal where a type will do: `{:id, "dt_"}` and
+  # `{:id, "da_"}` make the mismatch unphrasable.
+  #
+  # They read the MERGED directory (`Ampd.Loci.development_tasks/0`), so a
+  # live record answers here too. A door that only opened onto the archive
+  # would make every caller decide first which map its ref is in — a decision
+  # the caller cannot make from a card, because the card is what it is asking
+  # about.
+  #
+  # Human control only, because the card exists only in `operator-projection`.
+  # No new authority: this returns exactly what that frame carried in full
+  # until T17 stopped publishing it.
+  defp dispatch_read(_peer, :read_development_task, [ref]) do
+    case Ampd.Loci.development_tasks()[ref] do
+      nil -> record_unknown("development_task", ref)
+      task -> %{"allow" => true, "development_task" => task}
+    end
+  end
+
+  defp dispatch_read(_peer, :read_development_attempt, [ref]) do
+    case Ampd.Loci.development_attempts()[ref] do
+      nil -> record_unknown("development_attempt", ref)
+      attempt -> %{"allow" => true, "development_attempt" => attempt}
+    end
+  end
+
   # Reports seals. It does **not** recover: there is no recovery
   # transition yet, and a command called `recover_world` that only
   # describes the damage is a name making a promise the code does not
@@ -479,6 +517,14 @@ defmodule Ampd.Control do
   # its own commits. Reaching them from an ordered projection would put that
   # machine phase inside a 15-second transaction budget with a participant
   # fault able to take the coordinator down.
+
+  # A ref the caller could only have got from a card, for a record that is not
+  # there. `retryable: false`: nothing in this world will make it appear.
+  defp record_unknown(kind, ref),
+    do: %{
+      "allow" => false,
+      "refusal" => Refusal.new("record-unknown", component: "#{kind} #{ref}", retryable: false)
+    }
 
   defp dispatch_mutation(peer, :request_effect, [cap, resource, request]),
     do: Gateway.perform(cap, resource, Peer.authoritative_context(peer, request), request)

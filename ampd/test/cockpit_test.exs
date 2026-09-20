@@ -180,6 +180,15 @@ defmodule Ampd.CockpitTest do
       list_validations: {kestrel, [nil, 50]},
       list_effect_history: {kestrel, [nil, 50]},
       list_grant_requests: {kestrel, [nil, 50]},
+      # T17's two, the same rule a third time — and this census is what caught
+      # them. The projection stopped publishing an archived record's history
+      # and named these as the doors that return it; a door not framed to an
+      # incarnation answers a question about a world the caller cannot
+      # identify. `human`, because the card they redeem is only ever in an
+      # operator projection. Refs that do not exist, for the D.1.1 reason
+      # below: a refusal is a read's answer as much as a hit is.
+      read_development_task: {human, ["dt_0001"]},
+      read_development_attempt: {human, ["da_0001"]},
       inspect_refusal: {kestrel, [cid]},
       operator_projection: {human, []},
       recovery_status: {human, []},
