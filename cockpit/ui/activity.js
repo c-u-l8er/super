@@ -256,9 +256,16 @@ export function activityPanel(projection, reply) {
       open.dataset.developmentTask = r.kind === 'plan' ? r.ref : (r.task_ref ?? '');
       if (r.kind === 'attempt' && r.task_ref) open.dataset.attemptId = r.ref;
       if (!open.dataset.developmentTask) open.disabled = true;
+      // **The ref goes in an attribute, not in the text.** `references.js`
+      // rewrites any `dt_`/`da_` id it finds in a text node into that record's
+      // display label — so `${r.ref}` rendered the plan's title a second time,
+      // and a plan's accepted reviews came out as "Review of <the whole title>"
+      // once each. Found by opening the screen, not by reading the code.
+      open.title = r.ref;
       row.append(open, node('p',
-        `${r.status} · ${r.at ?? 'no recorded time'} · ${r.ref}` +
-        (r.accepted?.length ? ` · accepted ${r.accepted.join(', ')}` : ''), 'directory-note'));
+        `${r.status} · ${r.at ?? 'no recorded time'}` +
+        (r.accepted?.length ? ` · ${r.accepted.length} accepted review${r.accepted.length === 1 ? '' : 's'}` : ''),
+        'directory-note'));
       box.append(row);
     }
     cap.append(box);
