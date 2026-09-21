@@ -56,6 +56,51 @@ export function capacityRows(projection) {
   ];
 }
 
+/**
+ * What has left the live directories, newest finished first.
+ *
+ * T21. T14 and T16 gave the two directories an exit and T17 put every archived
+ * record on the frame as a card — so **this costs nothing new on the wire**:
+ * the marker `archived_cards/3` already writes is what tells the two apart, and
+ * this reads it. Until now the only trace of an archive anywhere in the app was
+ * a count in the capacity row, a number with nothing behind it.
+ *
+ * **There is deliberately no restore, and that is not an omission.**
+ * `bot-directory.js` archives a bot BY CHOICE and can therefore un-choose it. A
+ * plan is archived BECAUSE IT IS FINISHED — `Ampd.DevelopmentTask.update/3`
+ * refuses `task-completed` and `task-cancelled` by name — so there is nothing to
+ * restore it to. Different reason, different affordance.
+ */
+export function archivedRecords(projection) {
+  const card = r => r && r.archived && r.archived.schema === 'archived-record-card@1';
+  const plans = Object.values(projection?.development_tasks ?? {}).filter(card).map(t => ({
+    ref: t.id,
+    kind: 'plan',
+    title: t.title ?? t.id,
+    status: t.status ?? 'unknown',
+    at: t.completion?.at ?? null,
+    accepted: t.completion?.accepted_attempt_refs ?? [],
+  }));
+  const attempts = Object.values(projection?.development_attempts ?? {}).filter(card).map(a => ({
+    ref: a.id,
+    kind: 'attempt',
+    title: a.source?.path ?? (Array.isArray(a.files) ? `${a.files.length} files · combined review` : a.id),
+    status: a.status ?? 'unknown',
+    at: a.acceptance?.accepted_at ?? null,
+    task_ref: a.task_ref ?? null,
+  }));
+  // Newest first. A record with no time falls out last without a clause of its
+  // own: `?? ''` makes it the empty string, which a DESCENDING compare puts at
+  // the end. An explicit null-first test was written here and removed once a
+  // mutant showed it changed nothing — the behaviour is the fallback's, and the
+  // case below pins it so a change to that fallback cannot quietly move them.
+  // Ties broken by ref, so the order is total and does not shuffle per frame.
+  const order = (x, y) =>
+    String(y.at ?? '').localeCompare(String(x.at ?? '')) ||
+    String(y.ref).localeCompare(String(x.ref));
+  return {plans: plans.sort(order), attempts: attempts.sort(order)};
+}
+
 /** The worst bound, for a one-line summary. `null` when nothing is reported. */
 export function worstBound(rows) {
   if (!rows.length) return null;
@@ -186,6 +231,37 @@ export function activityPanel(projection, reply) {
     line.dataset.capacitySummary = worst.state;
     cap.append(line);
     for (const r of rows) cap.append(bar(r));
+  }
+
+  // T21. The capacity rows have counted what is archived since T18a; this is
+  // the first place in the app that says WHAT. It adds nothing to the frame —
+  // T17 already put every archived record on it as a card.
+  const gone = archivedRecords(projection);
+  for (const [kind, label, rows2] of [['plans', 'plans', gone.plans], ['attempts', 'reviews', gone.attempts]]) {
+    if (!rows2.length) continue;
+    const box = node('details', undefined, 'activity-archived');
+    box.dataset.archived = kind;
+    box.append(node('summary', `${rows2.length} archived ${label}`));
+    box.append(node('p', kind === 'plans'
+      ? 'Finished plans. They hold no directory budget and cannot be reopened — finishing is terminal.'
+      : 'Reviews of finished plans. Their identity, acceptance and runs are kept; the working material was released.',
+      'directory-note'));
+    for (const r of rows2) {
+      const row = node('article', undefined, 'guidance-item');
+      row.dataset.archivedRef = r.ref;
+      const open = node('button', r.title, 'subtle');
+      open.type = 'button';
+      // The app's own deep-link contract: a plan ref, optionally with an
+      // attempt to reveal inside it (`development-tasks.js`'s `reveal`).
+      open.dataset.developmentTask = r.kind === 'plan' ? r.ref : (r.task_ref ?? '');
+      if (r.kind === 'attempt' && r.task_ref) open.dataset.attemptId = r.ref;
+      if (!open.dataset.developmentTask) open.disabled = true;
+      row.append(open, node('p',
+        `${r.status} · ${r.at ?? 'no recorded time'} · ${r.ref}` +
+        (r.accepted?.length ? ` · accepted ${r.accepted.join(', ')}` : ''), 'directory-note'));
+      box.append(row);
+    }
+    cap.append(box);
   }
   root.append(cap);
 

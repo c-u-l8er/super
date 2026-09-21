@@ -668,3 +668,11 @@ body.schematics-active #app-rail,body.schematics-active #receipts,body.schematic
 [data-activity-kind="reply"] { border-left:2px solid var(--ice); padding-left:10px; }
 [data-activity-verdict="fail"] { border-left:2px solid var(--gone); padding-left:10px; }
 [data-activity-verdict="started"] { border-left:2px solid var(--wait); padding-left:10px; }
+
+/* T21 — what has left the live directories. Collapsed by default: this is
+   history, and the capacity bars above it are the thing to act on. */
+.activity-archived { margin:10px 0 18px; border:1px solid var(--line); border-radius:8px; padding:8px 12px; background:var(--panel); }
+.activity-archived > summary { cursor:pointer; font:600 11px/1.5 var(--mono); text-transform:uppercase; letter-spacing:.08em; color:var(--dim); }
+.activity-archived[open] > summary { margin-bottom:8px; }
+.activity-archived .guidance-item { padding:4px 0; border-bottom:1px solid var(--line); }
+.activity-archived .guidance-item:last-child { border-bottom:0; }

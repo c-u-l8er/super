@@ -7,7 +7,7 @@
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {capacityRows, worstBound, runRows, runTally, nowRows, WATCH, FULL} from '../cockpit/ui/activity.js';
+import {capacityRows, worstBound, runRows, runTally, nowRows, archivedRecords, WATCH, FULL} from '../cockpit/ui/activity.js';
 
 const capacity = (over = {}) => ({
   schema: 'world-capacity@1',
@@ -118,4 +118,70 @@ test('a live reply is described as bytes, because bytes is what it is', () => {
 test('an inactive or absent reply puts nothing in Now', () => {
   assert.deepEqual(nowRows({}, {active: false, received_bytes: 900}), []);
   assert.deepEqual(nowRows({}, null), []);
+});
+
+/* T21 — what has left the live directories.
+ *
+ * The capacity rows have counted it since T18a and nothing said what it was.
+ * This reads the marker T17 already puts on every archived card, so it costs
+ * nothing new on the frame. */
+
+const CARD = {schema: 'archived-record-card@1', omitted: ['history'], read_with: 'read_development_task'};
+const archivedWorld = {
+  development_tasks: {
+    dt_live: {id: 'dt_live', title: 'Still open', status: 'planned'},
+    dt_1: {id: 'dt_1', title: 'Older plan', status: 'completed', archived: CARD,
+           completion: {at: '2026-09-10T00:00:00Z', accepted_attempt_refs: ['da_1']}},
+    dt_2: {id: 'dt_2', title: 'Newer plan', status: 'cancelled', archived: CARD},
+    dt_3: {id: 'dt_3', title: 'Newest plan', status: 'completed', archived: CARD,
+           completion: {at: '2026-09-20T00:00:00Z', accepted_attempt_refs: ['da_2']}},
+  },
+  development_attempts: {
+    da_live: {id: 'da_live', task_ref: 'dt_live', source: {path: 'open.js'}},
+    da_1: {id: 'da_1', task_ref: 'dt_1', status: 'accepted', archived: CARD, source: {path: 'a.js'},
+           acceptance: {accepted_at: '2026-09-10T01:00:00Z'}},
+    da_2: {id: 'da_2', task_ref: 'dt_3', status: 'accepted', archived: CARD,
+           files: [{}, {}, {}], acceptance: {accepted_at: '2026-09-20T01:00:00Z'}},
+  },
+};
+
+test('T21 · only archived records are listed, and live ones are left alone', () => {
+  const {plans, attempts} = archivedRecords(archivedWorld);
+  assert.deepEqual(plans.map(p => p.ref).sort(), ['dt_1', 'dt_2', 'dt_3']);
+  assert.deepEqual(attempts.map(a => a.ref).sort(), ['da_1', 'da_2']);
+});
+
+test('T21 · newest finished first, and a record with no time goes last', () => {
+  // `dt_2` was cancelled and has no completion, so it has no time. Sorting it
+  // as if it happened at the beginning of time would put a record nobody can
+  // date above one that is dated — the list is meant to read as a history.
+  assert.deepEqual(archivedRecords(archivedWorld).plans.map(p => p.ref), ['dt_3', 'dt_1', 'dt_2']);
+});
+
+test('T21 · the order is total, so the list does not shuffle between frames', () => {
+  const world = {development_tasks: {
+    a: {id: 'a', archived: CARD, completion: {at: 'T'}},
+    b: {id: 'b', archived: CARD, completion: {at: 'T'}},
+  }};
+  assert.deepEqual(archivedRecords(world).plans.map(p => p.ref), archivedRecords(world).plans.map(p => p.ref));
+  assert.deepEqual(archivedRecords(world).plans.map(p => p.ref), ['b', 'a']);
+});
+
+test('T21 · a review is named by its path, or by how many files it reviewed', () => {
+  const {attempts} = archivedRecords(archivedWorld);
+  assert.equal(attempts.find(a => a.ref === 'da_1').title, 'a.js');
+  assert.equal(attempts.find(a => a.ref === 'da_2').title, '3 files · combined review');
+});
+
+test('T21 · a plan carries the reviews it was completed on', () => {
+  assert.deepEqual(archivedRecords(archivedWorld).plans.find(p => p.ref === 'dt_3').accepted, ['da_2']);
+  assert.deepEqual(archivedRecords(archivedWorld).plans.find(p => p.ref === 'dt_2').accepted, [],
+    'a cancelled plan accepted nothing, and says so as an empty list rather than undefined');
+});
+
+test('T21 · a marker of another schema is not an archived record', () => {
+  const world = {development_tasks: {x: {id: 'x', archived: {schema: 'something-else@1'}}}};
+  assert.deepEqual(archivedRecords(world).plans, []);
+  assert.deepEqual(archivedRecords({}).plans, []);
+  assert.deepEqual(archivedRecords(null).attempts, []);
 });
