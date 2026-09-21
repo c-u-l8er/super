@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createWorkbenchRecovery,recoveryFile,patchAttachment,tabDirty,RECOVERY_KEY} from '../cockpit/ui/workbench-recovery.js';
+import {createWorkbenchRecovery,recoveryFile,patchAttachment,tabDirty,tabsToEvict,EDITOR_TABS,RECOVERY_KEY} from '../cockpit/ui/workbench-recovery.js';
 const memory=()=>{const data=new Map();return {getItem:k=>data.get(k),setItem:(k,v)=>data.set(k,v),removeItem:k=>data.delete(k)};};
 const draft=(root='/repo')=>({root,selected:'a.js',files:[{path:'a.js',dirty:true,original:'before',draft:'unsaved'}]});
 test('restart recovers drafts separately for each selected repository',()=>{const storage=memory(),store=createWorkbenchRecovery(storage);store.saveProject(draft());store.saveProject(draft('/other'));store.saveSurfaces(['http://localhost:8080'],2);const reopened=createWorkbenchRecovery(storage);assert.equal(reopened.get('/repo').files[0].draft,'unsaved');assert.equal(reopened.get('/missing'),null);assert.equal(reopened.snapshot().shells,2);assert.deepEqual(reopened.snapshot().browsers,['http://localhost:8080/']);assert.equal(reopened.snapshot().commands,undefined);});
@@ -77,4 +77,62 @@ test('T19 · the store still keeps a new file as a new file', () => {
   const s = createWorkbenchRecovery(memory());
   s.saveProject({root: '/repo', selected: 'empty', files: [{path: 'empty', dirty: true, original: null, draft: ''}]});
   assert.deepEqual(s.get('/repo').files[0], {path: 'empty', dirty: true, original: null, draft: ''});
+});
+
+/* T20 — the sixteen-tab wall, and what may be shed to get past it.
+ *
+ * `development.js` refused staging outright at the cap, and nothing sheds a
+ * tab, so a device that reached it stayed there: measured on this one,
+ * `super-live` sat at exactly 16 and every review of a path that was not
+ * already open was refused. A clean tab is a cache of disk; a dirty one is
+ * unsaved work. */
+
+const tabs = (n, from = 0) => Array.from({length: n}, (_, i) => ({path: `f${i + from}.js`, dirty: false}));
+
+test('T20 · nothing is shed while the review fits', () => {
+  assert.deepEqual(tabsToEvict(tabs(3), ['f0.js', 'new.js'], EDITOR_TABS), []);
+  assert.deepEqual(tabsToEvict([], ['a', 'b'], EDITOR_TABS), []);
+});
+
+test('T20 · at the cap, exactly as many clean tabs go as the review needs room for', () => {
+  // 16 open, 4 members none of them open: 20 wanted, 4 over.
+  const shed = tabsToEvict(tabs(16), ['m1.js', 'm2.js', 'm3.js', 'm4.js'], EDITOR_TABS);
+  assert.equal(shed.length, 4, 'no more than the room required');
+  assert.deepEqual(shed, ['f0.js', 'f1.js', 'f2.js', 'f3.js'], 'oldest opened first');
+});
+
+test('T20 · a member already open is not shed to make room for itself', () => {
+  const open = [{path: 'm1.js', dirty: false}, ...tabs(15, 1)];
+  const shed = tabsToEvict(open, ['m1.js', 'new.js'], EDITOR_TABS);
+  assert.ok(!shed.includes('m1.js'), 'the review is about to need this tab');
+  assert.deepEqual(shed, ['f1.js']);
+});
+
+test('T20 · unsaved work is never shed, however old the tab', () => {
+  const open = [{path: 'draft.js', dirty: true}, ...tabs(15, 1)];
+  const shed = tabsToEvict(open, ['new.js'], EDITOR_TABS);
+  assert.ok(!shed.includes('draft.js'));
+  assert.deepEqual(shed, ['f1.js'], 'the next-oldest CLEAN tab goes instead');
+});
+
+test('T20 · when only unsaved work remains, it frees what it can and no more', () => {
+  // Sixteen dirty tabs and a review of one new file: there is nothing to shed,
+  // and the caller refuses with a message that can name the real reason.
+  const open = Array.from({length: 16}, (_, i) => ({path: `d${i}.js`, dirty: true}));
+  assert.deepEqual(tabsToEvict(open, ['new.js'], EDITOR_TABS), []);
+  // Fifteen dirty and one clean: one is freed, which is still not enough for
+  // two new members — the caller sees that and refuses.
+  const mixed = [...Array.from({length: 15}, (_, i) => ({path: `d${i}.js`, dirty: true})), {path: 'clean.js', dirty: false}];
+  assert.deepEqual(tabsToEvict(mixed, ['a.js', 'b.js'], EDITOR_TABS), ['clean.js']);
+});
+
+test('T20 · the recovery record and the Editor share one bound', () => {
+  // They were the same number written twice. A record that stored more than the
+  // Editor would stage, or the other way round, is two bounds drifting.
+  const s = createWorkbenchRecovery(memory());
+  const files = Array.from({length: EDITOR_TABS}, (_, i) => ({path: `f${i}.js`, dirty: false}));
+  s.saveProject({root: '/repo', selected: null, files});
+  assert.equal(s.get('/repo').files.length, EDITOR_TABS);
+  assert.throws(() => s.saveProject({root: '/repo', selected: null, files: [...files, {path: 'over.js', dirty: false}]}),
+    /Recovery limit exceeded/);
 });

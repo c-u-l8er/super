@@ -1,11 +1,16 @@
 // Local recovery copies only. Never stores credentials, process handles or commands.
 export const RECOVERY_KEY='super-workbench-recovery-v1';
 const MAX=3_000_000;
+/** How many files one repository keeps open, and therefore recovers.
+ *  One constant, two readers: the recovery record's own bound and the Editor's
+ *  staging check. They were the same number written twice, which is how two
+ *  bounds that must agree stop agreeing. */
+export const EDITOR_TABS=16;
 function text(v,n){if(typeof v!=='string'||v.length>n)throw Error('Invalid recovery text.');return v;}
 function path(v){v=text(v,4096);if(!v||v.startsWith('/')||v.includes('\0')||v.split('/').some(p=>!p||p==='.'||p==='..'||p==='.git'))throw Error('Invalid recovery file path.');return v;}
 function url(v){const u=new URL(text(v,8192));if(!['http:','https:'].includes(u.protocol)||!['localhost','127.0.0.1','[::1]'].includes(u.hostname)||u.username||u.password)throw Error('Invalid recovery address.');return u.href;}
 function array(v,n,clean){if(!Array.isArray(v)||v.length>n)throw Error('Recovery limit exceeded.');return v.map(clean);}
-function project(v){const seen=new Set();return {root:text(v.root,4096),selected:v.selected===null?null:path(v.selected),files:array(v.files,16,f=>{const p=path(f.path);if(seen.has(p))throw Error('Duplicate recovery file.');seen.add(p);return f.dirty===true?{path:p,dirty:true,original:f.original===null?null:text(f.original,1048576),draft:text(f.draft,1048576)}:{path:p,dirty:false};})};}
+function project(v){const seen=new Set();return {root:text(v.root,4096),selected:v.selected===null?null:path(v.selected),files:array(v.files,EDITOR_TABS,f=>{const p=path(f.path);if(seen.has(p))throw Error('Duplicate recovery file.');seen.add(p);return f.dirty===true?{path:p,dirty:true,original:f.original===null?null:text(f.original,1048576),draft:text(f.draft,1048576)}:{path:p,dirty:false};})};}
 function clean(v){if(v.version!==1)throw Error('Unsupported recovery format.');const roots=new Set();return {version:1,projects:array(v.projects,5,p=>{const value=project(p);if(!value.root||roots.has(value.root))throw Error('Invalid recovery repository.');roots.add(value.root);return value;}),browsers:array(v.browsers,8,url),shells:Number.isInteger(v.shells)&&v.shells>=0&&v.shells<=8?v.shells:0};}
 export function createWorkbenchRecovery(storage){
   let state={version:1,projects:[],browsers:[],shells:0},error=null;
@@ -45,6 +50,41 @@ export function createWorkbenchRecovery(storage){
  * WebDriver answers a `confirm` with `unexpected alert open`.
  */
 export function tabDirty(original,draft){return (draft??'')!==(original??'');}
+
+/**
+ * Which open tabs may be closed to make room for a review, and in what order.
+ *
+ * **The invariant this rests on: a clean tab is a cache of what is on disk, and
+ * a cache may be evicted; a dirty tab is unsaved work and may never be dropped
+ * without a person saying so.** Reopening a clean tab re-reads the file; there
+ * is nothing to lose. That is the whole difference, and it is why this can be
+ * decided without asking.
+ *
+ * T20. `development.js` refused staging outright at sixteen tabs — *"Close a
+ * file tab before staging this review."* — and nothing in the app or the
+ * recovery record ever sheds one, so a device that reaches the cap stays there.
+ * Measured on this one: `super-live` sat at exactly 16 for weeks, and every
+ * review of a path that was not already open was refused.
+ *
+ * `open` is `[{path, dirty}]` in the order the tabs were opened — **opened, not
+ * last used**, because nothing here records a selection time and calling it
+ * LRU would name a property this does not have. Members are never evicted:
+ * they are the tabs the review is about to need.
+ *
+ * Returns only what it can free. A caller that still does not fit after taking
+ * all of these is genuinely out of room, and its refusal can say the true
+ * thing — the tabs that remain hold unsaved work.
+ */
+export function tabsToEvict(open,members,limit){
+  const wanted=new Set(members);
+  const incoming=[...wanted].filter(p=>!open.some(t=>t.path===p)).length;
+  const over=open.length+incoming-limit;
+  // An early return for the reader, not for behaviour: at `over === 0` the
+  // slice below is already empty, so `<` and `<=` are indistinguishable here.
+  // Measured as an equivalent mutant rather than left as an untested branch.
+  if(over<=0)return [];
+  return open.filter(t=>!t.dirty&&!wanted.has(t.path)).slice(0,over).map(t=>t.path);
+}
 
 export function recoveryFile(saved,disk){
   // **Re-derived, not read from the stored flag.** A record written by a build

@@ -8,7 +8,7 @@ import {relatedFileSelection} from './related-files.js';
 import {taskFileAttachment} from './task-file-context.js';
 import {reviewFileProposal} from './file-proposal-review.js';
 import {sessionLinks} from './linked-sessions.js';
-import {createWorkbenchRecovery,recoveryFile,patchAttachment,tabDirty} from './workbench-recovery.js';
+import {createWorkbenchRecovery,recoveryFile,patchAttachment,tabDirty,tabsToEvict,EDITOR_TABS} from './workbench-recovery.js';
 import {initChangeReview} from './change-review.js';
 import {codeEditor} from './vendor/code-editor.js';
 import {createBotRoster} from './bot-roster.js';
@@ -100,14 +100,14 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
   function editorContext(){return {task:activeTask,root,session:surfaceSession,generation,busy:busy||review.open,files:[...files.values()].map(f=>({path:f.path,unsaved:tabDirty(f.original,f.draft),selected:f===file}))};}
   function publishEditor(){publishTaskEditor(editorContext());}
   document.addEventListener('open-task-editor-file',e=>{const p=heldProjection(current),task=p?.development_tasks?.[e.detail.task?.id];if(!canOpenTaskEditor(p,task,runtimeWorld(current),editorContext(),e.detail)){e.preventDefault();return;}selectFile(files.get(e.detail.path));navigate('editor',true);});
-  function sync(){for(const b of document.querySelectorAll("#editor-change-set button"))b.disabled=busy;publishEditor();for(const label of document.querySelectorAll('.workbench-root'))label.textContent=root??'No repository selected';for(const b of choosers)b.disabled=busy||[...shells.values()].some(s=>s.running);for(const [i,b] of openers.entries())b.disabled=busy||[...shells.values()].some(s=>s.running)||!registeredPickers[i].value;document.getElementById('editor-save').disabled=!file||file.pendingDeletion||file.draft===file.original||busy||review.open;document.getElementById('editor-reload').disabled=!file||busy||review.open;document.getElementById('editor-discuss').disabled=!file||review.open;document.getElementById('editor-share-files').disabled=!files.size||busy||review.open;document.getElementById('editor-changes').disabled=!root||busy;}
+  function sync(){for(const b of document.querySelectorAll("#editor-change-set button"))b.disabled=busy;publishEditor();for(const label of document.querySelectorAll('.workbench-root'))label.textContent=root??'No repository selected';for(const b of choosers)b.disabled=busy||[...shells.values()].some(s=>s.running);for(const [i,b] of openers.entries())b.disabled=busy||[...shells.values()].some(s=>s.running)||!registeredPickers[i].value;document.getElementById('editor-save').disabled=!file||file.pendingDeletion||!tabDirty(file.original,file.draft)||busy||review.open;document.getElementById('editor-reload').disabled=!file||busy||review.open;document.getElementById('editor-discuss').disabled=!file||review.open;document.getElementById('editor-share-files').disabled=!files.size||busy||review.open;document.getElementById('editor-changes').disabled=!root||busy;}
   function tab(bar,title,selected,select,close){const wrap=el('div',undefined,'workbench-tab'+(selected?' selected':''));const b=button(title,'',select);b.setAttribute('role','tab');b.setAttribute('aria-selected',String(selected));wrap.append(b);const x=button('×','',close);x.setAttribute('aria-label','Close '+title);wrap.append(x);bar.append(wrap);}
   function paintFiles(){bars.editor.replaceChildren();for(const f of files.values())tab(bars.editor,(f.pendingDeletion?'DELETE · ':tabDirty(f.original,f.draft)?'● ':'')+f.path.split('/').pop(),file===f,()=>selectFile(f),()=>{if(busy)return;if(tabDirty(f.original,f.draft)&&!confirm('Discard unsaved changes in '+f.path+'?'))return;files.delete(f.path);if(file===f){file=null;const next=files.values().next().value;if(next)selectFile(next);else{editor.show(editor.state('',''));editor.readonly(true);}}paintFiles();});if(!files.size)bars.editor.append(el('span','Editor','workbench-tab-label'));scheduleRecovery();report('editor',file?file.path+(file.pendingDeletion?' · Deletion staged':tabDirty(file.original,file.draft)?' · Unsaved':' · Saved')+(file.changed?' · Disk changed since recovery; saving checks for conflicts':''):'Open a repository and choose a file.');sync();}
   function selectFile(f){if(busy)return;review.hide();if(file)file.state=editor.current();file=f;editor.show(f.state);editor.readonly(!!f.pendingDeletion);paintFiles();}
   function addFile(path,content){if(files.has(path)){selectFile(files.get(path));return;}if(files.size>=16)throw new Error('Close a file tab before opening another.');const f={path,original:content,draft:content??'',state:editor.state(path,content??'')};files.set(path,f);selectFile(f);}
   async function openFile(path){if(busy)return;if(files.has(path))return selectFile(files.get(path));busy=true;try{const data=await request('read',{path});busy=false;addFile(data.path,data.content);}catch(e){report('editor',e);}finally{busy=false;sync();}}
   async function reloadFile(){if(!file||busy||(tabDirty(file.original,file.draft)&&!confirm('Discard your draft and reload '+file.path+'?')))return;const f=file;busy=true;try{const data=await request('read',{path:f.path});f.changed=false;f.original=f.draft=data.content;f.state=editor.state(f.path,f.draft);editor.show(f.state);paintFiles();}catch(e){report('editor',e);}finally{busy=false;sync();}}
-  async function saveFile(){if(file?.pendingDeletion){report('editor','Use Apply staged change set to apply the reviewed deletion.');return;}if(review.open||!file||busy||file.draft===file.original)return;const f=file;busy=true;editor.readonly(true);sync();try{const data=await request('save',{path:f.path,original:f.original,content:f.draft});f.changed=false;f.original=data.content;paintFiles();await list(folder);}catch(e){report('editor',e);}finally{busy=false;editor.readonly(false);sync();}}
+  async function saveFile(){if(file?.pendingDeletion){report('editor','Use Apply staged change set to apply the reviewed deletion.');return;}if(review.open||!file||busy||!tabDirty(file.original,file.draft))return;const f=file;busy=true;editor.readonly(true);sync();try{const data=await request('save',{path:f.path,original:f.original,content:f.draft});f.changed=false;f.original=data.content;paintFiles();await list(folder);}catch(e){report('editor',e);}finally{busy=false;editor.readonly(false);sync();}}
   async function list(path){if(!root)return;try{const data=await request('list',{path});folder=data.path;entries.replaceChildren(el('div',folder||'/','development-folder'));for(const entry of data.entries){const path=[folder,entry.name].filter(Boolean).join('/');const b=button((entry.directory?'▸ ':'')+entry.name,'',()=>entry.directory?list(path):openFile(path));b.dataset.filePath=path;b.dataset.directory=String(entry.directory);b.title=path;entries.append(b);}if(data.truncated)entries.append(el('p','First 1,000 entries'));}catch(e){report('editor',e);}}
   // Leaving a repository: recovery copies are flushed first, and open drafts ask.
   function leaveDrafts(){persistRecovery();return ![...files.values()].some(f=>tabDirty(f.original,f.draft))||confirm('Switch repository and close these drafts? The latest successful recovery copy will remain on this device.');}
@@ -238,12 +238,25 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       for(const m of members){
         let disk;
         try{disk=(await request('read',{path:m.path})).content;}catch(error){if(m.source.disk_sha256!==null)throw Error(m.path+': '+String(error.message||error));disk=null;}
-        const open=files.get(m.path),clean=!open||open.draft===open.original;
+        const open=files.get(m.path),clean=!open||!tabDirty(open.original,open.draft);
         states.set(m.path,{original:disk,draft:clean?(disk??''):open.draft,originalSha256:disk===null?null:await sha256Text(disk)});
       }
       if(generation!==capturedGeneration||activeTask!==capturedTask||selectedTask()?.revision!==task.revision)throw Error('The repository or plan changed while reading. Try again.');
       const items=savedReviewItems(members,bodies,states,{session:surfaceSession,generation,task:{id:task.id,revision:task.revision,world:capturedTask.world}});
-      if(items.filter(i=>!files.has(i.proposal.path)).length+files.size>16)throw Error('Close a file tab before staging this review.');
+      // T20. This used to refuse here, and nothing in the app or the recovery
+      // record ever sheds a tab — so a device that reached sixteen stayed
+      // there and every review of a path that was not already open was
+      // refused. A clean tab is a cache of disk and may be closed; a dirty one
+      // is unsaved work and may not. Close as many of the first as the review
+      // needs, say which, and refuse only if unsaved work is genuinely in the way.
+      {
+        const wanted=items.map(i=>i.proposal.path);
+        const shed=tabsToEvict([...files.values()].map(t=>({path:t.path,dirty:tabDirty(t.original,t.draft)})),wanted,EDITOR_TABS);
+        for(const path of shed){files.delete(path);if(file?.path===path)file=null;}
+        if(items.filter(i=>!files.has(i.proposal.path)).length+files.size>EDITOR_TABS)
+          throw Error(`This review needs more than ${EDITOR_TABS} open files and the tabs that remain hold unsaved work. Save or discard a draft, then stage it again.`);
+        if(shed.length)report('editor',`Closed ${shed.length} saved file tab${shed.length===1?'':'s'} to make room for this review: ${shed.join(', ')}`);
+      }
       // Only now touch the Editor: a tab per file showing the review's own shared
       // draft — the bytes on disk, unless the file was shared with an unsaved
       // edit, which the checks above admit only as that exact text.
