@@ -42,3 +42,12 @@ test('a proposal against a file that did not exist recovers with a null disk dig
   assert.ok(checkRecoveredBasis(r,{...basis,disk_sha256:null}));
   assert.throws(()=>checkRecoveredBasis(r,{...basis,disk_sha256:'d'.repeat(64)}),/outdated/);
 });
+import {rebindTaskWorld} from '../cockpit/ui/proposal-recovery.js';
+test('a recorded plan link is rebound across a restart only when incarnation and generation match',()=>{
+  const recorded=JSON.stringify(['inc-a',3,'epoch-old']),current=JSON.stringify(['inc-a',3,'epoch-new']);
+  assert.equal(rebindTaskWorld(recorded,current),current,'a new projection epoch alone is the same world');
+  assert.throws(()=>rebindTaskWorld(recorded,JSON.stringify(['inc-b',3,'e'])),/different world/);
+  assert.throws(()=>rebindTaskWorld(recorded,JSON.stringify(['inc-a',4,'e'])),/different world/);
+  assert.throws(()=>rebindTaskWorld('not json',current),/unreadable/);
+  assert.throws(()=>rebindTaskWorld(JSON.stringify(['inc-a']),current),/unreadable/);
+});

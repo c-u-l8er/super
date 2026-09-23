@@ -1,5 +1,5 @@
 import {REVIEW_FILE_BYTES,bytesOf} from './review-limits.js';
-import {checkRecoveredBasis} from './proposal-recovery.js';
+import {checkRecoveredBasis,rebindTaskWorld} from './proposal-recovery.js';
 import {stageContent,readContent,sha256Text} from './review-content.js';
 import {savedReviewSet,savedReviewFile,savedReviewBodies,savedReviewItems} from './saved-review.js';
 import {reviewProposalSet} from './file-proposal-set-review.js';
@@ -315,6 +315,9 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
         if((f.original??null)!==(reference.original??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Applying it would replace newer work. Nothing has been written.');
         const basis=await request('file_basis',{generation,path:reference.key,original:reference.original,draft:f.draft,proposed:e.detail.proposal.content??null});
         checkRecoveredBasis({...reference,schema:'proposal-recovery@1',path:reference.key,content:e.detail.proposal.content,source:reference.recordedSource},basis);
+        /* The plan link: same plan (id, revision), same world (incarnation, generation); the epoch is
+           this process's and is rebound. A missing or different plan refuses like a live review would. */
+        if(reference.task){const t=heldProjection(current)?.development_tasks?.[reference.task.id];if(!t)throw Error('The development plan this proposal was made for is unavailable in this world. Nothing has been written.');reference.task={...reference.task,world:rebindTaskWorld(reference.task.world,runtimeWorld(current))};}
         Object.assign(reference,{session:surfaceSession,generation,draft:f.draft,original:f.original,source:basis});
         const rebound=new CustomEvent('review-file-proposal',{detail:{reference:{...reference,recovered:false},proposal:e.detail.proposal,error:null,onIdentity:e.detail.onIdentity},cancelable:true});
         if(!document.dispatchEvent(rebound))throw Error(rebound.detail.error||'The file review could not open.');

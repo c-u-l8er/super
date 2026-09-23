@@ -51,3 +51,13 @@ export function checkRecoveredBasis(record,basis){
   if((basis.disk_sha256??null)!==(r.source.disk_sha256??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Applying it would replace newer work. Nothing has been written.');
   return basis;
 }
+/* A plan link records the world as [incarnation, generation, projection_epoch]; the epoch is a
+   per-process value, so no recorded link can equal the world after a restart. Recovery rebinds the
+   link to the current world ONLY when the world itself — incarnation and generation — is the same;
+   a different world is a different world and the proposal stays refused. */
+export function rebindTaskWorld(recorded,current){
+  let r,c;try{r=JSON.parse(recorded);c=JSON.parse(current);}catch{throw Error('The proposal\'s plan link is unreadable. Ask the assistant for a fresh proposal.');}
+  if(!Array.isArray(r)||!Array.isArray(c)||r.length<2||c.length<2)throw Error('The proposal\'s plan link is unreadable. Ask the assistant for a fresh proposal.');
+  if(r[0]!==c[0]||r[1]!==c[1])throw Error('This proposal was made in a different world (runtime incarnation or generation changed). It cannot be applied here.');
+  return current;
+}
