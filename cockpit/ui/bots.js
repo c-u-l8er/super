@@ -8,7 +8,8 @@ import {publishTaskSession} from './task-session.js';
 import {validateContextBatch} from './related-files.js';
 import {initBotWork} from './bot-work-view.js';
 import { heldProjection, registeredBot, registrationUnavailable, runtimeWorld, profileOf, botFields, waitForBot } from './runtime-bots.js';
-import { referenceText, renderMessage, referenceWorld, refreshReferenceText } from './references.js';
+import { referenceText, renderMessage, referenceWorld, refreshReferenceText } from './references.js'
+import { recoveryRecord, recoveredReference, unavailableReason } from './proposal-recovery.js';
 /* Conversation state is separate from runtime projection state. Model output
  * supplies proposals only; an explicit Apply click uses existing human controls. */
 import { node, selectedWorkspace, bindDisclosure, navigate } from './app-shell.js';
@@ -113,7 +114,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   function snapshot(){
     const turn=openTurn();
     return {...(conversationTaskLinks.length?{taskLinks:conversationTaskLinks}:{}),messages:turn?messages.slice(0,turn.messageCount):messages,
-      entries:[...transcript.children].filter(e=>!e.classList.contains('live-reply')).map(e=>({role:e.classList.contains('bot-user')?'user':e.classList.contains('bot-assistant')?'assistant':'result',label:e.querySelector('.eyebrow')?.textContent??'',text:e.querySelector('.bot-message-text')?.dataset.rawText??e.querySelector('.bot-message-text')?.textContent??'',referenceWorld:e.querySelector('.bot-message-text')?.dataset.referenceWorld||null,proposals:[...e.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].map(p=>p.dataset.savedText??[...p.children].filter(c=>c.tagName!=='BUTTON').map(c=>c.dataset.rawText??c.textContent).join('\n'))})),
+      entries:[...transcript.children].filter(e=>!e.classList.contains('live-reply')).map(e=>({role:e.classList.contains('bot-user')?'user':e.classList.contains('bot-assistant')?'assistant':'result',label:e.querySelector('.eyebrow')?.textContent??'',text:e.querySelector('.bot-message-text')?.dataset.rawText??e.querySelector('.bot-message-text')?.textContent??'',referenceWorld:e.querySelector('.bot-message-text')?.dataset.referenceWorld||null,proposals:[...e.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].map(p=>{const text=p.dataset.savedText??[...p.children].filter(c=>c.tagName!=='BUTTON'&&!c.classList.contains('proposal-source-record')).map(c=>c.dataset.rawText??c.textContent).join('\n');return p.dataset.recovery?{text,recovery:JSON.parse(p.dataset.recovery)}:text;})})),
       draft:turn?.sent.draft??input.value,files:turn?.sent.files??files,includeContext:include.checked,replyPending:!!turn};
   }
   function saveCurrent(){
@@ -133,7 +134,21 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
       conversationTaskLinks=saved.taskLinks??[];
       messages=saved.messages;files=saved.files;input.value=saved.draft;include.checked=saved.includeContext;
       for(const e of saved.entries){const entry=line(e.role,e.text);renderMessage(entry.querySelector('.bot-message-text'),e.text,e.referenceWorld??null);referenceText(entry.querySelector('.eyebrow'),e.label,e.referenceWorld??null);
-        for(const text of e.proposals){const card=node('div',undefined,'bot-proposal');card.dataset.savedText=text;card.append(node('div',undefined,'bot-message-text'),node('p','Saved proposal history · no action is restored. Ask the assistant for a fresh proposal to apply.','availability-note'));renderMessage(card.querySelector('.bot-message-text'),text,e.referenceWorld??null);entry.append(card);}
+        for(const saved of e.proposals){const text=typeof saved==='string'?saved:saved.text;const card=node('div',undefined,'bot-proposal');card.dataset.savedText=text;card.append(node('div',undefined,'bot-message-text'));renderMessage(card.querySelector('.bot-message-text'),text,e.referenceWorld??null);
+          const why=unavailableReason(saved);
+          if(why){card.append(node('p',why,'availability-note'));entry.append(card);continue;}
+          /* T22a: a saved proposal with its recovery record is reviewable again. The reference is
+             unbound; the Editor binds it only after the host re-verifies the file on disk against the
+             recorded basis, so the stale-file protection is the host's own, not a copy. */
+          card.dataset.recovery=JSON.stringify(saved.recovery);
+          const button=node('button','Review in Editor','primary'),result=node('p','Recovered with its original basis · no file changed','bot-status');button.type='button';card.append(result,button);
+          button.onclick=()=>{if(button.disabled)return;let reference;try{reference=recoveredReference(saved.recovery);}catch(error){result.textContent=String(error.message||error);return;}
+            const detail={reference,proposal:{path:saved.recovery.path,content:saved.recovery.content},error:null,pending:null,onIdentity:record=>{card.querySelector('.proposal-source-record')?.remove();const identity=node('details',undefined,'proposal-source-record');identity.append(node('summary','Recorded source and result'),node('pre',JSON.stringify(record,null,2)));card.append(identity);saveCurrent();}};
+            const event=new CustomEvent('review-file-proposal',{detail,cancelable:true});
+            if(!document.dispatchEvent(event)){result.textContent=detail.error||'The file review could not open.';return;}
+            result.textContent='Checking the file on disk against the proposal\'s recorded basis…';button.disabled=true;
+            Promise.resolve(detail.pending).then(()=>{result.textContent='Review opened in Editor. The file stays unchanged until you choose a draft and Save.';},error=>{result.textContent=String(error?.message||error);}).finally(()=>{button.disabled=false;});};
+          entry.append(card);}
       }
       if(saved.replyPending)line('result','The previous reply was not completed in this conversation. Your draft and attachments are restored; nothing was resent.');
       status.textContent='Saved conversation reopened. Historical proposals are read-only. Links look up current records; the original message is preserved.';
@@ -334,6 +349,9 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
         if(action.name==='propose_file_edit'){
           const reference=sentReferences.filter(r=>r.key===action.args.path).at(-1),proposal=node('div',undefined,'bot-proposal'),button=node('button','Review in Editor','primary'),result=node('p',reference?'Proposed · no file changed':'Share this file from Editor and request a fresh proposal to review it.','bot-status');button.type='button';
           proposal.append(node('h2','Proposed file edit'),node('p',action.args.path+(action.args.content===null?' · Delete file — use combined review':' · '+new TextEncoder().encode(action.args.content).length+' bytes'),'proposal-field'),result,button);const a={...action,button,state:'proposed',reference};proposals.push(a);
+          /* T22a: a proposal made against a shared basis is saved WITH that basis and its content, so a
+             restart keeps it reviewable. Without a basis nothing is recorded, and the card says so later. */
+          {const record=recoveryRecord(reference,action.args);if(record)proposal.dataset.recovery=JSON.stringify(record);}
           button.onclick=()=>{if(button.disabled)return;const detail={reference,proposal:action.args,error:null,onIdentity:record=>{proposal.querySelector('.proposal-source-record')?.remove();const identity=node('details',undefined,'proposal-source-record');identity.append(node('summary','Recorded source and result'),node('pre',JSON.stringify(record,null,2)));proposal.append(identity);saveCurrent();}};const event=new CustomEvent('review-file-proposal',{detail,cancelable:true});if(!document.dispatchEvent(event)){result.textContent=detail.error||'The file review could not open.';return;}result.textContent='Review opened in Editor. The file stays unchanged until you choose a draft and Save.';};entry.append(proposal);continue;
         }
 

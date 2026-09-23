@@ -1,4 +1,5 @@
 import {REVIEW_FILE_BYTES,bytesOf} from './review-limits.js';
+import {checkRecoveredBasis} from './proposal-recovery.js';
 import {stageContent,readContent,sha256Text} from './review-content.js';
 import {savedReviewSet,savedReviewFile,savedReviewBodies,savedReviewItems} from './saved-review.js';
 import {reviewProposalSet} from './file-proposal-set-review.js';
@@ -138,7 +139,8 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
     if(!match.matched||match.task_ref!==reference.task.id||match.revision!==reference.task.revision||JSON.stringify(match.world)!==reference.task.world)throw Error('The repository match is no longer current. Reopen the plan and file.');
     if(reference.source){
       const basis=await request(proposed===null?'delete_basis':'file_basis',{generation:reference.generation,path:reference.key,original:reference.original,draft:reference.draft,...(proposed===null?{}:{proposed:proposed??null})});
-      if(basis.basis_id!==reference.source.basis_id)throw Error('The source commit or file changed. Share a fresh snapshot before using this proposal.');
+      if(reference.recordedSource){if(basis.path!==reference.key||(basis.disk_sha256??null)!==(reference.recordedSource.disk_sha256??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Nothing has been written.');}
+      else if(basis.basis_id!==reference.source.basis_id)throw Error('The source commit or file changed. Share a fresh snapshot before using this proposal.');
       return {...basis,task_ref:match.task_ref,task_revision:match.revision,repository_ref:match.repository_ref,world:match.world};
     }
     return match;
@@ -296,7 +298,30 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       reviewFileProposal({reference,proposal:item.proposal,verify:()=>verifyPlan(reference,item.proposal.content),onIdentity:null,recordAttempt:null,current:()=>({session:surfaceSession,generation,file:files.get(reference.key),task:heldProjection(current)?.development_tasks?.[reference.task.id],world:runtimeWorld(current)}),stage:text=>{if(busy)throw Error('The editor is busy. Try again.');review.hide();selectFile(target);editor.replace(text);report('editor',target.path+' · Saved review '+attempt.id+' staged as unsaved draft · Review, then Save');},navigate,el,button});
     }catch(error){busy=false;sync();say(String(error.message||error));report('editor',String(error.message||error));}
   }
-  document.addEventListener('review-file-proposal',e=>{try{if(busy)throw Error('Finish the current file operation first.');const reference=e.detail.reference;const target=files.get(reference?.key);reviewFileProposal({reference,proposal:e.detail.proposal,verify:()=>verifyPlan(reference,e.detail.proposal.content),onIdentity:e.detail.onIdentity,recordAttempt:reference?.task&&recordAttempt?async source=>{
+  document.addEventListener('review-file-proposal',e=>{try{if(busy)throw Error('Finish the current file operation first.');const reference=e.detail.reference;
+    /* T22a: a RECOVERED proposal arrives unbound. Before the ordinary review can run, the file is opened
+       fresh from disk and the host is asked for its basis with the proposal's ORIGINAL as the expected
+       disk content — `file_basis` refuses when the file changed on disk, which is the stale-file
+       protection this feature must not weaken — and the recorded disk digest must match. Only then is the
+       reference bound to this page session and handed to the same review dialog a live proposal uses. */
+    if(reference?.recovered){
+      if(!reference.source)throw Error('This saved proposal has no original basis and cannot be applied. Ask the assistant for a fresh proposal.');
+      if(!root)throw Error('Open the repository this proposal targets, then review it.');
+      e.detail.pending=(async()=>{
+        if(!files.has(reference.key))await openFile(reference.key);
+        const f=files.get(reference.key);
+        if(!f)throw Error('The file could not be opened in this repository: '+reference.key);
+        if(tabDirty(f.original,f.draft))throw Error('This file has unsaved edits in the Editor. Save or discard them, then review the recovered proposal.');
+        if((f.original??null)!==(reference.original??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Applying it would replace newer work. Nothing has been written.');
+        const basis=await request('file_basis',{generation,path:reference.key,original:reference.original,draft:f.draft,proposed:e.detail.proposal.content??null});
+        checkRecoveredBasis({...reference,schema:'proposal-recovery@1',path:reference.key,content:e.detail.proposal.content,source:reference.recordedSource},basis);
+        Object.assign(reference,{session:surfaceSession,generation,draft:f.draft,original:f.original,source:basis});
+        const rebound=new CustomEvent('review-file-proposal',{detail:{reference:{...reference,recovered:false},proposal:e.detail.proposal,error:null,onIdentity:e.detail.onIdentity},cancelable:true});
+        if(!document.dispatchEvent(rebound))throw Error(rebound.detail.error||'The file review could not open.');
+      })();
+      return;
+    }
+    const target=files.get(reference?.key);reviewFileProposal({reference,proposal:e.detail.proposal,verify:()=>verifyPlan(reference,e.detail.proposal.content),onIdentity:e.detail.onIdentity,recordAttempt:reference?.task&&recordAttempt?async source=>{
       const origin=runtimeWorld(current);
       if(origin!==reference.task.world)throw Error('The runtime changed. Reopen the review.');
       reference.attemptRequests??={};

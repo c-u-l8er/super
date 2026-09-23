@@ -1,4 +1,5 @@
 import {REVIEW_FILE_BYTES} from './review-limits.js';
+import {validateRecovery} from './proposal-recovery.js';
 /* Local presentation history. Never stores credentials, runtime authority, or
  * executable proposals. Failed writes leave the previous saved history intact. */
 export const STORAGE_KEY = 'super-conversations-v1';
@@ -11,6 +12,15 @@ function string(value, max) {
 function array(value, max, convert) {
   if (!Array.isArray(value) || value.length > max) throw new Error('Conversation exceeds the supported history limit.');
   return value.map(convert);
+}
+/* A proposal is either its saved text (history only) or {text, recovery}: the text plus the record
+ * that lets the Editor review it after a restart. A recovery record that does not validate is a
+ * hard error, never silently downgraded to text: a proposal must not lose its basis on the way
+ * through storage without anyone noticing. */
+function proposal(p) {
+  if (typeof p === 'string') return string(p, 20000);
+  if (!p || typeof p !== 'object') throw new Error('Invalid saved proposal.');
+  return { text: string(p.text, 20000), recovery: validateRecovery(p.recovery) };
 }
 function files(value) {
   return array(value, 4, f => ({ name: string(f.name, 255), content: string(f.content, REVIEW_FILE_BYTES) }));
@@ -30,7 +40,7 @@ function clean(data) {
     entries: array(data.entries, 180, e => {
       if (!['user', 'assistant', 'result'].includes(e.role)) throw new Error('Invalid saved conversation entry.');
       return { referenceWorld: typeof e.referenceWorld==='string'?string(e.referenceWorld,500):null, role: e.role, label: string(e.label, 500), text: string(e.text, 160000),
-        proposals: array(e.proposals ?? [], 8, p => string(p, 20000)) };
+        proposals: array(e.proposals ?? [], 8, proposal) };
     }),
     draft: string(data.draft, 8000), files: files(data.files),
     includeContext: data.includeContext === true, replyPending: data.replyPending === true,
