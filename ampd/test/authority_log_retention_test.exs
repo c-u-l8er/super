@@ -385,6 +385,59 @@ defmodule Ampd.AuthorityLogRetentionTest do
   end
 
   describe "history" do
+    test "paging is lossless across the working rows and many archived batches" do
+      rs = performs!(40)
+      ids = rs |> Enum.map(& &1["effect_id"]) |> Enum.sort_by(&String.to_integer(String.trim_leading(&1, "ef_")), :desc)
+      # Small batches, so the history spans several of them.
+      for _ <- 1..5, do: Retention.run_now(keep_recent: 6, min_batch: 1, max_batch: 7)
+      assert Effects.retired_count() >= 30
+      assert map_size(Effects.retired_batches()) >= 5
+
+      pages =
+        Stream.unfold(nil, fn
+          :done ->
+            nil
+
+          cursor ->
+            p = Projection.history_page(:effects, nil, cursor, 7)
+            refute Map.has_key?(p, "archive_error")
+            {p, if(p["more"], do: p["next_cursor"], else: :done)}
+        end)
+        |> Enum.to_list()
+
+      seen = Enum.flat_map(pages, fn p -> Enum.map(p["items"], & &1["id"]) end)
+      assert seen == ids, "every effect exactly once, newest first"
+      assert Enum.all?(pages, &(&1["total"] == 40))
+
+      rpages =
+        Stream.unfold(nil, fn
+          :done -> nil
+          c -> (p = Projection.history_page(:receipts, nil, c, 9); {p, if(p["more"], do: p["next_cursor"], else: :done)})
+        end)
+        |> Enum.to_list()
+
+      assert rpages |> Enum.flat_map(& &1["items"]) |> Enum.map(& &1["effect_ref"]) == ids
+    end
+
+    test "a page reads only the archive batches that can reach it" do
+      performs!(40)
+      for _ <- 1..5, do: Retention.run_now(keep_recent: 6, min_batch: 1, max_batch: 7)
+      reads = fn -> AuthorityLog.status()["archive_batch_reads"] end
+
+      # The newest page is served from the working rows: no batch is read.
+      r0 = reads.()
+      p = Projection.history_page(:effects, nil, nil, 5)
+      assert p["returned"] == 5 and p["more"]
+      assert reads.() == r0
+
+      # A page just past the working rows reads the newest batch or two, not all of them.
+      r1 = reads.()
+      p2 = Projection.history_page(:effects, nil, p["next_cursor"], 5)
+      assert p2["returned"] == 5
+      assert reads.() - r1 <= 2
+      assert reads.() - r1 < map_size(Effects.retired_batches())
+    end
+
     test "an actor's own windows count that actor's retired rows" do
       performs!(5)
       pass!(keep_recent: 2)
@@ -405,8 +458,9 @@ defmodule Ampd.AuthorityLogRetentionTest do
       assert w["more"] == true
       assert length(w["recent"]) == 2
 
-      hist = Projection.history_for(:effects, nil)
-      assert Enum.sort(Enum.map(hist, & &1["id"])) == Enum.sort(ids)
+      page = Projection.history_page(:effects, nil, nil, 200)
+      assert Enum.sort(Enum.map(page["items"], & &1["id"])) == Enum.sort(ids)
+      assert page["total"] == 5 and page["more"] == false
 
       rw = Projection.operator()["receipts"]
       assert rw["total"] == 5

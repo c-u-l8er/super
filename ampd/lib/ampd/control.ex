@@ -420,7 +420,7 @@ defmodule Ampd.Control do
   # than restated, because a second copy of a filter is a second thing that
   # can be wrong.
   defp dispatch_read(peer, :list_receipts, [cursor, limit]),
-    do: Projection.page(Projection.history_for(:receipts, peer["actor"]), cursor, limit)
+    do: Projection.history_page(:receipts, peer["actor"], cursor, limit)
 
   # R0b.R. Both kinds R6 and R7 split out of `receipts` now have the door the
   # projection's own rule requires. Same filter, same paging, different
@@ -434,7 +434,7 @@ defmodule Ampd.Control do
     do: Projection.page(Projection.history_for(:validations, peer["actor"]), cursor, limit)
 
   defp dispatch_read(peer, :list_effect_history, [cursor, limit]),
-    do: Projection.page(Projection.history_for(:effects, peer["actor"]), cursor, limit)
+    do: Projection.history_page(:effects, peer["actor"], cursor, limit)
 
   defp dispatch_read(peer, :list_grant_requests, [cursor, limit]),
     do: Projection.page(Projection.history_for(:grant_requests, peer["actor"]), cursor, limit)

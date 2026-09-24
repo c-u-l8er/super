@@ -152,6 +152,9 @@ defmodule Ampd.Effects do
   # archive against it. Copies it out: never on a decision path.
   def retired_index, do: ask(:retired_index)
 
+  @doc "Every retired batch's `[lowest key, highest key, rows, %{actor => rows}]`, by batch."
+  def retired_batches, do: ask(:retired_batches)
+
   @doc "How many effects have been retired: all of them (`nil`), or one actor's."
   def retired_count(actor \\ nil), do: ask({:retired_count, actor})
 
@@ -304,6 +307,9 @@ defmodule Ampd.Effects do
 
   def handle_call({:retired, id}, _f, st), do: {:reply, retired_entry(st.s, id), st}
   def handle_call(:retired_index, _f, st), do: {:reply, Map.get(st.s, "retired", %{}), st}
+
+  def handle_call(:retired_batches, _f, st),
+    do: {:reply, Map.get(st.s, "retired_batches", %{}), st}
 
   def handle_call({:retired_count, actor}, _f, %{s: s} = st),
     do: {:reply, Map.get(Map.get(s, "retired_count", %{}), actor || "*", 0), st}
@@ -671,6 +677,10 @@ defmodule Ampd.Effects do
           |> Map.put("effects", Enum.reject(s["effects"], &MapSet.member?(set, &1["id"])))
           |> Map.put("retired", index)
           |> Map.put("retired_count", counts)
+          |> Map.put(
+            "retired_batches",
+            Map.put(Map.get(s, "retired_batches", %{}), batch, batch_range(Enum.map(rows, &elem(&1, 1))))
+          )
 
         st = %{st | s: Ampd.Store.save(tab, s2), ix: Map.drop(st.ix, ids)}
         {:reply, {:ok, length(ids)}, settle_leases(st, set)}
@@ -1103,6 +1113,24 @@ defmodule Ampd.Effects do
   defp lookup(%{s: s}, id), do: Enum.find(s["effects"], &(&1["id"] == id))
 
   defp retired_entry(s, id), do: Map.get(Map.get(s || %{}, "retired", %{}), id)
+
+  @doc false
+  # What a paged reader needs to know about one retired batch without reading
+  # it: `[lowest key, highest key, rows, %{actor => rows}]`, keys being the
+  # effect id's number — the order `Ampd.Projection` pages in.
+  def batch_range(rows) do
+    keys = Enum.map(rows, &key_of/1)
+
+    [
+      Enum.min(keys),
+      Enum.max(keys),
+      length(rows),
+      Enum.frequencies(for r <- rows, is_binary(r["actor"]), do: r["actor"])
+    ]
+  end
+
+  defp key_of(%{"id" => "ef_" <> n}), do: String.to_integer(n)
+  defp key_of(_), do: 0
 
   # The effects that still hold a live (unretired) lease in this incarnation.
   defp live_effects(%{inc: nil}), do: MapSet.new()

@@ -647,11 +647,13 @@ defmodule Ampd.Projection do
   them needs a command that can follow it — a cursor with nothing to give
   it to is a promise the protocol does not keep.
   """
-  def history_for(:receipts, nil),
-    do: with_archive(Receipts.of_kind(Receipts.default_kind()), archived_receipts())
+  # Capability receipts and effects: the WORKING rows. Retention moves the
+  # settled ones to the archive, and the paged commands reach those through
+  # `history_page/4`, which reads only the batches a page can touch.
+  def history_for(:receipts, nil), do: Receipts.of_kind(Receipts.default_kind())
 
   def history_for(:receipts, actor),
-    do: Enum.filter(history_for(:receipts, nil), &(&1["actor"] == actor))
+    do: Enum.filter(Receipts.of_kind(Receipts.default_kind()), &(&1["actor"] == actor))
 
   def history_for(:validations, nil), do: validation_records()
 
@@ -663,11 +665,10 @@ defmodule Ampd.Projection do
   def history_for(:worktree_receipts, actor),
     do: Enum.filter(Receipts.of_kind(Ampd.Locus.receipt_kind()), &(&1["locus_actor"] == actor))
 
-  def history_for(:effects, nil),
-    do: with_archive(Enum.filter(Effects.all(), &Effects.terminal?/1), archived_effects())
+  def history_for(:effects, nil), do: Enum.filter(Effects.all(), &Effects.terminal?/1)
 
   def history_for(:effects, actor),
-    do: Enum.filter(history_for(:effects, nil), &(&1["actor"] == actor))
+    do: Enum.filter(Effects.all(), &(Effects.terminal?(&1) and &1["actor"] == actor))
 
   def history_for(:grant_requests, nil),
     do: Enum.reject(GrantRegistry.requests(), &(&1["status"] == "pending"))
@@ -678,27 +679,110 @@ defmodule Ampd.Projection do
       |> Enum.reject(&(&1["status"] == "pending"))
       |> Enum.filter(&(&1["actor"] == actor))
 
-  # The working rows and the retired ones, each id once (the working row wins:
-  # an orphan archive batch can hold a row that is still live). Nothing is
-  # read from the archive unless retention has retired something.
-  defp with_archive(live, {:ok, archived}) do
-    ids = MapSet.new(live, & &1["id"])
-    live ++ Enum.reject(archived, &MapSet.member?(ids, &1["id"]))
+  @doc """
+  A page of effect or capability-receipt history — `page/3`'s shape and
+  cursor semantics — over the working rows AND the rows retention retired.
+
+  **It reads only the archive batches that can reach this page.** Each
+  retired batch is indexed with its lowest and highest key and its rows per
+  actor (`Effects.retired_batches/0`, `Receipts.retired_batches/0`), so the
+  batches below the cursor are read newest-first and the reading stops once
+  no unread batch can enter the page. These commands run inside the
+  coordinator's ordered observation; reading the whole archive there would be
+  unbounded work in the total order, growing with history.
+
+  Lossless like `page/3`: every row is in exactly one of the working list or
+  one committed batch (an orphan batch — archived, never retired — is not in
+  the index and never read). A batch that cannot be read makes the page say
+  so (`"archive_error"`) rather than end early as if history did.
+  """
+  def history_page(kind, actor, cursor, limit) when kind in [:effects, :receipts] do
+    limit = limit |> min(200) |> max(1)
+    live = Enum.sort_by(history_for(kind, actor), &order_key/1, :desc)
+    {batches, archived} = archive_index(kind, actor)
+    k = if cursor, do: cursor_key(live, cursor), else: nil
+    cands = Enum.filter(live, &older?(&1, k))
+
+    eligible =
+      batches
+      |> Enum.filter(fn [_n, lo | _] -> k == nil or lo < elem(k, 0) end)
+      |> Enum.sort_by(fn [_n, _lo, hi | _] -> hi end, :desc)
+
+    {top, err} = collect(eligible, cands, kind, actor, k, limit + 1)
+    items = Enum.take(top, limit)
+    more? = length(top) > limit
+
+    %{
+      "schema" => "history-page@1",
+      "items" => items,
+      "total" => length(live) + archived,
+      "returned" => length(items),
+      "more" => more?,
+      "next_cursor" => if(more?, do: List.last(items)["id"], else: nil)
+    }
+    |> then(fn p -> if err, do: Map.put(p, "archive_error", err), else: p end)
   end
 
-  defp with_archive(live, {:error, why}) do
-    require Logger
-    Logger.warning("ampd: history past the working list is unreadable: #{inspect(why)}")
-    live
+  defp older?(_r, nil), do: true
+  defp older?(r, k), do: order_key(r) < k
+
+  # Newest-first over the eligible batches; `acc` is always the best `want`
+  # rows so far, newest first. A batch whose highest key is below the
+  # `want`-th row cannot change the page, and neither can any batch after it.
+  defp collect([], acc, _kind, _actor, _k, want), do: {Enum.take(acc, want), nil}
+
+  defp collect([[n, _lo, hi | _] | rest], acc, kind, actor, k, want) do
+    if length(acc) >= want and hi < elem(order_key(Enum.at(acc, want - 1)), 0) do
+      {Enum.take(acc, want), nil}
+    else
+      case archived_batch(kind, n) do
+        {:ok, rows} ->
+          fresh = Enum.filter(rows, &(older?(&1, k) and (actor == nil or &1["actor"] == actor)))
+          acc = (acc ++ fresh) |> Enum.sort_by(&order_key/1, :desc) |> Enum.take(want)
+          collect(rest, acc, kind, actor, k, want)
+
+        {:error, why} ->
+          {Enum.take(acc, want), why}
+      end
+    end
   end
 
-  defp archived_effects do
-    if Effects.retired_count() > 0, do: Effects.archived(), else: {:ok, []}
+  defp archived_batch(:effects, n) do
+    case Ampd.AuthorityLog.read_batch(n) do
+      {:ok, rows} -> {:ok, Map.get(rows, "effects", [])}
+      err -> err
+    end
   end
 
-  defp archived_receipts do
+  defp archived_batch(:receipts, n) do
     k = Receipts.default_kind()
-    if Receipts.retired_count(k) > 0, do: Receipts.archived_of_kind(k), else: {:ok, []}
+
+    case Ampd.AuthorityLog.read_batch(n) do
+      {:ok, rows} -> {:ok, Enum.filter(Map.get(rows, "receipts", []), &(&1["kind"] == k))}
+      err -> err
+    end
+  end
+
+  # `{[[batch, lo, hi, rows]], rows retired}` for this kind and actor.
+  defp archive_index(:effects, actor),
+    do: index_of(Enum.map(Effects.retired_batches(), fn {n, r} -> {n, r} end), actor)
+
+  defp archive_index(:receipts, actor) do
+    k = Receipts.default_kind()
+
+    Receipts.retired_batches()
+    |> Enum.flat_map(fn {n, kinds} -> if r = kinds[k], do: [{n, r}], else: [] end)
+    |> index_of(actor)
+  end
+
+  defp index_of(entries, actor) do
+    rows =
+      for {n, [lo, hi, count, actors]} <- entries,
+          c = if(actor == nil, do: count, else: Map.get(actors, actor, 0)),
+          c > 0,
+          do: {[n, lo, hi, c], c}
+
+    {Enum.map(rows, &elem(&1, 0)), rows |> Enum.map(&elem(&1, 1)) |> Enum.sum()}
   end
 
   @doc """

@@ -1,7 +1,8 @@
 # Authority log retention — candidate 3 (2026-09-24)
 
-Branch `authority-log-3`, off candidate 2's frozen evidence commit `3879947`
-(ampd identical to `91a080f`). Human-authored infrastructure; no bot credit.
+Branch `authority-log-3`, on `b68e6da` (`authority-log-closure`: candidate 2
+`91a080f` + the checkpoint timings `a088896` + the ordered-closure fix).
+Human-authored infrastructure; no bot credit.
 
 ## The ruling this implements
 
@@ -49,6 +50,8 @@ log and its checkpoints:
 | receipts | `retired_count` | kind → (`"*"` and each actor → n) |
 | grant_registry | `retired` | id → `[status, batch, consumptions]` |
 | approvals | `retired` | id → `[status, batch, consumed_by]` |
+| effects | `retired_batches` | batch → `[lowest key, highest key, rows, %{actor => rows}]` |
+| receipts | `retired_batches` | batch → kind → the same, keyed by `seq` |
 
 The `retired` maps only ever gain keys, so `Delta` writes them as
 `{:merge, store, field, added}` — a new op, used for any map field that only
@@ -121,11 +124,16 @@ one is still refused by its exact name (`write-lease-retired` / `-closed`).
 
 ## Known costs and open items
 
-* **Paging deep history reads the whole archive** (`Projection.history_for/2`
-  for effects and receipts), and those commands run inside the coordinator's
-  observation. Rare and operator-driven, but unbounded in I/O; a bounded page
-  reader (newest batch backwards until `limit` rows) is the fix if the closure
-  gate or a measurement objects.
+* **Paging reads only the batches a page can reach.** The paged commands
+  (`list_effect_history`, `list_receipts`) run inside the coordinator's
+  ordered observation, so reading the whole archive there would be unbounded
+  work in the total order. Each retired batch is indexed with its lowest and
+  highest key and its rows per actor (`retired_batches`), and
+  `Projection.history_page/4` reads the eligible batches newest-first,
+  stopping once no unread batch can enter the page. A page served from the
+  working rows reads none (tested, with the log's `archive_batch_reads`
+  counter). A sparse actor's page can still read several batches — the
+  per-actor counts skip batches with none of its rows, not batches with few.
 * **A pass holds the total order** for its duration (one archive sync and one
   log record of the shrunk working lists, measured below).
 * **The compact indexes still grow with history** — ~one small entry per

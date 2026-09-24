@@ -139,6 +139,9 @@ defmodule Ampd.Receipts do
   @doc "A retired receipt's compact entry — `[receipt_id, batch]` — for an effect, or nil."
   def retired_ref(effect_ref), do: ask({:retired_ref, effect_ref})
 
+  @doc "Every retired batch's `%{kind => [lowest seq, highest seq, rows, %{actor => rows}]}`, by batch."
+  def retired_batches, do: ask(:retired_batches)
+
   @doc "How many records of `kind` were retired: all of them (`nil`), or one actor's."
   def retired_count(kind, actor \\ nil), do: ask({:retired_count, kind, actor})
 
@@ -503,6 +506,9 @@ defmodule Ampd.Receipts do
     {:reply, reply, st}
   end
 
+  def handle_call(:retired_batches, _f, st),
+    do: {:reply, Map.get(st.s, "retired_batches", %{}), st}
+
   def handle_call({:retired_ref, ref}, _f, st),
     do: {:reply, Map.get(Map.get(st.s, "retired_refs", %{}), ref), st}
 
@@ -676,11 +682,27 @@ defmodule Ampd.Receipts do
         Map.put(c, k, per)
       end)
 
+    ranges =
+      gone
+      |> Enum.group_by(&(&1["kind"] || @default_kind))
+      |> Map.new(fn {k, rs} ->
+        ns = Enum.map(rs, & &1["seq"])
+
+        {k,
+         [
+           Enum.min(ns),
+           Enum.max(ns),
+           length(rs),
+           Enum.frequencies(for r <- rs, is_binary(r["actor"]), do: r["actor"])
+         ]}
+      end)
+
     s2 =
       s
       |> Map.put("log", keep)
       |> Map.put("retired_refs", refs_index)
       |> Map.put("retired_count", counts)
+      |> Map.put("retired_batches", Map.put(Map.get(s, "retired_batches", %{}), batch, ranges))
 
     st = %{st | s: Ampd.Store.save(tab, s2)}
     st = if Map.has_key?(st, :refs), do: %{st | refs: Map.drop(st.refs, effect_refs)}, else: st

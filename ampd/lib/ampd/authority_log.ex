@@ -495,6 +495,10 @@ defmodule Ampd.AuthorityLog do
       counters: %{
         "records" => 0,
         "archive_batches" => 0,
+        # Batch lookups by readers: how many archive batches pages and
+        # by-id reads asked for, so "a page reads only what it needs" is
+        # measured, not assumed.
+        "archive_batch_reads" => 0,
         "archive_bytes" => 0,
         "archive_sync_us_total" => 0,
         "syncs" => 0,
@@ -672,7 +676,7 @@ defmodule Ampd.AuthorityLog do
         nil -> {:error, "archive-unreadable · no batch #{n} in this world's archive"}
       end
 
-    {:reply, reply, st}
+    {:reply, reply, bump(st, "archive_batch_reads")}
   end
 
   def handle_call(:archive_slots, _f, st) do
