@@ -52,7 +52,7 @@ defmodule Ampd.Receipts do
         {:ok, %{tab: tab, s: s, refs: refs(s), sealed: nil}}
 
       {:sealed, reason} ->
-        {:ok, %{tab: nil, s: sealed_state(), refs: MapSet.new(), sealed: reason}}
+        {:ok, %{tab: nil, s: sealed_state(), refs: %{}, sealed: reason}}
     end
   end
 
@@ -109,6 +109,14 @@ defmodule Ampd.Receipts do
   `capability` off it, which is only correct while one kind exists.
   """
   def all, do: ask(:all)
+
+  @doc """
+  The receipt naming `effect_ref`, or nil — looked up in this process, not by
+  copying the ledger out and filtering it (that copy grew with every receipt
+  ever emitted). At most one exists: uniqueness per effect is enforced at the
+  append.
+  """
+  def for_effect(effect_ref), do: ask({:for_effect, effect_ref})
 
   @doc "Every record of one kind, in append order."
   def of_kind(kind), do: Enum.filter(all(), &(&1["kind"] == kind))
@@ -379,7 +387,7 @@ defmodule Ampd.Receipts do
             {:refused, "write-unscoped",
              "the record names #{m["effect_ref"]}; the ticket targets #{target}"}
 
-          MapSet.member?(refs_of(st), target) ->
+          Map.has_key?(refs_of(st), target) ->
             {:refused, "write-duplicate", "a receipt for #{target} is already in the ledger"}
 
           true ->
@@ -445,6 +453,7 @@ defmodule Ampd.Receipts do
   end
 
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["log"], st}
+  def handle_call({:for_effect, ref}, _f, st), do: {:reply, Map.get(refs_of(st), ref), st}
 
   # A read of this resource's fence — epoch and retired set, never the key.
   def handle_call(:fence, _f, %{s: s} = st),
@@ -468,14 +477,15 @@ defmodule Ampd.Receipts do
 
     st = %{st | s: Ampd.Store.save(tab, %{s | "log" => s["log"] ++ [record], "seq" => seq + 1})}
     ref = record["effect_ref"]
-    {record, if(ref, do: %{st | refs: MapSet.put(refs_of(st), ref)}, else: st)}
+    {record, if(ref, do: %{st | refs: Map.put(refs_of(st), ref, record)}, else: st)}
   end
 
-  # Receipt uniqueness per effect is checked against this set, not by scanning
-  # the ledger: the scan grew with every receipt ever emitted. Derived from the
-  # log, never persisted — the log stays the authority.
+  # Receipt uniqueness per effect is checked against this index, not by
+  # scanning the ledger: the scan grew with every receipt ever emitted. The
+  # ledger is append-only, so an indexed record never goes stale. Derived from
+  # the log, never persisted — the log stays the authority.
   defp refs(s),
-    do: for(r <- s["log"] || [], r["effect_ref"] != nil, into: MapSet.new(), do: r["effect_ref"])
+    do: for(r <- s["log"] || [], r["effect_ref"] != nil, into: %{}, do: {r["effect_ref"], r})
 
   defp refs_of(%{refs: refs}), do: refs
   defp refs_of(%{s: s}), do: refs(s)

@@ -405,6 +405,18 @@ defmodule Ampd.AuthorityLogTest do
       assert Ampd.seals() == []
     end
 
+    test "an effect's receipt and one grant are looked up by key, not by copying the ledger out" do
+      world!()
+      r = perform!()
+      e = Effects.get(r["effect_id"])
+
+      assert Receipts.for_effect(r["effect_id"])["id"] == r["receipt"]["id"]
+      assert Receipts.for_effect("ef_none") == nil
+      assert GrantRegistry.get(e["grant_ref"])["consumptions"] == [e["id"]]
+      assert Enum.all?(GrantRegistry.active(), &(&1["status"] == "active"))
+      refute Enum.any?(GrantRegistry.active(), &(&1["id"] == e["grant_ref"]))
+    end
+
     test "a delta for a store the log does not hold is refused, not built into a partial store" do
       world!()
 
