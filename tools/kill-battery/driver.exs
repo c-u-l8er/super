@@ -71,7 +71,14 @@ report = %{
     for g <- GrantRegistry.list(), g["capability"] == cap do
       %{"id" => g["id"], "status" => g["status"], "consumptions" => g["consumptions"] || []}
     end,
-  "recovery_listing" => (if seals == [], do: Effects.recovery_listing(), else: nil),
+  # Super's listing classifies each effect against every receipt, which is quadratic in history; the
+  # check reads a listing row only for effects that are not COMMITTED (a split claim, an in-flight one),
+  # so only those are listed. Same function, fewer rows.
+  "recovery_listing" =>
+    (if seals == [] do
+       open = Enum.reject(Effects.all(), &(&1["state"] == "COMMITTED"))
+       Ampd.Effects.Contract.listing(open, Effects.stores())
+     end),
   # The authority log's own account (a tree without one reports nil): the torn tails it truncated and
   # named on this boot, and its counters.
   "authority_log" =>

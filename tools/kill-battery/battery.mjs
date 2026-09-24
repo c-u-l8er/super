@@ -87,7 +87,7 @@ const rawLog = dataDir => {
 /* One boot of the driver. Resolves when the loop has started (so a kill can land), or when the boot
    ended on its own (sealed, refused). */
 const boot = ({world, acks, report, seed, log}) => new Promise(res => {
-  const before = lines(acks).length;
+  const before = lines(acks).length, t0 = Date.now();
   const child = spawn('mix', ['run', '../tools/kill-battery/driver.exs'], {cwd: AMPD, stdio: ['ignore', 'pipe', 'pipe'],
     env: {...process.env, MIX_ENV: 'test', AMPD_DATA_DIR: world, AMPD_TEST_DATA_DIR: join(BASE, '.test-config'),
           KB_ACKS: acks, KB_REPORT: report, KB_SEED: seed ? '1' : '0'}});
@@ -99,7 +99,7 @@ const boot = ({world, acks, report, seed, log}) => new Promise(res => {
     for (const end = Date.now() + BOOT_TIMEOUT_MS; Date.now() < end && !done; await sleep(20)) {
       const mine = lines(acks).slice(before);
       const b = mine.find(e => e.event === 'boot');
-      if (mine.some(e => e.event === 'loop_started')) return finish({state: 'looping', os_pid: Number(b.os_pid)});
+      if (mine.some(e => e.event === 'loop_started')) return finish({state: 'looping', os_pid: Number(b.os_pid), boot_ms: Date.now() - t0});
     }
     finish({state: 'boot-timeout'});
   })();
@@ -126,7 +126,7 @@ for (let k = 1; k <= KILLS; k++) {
   bootN++;
   const report = join(OUT, `report-L${lineage}-b${bootN}.json`), log = join(OUT, `boot-L${lineage}-b${bootN}.log`);
   pending = await boot({world, acks, report, seed: false, log});
-  const row = {kill: k, lineage, boot: bootN, delay_ms: Math.round(delay), acked_before_kill: ackedAtKill,
+  const row = {kill: k, lineage, boot: bootN, delay_ms: Math.round(delay), acked_before_kill: ackedAtKill, reboot_ms: pending.boot_ms ?? null,
     last_event_before_kill: evBefore.at(-1)?.event ?? null, raw_dets: raw,
     dirty_tables: Object.entries(raw).filter(([, v]) => v !== 'ok').map(([k]) => k), authority_log: alog};
   if (pending.state === 'looping' || existsSync(report)) {
@@ -148,6 +148,10 @@ for (let k = 1; k <= KILLS; k++) {
     row.seal_codes = [...new Set([...text.matchAll(/(RECOVERY-STATE-[A-Z]+|ORPHANED-WORLD|WORLD-META-[A-Z-]+) · ([a-z_]+)/g)].map(m => `${m[1]} · ${m[2]}`))];
   }
   rows.push(row);
+  // A clean recovery's report is only the evidence that it was clean, and at tens of thousands of
+  // effects each is megabytes: keep the first, the last, and every one with a finding.
+  const finding = row.outcome !== 'CONTINUED' || row.lost?.length || row.invented?.length || row.split?.length;
+  if (process.env.KB_KEEP_REPORTS !== 'all' && !finding && k !== 1 && k !== KILLS) rmSync(report, {force: true});
   console.log(`kill ${k}/${KILLS} L${lineage}b${bootN} +${row.delay_ms} ms · acked ${row.acked_before_kill} · dirty [${row.dirty_tables}]${alog ? ` · log ${alog.state}${alog.torn_bytes ? ' ' + alog.torn_bytes + 'B' : ''}` : ''} · ${row.outcome}` +
     (row.outcome === 'CONTINUED' ? ` · lost ${row.lost.length}${row.lost.length ? ' ' + JSON.stringify(row.lost.slice(0, 3)) : ''} · invented ${row.invented.length}${row.invented.length ? ' ' + JSON.stringify(row.invented.slice(0, 3)) : ''} · unrecorded ${JSON.stringify(row.unrecorded)} · in-flight ${JSON.stringify(row.inflight)}` : ` · ${row.seal_codes?.join(', ') ?? row.seals?.map(s => s.store).join(', ') ?? ''}`) +
     (row.witness_torn?.length ? ` · torn witness ${JSON.stringify(row.witness_torn)}` : ''));
