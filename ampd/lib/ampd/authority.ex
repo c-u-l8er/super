@@ -651,6 +651,14 @@ defmodule Ampd.Authority do
 
   # ---------------------------------------------------------------- claim
   @doc """
+  One retention pass (`Ampd.Retention.pass/1`): inside the total order, as
+  ONE authority-log record. `{:ok, summary}` or `{:error, why}`.
+  """
+  def retire_settled(cfg) do
+    tx(fn -> Ampd.AuthorityLog.group(fn -> Ampd.Retention.pass(cfg) end) end)
+  end
+
+  @doc """
   Decide, journal, claim, and consume — all inside the total order.
 
   The decision is taken **here**, not by the caller, which is what makes a

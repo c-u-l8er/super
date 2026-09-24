@@ -85,7 +85,7 @@ defmodule Ampd.Effects do
   # them is INDETERMINATE, not a refusal.
   @participant_mutations ~w(close_store load_state propose to claim attempt commit recover
                             authorize_write landed refused witness_state witness_listing
-                            flush_deferred)a
+                            flush_deferred retire)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -112,13 +112,68 @@ defmodule Ampd.Effects do
   def sealed, do: ask(:sealed)
   def close_store, do: ask(:close_store)
   def load_state(s), do: ask({:load_state, s})
+
+  @doc """
+  The WORKING journal: every effect not yet retired, oldest first.
+
+  Retention (`Ampd.Retention`) moves settled, terminal effects out of this
+  list into the authority archive; `retired/1`, `retired_count/1` and
+  `archived/0` answer for those. Everything that decides — claim, recovery,
+  the listing, the reconcile queue — reads this list, and never needs a
+  retired effect: one is retired only once it is terminal, holds no live
+  lease, and its recovery row is settled.
+  """
   def all, do: ask(:all)
 
   # Looked up here, not by copying every effect out of this process to find
   # one: the copy grew with history (0.1 ms at an empty journal, 15–21 ms at
-  # 2,000, measured).
-  def get(id), do: ask({:get, id})
+  # 2,000, measured). A retired effect is read from the archive by the CALLER,
+  # so the journal owner never waits on a history read.
+  def get(id) do
+    case ask({:get, id}) do
+      {:archived, batch} ->
+        case Ampd.AuthorityLog.archived_row(batch, @store, id) do
+          {:ok, e} -> e
+          {:error, _} = err -> err
+        end
+
+      other ->
+        other
+    end
+  end
+
   def count, do: length(all())
+
+  @doc "A retired effect's compact entry — `[final_state, batch]` — or nil."
+  def retired(id), do: ask({:retired, id})
+
+  @doc false
+  # The whole retired index (id → [state, batch]), for tools that check the
+  # archive against it. Copies it out: never on a decision path.
+  def retired_index, do: ask(:retired_index)
+
+  @doc "How many effects have been retired: all of them (`nil`), or one actor's."
+  def retired_count(actor \\ nil), do: ask({:retired_count, actor})
+
+  @doc """
+  Every retired effect, read from the archive — for paged history only, never
+  for a decision. `{:ok, rows}` or `{:error, why}`.
+  """
+  def archived, do: Ampd.AuthorityLog.archived_rows(@store)
+
+  @doc """
+  The oldest terminal effects that may be retired: all but the newest
+  `keep_recent` terminal ones, none holding a live lease, at most `max`.
+  A read; `Ampd.Retention` decides which of them are settled.
+  """
+  def retirable(keep_recent, max), do: ask({:retirable, keep_recent, max})
+
+  @doc """
+  Coordinator only, inside the retirement transaction: drop `ids` from the
+  working journal and index them as archived in `batch`. Refuses the whole
+  batch, by name, if any id is not a terminal effect without a live lease.
+  """
+  def retire(ids, batch), do: ask({:retire, ids, batch})
 
   @doc """
   Open a proposal. `env["branch"]` is the one declaration field the
@@ -195,7 +250,7 @@ defmodule Ampd.Effects do
   def witness_listing, do: ask(:witness_listing)
 
   # --- ordered-authority boundary -------------------------------------
-  @ordered_ops [:claim, :propose, :load_state]
+  @ordered_ops [:claim, :propose, :load_state, :retire]
   @impl true
   # A call made for the open authority transaction (`Ampd.AuthorityLog.group/1`)
   # arrives wrapped with its origin, so this registry's writes join that
@@ -231,7 +286,40 @@ defmodule Ampd.Effects do
 
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["effects"], st}
 
-  def handle_call({:get, id}, _f, st), do: {:reply, lookup(st, id), st}
+  def handle_call({:get, id}, _f, st) do
+    reply =
+      case lookup(st, id) do
+        nil ->
+          case retired_entry(st.s, id) do
+            [_state, batch | _] -> {:archived, batch}
+            _ -> nil
+          end
+
+        e ->
+          e
+      end
+
+    {:reply, reply, st}
+  end
+
+  def handle_call({:retired, id}, _f, st), do: {:reply, retired_entry(st.s, id), st}
+  def handle_call(:retired_index, _f, st), do: {:reply, Map.get(st.s, "retired", %{}), st}
+
+  def handle_call({:retired_count, actor}, _f, %{s: s} = st),
+    do: {:reply, Map.get(Map.get(s, "retired_count", %{}), actor || "*", 0), st}
+
+  def handle_call({:retirable, keep, max}, _f, %{s: s} = st) do
+    terminal = Enum.filter(s["effects"], &(&1["state"] in @terminal))
+    live = live_effects(st)
+
+    cands =
+      terminal
+      |> Enum.take(max(length(terminal) - keep, 0))
+      |> Enum.reject(&MapSet.member?(live, &1["id"]))
+      |> Enum.take(max)
+
+    {:reply, cands, st}
+  end
 
   # The witness lines of an authority transaction's writes wait for its commit
   # (`Ampd.AuthorityLog.group/1`), because a witness line follows the durable
@@ -541,10 +629,65 @@ defmodule Ampd.Effects do
     end
   end
 
+  def handle_ordered({:retire, ids, batch}, %{tab: tab, s: s} = st) do
+    live = live_effects(st)
+    rows = Enum.map(ids, &{&1, lookup(st, &1)})
+
+    case Enum.find(rows, fn {id, e} ->
+           e == nil or e["state"] not in @terminal or MapSet.member?(live, id)
+         end) do
+      {id, e} ->
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("retire-not-settled",
+            component: "Ampd.Effects",
+            retryable: true,
+            requires_human: false,
+            public_message: "An effect in the retirement batch is not settled.",
+            operator_detail: %{
+              "effect" => id,
+              "state" => e && e["state"],
+              "live_lease" => MapSet.member?(live, id)
+            }
+          )}, st}
+
+      nil ->
+        set = MapSet.new(ids)
+
+        index =
+          Map.merge(
+            Map.get(s, "retired", %{}),
+            Map.new(rows, fn {id, e} -> {id, [e["state"], batch]} end)
+          )
+
+        counts =
+          Enum.reduce(rows, Map.get(s, "retired_count", %{}), fn {_id, e}, c ->
+            c = Map.update(c, "*", 1, &(&1 + 1))
+            if is_binary(e["actor"]), do: Map.update(c, e["actor"], 1, &(&1 + 1)), else: c
+          end)
+
+        s2 =
+          s
+          |> Map.put("effects", Enum.reject(s["effects"], &MapSet.member?(set, &1["id"])))
+          |> Map.put("retired", index)
+          |> Map.put("retired_count", counts)
+
+        st = %{st | s: Ampd.Store.save(tab, s2), ix: Map.drop(st.ix, ids)}
+        {:reply, {:ok, length(ids)}, settle_leases(st, set)}
+    end
+  end
+
   def handle_ordered({:claim, id}, %{inc: inc} = st) do
     case lookup(st, id) do
       nil ->
-        {:reply, {:error, "effect-unknown · " <> id}, st}
+        case retired_entry(st.s, id) do
+          [state | _] ->
+            {:reply,
+             {:error, "effect-settled · " <> id <> " is already " <> state <> " (retired)"}, st}
+
+          _ ->
+            {:reply, {:error, "effect-unknown · " <> id}, st}
+        end
 
       %{"state" => st_now} = e when st_now in @in_flight ->
         {:reply, {:error, "effect-already-claimed · " <> id <> " is " <> e["state"]}, st}
@@ -629,6 +772,10 @@ defmodule Ampd.Effects do
       epoch: epoch,
       key: key,
       leases: %{},
+      # Leases of RETIRED effects, moved out of `leases` (which the per-effect
+      # paths walk) and kept only as the reason they were retired, so a late
+      # ticket is still refused by its exact name.
+      settled: %{},
       terminals: MapSet.new(),
       tseq: 0,
       n_lease: 0,
@@ -742,7 +889,10 @@ defmodule Ampd.Effects do
   def admit(st, id, state) do
     case lookup(st, id) do
       nil ->
-        {:refused, transition_refusal("effect-unknown", id, nil, state)}
+        case st[:s] && retired_entry(st.s, id) do
+          [from | _] -> {:refused, transition_refusal("journal-transition-illegal", id, from, state)}
+          _ -> {:refused, transition_refusal("effect-unknown", id, nil, state)}
+        end
 
       e ->
         if Contract.legal_transition?(e["state"], state),
@@ -785,7 +935,7 @@ defmodule Ampd.Effects do
         {:refused, owner_refusal("write-unmediated", lease, nil, nil, nil)}
 
       true ->
-        case Map.get(inc.leases, lease["lease_id"]) do
+        case Map.get(inc.leases, lease["lease_id"]) || settled_lease(inc, lease["lease_id"]) do
           nil ->
             {:refused, owner_refusal("write-unmediated", lease, nil, nil, nil)}
 
@@ -951,6 +1101,32 @@ defmodule Ampd.Effects do
   # is still answered, by the scan the index replaced.
   defp lookup(%{ix: ix}, id), do: Map.get(ix, id)
   defp lookup(%{s: s}, id), do: Enum.find(s["effects"], &(&1["id"] == id))
+
+  defp retired_entry(s, id), do: Map.get(Map.get(s || %{}, "retired", %{}), id)
+
+  # The effects that still hold a live (unretired) lease in this incarnation.
+  defp live_effects(%{inc: nil}), do: MapSet.new()
+
+  defp live_effects(%{inc: inc}),
+    do: for({_, l} <- inc.leases, l.retired == nil, into: MapSet.new(), do: l.effect)
+
+  defp settled_lease(inc, lease_id) do
+    case Map.get(Map.get(inc, :settled, %{}), lease_id) do
+      nil -> nil
+      reason -> %{retired: reason}
+    end
+  end
+
+  # Retired effects' leases leave the table the per-effect paths walk.
+  defp settle_leases(%{inc: nil} = st, _set), do: st
+
+  defp settle_leases(%{inc: inc} = st, set) do
+    {gone, keep} =
+      Enum.split_with(inc.leases, fn {_, l} -> MapSet.member?(set, l.effect) and l.retired != nil end)
+
+    settled = Enum.reduce(gone, Map.get(inc, :settled, %{}), fn {id, l}, m -> Map.put(m, id, l.retired) end)
+    %{st | inc: inc |> Map.put(:leases, Map.new(keep)) |> Map.put(:settled, settled)}
+  end
 
   defp now, do: DateTime.utc_now() |> DateTime.to_iso8601()
 end

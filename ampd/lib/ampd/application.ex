@@ -57,6 +57,9 @@ defmodule Ampd.Application do
       Ampd.Approvals,
       Ampd.Receipts,
       Ampd.Effects,
+      # Holds no authority: it only decides WHEN a retention pass runs, and
+      # the pass itself runs inside the total order (`Ampd.Retention`).
+      Ampd.Retention,
       # The semantic objects, and the trusted edge that resolves one of
       # them to a directory. After the registries because establishing a
       # capability reads the grant table, and before the bridge because a

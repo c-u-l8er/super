@@ -28,6 +28,10 @@ export function check(rep, ev) {
   const receiptById = new Map(receipts.map(r => [r.id, r]));
   const lost = [], invented = [], unrecorded = [], split = [];
 
+  // 0. retention: every effect the retired index names has its row in the archive
+  if (rep.retention && rep.retention.index_without_row_count > 0)
+    lost.push(`${rep.retention.index_without_row_count} retired effects have no row in the archive: ${rep.retention.index_without_row.join(',')}`);
+
   // 1. every acknowledged transition is there, whole
   for (const a of acked) {
     const e = effects.get(a.effect_id);

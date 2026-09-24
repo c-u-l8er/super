@@ -57,6 +57,31 @@ defmodule Ampd.AuthorityLog do
   log's. A world reset waits for a running snapshot, so an old world's
   checkpoint can never be renamed into a new world's directory.
 
+  ## Retention: the archive
+
+  Completed work leaves the working lists (`Ampd.Retention`), and what leaves
+  is kept here first: `authority.archive`, append-only, the same frames as the
+  log (`<<len::32, crc32::32, payload>>` after its own header), one frame per
+  retirement batch — `%{"b" => n, "rows" => %{store => [row]}}`, `n` gapless
+  from 1. This process appends and syncs a batch BEFORE the record that
+  removes those rows from the working lists, so a row is always in one or
+  the other: a crash between leaves an orphan batch whose rows are still
+  live, and the next pass archives them again. Each store keeps a compact
+  index of what it retired (id → final status, batch) in its own state, so
+  the index is carried by this log and its checkpoints; the archive holds the
+  rows and is never covered or deleted by a checkpoint.
+
+  Boot reads only the frame headers. A torn LAST frame (short, or a bad
+  checksum with nothing after it) is an unacknowledged batch — no retirement
+  record can name it, because the record is written after the sync — so it is
+  truncated and named like a torn log tail. A frame that does not verify when
+  it is READ is named in the reader's answer; it never seals the authority
+  stores, whose decisions read the index, not the archive.
+
+  Readers read the file themselves (`read_batch/1`, `archived_rows/1`), by
+  the offsets this process hands out, so a history read never holds up an
+  append.
+
   ## Worlds written before this
 
   World `schema_version` 3 is this layout. A version-2 world is converted
@@ -82,6 +107,8 @@ defmodule Ampd.AuthorityLog do
   @header "AMPD-AUTHORITY-LOG/1\n"
   @cp_file "authority.checkpoint"
   @cp_header "AMPD-AUTHORITY-CHECKPOINT/1\n"
+  @ar_file "authority.archive"
+  @ar_header "AMPD-AUTHORITY-ARCHIVE/1\n"
   @group_table :ampd_authority_log_group
 
   @doc "The stores this log backs. Every other authority store is still a DETS table."
@@ -89,6 +116,7 @@ defmodule Ampd.AuthorityLog do
   def backed?(name), do: name in @stores
   def path(dir \\ Ampd.Store.data_dir()), do: Path.join(dir, @file_name)
   def checkpoint_path(dir \\ Ampd.Store.data_dir()), do: Path.join(dir, @cp_file)
+  def archive_path(dir \\ Ampd.Store.data_dir()), do: Path.join(dir, @ar_file)
   def header, do: @header
 
   # A log that reached the checkpoint cadence is renamed to this and a new
@@ -230,6 +258,107 @@ defmodule Ampd.AuthorityLog do
   """
   def status, do: call(:status, :read)
 
+  # ---------------------------------------------------------------- archive
+
+  @doc """
+  Append one retirement batch — `%{store => [row]}` — to the archive and sync
+  it. `{:ok, n}` once durable, `{:error, why}` otherwise (nothing then names
+  the batch: the caller must not retire its rows).
+  """
+  def archive(rows) when is_map(rows),
+    do: GenServer.call(__MODULE__, {:archive, rows}, 60_000)
+
+  @doc "Where batch `n` is: `{:ok, path, offset, length}` or `{:error, why}`."
+  def archive_slot(n), do: GenServer.call(__MODULE__, {:archive_slot, n}, 60_000)
+
+  @doc """
+  Batch `n`'s rows, `{:ok, %{store => [row]}}` or `{:error, why}`, read by the
+  caller from the file — never through this process's mailbox beyond the
+  offset lookup.
+  """
+  def read_batch(n) do
+    with {:ok, path, off, len} <- archive_slot(n) do
+      read_frame(path, off, len, n)
+    end
+  end
+
+  @doc """
+  One archived row: the row in batch `n` of `store` whose `field` (default
+  `"id"`) is `value`, or `{:error, why}`.
+  """
+  def archived_row(n, store, value, field \\ "id") do
+    with {:ok, rows} <- read_batch(n) do
+      case Enum.find(Map.get(rows, store, []), &(&1[field] == value)) do
+        nil -> {:error, "archive-row-absent · #{store} #{value} is not in batch #{n}"}
+        row -> {:ok, row}
+      end
+    end
+  end
+
+  @doc """
+  Every archived row of `store`, oldest batch first, each id once (the latest
+  batch that holds it: an orphan batch — archived, then the process died
+  before its retirement record — is followed by the batch that retired the
+  same rows for real). Reads the whole archive; for paged history only.
+  `{:ok, rows}` or `{:error, why}` at the first batch that does not verify.
+  """
+  def archived_rows(store, field \\ "id") do
+    case GenServer.call(__MODULE__, :archive_slots, 60_000) do
+      {:ok, _path, []} ->
+        {:ok, []}
+
+      {:ok, path, slots} ->
+        slots
+        |> Enum.reduce_while({:ok, []}, fn {n, off, len}, {:ok, acc} ->
+          case read_frame(path, off, len, n) do
+            {:ok, rows} -> {:cont, {:ok, [Map.get(rows, store, []) | acc]}}
+            err -> {:halt, err}
+          end
+        end)
+        |> case do
+          {:ok, per_batch} ->
+            rows = per_batch |> Enum.reverse() |> Enum.concat()
+            last = Map.new(Enum.with_index(rows), fn {r, i} -> {r[field], i} end)
+
+            {:ok,
+             for({r, i} <- Enum.with_index(rows), Map.fetch!(last, r[field]) == i, do: r)}
+
+          err ->
+            err
+        end
+
+      err ->
+        err
+    end
+  end
+
+  defp read_frame(path, off, len, n) do
+    case :file.open(path, [:read, :raw, :binary]) do
+      {:ok, fd} ->
+        try do
+          verify_frame(:file.pread(fd, off, len), n)
+        after
+          :file.close(fd)
+        end
+
+      {:error, why} ->
+        {:error, "archive-unreadable · #{inspect(why)}"}
+    end
+  end
+
+  defp verify_frame({:ok, <<plen::32, crc::32, payload::binary-size(plen)>>}, n) do
+    if :erlang.crc32(payload) != crc do
+      {:error, "archive-unreadable · batch #{n} does not verify (checksum)"}
+    else
+      case decode(payload) do
+        {:ok, %{"b" => ^n, "rows" => rows}} -> {:ok, rows}
+        _ -> {:error, "archive-unreadable · batch #{n} is not the batch it claims"}
+      end
+    end
+  end
+
+  defp verify_frame(_, n), do: {:error, "archive-unreadable · batch #{n} is incomplete"}
+
   # ----------------------------------------------------------- transactions
 
   @doc """
@@ -357,8 +486,17 @@ defmodule Ampd.AuthorityLog do
       cp_last: nil,
       cp_retry_at: 0,
       gen: nil,
+      # The archive: its handle, size, batch count and where each batch is.
+      ar_fd: nil,
+      ar_size: 0,
+      ar_n: 0,
+      ar_slots: %{},
+      ar_damaged: nil,
       counters: %{
         "records" => 0,
+        "archive_batches" => 0,
+        "archive_bytes" => 0,
+        "archive_sync_us_total" => 0,
         "syncs" => 0,
         "bytes" => 0,
         "grouped_records" => 0,
@@ -382,6 +520,7 @@ defmodule Ampd.AuthorityLog do
     # checkpoint into the NEW world. So its report is awaited here.
     st = await_checkpoint(st)
     if st.fd, do: :file.close(st.fd)
+    if st.ar_fd, do: :file.close(st.ar_fd)
     {:reply, :ok, %{closed() | counters: st.counters}}
   end
 
@@ -405,7 +544,11 @@ defmodule Ampd.AuthorityLog do
        "damaged" => st.damaged,
        "recovered" => Enum.reverse(st.recovered),
        "stores" => Map.keys(st.images),
-       "group_open" => st.group != nil
+       "group_open" => st.group != nil,
+       "archive_path" => st.dir && archive_path(st.dir),
+       "archive_size" => st.ar_size,
+       "archive_batches_present" => st.ar_n,
+       "archive_damaged" => st.ar_damaged
      }), st}
   end
 
@@ -471,6 +614,76 @@ defmodule Ampd.AuthorityLog do
     end
   end
 
+  def handle_call({:archive, rows}, _f, st) do
+    st = ensure_open(st)
+
+    cond do
+      st.damaged ->
+        {:reply, {:error, {:damaged, st.damaged}}, st}
+
+      st.ar_damaged ->
+        {:reply, {:error, {:archive_damaged, st.ar_damaged}}, st}
+
+      true ->
+        st = ensure_archive(st)
+        n = st.ar_n + 1
+        fr = frame(%{"b" => n, "rows" => rows})
+        len = IO.iodata_length(fr)
+
+        with :ok <- :file.pwrite(st.ar_fd, st.ar_size, fr),
+             {:ok, us} <- timed_datasync(st.ar_fd) do
+          c = st.counters
+
+          {:reply, {:ok, n},
+           %{
+             st
+             | ar_n: n,
+               ar_size: st.ar_size + len,
+               ar_slots: Map.put(st.ar_slots, n, {st.ar_size, len}),
+               counters: %{
+                 c
+                 | "archive_batches" => c["archive_batches"] + 1,
+                   "archive_bytes" => c["archive_bytes"] + len,
+                   "archive_sync_us_total" => c["archive_sync_us_total"] + us
+               }
+           }}
+        else
+          {:error, why} ->
+            # Take back whatever part reached the file, as for the log.
+            case :file.position(st.ar_fd, st.ar_size) do
+              {:ok, _} ->
+                _ = :file.truncate(st.ar_fd)
+                {:reply, {:error, why}, st}
+
+              _ ->
+                {:reply, {:error, why},
+                 %{st | ar_damaged: "a failed archive write could not be taken back"}}
+            end
+        end
+    end
+  end
+
+  def handle_call({:archive_slot, n}, _f, st) do
+    st = ensure_open(st)
+
+    reply =
+      case Map.get(st.ar_slots, n) do
+        {off, len} -> {:ok, archive_path(st.dir), off, len}
+        nil -> {:error, "archive-unreadable · no batch #{n} in this world's archive"}
+      end
+
+    {:reply, reply, st}
+  end
+
+  def handle_call(:archive_slots, _f, st) do
+    st = ensure_open(st)
+
+    slots =
+      st.ar_slots |> Enum.sort() |> Enum.map(fn {n, {off, len}} -> {n, off, len} end)
+
+    {:reply, {:ok, archive_path(st.dir), slots}, st}
+  end
+
   def handle_call({:open_group, owner}, _f, st) do
     st = ensure_open(st)
 
@@ -530,7 +743,9 @@ defmodule Ampd.AuthorityLog do
   defp bump(st, k), do: %{st | counters: Map.update!(st.counters, k, &(&1 + 1))}
 
   defp ensure_open(st, dir \\ Ampd.Store.data_dir()) do
-    if st.dir == dir, do: st, else: load(%{closed() | counters: st.counters}, dir)
+    if st.dir == dir,
+      do: st,
+      else: load(%{closed() | counters: st.counters}, dir) |> load_archive()
   end
 
   # Load the checkpoint, replay what follows it (sealed segments, then the
@@ -592,6 +807,120 @@ defmodule Ampd.AuthorityLog do
   end
 
   defp compact(images), do: Map.new(images, fn {n, img} -> {n, Delta.compact(img)} end)
+
+  # The archive at boot: its frame headers only — where each batch is — with
+  # the LAST frame verified, because a torn write can only be the last one.
+  defp load_archive(%{dir: dir} = st) do
+    p = archive_path(dir)
+
+    case File.stat(p) do
+      {:error, :enoent} ->
+        st
+
+      {:ok, %{size: size}} ->
+        {:ok, fd} = :file.open(p, [:read, :write, :raw, :binary])
+        st = %{st | ar_fd: fd}
+        hs = byte_size(@ar_header)
+
+        cond do
+          size < hs ->
+            torn_archive(st, 0, size, 1, %{}, "partial header")
+
+          true ->
+            case :file.pread(fd, 0, hs) do
+              {:ok, @ar_header} ->
+                scan_archive(st, hs, size, 1, %{})
+
+              _ ->
+                %{st | ar_size: size, ar_damaged: "the archive does not begin with its header"}
+            end
+        end
+    end
+  end
+
+  defp scan_archive(st, off, size, n, slots) when off == size,
+    do: %{st | ar_size: size, ar_n: n - 1, ar_slots: slots}
+
+  defp scan_archive(st, off, size, n, slots) when size - off < 8,
+    do: torn_archive(st, off, size, n, slots, "partial frame header")
+
+  defp scan_archive(st, off, size, n, slots) do
+    {:ok, <<len::32, crc::32>>} = :file.pread(st.ar_fd, off, 8)
+    next = off + 8 + len
+
+    cond do
+      next > size ->
+        torn_archive(st, off, size, n, slots, "frame declares #{len} bytes, #{size - off - 8} present")
+
+      next == size ->
+        case :file.pread(st.ar_fd, off + 8, len) do
+          {:ok, payload} when byte_size(payload) == len ->
+            if :erlang.crc32(payload) == crc,
+              do: scan_archive(st, next, size, n + 1, Map.put(slots, n, {off, 8 + len})),
+              else: torn_archive(st, off, size, n, slots, "checksum mismatch on the last frame")
+
+          _ ->
+            torn_archive(st, off, size, n, slots, "the last frame cannot be read whole")
+        end
+
+      true ->
+        scan_archive(st, next, size, n + 1, Map.put(slots, n, {off, 8 + len}))
+    end
+  end
+
+  # An unacknowledged batch: its retirement record is written only after the
+  # batch is synced, so nothing can name it. Truncated, and named by a durable
+  # `recovered` record exactly as a torn log tail is.
+  defp torn_archive(st, off, size, n, slots, reason) do
+    hs = byte_size(@ar_header)
+
+    st =
+      if off < hs do
+        {:ok, _} = :file.position(st.ar_fd, 0)
+        :ok = :file.truncate(st.ar_fd)
+        :ok = :file.pwrite(st.ar_fd, 0, @ar_header)
+        %{st | ar_size: hs}
+      else
+        {:ok, _} = :file.position(st.ar_fd, off)
+        :ok = :file.truncate(st.ar_fd)
+        %{st | ar_size: off}
+      end
+
+    :ok = :file.datasync(st.ar_fd)
+    st = %{st | ar_n: n - 1, ar_slots: slots}
+
+    event = %{
+      "archive_torn_tail_bytes" => size - off,
+      "at_offset" => off,
+      "reason" => reason,
+      "at" => DateTime.utc_now() |> DateTime.to_iso8601()
+    }
+
+    Logger.warning(
+      "ampd: authority archive had a torn last batch (#{size - off} bytes at offset #{off}, " <>
+        "#{reason}) — a batch no retirement record named; truncated and recorded"
+    )
+
+    if st.damaged == nil and st.fd != nil do
+      case write_record(st, %{"ops" => [], "recovered" => event}) do
+        {:ok, st} -> %{st | recovered: [event | st.recovered]}
+        {:error, _why, st} -> %{st | recovered: [event | st.recovered]}
+      end
+    else
+      %{st | recovered: [event | st.recovered]}
+    end
+  end
+
+  defp ensure_archive(%{ar_fd: nil, dir: dir} = st) do
+    {:ok, fd} = :file.open(archive_path(dir), [:read, :write, :raw, :binary])
+    :ok = :file.pwrite(fd, 0, @ar_header)
+    {:ok, _} = :file.position(fd, byte_size(@ar_header))
+    :ok = :file.truncate(fd)
+    :ok = :file.datasync(fd)
+    %{st | ar_fd: fd, ar_size: byte_size(@ar_header), ar_n: 0, ar_slots: %{}}
+  end
+
+  defp ensure_archive(st), do: st
 
   @doc false
   # Everything durable in `dir`, without writing: the checkpoint, the sealed

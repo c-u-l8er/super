@@ -33,7 +33,7 @@ defmodule Ampd.Receipts do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state emit emit_ticketed fence_epoch fence_retire reset validation_start validation_outcome)a
+  @participant_mutations ~w(close_store load_state emit emit_ticketed fence_epoch fence_retire reset validation_start validation_outcome retire)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -116,7 +116,37 @@ defmodule Ampd.Receipts do
   ever emitted). At most one exists: uniqueness per effect is enforced at the
   append.
   """
-  def for_effect(effect_ref), do: ask({:for_effect, effect_ref})
+  def for_effect(effect_ref) do
+    case ask({:for_effect, effect_ref}) do
+      {:archived, batch} ->
+        case Ampd.AuthorityLog.archived_row(batch, @store, effect_ref, "effect_ref") do
+          {:ok, r} -> r
+          {:error, _} = err -> err
+        end
+
+      other ->
+        other
+    end
+  end
+
+  @doc """
+  Coordinator only, inside the retirement transaction: every record naming
+  one of `effect_refs` leaves the working ledger, indexed as archived in
+  `batch`. Records naming no effect (worktree, validation) are never retired.
+  """
+  def retire(effect_refs, batch), do: ask({:retire, effect_refs, batch})
+
+  @doc "A retired receipt's compact entry — `[receipt_id, batch]` — for an effect, or nil."
+  def retired_ref(effect_ref), do: ask({:retired_ref, effect_ref})
+
+  @doc "How many records of `kind` were retired: all of them (`nil`), or one actor's."
+  def retired_count(kind, actor \\ nil), do: ask({:retired_count, kind, actor})
+
+  @doc "Every retired record of `kind`, from the archive — paged history only."
+  def archived_of_kind(kind) do
+    with {:ok, rows} <- Ampd.AuthorityLog.archived_rows(@store),
+         do: {:ok, Enum.filter(rows, &(&1["kind"] == kind))}
+  end
 
   @doc "Every record of one kind, in append order."
   def of_kind(kind), do: Enum.filter(all(), &(&1["kind"] == kind))
@@ -257,7 +287,7 @@ defmodule Ampd.Receipts do
   # executor. `emit` is deliberately NOT — an ordinary ledger append is not
   # an authority mutation, and routing every receipt through the total order
   # would buy nothing.
-  @ordered_ops [:reset, :load_state, :validation_start, :validation_outcome]
+  @ordered_ops [:reset, :load_state, :validation_start, :validation_outcome, :retire]
 
   @doc """
   Operations served only when the caller IS the total order.
@@ -390,6 +420,10 @@ defmodule Ampd.Receipts do
           Map.has_key?(refs_of(st), target) ->
             {:refused, "write-duplicate", "a receipt for #{target} is already in the ledger"}
 
+          Map.has_key?(Map.get(s, "retired_refs", %{}), target) ->
+            {:refused, "write-duplicate",
+             "a receipt for #{target} is already in the ledger (retired to the archive)"}
+
           true ->
             :ok
         end
@@ -453,7 +487,30 @@ defmodule Ampd.Receipts do
   end
 
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["log"], st}
-  def handle_call({:for_effect, ref}, _f, st), do: {:reply, Map.get(refs_of(st), ref), st}
+  def handle_call({:for_effect, ref}, _f, st) do
+    reply =
+      case Map.get(refs_of(st), ref) do
+        nil ->
+          case Map.get(Map.get(st.s, "retired_refs", %{}), ref) do
+            [_rid, batch | _] -> {:archived, batch}
+            _ -> nil
+          end
+
+        r ->
+          r
+      end
+
+    {:reply, reply, st}
+  end
+
+  def handle_call({:retired_ref, ref}, _f, st),
+    do: {:reply, Map.get(Map.get(st.s, "retired_refs", %{}), ref), st}
+
+  def handle_call({:retired_count, kind, actor}, _f, st),
+    do:
+      {:reply,
+       st.s |> Map.get("retired_count", %{}) |> Map.get(kind, %{}) |> Map.get(actor || "*", 0),
+       st}
 
   # A read of this resource's fence — epoch and retired set, never the key.
   def handle_call(:fence, _f, %{s: s} = st),
@@ -599,6 +656,35 @@ defmodule Ampd.Receipts do
         {record, st} = append(st, fields)
         {:reply, {:ok, record}, st}
     end
+  end
+
+  def handle_ordered({:retire, effect_refs, batch}, %{tab: tab, s: s} = st) do
+    set = MapSet.new(effect_refs)
+    {gone, keep} = Enum.split_with(s["log"], &MapSet.member?(set, &1["effect_ref"]))
+
+    refs_index =
+      Map.merge(
+        Map.get(s, "retired_refs", %{}),
+        Map.new(gone, &{&1["effect_ref"], [&1["id"], batch]})
+      )
+
+    counts =
+      Enum.reduce(gone, Map.get(s, "retired_count", %{}), fn r, c ->
+        k = r["kind"] || @default_kind
+        per = c |> Map.get(k, %{}) |> Map.update("*", 1, &(&1 + 1))
+        per = if is_binary(r["actor"]), do: Map.update(per, r["actor"], 1, &(&1 + 1)), else: per
+        Map.put(c, k, per)
+      end)
+
+    s2 =
+      s
+      |> Map.put("log", keep)
+      |> Map.put("retired_refs", refs_index)
+      |> Map.put("retired_count", counts)
+
+    st = %{st | s: Ampd.Store.save(tab, s2)}
+    st = if Map.has_key?(st, :refs), do: %{st | refs: Map.drop(st.refs, effect_refs)}, else: st
+    {:reply, {:ok, length(gone)}, st}
   end
 
   def handle_ordered({:load_state, s}, st) do

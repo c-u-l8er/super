@@ -17,7 +17,7 @@ defmodule Ampd.GrantRegistry do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state mint draft request_grant resolve_request dur revoke_domain revoke_one revoke_matching consume consume_ticket fence_epoch fence_retire commit reset)a
+  @participant_mutations ~w(close_store load_state mint draft request_grant resolve_request dur revoke_domain revoke_one revoke_matching consume consume_ticket fence_epoch fence_retire commit reset retire)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -194,6 +194,8 @@ defmodule Ampd.GrantRegistry do
 
   defp pos_of(grants, id), do: elem(Map.fetch!(view(grants).by_id, id), 0)
 
+  defp retired_entry(s, id), do: Map.get(Map.get(s || %{}, "retired", %{}), id)
+
   def one_shot(cap),
     do: mint(%{"capability" => cap, "duration" => "once", "uses_remaining" => 1})
 
@@ -207,8 +209,33 @@ defmodule Ampd.GrantRegistry do
   """
   def active, do: ask(:active)
 
-  @doc "One grant by id, or nil."
-  def get(id), do: ask({:get, id})
+  @doc "One grant by id, or nil — a retired grant is read from the archive by the caller."
+  def get(id) do
+    case ask({:get, id}) do
+      {:archived, batch} ->
+        case Ampd.AuthorityLog.archived_row(batch, @store, id) do
+          {:ok, g} -> g
+          {:error, _} = err -> err
+        end
+
+      other ->
+        other
+    end
+  end
+
+  @doc """
+  A retired grant's compact entry — `[status, batch, consumptions]` — or nil.
+  What stays in the working state so a used grant can never be spent again,
+  and a replayed consumption is still refused as the duplicate it is.
+  """
+  def retired(id), do: ask({:retired, id})
+
+  @doc """
+  Coordinator only, inside the retirement transaction: drop the used grants
+  `ids` from the working list, indexed as archived in `batch`. Refuses the
+  whole batch if any is absent or still active.
+  """
+  def retire(ids, batch), do: ask({:retire, ids, batch})
 
   def snapshot do
     # `snapshot_of/2` keeps only active grants; handing it only those is the
@@ -326,7 +353,8 @@ defmodule Ampd.GrantRegistry do
     :request_grant,
     :resolve_request,
     :revoke_one,
-    :revoke_matching
+    :revoke_matching,
+    :retire
   ]
   @impl true
   # A call made for the open authority transaction (`Ampd.AuthorityLog.group/1`)
@@ -364,7 +392,23 @@ defmodule Ampd.GrantRegistry do
 
   def handle_call(:list, _f, %{s: s} = st), do: {:reply, s["grants"], st}
   def handle_call(:active, _f, %{s: s} = st), do: {:reply, active_of(s["grants"]), st}
-  def handle_call({:get, id}, _f, %{s: s} = st), do: {:reply, get_of(s["grants"], id), st}
+  def handle_call({:get, id}, _f, %{s: s} = st) do
+    reply =
+      case get_of(s["grants"], id) do
+        nil ->
+          case retired_entry(s, id) do
+            [_status, batch | _] -> {:archived, batch}
+            _ -> nil
+          end
+
+        g ->
+          g
+      end
+
+    {:reply, reply, st}
+  end
+
+  def handle_call({:retired, id}, _f, %{s: s} = st), do: {:reply, retired_entry(s, id), st}
 
   # The write fence (E3-1). Guarded by "from the journal owner", not by the
   # total order — see `Ampd.Ordered.from_journal_owner?/1`.
@@ -566,7 +610,19 @@ defmodule Ampd.GrantRegistry do
       with :ok <- Ampd.Fence.check(s["fence"], ticket, "consume_grant", target) do
         cond do
           g == nil ->
-            {:refused, "write-unscoped", "no grant #{inspect(target)}"}
+            case retired_entry(s, target) do
+              [status, _batch, cs | _] ->
+                if ticket["effect"] in cs,
+                  do:
+                    {:refused, "write-duplicate",
+                     "#{ticket["effect"]}'s consumption of #{target} is already witnessed (retired)"},
+                  else:
+                    {:refused, "write-unscoped",
+                     "grant #{target} is #{status} and retired; it can never be spent again"}
+
+              _ ->
+                {:refused, "write-unscoped", "no grant #{inspect(target)}"}
+            end
 
           ticket["effect"] in (g["consumptions"] || []) or
               Enum.any?(g["consumption_witness"] || [], &(&1["ticket_id"] == ticket["ticket_id"])) ->
@@ -606,6 +662,39 @@ defmodule Ampd.GrantRegistry do
         }
 
         {:reply, {:ok, witness}, st}
+    end
+  end
+
+  def handle_ordered({:retire, ids, batch}, %{tab: tab, s: s} = st) do
+    rows = Enum.map(ids, &{&1, get_of(s["grants"], &1)})
+
+    case Enum.find(rows, fn {_id, g} -> g == nil or g["status"] == "active" end) do
+      {id, g} ->
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("retire-not-settled",
+            component: "Ampd.GrantRegistry",
+            retryable: true,
+            requires_human: false,
+            public_message: "A grant in the retirement batch is not used up.",
+            operator_detail: %{"grant" => id, "status" => g && g["status"]}
+          )}, st}
+
+      nil ->
+        set = MapSet.new(ids)
+
+        index =
+          Map.merge(
+            Map.get(s, "retired", %{}),
+            Map.new(rows, fn {id, g} -> {id, [g["status"], batch, g["consumptions"] || []]} end)
+          )
+
+        s2 =
+          s
+          |> Map.put("grants", Enum.reject(s["grants"], &MapSet.member?(set, &1["id"])))
+          |> Map.put("retired", index)
+
+        {:reply, {:ok, length(ids)}, %{st | s: Ampd.Store.save(tab, s2)}}
     end
   end
 

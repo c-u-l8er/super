@@ -255,7 +255,11 @@ defmodule Ampd.Projection do
       # `workers`, and the prototype page keeps its own client-side log — so
       # this is the moment to split it, before a renderer inherits the
       # ambiguity rather than after.
-      "receipts" => window(Receipts.of_kind(Receipts.default_kind())),
+      "receipts" =>
+        window(
+          Receipts.of_kind(Receipts.default_kind()),
+          Receipts.retired_count(Receipts.default_kind())
+        ),
       "worktree_receipts" => window(Receipts.of_kind(Ampd.Locus.receipt_kind())),
       # R7 · **its own surface, and no renderer.** The R1 census established
       # that nothing shipped renders the durable ledger — the cockpit reads
@@ -268,7 +272,8 @@ defmodule Ampd.Projection do
       # one lifecycle read in order, and separating them into two windows
       # would let a reader page past the outcome of a start it had not seen.
       "validations" => window(validation_records()),
-      "effects_history" => window(Enum.filter(Effects.all(), &Effects.terminal?/1))
+      "effects_history" =>
+        window(Enum.filter(Effects.all(), &Effects.terminal?/1), Effects.retired_count())
     }
     |> with_capacity()
   end
@@ -523,15 +528,19 @@ defmodule Ampd.Projection do
     }
   end
 
-  defp window(list) do
+  # `archived` counts what retention moved out of the working list
+  # (`Ampd.Retention`): always OLDER than everything still in it, so it only
+  # ever lies past the window, and the cursor that reaches it is the same
+  # one — `history_for/2` pages on into the archive.
+  defp window(list, archived \\ 0) do
     sorted = Enum.sort_by(list, &order_key/1, :desc)
     recent = Enum.take(sorted, @history_window)
-    more? = length(sorted) > @history_window
+    more? = length(sorted) > @history_window or archived > 0
 
     %{
       "recent" => recent,
-      "total" => length(sorted),
-      "next_cursor" => if(more?, do: List.last(recent)["id"], else: nil),
+      "total" => length(sorted) + archived,
+      "next_cursor" => if(more? and recent != [], do: List.last(recent)["id"], else: nil),
       "more" => more?
     }
   end
@@ -575,10 +584,16 @@ defmodule Ampd.Projection do
       # receipts also only ever grow.
       "effects" => Effects.all() |> mine.() |> Enum.reject(&Effects.terminal?/1),
       "effects_history" =>
-        Effects.all() |> mine.() |> Enum.filter(&Effects.terminal?/1) |> window(),
+        Effects.all()
+        |> mine.()
+        |> Enum.filter(&Effects.terminal?/1)
+        |> window(Effects.retired_count(actor)),
       # Capability receipts carry a top-level `actor`; this is the filter
       # they were designed for.
-      "receipts" => Receipts.of_kind(Receipts.default_kind()) |> mine.() |> window(),
+      "receipts" =>
+        Receipts.of_kind(Receipts.default_kind())
+        |> mine.()
+        |> window(Receipts.retired_count(Receipts.default_kind(), actor)),
 
       # **Worktree receipts name their principal `locus_actor`, not
       # `actor`.** So `mine.()` never matched one, and an agent has been
@@ -632,10 +647,11 @@ defmodule Ampd.Projection do
   them needs a command that can follow it — a cursor with nothing to give
   it to is a promise the protocol does not keep.
   """
-  def history_for(:receipts, nil), do: Receipts.of_kind(Receipts.default_kind())
+  def history_for(:receipts, nil),
+    do: with_archive(Receipts.of_kind(Receipts.default_kind()), archived_receipts())
 
   def history_for(:receipts, actor),
-    do: Enum.filter(Receipts.of_kind(Receipts.default_kind()), &(&1["actor"] == actor))
+    do: Enum.filter(history_for(:receipts, nil), &(&1["actor"] == actor))
 
   def history_for(:validations, nil), do: validation_records()
 
@@ -647,10 +663,11 @@ defmodule Ampd.Projection do
   def history_for(:worktree_receipts, actor),
     do: Enum.filter(Receipts.of_kind(Ampd.Locus.receipt_kind()), &(&1["locus_actor"] == actor))
 
-  def history_for(:effects, nil), do: Enum.filter(Effects.all(), &Effects.terminal?/1)
+  def history_for(:effects, nil),
+    do: with_archive(Enum.filter(Effects.all(), &Effects.terminal?/1), archived_effects())
 
   def history_for(:effects, actor),
-    do: Enum.filter(Effects.all(), &(Effects.terminal?(&1) and &1["actor"] == actor))
+    do: Enum.filter(history_for(:effects, nil), &(&1["actor"] == actor))
 
   def history_for(:grant_requests, nil),
     do: Enum.reject(GrantRegistry.requests(), &(&1["status"] == "pending"))
@@ -660,6 +677,29 @@ defmodule Ampd.Projection do
       GrantRegistry.requests()
       |> Enum.reject(&(&1["status"] == "pending"))
       |> Enum.filter(&(&1["actor"] == actor))
+
+  # The working rows and the retired ones, each id once (the working row wins:
+  # an orphan archive batch can hold a row that is still live). Nothing is
+  # read from the archive unless retention has retired something.
+  defp with_archive(live, {:ok, archived}) do
+    ids = MapSet.new(live, & &1["id"])
+    live ++ Enum.reject(archived, &MapSet.member?(ids, &1["id"]))
+  end
+
+  defp with_archive(live, {:error, why}) do
+    require Logger
+    Logger.warning("ampd: history past the working list is unreadable: #{inspect(why)}")
+    live
+  end
+
+  defp archived_effects do
+    if Effects.retired_count() > 0, do: Effects.archived(), else: {:ok, []}
+  end
+
+  defp archived_receipts do
+    k = Receipts.default_kind()
+    if Receipts.retired_count(k) > 0, do: Receipts.archived_of_kind(k), else: {:ok, []}
+  end
 
   @doc """
   The **four** fields that say which world, and how current.

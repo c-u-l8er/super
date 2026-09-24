@@ -16,7 +16,7 @@ defmodule Ampd.Approvals do
   # The class is not optional and is not inferred: a crossing whose class
   # the author has not decided is a crossing whose failure cannot be
   # classified either. Every tag NOT named below is a read.
-  @participant_mutations ~w(close_store load_state push new_pending mark mark_consumed fence_epoch fence_retire reset)a
+  @participant_mutations ~w(close_store load_state push new_pending mark mark_consumed fence_epoch fence_retire reset retire)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -78,6 +78,16 @@ defmodule Ampd.Approvals do
   @doc "Journal-owner only: retire a lease at this resource; replies with the landings held under it."
   def fence_retire(lease_id, reason), do: ask({:fence_retire, lease_id, reason})
 
+  @doc """
+  Coordinator only, inside the retirement transaction: drop the consumed
+  approvals `ids` from the working list, indexed as archived in `batch`.
+  Refuses the whole batch if any is absent or not consumed.
+  """
+  def retire(ids, batch), do: ask({:retire, ids, batch})
+
+  @doc "A retired approval's compact entry — `[status, batch, consumed_by]` — or nil."
+  def retired(id), do: ask({:retired, id})
+
   def last_pending do
     all() |> Enum.reverse() |> Enum.find(&(&1["status"] == "pending"))
   end
@@ -85,7 +95,7 @@ defmodule Ampd.Approvals do
   def reset, do: ask(:reset)
   # --- ordered-authority boundary -------------------------------------
   # These mutations are served only when the caller IS the total order.
-  @ordered_ops [:push, :new_pending, :mark, :mark_consumed, :reset, :load_state]
+  @ordered_ops [:push, :new_pending, :mark, :mark_consumed, :reset, :load_state, :retire]
   @impl true
   # A call made for the open authority transaction (`Ampd.AuthorityLog.group/1`)
   # arrives wrapped with its origin, so this registry's writes join that
@@ -122,6 +132,9 @@ defmodule Ampd.Approvals do
 
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["approvals"], st}
 
+  def handle_call({:retired, id}, _f, %{s: s} = st),
+    do: {:reply, Map.get(Map.get(s, "retired", %{}), id), st}
+
   # A read of this resource's fence — epoch and retired set, never the key.
   def handle_call(:fence, _f, %{s: s} = st),
     do: {:reply, if(is_map(s["fence"]), do: Map.delete(s["fence"], "key"), else: nil), st}
@@ -147,6 +160,39 @@ defmodule Ampd.Approvals do
      %{st | tab: tab, s: Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s)), sealed: nil}}
   end
 
+  def handle_ordered({:retire, ids, batch}, %{tab: tab, s: s} = st) do
+    rows = Enum.map(ids, fn id -> {id, Enum.find(s["approvals"], &(&1["id"] == id))} end)
+
+    case Enum.find(rows, fn {_id, a} -> a == nil or a["status"] != "consumed" end) do
+      {id, a} ->
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("retire-not-settled",
+            component: "Ampd.Approvals",
+            retryable: true,
+            requires_human: false,
+            public_message: "An approval in the retirement batch is not consumed.",
+            operator_detail: %{"approval" => id, "status" => a && a["status"]}
+          )}, st}
+
+      nil ->
+        set = MapSet.new(ids)
+
+        index =
+          Map.merge(
+            Map.get(s, "retired", %{}),
+            Map.new(rows, fn {id, a} -> {id, [a["status"], batch, a["consumed_by"]]} end)
+          )
+
+        s2 =
+          s
+          |> Map.put("approvals", Enum.reject(s["approvals"], &MapSet.member?(set, &1["id"])))
+          |> Map.put("retired", index)
+
+        {:reply, {:ok, length(ids)}, %{st | s: Ampd.Store.save(tab, s2)}}
+    end
+  end
+
   def handle_ordered({:mark_consumed, ticket}, %{tab: tab, s: s} = st) do
     target = if is_map(ticket), do: ticket["target"], else: nil
     a = target && Enum.find(s["approvals"], &(&1["id"] == target))
@@ -154,6 +200,9 @@ defmodule Ampd.Approvals do
     verdict =
       with :ok <- Ampd.Fence.check(s["fence"], ticket, "consume_approval", target) do
         cond do
+          a == nil and Map.has_key?(Map.get(s, "retired", %{}), target) ->
+            {:refused, "write-duplicate", "#{target} is already consumed (retired)"}
+
           a == nil ->
             {:refused, "write-unscoped", "no approval #{inspect(target)}"}
 

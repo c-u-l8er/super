@@ -10,6 +10,7 @@ defmodule Ampd.AuthorityLog.Delta do
       field unchanged (the same term)   nothing
       field removed                     {:unset, store, field}
       a list that kept its prefix       {:list, store, field, len, [{index, element}]}
+      a map that only gained keys       {:merge, store, field, %{added}}
       anything else                     {:set, store, field, value}
       no durable state yet              {:init, store, whole_state}
 
@@ -22,6 +23,13 @@ defmodule Ampd.AuthorityLog.Delta do
   or where more than a quarter changed (an insertion in the middle shifts
   everything after it), is written whole with `{:set, …}`: always correct,
   merely larger.
+
+  The map case exists for retention (`Ampd.Retention`): each store's index of
+  what it has retired only ever gains keys, and writing it whole on every
+  retirement would make the retirement record grow with history. A map field
+  whose every old key is still present with the same term (a pointer
+  comparison, as for lists) is written as the added keys alone. Anything else
+  — a key removed, a value changed — is `{:set, …}` exactly as before.
 
   `len` in a list op is a LOWER bound, applied as `max`. Two writers' list ops
   on one list therefore commute when they touch different indices, which is
@@ -41,6 +49,7 @@ defmodule Ampd.AuthorityLog.Delta do
         case Map.fetch(prev, k) do
           {:ok, pv} when pv === cv -> []
           {:ok, pv} when is_list(pv) and is_list(cv) -> list_diff(name, k, pv, cv)
+          {:ok, pv} when is_map(pv) and is_map(cv) -> map_diff(name, k, pv, cv)
           _ -> [{:set, name, k, cv}]
         end
       end)
@@ -58,6 +67,23 @@ defmodule Ampd.AuthorityLog.Delta do
     end
   end
 
+  # Growth only: every old key still maps to the SAME term. An empty or
+  # shrunk map, or any changed value, is written whole.
+  defp map_diff(name, k, pv, cv) do
+    grew? =
+      map_size(pv) > 0 and map_size(cv) > map_size(pv) and
+        Enum.all?(pv, fn {pk, v} ->
+          case Map.fetch(cv, pk) do
+            {:ok, cv2} -> cv2 === v
+            :error -> false
+          end
+        end)
+
+    if grew?,
+      do: [{:merge, name, k, Map.reject(cv, fn {ck, _} -> Map.has_key?(pv, ck) end)}],
+      else: [{:set, name, k, cv}]
+  end
+
   defp walk([p | ps], [c | cs], i, acc, n) when p === c, do: walk(ps, cs, i + 1, acc, n)
   defp walk([_ | ps], [c | cs], i, acc, n), do: walk(ps, cs, i + 1, [{i, c} | acc], n + 1)
   defp walk([], [], i, acc, n), do: {:ok, Enum.reverse(acc), i, n}
@@ -72,6 +98,18 @@ defmodule Ampd.AuthorityLog.Delta do
 
   def apply_op({:set, name, k, v}, images),
     do: Map.update(images, name, %{k => field(v)}, &Map.put(&1, k, field(v)))
+
+  def apply_op({:merge, name, k, added}, images) do
+    img = Map.get(images, name, %{})
+
+    v =
+      case Map.get(img, k) do
+        {:v, m} when is_map(m) -> Map.merge(m, added)
+        _ -> added
+      end
+
+    Map.put(images, name, Map.put(img, k, {:v, v}))
+  end
 
   def apply_op({:unset, name, k}, images),
     do: Map.update(images, name, %{}, &Map.delete(&1, k))
@@ -138,6 +176,9 @@ defmodule Ampd.AuthorityLog.Delta do
       {:unset, n, k}, a ->
         %{a | stores: MapSet.put(a.stores, n), fields: MapSet.put(a.fields, {n, k})}
 
+      {:merge, n, k, _}, a ->
+        %{a | stores: MapSet.put(a.stores, n), fields: MapSet.put(a.fields, {n, k})}
+
       {:list, n, k, _len, puts}, a ->
         idx = Enum.reduce(puts, a.idx, fn {i, _}, s -> MapSet.put(s, {n, k, i}) end)
         %{a | stores: MapSet.put(a.stores, n), idx: MapSet.put(idx, {n, k})}
@@ -153,6 +194,9 @@ defmodule Ampd.AuthorityLog.Delta do
         field_held?(held, n, k)
 
       {:unset, n, k} ->
+        field_held?(held, n, k)
+
+      {:merge, n, k, _} ->
         field_held?(held, n, k)
 
       {:list, n, k, _len, puts} ->

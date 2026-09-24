@@ -467,6 +467,14 @@ defmodule Ampd.Gateway do
   nothing and returns `nil`. That is the only simulated part of this path.
   """
   def perform(cap, resource, ctx, request, adapter \\ fn _ -> nil end) do
+    result = perform_effect(cap, resource, ctx, request, adapter)
+    # Outside the order, after the caller's effect is settled either way:
+    # retention counts it and, now and then, looks for a batch.
+    Ampd.Retention.poke()
+    result
+  end
+
+  defp perform_effect(cap, resource, ctx, request, adapter) do
     # Decide + journal + claim + consume happen as one ordered step. The
     # adapter deliberately runs *outside* the order: it may be slow or
     # remote, and holding the authority lock across the network would make

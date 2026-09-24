@@ -47,16 +47,58 @@ witness =
 
 seals = for {mod, why} <- Ampd.seals(), do: %{"store" => inspect(mod), "reason" => why}
 
+# Retention (a tree with `Ampd.Retention`): rows retired to the authority archive are part of what
+# was recovered, read back from the archive FILE — so a kill that lost an archived row, or an index
+# entry whose row is not in the archive, is caught exactly like a lost live row. A tree without
+# retention reports nil and nothing here runs.
+ok_rows = fn
+  {:ok, rows} -> rows
+  _ -> []
+end
+
+{arch_effects, arch_receipts, arch_grants, retention} =
+  if Code.ensure_loaded?(Ampd.Retention) and seals == [] do
+    ae = ok_rows.(Effects.archived())
+    ar = ok_rows.(Ampd.AuthorityLog.archived_rows("receipts"))
+    ag = ok_rows.(Ampd.AuthorityLog.archived_rows("grant_registry"))
+    idx = Effects.retired_index()
+    have = MapSet.new(ae, & &1["id"])
+    missing = for {id, _} <- idx, not MapSet.member?(have, id), do: id
+    st = Ampd.Retention.status() || %{}
+
+    {ae, ar, ag,
+     %{
+       "effects_retired" => map_size(idx),
+       "archive_effect_rows" => length(ae),
+       "index_without_row_count" => length(missing),
+       "index_without_row" => Enum.take(Enum.sort(missing), 50),
+       "passes" => st[:passes],
+       "rows_retired_this_boot" => st[:retired],
+       "pass_errors" => st[:errors]
+     }}
+  else
+    {[], [], [], nil}
+  end
+
+live_ids = MapSet.new(Effects.all(), & &1["id"])
+arch_effects = Enum.reject(arch_effects, &MapSet.member?(live_ids, &1["id"]))
+live_receipt_ids = MapSet.new(Receipts.all(), & &1["id"])
+arch_receipts = Enum.reject(arch_receipts, &MapSet.member?(live_receipt_ids, &1["id"]))
+live_grant_ids = MapSet.new(GrantRegistry.list(), & &1["id"])
+arch_grants = Enum.reject(arch_grants, &MapSet.member?(live_grant_ids, &1["id"]))
+
 report = %{
   "schema" => "kill-battery-recovery@1",
   "os_pid" => System.pid(),
   "data_dir" => Ampd.Store.data_dir(),
   "world" => Ampd.World.read(),
   "seals" => seals,
+  "retention" => retention,
   "effects" =>
-    for e <- Effects.all() do
+    for e <- Effects.all() ++ arch_effects do
       %{
         "id" => e["id"],
+        "retired" => not MapSet.member?(live_ids, e["id"]),
         "state" => e["state"],
         "history" => Enum.map(e["history"] || [], & &1["state"]),
         "grant_ref" => e["grant_ref"],
@@ -64,11 +106,11 @@ report = %{
       }
     end,
   "receipts" =>
-    for r <- Receipts.all() do
+    for r <- Receipts.all() ++ arch_receipts do
       %{"id" => r["id"], "kind" => r["kind"], "effect_ref" => r["effect_ref"]}
     end,
   "grants" =>
-    for g <- GrantRegistry.list(), g["capability"] == cap do
+    for g <- GrantRegistry.list() ++ arch_grants, g["capability"] == cap do
       %{"id" => g["id"], "status" => g["status"], "consumptions" => g["consumptions"] || []}
     end,
   # Super's listing classifies each effect against every receipt, which is quadratic in history; the
