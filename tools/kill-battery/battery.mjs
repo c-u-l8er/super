@@ -67,8 +67,13 @@ const rawDets = dataDir => {
 const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
 const crc32 = b => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
 const HEADER = Buffer.from('AMPD-AUTHORITY-LOG/1\n');
-const rawLog = dataDir => {
-  const p = join(dataDir, 'authority.log'); if (!existsSync(p)) return null;
+/* The retention archive (`authority.archive`, when the tree has one) is the same frames after its own
+   header, and is judged the same way: a torn LAST batch is what boot truncates and names. */
+const AR_HEADER = Buffer.from('AMPD-AUTHORITY-ARCHIVE/1\n');
+const rawLog = dataDir => rawFrames(join(dataDir, 'authority.log'), HEADER);
+const rawArchive = dataDir => rawFrames(join(dataDir, 'authority.archive'), AR_HEADER);
+const rawFrames = (p, HEADER) => {
+  if (!existsSync(p)) return null;
   const b = readFileSync(p); let off = HEADER.length, frames = 0;
   if (b.length < HEADER.length) return {state: 'torn', frames, bytes: b.length, torn_bytes: b.length, why: 'partial header'};
   if (!b.subarray(0, HEADER.length).equals(HEADER)) return {state: 'damaged', frames, bytes: b.length, why: 'header'};
@@ -122,13 +127,13 @@ for (let k = 1; k <= KILLS; k++) {
   const evBefore = lines(acks);
   const ackedAtKill = evBefore.filter(e => e.event === 'ack' && e.allow).length;
   const raw = rawDets(world);
-  const alog = rawLog(world);
+  const alog = rawLog(world), archive = rawArchive(world);
   bootN++;
   const report = join(OUT, `report-L${lineage}-b${bootN}.json`), log = join(OUT, `boot-L${lineage}-b${bootN}.log`);
   pending = await boot({world, acks, report, seed: false, log});
   const row = {kill: k, lineage, boot: bootN, delay_ms: Math.round(delay), acked_before_kill: ackedAtKill, reboot_ms: pending.boot_ms ?? null,
     last_event_before_kill: evBefore.at(-1)?.event ?? null, raw_dets: raw,
-    dirty_tables: Object.entries(raw).filter(([, v]) => v !== 'ok').map(([k]) => k), authority_log: alog};
+    dirty_tables: Object.entries(raw).filter(([, v]) => v !== 'ok').map(([k]) => k), authority_log: alog, authority_archive: archive};
   if (pending.state === 'looping' || existsSync(report)) {
     const rep = JSON.parse(readFileSync(report, 'utf8'));
     row.outcome = rep.seals.length ? 'SEALED' : 'CONTINUED';
@@ -152,7 +157,7 @@ for (let k = 1; k <= KILLS; k++) {
   // effects each is megabytes: keep the first, the last, and every one with a finding.
   const finding = row.outcome !== 'CONTINUED' || row.lost?.length || row.invented?.length || row.split?.length;
   if (process.env.KB_KEEP_REPORTS !== 'all' && !finding && k !== 1 && k !== KILLS) rmSync(report, {force: true});
-  console.log(`kill ${k}/${KILLS} L${lineage}b${bootN} +${row.delay_ms} ms · acked ${row.acked_before_kill} · dirty [${row.dirty_tables}]${alog ? ` · log ${alog.state}${alog.torn_bytes ? ' ' + alog.torn_bytes + 'B' : ''}` : ''} · ${row.outcome}` +
+  console.log(`kill ${k}/${KILLS} L${lineage}b${bootN} +${row.delay_ms} ms · acked ${row.acked_before_kill} · dirty [${row.dirty_tables}]${alog ? ` · log ${alog.state}${alog.torn_bytes ? ' ' + alog.torn_bytes + 'B' : ''}` : ''}${archive ? ` · archive ${archive.state} ${archive.frames}b${archive.torn_bytes ? ' ' + archive.torn_bytes + 'B' : ''}` : ''} · ${row.outcome}` +
     (row.outcome === 'CONTINUED' ? ` · lost ${row.lost.length}${row.lost.length ? ' ' + JSON.stringify(row.lost.slice(0, 3)) : ''} · invented ${row.invented.length}${row.invented.length ? ' ' + JSON.stringify(row.invented.slice(0, 3)) : ''} · unrecorded ${JSON.stringify(row.unrecorded)} · in-flight ${JSON.stringify(row.inflight)}` : ` · ${row.seal_codes?.join(', ') ?? row.seals?.map(s => s.store).join(', ') ?? ''}`) +
     (row.witness_torn?.length ? ` · torn witness ${JSON.stringify(row.witness_torn)}` : ''));
   if (row.outcome !== 'CONTINUED') {
@@ -172,6 +177,7 @@ const summary = {
   counts: {
     continued: count(r => r.outcome === 'CONTINUED'), sealed_running: count(r => r.outcome === 'SEALED'), boot_refused: count(r => r.outcome === 'BOOT-REFUSED'),
     any_dirty_table: count(r => r.dirty_tables.length), log_torn: count(r => r.authority_log?.state === 'torn'), log_damaged: count(r => r.authority_log?.state === 'damaged'),
+    archive_torn: count(r => r.authority_archive?.state === 'torn'), archive_damaged: count(r => r.authority_archive?.state === 'damaged'),
     lost_acknowledged: rows.reduce((n, r) => n + (r.lost?.length ?? 0), 0),
     invented: rows.reduce((n, r) => n + (r.invented?.length ?? 0), 0), kills_with_torn_witness: count(r => r.witness_torn?.length),
     recoveries_with_split_claim: count(r => r.split?.length), recoveries_with_conflict_listing: count(r => r.split?.some(x => x.includes('CONFLICT'))),

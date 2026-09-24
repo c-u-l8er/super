@@ -128,6 +128,20 @@ one is still refused by its exact name (`write-lease-retired` / `-closed`).
   gate or a measurement objects.
 * **A pass holds the total order** for its duration (one archive sync and one
   log record of the shrunk working lists, measured below).
+* **The compact indexes still grow with history** — ~one small entry per
+  retired effect, grant and receipt, held in each registry's heap and in the
+  log's image (and so in every checkpoint). Far smaller than the rows, but
+  not flat: a major GC of `Ampd.Effects` copies its live heap, index
+  included. If a p95 tail survives retention, this is the first suspect,
+  and the fix is to hold the index off-heap (ETS) rather than to drop it.
+  Per incarnation, `Ampd.Effects` also keeps the ticket ids of terminals and
+  the settled leases' reasons — both compact, both reset by a restart.
+* **Closure.** The ordered-closure gate reads CLOSED on this branch (rebased
+  onto `b68e6da`, which closed the 15 items candidates 1 and 2 had left open
+  and which the suite's Q.4 could not see because it reads the committed
+  census). The archive calls cross through `Ampd.Participant` like every other
+  `AuthorityLog` call; the regenerated census has the same crossings, opaque
+  set and totals.
 * **`approve_effect/2` on a retired approval** answers `approval-unknown`
   rather than `approval-not-pending` (it reads the working list). Both refuse.
 * **The archive grows without bound** — by design: the ruling is to keep
