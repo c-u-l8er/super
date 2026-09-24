@@ -21,9 +21,9 @@
       "bare": 0
     },
     "Ampd.GrantRegistry": {
-      "sends": 20,
+      "sends": 22,
       "mutations": 16,
-      "reads": 4,
+      "reads": 6,
       "declared_mutations": 16,
       "dead": [],
       "bare": 0
@@ -45,10 +45,10 @@
       "bare": 0
     },
     "Ampd.Effects": {
-      "sends": 16,
-      "mutations": 13,
-      "reads": 3,
-      "declared_mutations": 13,
+      "sends": 18,
+      "mutations": 14,
+      "reads": 4,
+      "declared_mutations": 14,
       "dead": [],
       "bare": 0
     },
@@ -77,9 +77,9 @@
       "bare": 0
     },
     "Ampd.Receipts": {
-      "sends": 12,
+      "sends": 13,
       "mutations": 9,
-      "reads": 3,
+      "reads": 4,
       "declared_mutations": 9,
       "dead": [],
       "bare": 0

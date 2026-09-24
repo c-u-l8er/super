@@ -42,11 +42,6 @@ defmodule Ampd.Bootstrap do
   of them is safe to overwrite.
   """
   def new_world! do
-    # A world written by the previous schema is converted before anything
-    # reads it (`Ampd.AuthorityLog.Migration`); a world it refuses to convert
-    # stays at its version and is sealed as needing migration, below.
-    Ampd.AuthorityLog.Migration.run!()
-
     case Ampd.World.may_initialize?() do
       :ok ->
         Enum.each(initial_states(), fn {name, s} -> Ampd.Store.seed!(name, s) end)

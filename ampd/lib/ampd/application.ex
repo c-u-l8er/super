@@ -6,6 +6,14 @@ defmodule Ampd.Application do
   def start(_type, _args) do
     # The world manifest is written before any registry opens, so a store
     # that is absent afterwards is *lost*, not new.
+    #
+    # A world written by the previous schema is converted first
+    # (`Ampd.AuthorityLog.Migration`), HERE and not inside `new_world!/0`:
+    # `new_world!/0` also runs inside the total order under a reset, which has
+    # just removed the directory and has nothing to migrate, and the migration's
+    # table reads would be crossings inside the order for no reason. A world it
+    # refuses to convert stays at its version and is sealed as needing migration.
+    Ampd.AuthorityLog.Migration.run!()
     Ampd.Bootstrap.new_world!()
 
     # Interrupted review-content uploads belong to an uploader that died with

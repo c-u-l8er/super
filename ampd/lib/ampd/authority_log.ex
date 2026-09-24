@@ -120,20 +120,27 @@ defmodule Ampd.AuthorityLog do
 
   # ------------------------------------------------------------------ API
 
+  # **Every client call crosses through `Ampd.Participant`.** Several are made
+  # from inside the total order — a reset seeds and closes the log, a claim
+  # opens and commits a transaction — and a bare `GenServer.call` there that
+  # exits would take the coordinator down with this process (C1.0b·2·1).
+  # Through the participant boundary a dead or stuck log is a typed failure the
+  # order survives. Outside the order it is `GenServer.call/3` and nothing else.
+  defp call(msg, class), do: Ampd.Participant.call(__MODULE__, msg, class, timeout: 60_000)
+
   @doc "The durable state of `name`: `{:present, s}`, `:absent`, or `{:damaged, why}`."
-  def image(name), do: GenServer.call(__MODULE__, {:image, name}, 60_000)
+  def image(name), do: call({:image, name}, :read)
 
   @doc """
   Make `ops` durable for `name`. `:ok` once the record is synced; `:pending`
   when it belongs to the open transaction of `origin` (durable at that
   transaction's commit, which `group/1` awaits); `{:error, why}` otherwise.
   """
-  def append(name, ops, origin),
-    do: GenServer.call(__MODULE__, {:append, name, ops, origin}, 60_000)
+  def append(name, ops, origin), do: call({:append, name, ops, origin}, :mutate)
 
   @doc "Close the file and forget the image — a world reset removes the directory under it."
   def close do
-    if Process.whereis(__MODULE__), do: GenServer.call(__MODULE__, :close, 60_000), else: :ok
+    if Process.whereis(__MODULE__), do: call(:close, :mutate), else: :ok
   end
 
   @doc """
@@ -150,7 +157,7 @@ defmodule Ampd.AuthorityLog do
         []
 
       Process.whereis(__MODULE__) ->
-        GenServer.call(__MODULE__, {:present, dir}, 60_000)
+        call({:present, dir}, :read)
 
       true ->
         case read_all(dir) do
@@ -172,7 +179,15 @@ defmodule Ampd.AuthorityLog do
     ops = [{:init, name, s}]
 
     if Process.whereis(__MODULE__) do
-      :ok = append(name, ops, nil)
+      # Inside a reset this runs in the coordinator; a failure is typed, never a
+      # match error that would take the order down.
+      case append(name, ops, nil) do
+        :ok ->
+          :ok
+
+        other ->
+          raise Ampd.Participant.Failure.new(:indeterminate, __MODULE__, {:seed, name}, other)
+      end
     else
       offline_append!(path(), ops)
     end
@@ -213,7 +228,7 @@ defmodule Ampd.AuthorityLog do
   and how many transactions had to be split because a concurrent write
   touched the same field (expected: zero).
   """
-  def status, do: GenServer.call(__MODULE__, :status, 60_000)
+  def status, do: call(:status, :read)
 
   # ----------------------------------------------------------- transactions
 
@@ -239,12 +254,18 @@ defmodule Ampd.AuthorityLog do
         fun.()
 
       true ->
-        :ok = GenServer.call(__MODULE__, {:open_group, self()}, 60_000)
+        case call({:open_group, self()}, :mutate) do
+          :ok ->
+            :ok
+
+          other ->
+            raise Ampd.Participant.Failure.new(:not_applied, __MODULE__, :open_group, other)
+        end
 
         try do
           fun.()
         after
-          case GenServer.call(__MODULE__, {:commit_group, self()}, 60_000) do
+          case call({:commit_group, self()}, :mutate) do
             :ok ->
               if Process.whereis(Ampd.Effects), do: Ampd.Effects.flush_deferred()
 
@@ -253,8 +274,10 @@ defmodule Ampd.AuthorityLog do
                 if pid = Process.whereis(mod), do: Process.exit(pid, :kill)
               end)
 
-              raise "authority log: a transaction's commit failed (#{inspect(why)}); " <>
-                      "the registries restart from the durable image"
+              # Typed, so the order that called this survives it: the registries
+              # restart from what is durable, and the transaction's outcome is
+              # not known to the caller.
+              raise Ampd.Participant.Failure.new(:indeterminate, __MODULE__, :commit_group, why)
           end
         end
     end
@@ -737,13 +760,27 @@ defmodule Ampd.AuthorityLog do
         {:ok, 0, %{}, []}
 
       {:ok, <<@cp_header, len::32, crc::32, payload::binary-size(len)>>} ->
-        with true <- :erlang.crc32(payload) == crc,
-             {:ok, %{"t" => t, "images" => bin, "sha256" => sha} = cp} <- decode(payload),
-             true <- Base.encode16(:crypto.hash(:sha256, bin), case: :lower) == sha,
-             {:ok, images} <- decode(bin) do
-          {:ok, t, images, cp["recovered"] || []}
+        # Nested cases, not `with … else`: its else compiles to a closure, and
+        # this is reachable inside the order (`present/1`, read offline).
+        bad = {:damaged, "the checkpoint does not verify (checksum or digest)"}
+
+        if :erlang.crc32(payload) != crc do
+          bad
         else
-          _ -> {:damaged, "the checkpoint does not verify (checksum or digest)"}
+          case decode(payload) do
+            {:ok, %{"t" => t, "images" => bin, "sha256" => sha} = cp} ->
+              if Base.encode16(:crypto.hash(:sha256, bin), case: :lower) == sha do
+                case decode(bin) do
+                  {:ok, images} -> {:ok, t, images, cp["recovered"] || []}
+                  _ -> bad
+                end
+              else
+                bad
+              end
+
+            _ ->
+              bad
+          end
         end
 
       {:ok, _} ->
