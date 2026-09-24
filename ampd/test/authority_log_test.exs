@@ -216,6 +216,94 @@ defmodule Ampd.AuthorityLogTest do
     end
   end
 
+  # ------------------------------------------------------------ checkpoints
+
+  describe "checkpoints" do
+    setup do
+      Application.put_env(:ampd, :authority_log_checkpoint_every, 10)
+      on_exit(fn -> Application.delete_env(:ampd, :authority_log_checkpoint_every) end)
+      world!()
+      :ok
+    end
+
+    defp settled! do
+      Enum.reduce_while(1..500, nil, fn _, _ ->
+        if AuthorityLog.status()["checkpoint_running"] == nil,
+          do: {:halt, :ok},
+          else: Process.sleep(10) && {:cont, nil}
+      end)
+    end
+
+    defp journal, do: Enum.map(Effects.all(), &Map.take(&1, ["id", "state", "grant_ref"]))
+
+    test "the log is sealed at the cadence, the image written apart, the covered segments deleted, and a reboot comes back whole" do
+      Enum.each(1..8, fn _ -> perform!() end)
+      settled!()
+      st = AuthorityLog.status()
+
+      assert st["checkpoints"] >= 2, inspect(st)
+      assert File.exists?(AuthorityLog.checkpoint_path())
+      assert st["sealed_segments"] == 0, "a covered segment was left behind"
+      {:ok, active} = AuthorityLog.records(log_bin())
+      assert length(active) < 20, "the active log was not rotated: #{length(active)} records"
+
+      before = journal()
+      receipts = length(Receipts.all())
+      reboot_registries!()
+
+      assert Ampd.seals() == []
+      assert journal() == before
+      assert length(Receipts.all()) == receipts
+      perform!()
+    end
+
+    test "a checkpoint that does not verify seals every store the log backs, and says why" do
+      Enum.each(1..4, fn _ -> perform!() end)
+      settled!()
+      AuthorityLog.close()
+
+      cp = File.read!(AuthorityLog.checkpoint_path())
+      at = byte_size(cp) - 10
+      <<a::binary-size(at), b, rest::binary>> = cp
+      File.write!(AuthorityLog.checkpoint_path(), a <> <<Bitwise.bxor(b, 0xFF)>> <> rest)
+      reboot_registries!()
+
+      assert Map.new(Ampd.seals())[Ampd.Effects] =~ "checkpoint"
+      Ampd.reset_demo()
+    end
+
+    test "a snapshot cut short is not a checkpoint, and is removed" do
+      Enum.each(1..4, fn _ -> perform!() end)
+      settled!()
+      before = journal()
+      AuthorityLog.close()
+      File.write!(AuthorityLog.checkpoint_path() <> ".tmp", "half a snapshot")
+      reboot_registries!()
+
+      assert Ampd.seals() == []
+      assert journal() == before
+      refute File.exists?(AuthorityLog.checkpoint_path() <> ".tmp")
+    end
+
+    test "a segment sealed before its checkpoint became durable is replayed, not lost" do
+      Enum.each(1..4, fn _ -> perform!() end)
+      settled!()
+      before = journal()
+      t = AuthorityLog.status()["tseq"]
+      AuthorityLog.close()
+
+      # As if the process died right after sealing: the segment is there, its
+      # checkpoint never landed, and the new active log holds only a header.
+      File.rename!(AuthorityLog.path(), AuthorityLog.path() <> ".sealed-#{t}")
+      File.write!(AuthorityLog.path(), AuthorityLog.header())
+      reboot_registries!()
+
+      assert Ampd.seals() == []
+      assert journal() == before
+      perform!()
+    end
+  end
+
   # --------------------------------------------------- through the effect path
 
   describe "through Gateway.perform" do

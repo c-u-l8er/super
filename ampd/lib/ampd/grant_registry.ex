@@ -129,13 +129,91 @@ defmodule Ampd.GrantRegistry do
 
   def mint(f), do: ask({:mint, f})
 
+  # ------------------------------------------------------------ the index
+  #
+  # id → {position, grant}, and the active ids, derived from the grant list
+  # and kept in this process. It is refreshed against the list it was built
+  # from by walking both together: an unchanged grant is the same term, so
+  # that is a pointer comparison per grant, and only changed or appended rows
+  # are re-indexed. A list that shrank or moved an id is rebuilt whole. It
+  # is never persisted; the list stays the authority.
+  @view {__MODULE__, :view}
+
+  defp view(grants) do
+    {built_from, v} = Process.get(@view, {[], %{by_id: %{}, active: %{}}})
+
+    v =
+      if built_from === grants,
+        do: v,
+        else:
+          (try do
+             refresh(built_from, grants, 0, v)
+           catch
+             :rebuild -> refresh([], grants, 0, %{by_id: %{}, active: %{}})
+           end)
+
+    Process.put(@view, {grants, v})
+    v
+  end
+
+  defp refresh([o | os], [n | ns], i, v) when o === n, do: refresh(os, ns, i + 1, v)
+
+  defp refresh([o | os], [n | ns], i, v) do
+    if o["id"] != n["id"], do: throw(:rebuild)
+    refresh(os, ns, i + 1, index_row(v, i, n))
+  end
+
+  defp refresh([], [n | ns], i, v), do: refresh([], ns, i + 1, index_row(v, i, n))
+  defp refresh([], [], _i, v), do: v
+  defp refresh([_ | _], [], _i, _v), do: throw(:rebuild)
+
+  defp index_row(v, i, g) do
+    id = g["id"]
+
+    %{
+      by_id: Map.put(v.by_id, id, {i, g}),
+      active:
+        if(g["status"] == "active", do: Map.put(v.active, id, i), else: Map.delete(v.active, id))
+    }
+  end
+
+  defp active_of(grants) do
+    v = view(grants)
+
+    v.active
+    |> Enum.sort_by(fn {_id, i} -> i end)
+    |> Enum.map(fn {id, _} -> elem(Map.fetch!(v.by_id, id), 1) end)
+  end
+
+  defp get_of(grants, id) do
+    case Map.get(view(grants).by_id, id) do
+      {_i, g} -> g
+      nil -> nil
+    end
+  end
+
+  defp pos_of(grants, id), do: elem(Map.fetch!(view(grants).by_id, id), 0)
+
   def one_shot(cap),
     do: mint(%{"capability" => cap, "duration" => "once", "uses_remaining" => 1})
 
   def list, do: ask(:list)
 
+  @doc """
+  The ACTIVE grants, in list order (the order `Ampd.Core.grant_for/5` takes
+  the first match in). Everything a decision reads filters to active grants
+  first, so this answers it without copying every grant ever kept out of
+  this process — the copy that grew with history, twice per decision.
+  """
+  def active, do: ask(:active)
+
+  @doc "One grant by id, or nil."
+  def get(id), do: ask({:get, id})
+
   def snapshot do
-    Ampd.Core.snapshot_of(list(), Ampd.CapabilityRegistry.all())
+    # `snapshot_of/2` keeps only active grants; handing it only those is the
+    # same digest.
+    Ampd.Core.snapshot_of(active(), Ampd.CapabilityRegistry.all())
   end
 
   def set_draft(k, v), do: ask({:draft, k, v})
@@ -285,6 +363,8 @@ defmodule Ampd.GrantRegistry do
   end
 
   def handle_call(:list, _f, %{s: s} = st), do: {:reply, s["grants"], st}
+  def handle_call(:active, _f, %{s: s} = st), do: {:reply, active_of(s["grants"]), st}
+  def handle_call({:get, id}, _f, %{s: s} = st), do: {:reply, get_of(s["grants"], id), st}
 
   # The write fence (E3-1). Guarded by "from the journal owner", not by the
   # total order — see `Ampd.Ordered.from_journal_owner?/1`.
@@ -480,7 +560,7 @@ defmodule Ampd.GrantRegistry do
   # then the mutation and the witness in ONE save.
   def handle_ordered({:consume_ticket, ticket}, %{tab: tab, s: s} = st) do
     target = if is_map(ticket), do: ticket["target"], else: nil
-    g = target && Enum.find(s["grants"], &(&1["id"] == target))
+    g = target && get_of(s["grants"], target)
 
     verdict =
       with :ok <- Ampd.Fence.check(s["fence"], ticket, "consume_grant", target) do
@@ -504,23 +584,19 @@ defmodule Ampd.GrantRegistry do
          {:refused, Ampd.Fence.refusal(s["fence"], code, why, ticket, "Ampd.GrantRegistry")}, st}
 
       :ok ->
-        grants =
-          Enum.map(s["grants"], fn x ->
-            if x["id"] == target do
-              left = (x["uses_remaining"] || 0) - 1
+        left = (g["uses_remaining"] || 0) - 1
 
-              x
-              |> Map.put("uses_remaining", left)
-              |> Map.put("status", if(left == 0, do: "consumed", else: x["status"]))
-              |> Map.put("consumptions", (x["consumptions"] || []) ++ [ticket["effect"]])
-              |> Map.put(
-                "consumption_witness",
-                (x["consumption_witness"] || []) ++ [Ampd.Fence.witness_of(ticket)]
-              )
-            else
-              x
-            end
-          end)
+        g2 =
+          g
+          |> Map.put("uses_remaining", left)
+          |> Map.put("status", if(left == 0, do: "consumed", else: g["status"]))
+          |> Map.put("consumptions", (g["consumptions"] || []) ++ [ticket["effect"]])
+          |> Map.put(
+            "consumption_witness",
+            (g["consumption_witness"] || []) ++ [Ampd.Fence.witness_of(ticket)]
+          )
+
+        grants = List.replace_at(s["grants"], pos_of(s["grants"], target), g2)
 
         st = %{st | s: Ampd.Store.save(tab, %{s | "grants" => grants})}
 

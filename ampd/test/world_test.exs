@@ -140,7 +140,7 @@ defmodule Ampd.WorldTest do
     # Everything correct except `generation`.
     File.write!(
       Path.join(dir(), "world.json"),
-      ~s({"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":2})
+      ~s({"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":#{World.schema_version()}})
     )
 
     assert World.manifest_state() == :malformed

@@ -42,7 +42,12 @@ defmodule Ampd.World do
   """
 
   @schema "world-meta@1"
-  @schema_version 2
+  # 3: the effect path's four stores live in `authority.log`
+  # (`Ampd.AuthorityLog`), no longer in a DETS table each. A version-2 world
+  # is converted at boot by `Ampd.AuthorityLog.Migration`, before any
+  # registry opens; an older build reads a version-3 world as UNSUPPORTED
+  # rather than reading the DETS tables it left behind.
+  @schema_version 3
 
   # Stores whose absence is an authority question, not a cache miss.
   # `capability_registry` is in the list because pack *policies* govern
@@ -109,9 +114,9 @@ defmodule Ampd.World do
   whose meaning is a guess — and the guess would be about world identity
   and lineage, the two facts everything else is anchored to.
 
-      schema_version == 2   →  :valid
-      schema_version <  2   →  :migration_required   (no migration engine yet)
-      schema_version >  2   →  :unsupported
+      schema_version == 3   →  :valid
+      schema_version <  3   →  :migration_required   (2 → 3 runs at boot, `Ampd.AuthorityLog.Migration`)
+      schema_version >  3   →  :unsupported
       shape wrong           →  :malformed
 
   `:migration_required` is separate from `:unsupported` because the
@@ -160,6 +165,26 @@ defmodule Ampd.World do
   # Kept apart from `valid?/1` so an unreadable *version* is reported as a
   # version problem instead of being flattened into "malformed", which
   # would send an operator hunting for corruption that is not there.
+  @doc "A manifest's shape, whatever its version says — what a migration may start from."
+  def shape_ok_any_version?(m), do: shape_ok?(m)
+
+  @doc """
+  Replace the manifest in one step: a whole new file, renamed over the old
+  one, so a crash leaves either manifest and never half of one. For a
+  migration, where the old manifest must stay readable until the new one
+  exists.
+  """
+  def replace!(meta) do
+    target = path()
+    tmp = target <> ".tmp"
+    File.write!(tmp, encode(meta))
+    {:ok, fd} = :file.open(tmp, [:read, :raw])
+    :ok = :file.datasync(fd)
+    :ok = :file.close(fd)
+    File.rename!(tmp, target)
+    meta
+  end
+
   defp shape_ok?(m) when is_map(m) do
     m["schema"] == @schema and
       is_integer(m["schema_version"]) and m["schema_version"] >= 1 and

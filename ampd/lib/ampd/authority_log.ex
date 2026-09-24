@@ -44,6 +44,24 @@ defmodule Ampd.AuthorityLog do
   A store the log has never held is ABSENT, and `Ampd.World` decides whether
   that means fresh or lost — this module never interprets absence itself.
 
+  ## Checkpoints
+
+  Every `checkpoint_every/0` records (10,000 by default) the active log is
+  sealed as `authority.log.sealed-<t>` and a new one begun, and the image at
+  `t` is written apart from this process to `authority.checkpoint` (one
+  frame: the image, its SHA-256, the recoveries named so far; temp file,
+  sync, rename). Once it is durable the segments it covers are deleted. Boot
+  is the checkpoint, then any sealed segment after it (a crash between the
+  seal and the checkpoint), then the active log. A checkpoint that does not
+  verify seals like a bad frame does; a torn tail can only be the active
+  log's. A world reset waits for a running snapshot, so an old world's
+  checkpoint can never be renamed into a new world's directory.
+
+  ## Worlds written before this
+
+  World `schema_version` 3 is this layout. A version-2 world is converted
+  once, at boot, by `Ampd.AuthorityLog.Migration`.
+
   The witness log (`Ampd.Effects.Witness`, `wek-r3-trace@3`) is unchanged
   and separate. Whether an authority record may *be* the witness line is
   WEK's decision, not this module's.
@@ -62,13 +80,41 @@ defmodule Ampd.AuthorityLog do
   }
   @file_name "authority.log"
   @header "AMPD-AUTHORITY-LOG/1\n"
+  @cp_file "authority.checkpoint"
+  @cp_header "AMPD-AUTHORITY-CHECKPOINT/1\n"
   @group_table :ampd_authority_log_group
 
   @doc "The stores this log backs. Every other authority store is still a DETS table."
   def stores, do: @stores
   def backed?(name), do: name in @stores
   def path(dir \\ Ampd.Store.data_dir()), do: Path.join(dir, @file_name)
+  def checkpoint_path(dir \\ Ampd.Store.data_dir()), do: Path.join(dir, @cp_file)
   def header, do: @header
+
+  # A log that reached the checkpoint cadence is renamed to this and a new
+  # `authority.log` begins; it is deleted once a checkpoint covering it is
+  # durable. `t` is the last record it holds.
+  defp sealed_path(dir, t), do: Path.join(dir, "#{@file_name}.sealed-#{t}")
+
+  defp sealed_segments(dir) do
+    case File.ls(dir) do
+      {:ok, files} ->
+        for f <- files,
+            [_, t] <- [Regex.run(~r/^authority\.log\.sealed-(\d+)$/, f)],
+            do: {String.to_integer(t), Path.join(dir, f)}
+
+      _ ->
+        []
+    end
+    |> Enum.sort()
+  end
+
+  @doc """
+  Records between checkpoints. A checkpoint is the whole image at one record,
+  so boot replays at most this many records past it. Super's choice, and a
+  setting (`config :ampd, authority_log_checkpoint_every: n`).
+  """
+  def checkpoint_every, do: Application.get_env(:ampd, :authority_log_checkpoint_every, 10_000)
 
   def start_link(_), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -99,17 +145,18 @@ defmodule Ampd.AuthorityLog do
   """
   def present(dir) do
     cond do
-      not File.exists?(path(dir)) ->
+      not (File.exists?(path(dir)) or File.exists?(checkpoint_path(dir)) or
+               sealed_segments(dir) != []) ->
         []
 
       Process.whereis(__MODULE__) ->
         GenServer.call(__MODULE__, {:present, dir}, 60_000)
 
       true ->
-        case replay(File.read!(path(dir))) do
-          {:ok, images, _, _} -> Map.keys(images)
-          {:torn, images, _, _, _, _} -> Map.keys(images)
+        case read_all(dir) do
+          :fresh -> []
           {:damaged, _} -> @stores
+          r -> Map.keys(elem(r, 1))
         end
     end
   end
@@ -279,18 +326,31 @@ defmodule Ampd.AuthorityLog do
       damaged: nil,
       recovered: [],
       group: nil,
+      # The checkpoint: the record it covers, the one being written (a
+      # snapshot writer runs apart from this process), and a generation that
+      # tells a writer's report from an older world's apart.
+      cp_t: 0,
+      cp_running: nil,
+      cp_retry_at: 0,
+      gen: nil,
       counters: %{
         "records" => 0,
         "syncs" => 0,
         "bytes" => 0,
         "grouped_records" => 0,
-        "group_splits" => 0
+        "group_splits" => 0,
+        "checkpoints" => 0
       }
     }
 
   @impl true
   def handle_call(:close, _f, st) do
     st = if st.group, do: commit_group(st), else: st
+
+    # A world reset removes this directory and makes a new world at the same
+    # path. A snapshot writer still running would then rename an OLD world's
+    # checkpoint into the NEW world. So its report is awaited here.
+    st = await_checkpoint(st)
     if st.fd, do: :file.close(st.fd)
     {:reply, :ok, %{closed() | counters: st.counters}}
   end
@@ -305,6 +365,9 @@ defmodule Ampd.AuthorityLog do
 
     {:reply,
      Map.merge(st.counters, %{
+       "checkpoint_t" => st.cp_t,
+       "checkpoint_running" => st.cp_running,
+       "sealed_segments" => st.dir && length(sealed_segments(st.dir)),
        "path" => st.dir && path(st.dir),
        "tseq" => st.tseq,
        "size" => st.size,
@@ -439,71 +502,235 @@ defmodule Ampd.AuthorityLog do
     if st.dir == dir, do: st, else: load(%{closed() | counters: st.counters}, dir)
   end
 
-  # Read the whole log, replay it into images, truncate a torn last frame
-  # (and name it), and position for the next append.
+  # Load the checkpoint, replay what follows it (sealed segments, then the
+  # active log), truncate a torn last frame of the ACTIVE log and name it, and
+  # position for the next append.
   defp load(st, dir) do
     File.mkdir_p!(dir)
     p = path(dir)
-    st = %{st | dir: dir}
+    st = %{st | dir: dir, gen: make_ref()}
+    # A snapshot a crash cut short, never renamed into place: not a checkpoint.
+    File.rm(checkpoint_path(dir) <> ".tmp")
 
-    case File.read(p) do
-      {:error, :enoent} ->
+    case read_all(dir) do
+      :fresh ->
         create(st, p)
 
-      {:ok, bin} ->
-        case replay(bin) do
-          {:ok, images, tseq, recovered} ->
-            images = Map.new(images, fn {n, img} -> {n, Delta.compact(img)} end)
+      {:ok, images, tseq, recovered, cp_t, active_size} ->
+        st = %{st | images: compact(images), tseq: tseq, recovered: recovered, cp_t: cp_t}
+        st = if active_size, do: open_for_append(st, p, active_size), else: create(st, p)
+        drop_covered(st)
 
-            open_for_append(
-              %{st | images: images, tseq: tseq, recovered: recovered},
-              p,
-              byte_size(bin)
-            )
+      {:torn, images, tseq, recovered, cp_t, good, total, reason} ->
+        st = %{st | images: compact(images), tseq: tseq, recovered: recovered, cp_t: cp_t}
 
-          {:torn, images, tseq, recovered, good, reason} ->
-            images = Map.new(images, fn {n, img} -> {n, Delta.compact(img)} end)
-            st = %{st | images: images, tseq: tseq, recovered: recovered}
+        # Not even the header survived: start the file again.
+        st =
+          if good < byte_size(@header),
+            do: create(st, p),
+            else: open_for_append(st, p, good)
 
-            # Not even the header survived: start the file again.
-            st =
-              if good < byte_size(@header),
-                do: create(st, p),
-                else: open_for_append(st, p, good)
+        :ok = :file.truncate(st.fd)
+        :ok = :file.datasync(st.fd)
+        torn = total - good
 
-            :ok = :file.truncate(st.fd)
-            :ok = :file.datasync(st.fd)
-            torn = byte_size(bin) - good
+        event = %{
+          "torn_tail_bytes" => torn,
+          "at_offset" => good,
+          "reason" => reason,
+          "at" => DateTime.utc_now() |> DateTime.to_iso8601()
+        }
 
-            event = %{
-              "torn_tail_bytes" => torn,
-              "at_offset" => good,
-              "reason" => reason,
-              "at" => DateTime.utc_now() |> DateTime.to_iso8601()
-            }
+        Logger.warning(
+          "ampd: authority log had a torn last record (#{torn} bytes at offset #{good}, " <>
+            "#{reason}) — a write nobody was answered for; truncated and recorded"
+        )
 
-            Logger.warning(
-              "ampd: authority log had a torn last record (#{torn} bytes at offset #{good}, " <>
-                "#{reason}) — a write nobody was answered for; truncated and recorded"
-            )
+        case write_record(drop_covered(st), %{"ops" => [], "recovered" => event}) do
+          {:ok, st} ->
+            %{st | recovered: [event | st.recovered]}
 
-            case write_record(st, %{"ops" => [], "recovered" => event}) do
-              {:ok, st} ->
-                %{st | recovered: [event | st.recovered]}
-
-              {:error, why, st} ->
-                %{st | damaged: "authority log: recording a torn tail failed: #{inspect(why)}"}
-            end
-
-          {:damaged, why} ->
-            Logger.error(
-              "ampd: authority log is untrusted — #{why}; every store it backs is sealed"
-            )
-
-            %{st | damaged: "authority log: " <> why}
+          {:error, why, st} ->
+            %{st | damaged: "authority log: recording a torn tail failed: #{inspect(why)}"}
         end
+
+      {:damaged, why} ->
+        Logger.error("ampd: authority log is untrusted — #{why}; every store it backs is sealed")
+        %{st | damaged: "authority log: " <> why}
     end
   end
+
+  defp compact(images), do: Map.new(images, fn {n, img} -> {n, Delta.compact(img)} end)
+
+  @doc false
+  # Everything durable in `dir`, without writing: the checkpoint, the sealed
+  # segments after it, the active log. `:fresh`, `{:damaged, why}`,
+  # `{:ok, images, tseq, recovered, checkpoint_t, active_size | nil}`, or
+  # `{:torn, images, tseq, recovered, checkpoint_t, good, total, why}` — a torn
+  # tail is only ever the ACTIVE log's: a sealed segment was complete when it
+  # was sealed, so one that is not is corruption.
+  def read_all(dir) do
+    sealed = sealed_segments(dir)
+
+    with {:ok, cp_t, images, rec} <- read_checkpoint(dir),
+         {:ok, images, tseq, rec} <-
+           replay_sealed(Enum.filter(sealed, fn {t, _} -> t > cp_t end), cp_t, images, rec) do
+      case File.read(path(dir)) do
+        {:error, :enoent} when cp_t == 0 and sealed == [] ->
+          :fresh
+
+        {:error, :enoent} ->
+          {:ok, images, tseq, rec, cp_t, nil}
+
+        {:ok, bin} ->
+          case replay_from(bin, tseq, images, rec) do
+            {:ok, images, tseq, rec} ->
+              {:ok, images, tseq, rec, cp_t, byte_size(bin)}
+
+            {:torn, images, tseq, rec, off, why} ->
+              {:torn, images, tseq, rec, cp_t, off, byte_size(bin), why}
+
+            {:damaged, why} ->
+              {:damaged, why}
+          end
+      end
+    end
+  end
+
+  defp replay_sealed([], tseq, images, rec), do: {:ok, images, tseq, rec}
+
+  defp replay_sealed([{_t, p} | more], tseq, images, rec) do
+    case replay_from(File.read!(p), tseq, images, rec) do
+      {:ok, images, tseq, rec} ->
+        replay_sealed(more, tseq, images, rec)
+
+      {:torn, _, _, _, off, why} ->
+        {:damaged, "sealed segment #{Path.basename(p)} is incomplete at offset #{off} (#{why})"}
+
+      {:damaged, why} ->
+        {:damaged, "sealed segment #{Path.basename(p)}: #{why}"}
+    end
+  end
+
+  # ------------------------------------------------------------ checkpoints
+  #
+  # At the cadence the active log is sealed (renamed) and a new one begun —
+  # cheap, and done here — and the image at that record is handed to a
+  # snapshot writer apart from this process, so appends do not wait for it.
+  # Once the checkpoint is durable, the segments it covers are deleted.
+
+  defp maybe_checkpoint(st) do
+    if st.cp_running == nil and st.group == nil and st.damaged == nil and
+         st.tseq - st.cp_t >= checkpoint_every() and st.tseq >= st.cp_retry_at,
+       do: rotate(st),
+       else: st
+  end
+
+  defp rotate(%{dir: dir, tseq: t} = st) do
+    :ok = :file.close(st.fd)
+
+    case File.rename(path(dir), sealed_path(dir, t)) do
+      :ok ->
+        st = create(%{st | fd: nil}, path(dir))
+        owner = self()
+        gen = st.gen
+        images = st.images
+        rec = st.recovered
+        spawn(fn -> send(owner, {:checkpoint, gen, t, write_checkpoint(dir, t, images, rec)}) end)
+        %{st | cp_running: t}
+
+      {:error, why} ->
+        Logger.warning(
+          "ampd: authority log could not be sealed for a checkpoint: #{inspect(why)}"
+        )
+
+        retry_later(open_for_append(%{st | fd: nil}, path(dir), st.size))
+    end
+  end
+
+  defp retry_later(st), do: %{st | cp_retry_at: st.tseq + max(1, div(checkpoint_every(), 10))}
+
+  defp write_checkpoint(dir, t, images, rec) do
+    bin = :erlang.term_to_binary(images)
+
+    cp = %{
+      "t" => t,
+      "images" => bin,
+      "sha256" => Base.encode16(:crypto.hash(:sha256, bin), case: :lower),
+      "recovered" => rec
+    }
+
+    tmp = checkpoint_path(dir) <> ".tmp"
+
+    with :ok <- File.write(tmp, [@cp_header | frame(cp)]),
+         {:ok, fd} <- :file.open(tmp, [:read, :raw]),
+         :ok <- :file.datasync(fd),
+         :ok <- :file.close(fd),
+         :ok <- File.rename(tmp, checkpoint_path(dir)) do
+      :ok
+    else
+      {:error, why} -> {:error, why}
+    end
+  end
+
+  defp read_checkpoint(dir) do
+    case File.read(checkpoint_path(dir)) do
+      {:error, :enoent} ->
+        {:ok, 0, %{}, []}
+
+      {:ok, <<@cp_header, len::32, crc::32, payload::binary-size(len)>>} ->
+        with true <- :erlang.crc32(payload) == crc,
+             {:ok, %{"t" => t, "images" => bin, "sha256" => sha} = cp} <- decode(payload),
+             true <- Base.encode16(:crypto.hash(:sha256, bin), case: :lower) == sha,
+             {:ok, images} <- decode(bin) do
+          {:ok, t, images, cp["recovered"] || []}
+        else
+          _ -> {:damaged, "the checkpoint does not verify (checksum or digest)"}
+        end
+
+      {:ok, _} ->
+        {:damaged, "the checkpoint is not a whole checkpoint file"}
+
+      {:error, why} ->
+        {:damaged, "the checkpoint cannot be read: #{inspect(why)}"}
+    end
+  end
+
+  defp checkpoint_done(%{gen: gen} = st, gen, t, :ok) do
+    st = %{st | cp_running: nil, cp_t: t}
+    bump(drop_covered(st), "checkpoints")
+  end
+
+  defp checkpoint_done(%{gen: gen} = st, gen, t, {:error, why}) do
+    Logger.warning(
+      "ampd: authority log checkpoint at #{t} failed: #{inspect(why)}; retrying later"
+    )
+
+    retry_later(%{st | cp_running: nil})
+  end
+
+  defp checkpoint_done(st, _other_gen, _t, _result), do: st
+
+  defp drop_covered(%{dir: dir, cp_t: cp_t} = st) do
+    for {t, p} <- sealed_segments(dir), t <= cp_t, do: File.rm(p)
+    st
+  end
+
+  defp await_checkpoint(%{cp_running: nil} = st), do: st
+
+  defp await_checkpoint(%{gen: gen} = st) do
+    receive do
+      {:checkpoint, ^gen, t, result} -> checkpoint_done(st, gen, t, result)
+    after
+      120_000 ->
+        Logger.error("ampd: an authority log checkpoint did not report within 120 s")
+        st
+    end
+  end
+
+  @impl true
+  def handle_info({:checkpoint, gen, t, result}, st),
+    do: {:noreply, checkpoint_done(st, gen, t, result)}
 
   defp create(st, p) do
     {:ok, fd} = :file.open(p, [:read, :write, :raw, :binary])
@@ -531,7 +758,7 @@ defmodule Ampd.AuthorityLog do
       c = st.counters
 
       {:ok,
-       %{
+       maybe_checkpoint(%{
          st
          | size: size + n,
            tseq: tseq + 1,
@@ -542,7 +769,7 @@ defmodule Ampd.AuthorityLog do
                "syncs" => c["syncs"] + 1,
                "bytes" => c["bytes"] + n
            }
-       }}
+       })}
     else
       {:error, why} ->
         # Take back whatever part of the frame reached the file, so the next
@@ -584,23 +811,28 @@ defmodule Ampd.AuthorityLog do
   defp collect(_, acc), do: {:error, {:partial, length(acc) + 1}}
 
   @doc false
-  # Replay a whole log binary. Exposed for tests and tools.
-  def replay(bin) do
+  # Replay a whole log binary from nothing. Exposed for tests and tools.
+  def replay(bin), do: replay_from(bin, 0, %{}, [])
+
+  # Replay onto a base (a checkpoint, earlier segments). Records the base
+  # already holds (t <= tseq) are read, checked for sequence, and skipped;
+  # the first record may not leave a gap after the base.
+  defp replay_from(bin, tseq, images, rec) do
     hs = byte_size(@header)
 
     case bin do
-      <<@header, rest::binary>> -> frames(rest, hs, byte_size(bin), %{}, 0, [])
-      _ when byte_size(bin) < hs -> {:torn, %{}, 0, [], 0, "partial header"}
+      <<@header, rest::binary>> -> frames(rest, hs, images, tseq, rec, nil)
+      _ when byte_size(bin) < hs -> {:torn, images, tseq, rec, 0, "partial header"}
       _ -> {:damaged, "the file does not begin with #{inspect(@header)}"}
     end
   end
 
-  defp frames(<<>>, _off, _total, images, tseq, rec), do: {:ok, images, tseq, rec}
+  defp frames(<<>>, _off, images, tseq, rec, _seen), do: {:ok, images, tseq, rec}
 
-  defp frames(rest, off, _total, images, tseq, rec) when byte_size(rest) < 8,
+  defp frames(rest, off, images, tseq, rec, _seen) when byte_size(rest) < 8,
     do: {:torn, images, tseq, rec, off, "partial frame header"}
 
-  defp frames(<<len::32, crc::32, body::binary>>, off, total, images, tseq, rec) do
+  defp frames(<<len::32, crc::32, body::binary>>, off, images, tseq, rec, seen) do
     cond do
       byte_size(body) < len ->
         {:torn, images, tseq, rec, off, "frame declares #{len} bytes, #{byte_size(body)} present"}
@@ -618,14 +850,20 @@ defmodule Ampd.AuthorityLog do
 
           true ->
             case decode(payload) do
-              {:ok, %{"t" => t, "ops" => ops} = r} when t == tseq + 1 ->
-                images = Enum.reduce(ops, images, &Delta.apply_op/2)
-                rec = if r["recovered"], do: [r["recovered"] | rec], else: rec
-                frames(rest, off + 8 + len, total, images, t, rec)
+              {:ok, %{"t" => t, "ops" => ops} = r} ->
+                cond do
+                  (seen == nil and t > tseq + 1) or (seen != nil and t != seen + 1) ->
+                    {:damaged,
+                     "record sequence gap at offset #{off}: expected #{(seen || tseq) + 1}, found #{t}"}
 
-              {:ok, %{"t" => t}} ->
-                {:damaged,
-                 "record sequence gap at offset #{off}: expected #{tseq + 1}, found #{t}"}
+                  t <= tseq ->
+                    frames(rest, off + 8 + len, images, tseq, rec, t)
+
+                  true ->
+                    images = Enum.reduce(ops, images, &Delta.apply_op/2)
+                    rec = if r["recovered"], do: [r["recovered"] | rec], else: rec
+                    frames(rest, off + 8 + len, images, t, rec, t)
+                end
 
               _ ->
                 {:damaged, "an unreadable record at offset #{off} under a valid checksum"}

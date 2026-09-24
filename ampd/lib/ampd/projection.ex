@@ -135,7 +135,7 @@ defmodule Ampd.Projection do
       "world" => world_block(),
 
       # --- live: everything an operator can act on, in full -------------
-      "grants" => Enum.filter(GrantRegistry.list(), &(&1["status"] == "active")),
+      "grants" => GrantRegistry.active(),
       "grant_requests" => Enum.filter(GrantRegistry.requests(), &(&1["status"] == "pending")),
       # Resolved requests are provenance — "Kestrel asked, the person said
       # no" is exactly what this system exists to keep distinguishable — and
@@ -230,7 +230,8 @@ defmodule Ampd.Projection do
         end),
       "worktree_caps" => Ampd.Loci.caps(),
       "repositories" =>
-        Ampd.Worktree.repos() |> Map.new(fn {ref, r} -> {ref, %{"ref" => ref, "name" => Path.basename(r["path"])}} end),
+        Ampd.Worktree.repos()
+        |> Map.new(fn {ref, r} -> {ref, %{"ref" => ref, "name" => Path.basename(r["path"])}} end),
       "worktree_resources" =>
         Ampd.Worktree.resources() |> Map.new(fn {ref, r} -> {ref, Ampd.Locus.view(r)} end),
       "recent_refusals" => Ampd.RefusalLog.recent(20),
@@ -554,8 +555,7 @@ defmodule Ampd.Projection do
       "actor" => actor,
       "workspace" => Session.ctx()["workspace"],
       "run" => Session.run(),
-      "grants" =>
-        Enum.filter(GrantRegistry.list(), &(&1["status"] == "active" and &1["actor"] == actor)),
+      "grants" => Enum.filter(GrantRegistry.active(), &(&1["actor"] == actor)),
       # **Symmetric with the operator's**, and for the same reason. This
       # carried every request the actor had ever made, pending or resolved
       # — and an agent can request-and-resolve without limit, so it could

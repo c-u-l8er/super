@@ -158,7 +158,9 @@ defmodule Ampd.Gateway do
 
       true ->
         decl = pk["surface"][Core.cap_key(cap)]
-        grants = GrantRegistry.list()
+        # Active grants only, in list order: every rule below filters to them
+        # first, and fetching every grant ever kept grew with history.
+        grants = GrantRegistry.active()
 
         cond do
           decl == nil ->
