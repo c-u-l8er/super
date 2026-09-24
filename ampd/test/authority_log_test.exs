@@ -333,6 +333,10 @@ defmodule Ampd.AuthorityLogTest do
       assert inspect(claim["ops"]) =~ e["grant_ref"]
       assert after_["grouped_records"] == before["grouped_records"] + 1
 
+      # Each sync's duration is counted, so a latency can be put on the device or not.
+      assert after_["sync_us_total"] > before["sync_us_total"]
+      assert Enum.sum(Map.values(after_["sync_us_hist"])) == after_["syncs"]
+
       # 2 · stated, and counted: claim transaction · ATTEMPTED · COMMITTED · receipt.
       assert length(new) == 4,
              "records per effect: #{length(new)} — #{inspect(Enum.map(new, &Enum.map(&1["ops"], fn op -> elem(op, 1) end)))}"

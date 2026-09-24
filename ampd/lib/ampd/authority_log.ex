@@ -339,7 +339,13 @@ defmodule Ampd.AuthorityLog do
         "bytes" => 0,
         "grouped_records" => 0,
         "group_splits" => 0,
-        "checkpoints" => 0
+        "checkpoints" => 0,
+        # Each datasync's own duration: the total, the slowest, and a log2
+        # histogram in microseconds (bucket b counts syncs of 2^(b-1)..2^b µs).
+        # So a latency that grows can be attributed to the device, or ruled out.
+        "sync_us_total" => 0,
+        "sync_us_max" => 0,
+        "sync_us_hist" => %{}
       }
     }
 
@@ -747,15 +753,35 @@ defmodule Ampd.AuthorityLog do
     %{st | fd: fd, size: size}
   end
 
+  defp timed_datasync(fd) do
+    t0 = System.monotonic_time(:microsecond)
+
+    case :file.datasync(fd) do
+      :ok -> {:ok, System.monotonic_time(:microsecond) - t0}
+      err -> err
+    end
+  end
+
+  defp sync_census(c, us) do
+    b = if us <= 1, do: 0, else: ceil(:math.log2(us))
+
+    %{
+      c
+      | "sync_us_total" => c["sync_us_total"] + us,
+        "sync_us_max" => max(c["sync_us_max"], us),
+        "sync_us_hist" => Map.update(c["sync_us_hist"], b, 1, &(&1 + 1))
+    }
+  end
+
   defp write_record(%{fd: fd, size: size, tseq: tseq} = st, rec) do
     rec = Map.put(rec, "t", tseq + 1)
     frame = frame(rec)
     n = IO.iodata_length(frame)
 
     with :ok <- :file.pwrite(fd, size, frame),
-         :ok <- :file.datasync(fd) do
+         {:ok, sync_us} <- timed_datasync(fd) do
       images = Enum.reduce(rec["ops"], st.images, &Delta.apply_op/2)
-      c = st.counters
+      c = sync_census(st.counters, sync_us)
 
       {:ok,
        maybe_checkpoint(%{
