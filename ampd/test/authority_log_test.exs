@@ -242,6 +242,15 @@ defmodule Ampd.AuthorityLogTest do
       st = AuthorityLog.status()
 
       assert st["checkpoints"] >= 2, inspect(st)
+
+      # The last snapshot's own time, by phase, and where the log was when it landed.
+      last = st["checkpoint_last"]
+      assert last["bytes"] > 0 and last["total_us"] >= last["sync_us"]
+      assert last["finished_at_tseq"] >= last["started_at_tseq"]
+
+      for k <- ~w(serialize_us write_us sync_us rename_us),
+          do: assert(is_integer(last[k]) and last[k] >= 0, k)
+
       assert File.exists?(AuthorityLog.checkpoint_path())
       assert st["sealed_segments"] == 0, "a covered segment was left behind"
       {:ok, active} = AuthorityLog.records(log_bin())
@@ -270,6 +279,19 @@ defmodule Ampd.AuthorityLogTest do
 
       assert Map.new(Ampd.seals())[Ampd.Effects] =~ "checkpoint"
       Ampd.reset_demo()
+    end
+
+    test "a snapshot written in chunks is the same checkpoint" do
+      Application.put_env(:ampd, :authority_log_checkpoint_chunk_bytes, 4096)
+      on_exit(fn -> Application.delete_env(:ampd, :authority_log_checkpoint_chunk_bytes) end)
+      Enum.each(1..6, fn _ -> perform!() end)
+      settled!()
+
+      assert AuthorityLog.status()["checkpoint_last"]["chunk_bytes"] == 4096
+      before = journal()
+      reboot_registries!()
+      assert Ampd.seals() == []
+      assert journal() == before
     end
 
     test "a snapshot cut short is not a checkpoint, and is removed" do

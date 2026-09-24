@@ -331,6 +331,7 @@ defmodule Ampd.AuthorityLog do
       # tells a writer's report from an older world's apart.
       cp_t: 0,
       cp_running: nil,
+      cp_last: nil,
       cp_retry_at: 0,
       gen: nil,
       counters: %{
@@ -373,6 +374,7 @@ defmodule Ampd.AuthorityLog do
      Map.merge(st.counters, %{
        "checkpoint_t" => st.cp_t,
        "checkpoint_running" => st.cp_running,
+       "checkpoint_last" => st.cp_last,
        "sealed_segments" => st.dir && length(sealed_segments(st.dir)),
        "path" => st.dir && path(st.dir),
        "tseq" => st.tseq,
@@ -656,7 +658,14 @@ defmodule Ampd.AuthorityLog do
 
   defp retry_later(st), do: %{st | cp_retry_at: st.tseq + max(1, div(checkpoint_every(), 10))}
 
+  # The snapshot, timed by phase so a slow log sync can be lined up against a
+  # running write: serializing the image, writing it, syncing it, renaming it.
+  # With `:authority_log_checkpoint_chunk_bytes` set, it is written in chunks of
+  # that size with a datasync after each, which bounds how much of its dirty
+  # data any one of the log's own datasyncs can be made to wait behind in the
+  # filesystem's journal. Unset (the default), it is one write and one sync.
   defp write_checkpoint(dir, t, images, rec) do
+    t0 = now_us()
     bin = :erlang.term_to_binary(images)
 
     cp = %{
@@ -666,18 +675,61 @@ defmodule Ampd.AuthorityLog do
       "recovered" => rec
     }
 
+    data = IO.iodata_to_binary([@cp_header | frame(cp)])
+    t1 = now_us()
     tmp = checkpoint_path(dir) <> ".tmp"
+    chunk = Application.get_env(:ampd, :authority_log_checkpoint_chunk_bytes)
 
-    with :ok <- File.write(tmp, [@cp_header | frame(cp)]),
-         {:ok, fd} <- :file.open(tmp, [:read, :raw]),
-         :ok <- :file.datasync(fd),
+    with {:ok, fd} <- :file.open(tmp, [:write, :raw, :binary]),
+         {:ok, write_us, sync_us} <- write_synced(fd, data, chunk, 0, 0, 0),
          :ok <- :file.close(fd),
+         t2 = now_us(),
          :ok <- File.rename(tmp, checkpoint_path(dir)) do
-      :ok
+      t3 = now_us()
+
+      {:ok,
+       %{
+         "t" => t,
+         "bytes" => byte_size(data),
+         "chunk_bytes" => chunk,
+         "serialize_us" => t1 - t0,
+         "write_us" => write_us,
+         "sync_us" => sync_us,
+         "rename_us" => t3 - t2,
+         "total_us" => t3 - t0,
+         "started_at_tseq" => t
+       }}
     else
       {:error, why} -> {:error, why}
     end
   end
+
+  defp write_synced(fd, data, chunk, off, w, s) when is_integer(chunk) and chunk > 0 do
+    if off >= byte_size(data) do
+      {:ok, w, s}
+    else
+      n = min(chunk, byte_size(data) - off)
+      a = now_us()
+
+      with :ok <- :file.write(fd, binary_part(data, off, n)),
+           b = now_us(),
+           :ok <- :file.datasync(fd) do
+        write_synced(fd, data, chunk, off + n, w + (b - a), s + (now_us() - b))
+      end
+    end
+  end
+
+  defp write_synced(fd, data, _whole, _off, _w, _s) do
+    a = now_us()
+
+    with :ok <- :file.write(fd, data),
+         b = now_us(),
+         :ok <- :file.datasync(fd) do
+      {:ok, b - a, now_us() - b}
+    end
+  end
+
+  defp now_us, do: System.monotonic_time(:microsecond)
 
   defp read_checkpoint(dir) do
     case File.read(checkpoint_path(dir)) do
@@ -702,8 +754,8 @@ defmodule Ampd.AuthorityLog do
     end
   end
 
-  defp checkpoint_done(%{gen: gen} = st, gen, t, :ok) do
-    st = %{st | cp_running: nil, cp_t: t}
+  defp checkpoint_done(%{gen: gen} = st, gen, t, {:ok, info}) do
+    st = %{st | cp_running: nil, cp_t: t, cp_last: Map.put(info, "finished_at_tseq", st.tseq)}
     bump(drop_covered(st), "checkpoints")
   end
 
