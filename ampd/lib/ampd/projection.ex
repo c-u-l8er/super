@@ -712,7 +712,7 @@ defmodule Ampd.Projection do
     items = Enum.take(top, limit)
     more? = length(top) > limit
 
-    %{
+    page = %{
       "schema" => "history-page@1",
       "items" => items,
       "total" => length(live) + archived,
@@ -720,7 +720,8 @@ defmodule Ampd.Projection do
       "more" => more?,
       "next_cursor" => if(more?, do: List.last(items)["id"], else: nil)
     }
-    |> then(fn p -> if err, do: Map.put(p, "archive_error", err), else: p end)
+
+    if err, do: Map.put(page, "archive_error", err), else: page
   end
 
   defp older?(_r, nil), do: true

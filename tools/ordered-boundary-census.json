@@ -21,10 +21,10 @@
       "bare": 0
     },
     "Ampd.GrantRegistry": {
-      "sends": 22,
-      "mutations": 16,
-      "reads": 6,
-      "declared_mutations": 16,
+      "sends": 24,
+      "mutations": 17,
+      "reads": 7,
+      "declared_mutations": 17,
       "dead": [],
       "bare": 0
     },
@@ -37,18 +37,18 @@
       "bare": 0
     },
     "Ampd.Approvals": {
-      "sends": 12,
-      "mutations": 9,
-      "reads": 3,
-      "declared_mutations": 9,
+      "sends": 14,
+      "mutations": 10,
+      "reads": 4,
+      "declared_mutations": 10,
       "dead": [],
       "bare": 0
     },
     "Ampd.Effects": {
-      "sends": 18,
-      "mutations": 14,
-      "reads": 4,
-      "declared_mutations": 14,
+      "sends": 24,
+      "mutations": 15,
+      "reads": 9,
+      "declared_mutations": 15,
       "dead": [],
       "bare": 0
     },
@@ -77,10 +77,10 @@
       "bare": 0
     },
     "Ampd.Receipts": {
-      "sends": 13,
-      "mutations": 9,
-      "reads": 4,
-      "declared_mutations": 9,
+      "sends": 17,
+      "mutations": 10,
+      "reads": 7,
+      "declared_mutations": 10,
       "dead": [],
       "bare": 0
     },
