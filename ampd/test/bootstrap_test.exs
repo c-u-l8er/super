@@ -20,14 +20,20 @@ defmodule Ampd.BootstrapTest do
   defp wait_up(mod, probe, n) do
     ok =
       Process.whereis(mod) != nil and
-        (try do
-           probe.()
-           true
-         catch
-           :exit, _ -> false
-         end)
+        try do
+          probe.()
+          true
+        catch
+          :exit, _ -> false
+        end
 
-    if ok, do: :ok, else: (Process.sleep(20); wait_up(mod, probe, n - 1))
+    if ok,
+      do: :ok,
+      else:
+        (
+          Process.sleep(20)
+          wait_up(mod, probe, n - 1)
+        )
   end
 
   test "a production world boots with zero authority" do
@@ -50,7 +56,10 @@ defmodule Ampd.BootstrapTest do
     Ampd.reset_demo()
     active = Enum.filter(GrantRegistry.list(), &(&1["status"] == "active"))
     assert length(active) == 3, "the C0 fixture stopped seeding its three grants"
-    assert Ampd.Conformance.authorize("github.repo.read", "traaviis/trvm", Gateway.ctx(), nil)["allow"]
+
+    assert Ampd.Conformance.authorize("github.repo.read", "traaviis/trvm", Gateway.ctx(), nil)[
+             "allow"
+           ]
   end
 
   test "the world manifest is written last, so its presence proves the stores existed" do
@@ -63,43 +72,50 @@ defmodule Ampd.BootstrapTest do
     assert meta["initialized_at"] =~ ~r/^\d{4}-/
 
     dir = Application.get_env(:ampd, :data_dir)
-    files = File.ls!(dir)
 
     Enum.each(World.authority_stores(), fn s ->
-      assert "#{s}.dets" in files, "store #{s} missing though the manifest was written"
+      assert Ampd.TestStoreLoss.on_disk?(dir, s),
+             "store #{s} missing though the manifest was written"
     end)
   end
 
   test "losing an authority store seals the gateway instead of reseeding defaults" do
     Ampd.reset_demo()
     Ampd.Authority.revoke_domain("github.repo.read")
-    refute Ampd.Conformance.authorize("github.repo.read", "traaviis/trvm", Gateway.ctx(), nil)["allow"]
+
+    refute Ampd.Conformance.authorize("github.repo.read", "traaviis/trvm", Gateway.ctx(), nil)[
+             "allow"
+           ]
 
     # The disk loses exactly one authority store while the world lives on.
     dir = Application.get_env(:ampd, :data_dir)
     GrantRegistry.close_store()
-    File.rm_rf!(Path.join(dir, "grant_registry.dets"))
+    Ampd.TestStoreLoss.lose!(dir, "grant_registry")
     Process.exit(Process.whereis(GrantRegistry), :kill)
     wait_up(GrantRegistry, fn -> GrantRegistry.sealed() end)
 
     auth = Ampd.Conformance.authorize("github.repo.read", "traaviis/trvm", Gateway.ctx(), nil)
 
     refute auth["allow"], "data loss widened authority"
+
     assert auth["reason"] =~ "RECOVERY-STATE-MISSING",
            "the refusal did not name the recovery state: #{inspect(auth["reason"])}"
+
     assert auth["sealed"] == true
     assert Ampd.seals() != [], "the seal was invisible to Ampd.seals/0"
 
     # And it stays sealed for a capability that was never revoked — the
     # seal is a property of the store, not of one grant.
-    refute Ampd.Conformance.authorize("github.pr.draft", "traaviis/trvm", Gateway.ctx(), nil)["allow"]
+    refute Ampd.Conformance.authorize("github.pr.draft", "traaviis/trvm", Gateway.ctx(), nil)[
+             "allow"
+           ]
   end
 
   test "a sealed store refuses writes BY NAME, without taking the total order down with it" do
     Ampd.reset_demo()
     dir = Application.get_env(:ampd, :data_dir)
     GrantRegistry.close_store()
-    File.rm_rf!(Path.join(dir, "grant_registry.dets"))
+    Ampd.TestStoreLoss.lose!(dir, "grant_registry")
     Process.exit(Process.whereis(GrantRegistry), :kill)
     wait_up(GrantRegistry, fn -> GrantRegistry.sealed() end)
 
@@ -131,7 +147,7 @@ defmodule Ampd.BootstrapTest do
     Ampd.reset_demo()
     dir = Application.get_env(:ampd, :data_dir)
     Ampd.Effects.close_store()
-    File.rm_rf!(Path.join(dir, "effects.dets"))
+    Ampd.TestStoreLoss.lose!(dir, "effects")
     Process.exit(Process.whereis(Ampd.Effects), :kill)
     wait_up(Ampd.Effects, fn -> Ampd.Effects.sealed() end)
 

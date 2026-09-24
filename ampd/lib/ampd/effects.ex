@@ -84,7 +84,8 @@ defmodule Ampd.Effects do
   # `refused` mutate the lease table and append to the log: a timeout on
   # them is INDETERMINATE, not a refusal.
   @participant_mutations ~w(close_store load_state propose to claim attempt commit recover
-                            authorize_write landed refused witness_state witness_listing)a
+                            authorize_write landed refused witness_state witness_listing
+                            flush_deferred)a
 
   defp ask(msg, timeout \\ 5_000) do
     tag = if is_tuple(msg), do: elem(msg, 0), else: msg
@@ -98,10 +99,10 @@ defmodule Ampd.Effects do
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
       {:ok, tab, s} ->
-        {:ok, incarnate(%{tab: tab, s: s, sealed: nil, inc: nil})}
+        {:ok, incarnate(%{tab: tab, s: s, ix: index(s), sealed: nil, inc: nil})}
 
       {:sealed, reason} ->
-        {:ok, %{tab: nil, s: sealed_state(), sealed: reason, inc: nil}}
+        {:ok, %{tab: nil, s: sealed_state(), ix: %{}, sealed: reason, inc: nil}}
     end
   end
 
@@ -112,7 +113,11 @@ defmodule Ampd.Effects do
   def close_store, do: ask(:close_store)
   def load_state(s), do: ask({:load_state, s})
   def all, do: ask(:all)
-  def get(id), do: Enum.find(all(), &(&1["id"] == id))
+
+  # Looked up here, not by copying every effect out of this process to find
+  # one: the copy grew with history (0.1 ms at an empty journal, 15–21 ms at
+  # 2,000, measured).
+  def get(id), do: ask({:get, id})
   def count, do: length(all())
 
   @doc """
@@ -148,6 +153,10 @@ defmodule Ampd.Effects do
 
   @doc "Report a participant's refusal after authorisation, with the participant's proof."
   def refused(ticket, code, proof), do: ask({:refused, ticket, code, proof})
+
+  @doc false
+  # Write the witness lines held for a committed authority transaction.
+  def flush_deferred, do: ask(:flush_deferred)
 
   @doc "Boot-time truth: anything still CLAIMED or ATTEMPTED is UNKNOWN."
   def recover!, do: ask(:recover)
@@ -188,6 +197,12 @@ defmodule Ampd.Effects do
   # --- ordered-authority boundary -------------------------------------
   @ordered_ops [:claim, :propose, :load_state]
   @impl true
+  # A call made for the open authority transaction (`Ampd.AuthorityLog.group/1`)
+  # arrives wrapped with its origin, so this registry's writes join that
+  # transaction's one record.
+  def handle_call({:"$alog_origin", origin, msg}, from, st),
+    do: Ampd.AuthorityLog.as_member(origin, fn -> handle_call(msg, from, st) end)
+
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
              (is_atom(msg) and msg in @ordered_ops) do
@@ -209,12 +224,24 @@ defmodule Ampd.Effects do
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
 
   def handle_call(:close_store, _f, st) do
-    if st.tab, do: :dets.close(st.tab)
+    if st.tab, do: Ampd.Store.close(st.tab)
     if st.inc, do: Witness.close(st.inc.log)
     {:reply, :ok, %{st | tab: nil, inc: nil}}
   end
 
   def handle_call(:all, _f, %{s: s} = st), do: {:reply, s["effects"], st}
+
+  def handle_call({:get, id}, _f, st), do: {:reply, lookup(st, id), st}
+
+  # The witness lines of an authority transaction's writes wait for its commit
+  # (`Ampd.AuthorityLog.group/1`), because a witness line follows the durable
+  # fact it witnesses. The transaction's owner calls this once it committed.
+  def handle_call(:flush_deferred, _f, %{inc: %{deferred: [_ | _]} = inc} = st) do
+    st = %{st | inc: %{inc | deferred: []}}
+    {:reply, :ok, Enum.reduce(Enum.reverse(inc.deferred), st, &append_witness(&2, &1))}
+  end
+
+  def handle_call(:flush_deferred, _f, st), do: {:reply, :ok, st}
 
   def handle_call(:incarnation, _f, %{inc: nil} = st), do: {:reply, nil, st}
 
@@ -270,10 +297,10 @@ defmodule Ampd.Effects do
     end
   end
 
-  def handle_call({:attempt, lease, adapter}, _f, %{s: s} = st) do
+  def handle_call({:attempt, lease, adapter}, _f, st) do
     with {:ok, l} <- live_lease(st, lease),
          :ok <- sequencing(l) do
-      e0 = Enum.find(s["effects"], &(&1["id"] == l.effect)) || %{"attempts" => []}
+      e0 = lookup(st, l.effect) || %{"attempts" => []}
       n = length(e0["attempts"]) + 1
 
       a = %{
@@ -304,8 +331,8 @@ defmodule Ampd.Effects do
   end
 
   # ----------------------------------------------------- lease authority
-  def handle_call({:authorize_write, lease, op, target}, _f, %{inc: inc, s: s} = st) do
-    effect_of = fn id -> Enum.find(s["effects"], &(&1["id"] == id)) end
+  def handle_call({:authorize_write, lease, op, target}, _f, %{inc: inc} = st) do
+    effect_of = fn id -> lookup(st, id) end
     token_ok? = fn token -> Fence.lease_valid?(inc.key, token) end
 
     ticket_id = "tk-#{inc.epoch}-#{inc.n_ticket + 1}"
@@ -427,6 +454,7 @@ defmodule Ampd.Effects do
       end)
 
     st = %{st | s: Ampd.Store.save(tab, %{s | "effects" => effects})}
+    st = %{st | ix: index(st.s)}
 
     st =
       Enum.reduce(moved, st, fn {id, why}, st ->
@@ -449,7 +477,8 @@ defmodule Ampd.Effects do
   def handle_ordered({:load_state, s}, st) do
     tab = st.tab || Ampd.Store.open!(@store)
     if st.inc, do: Witness.close(st.inc.log)
-    {:reply, :ok, incarnate(%{st | tab: tab, s: Ampd.Store.save(tab, s), sealed: nil, inc: nil})}
+    s = Ampd.Store.save(tab, s)
+    {:reply, :ok, incarnate(%{st | tab: tab, s: s, ix: index(s), sealed: nil, inc: nil})}
   end
 
   def handle_ordered({:propose, env}, %{tab: tab, s: s} = st) do
@@ -488,7 +517,8 @@ defmodule Ampd.Effects do
 
       st = %{
         st
-        | s: Ampd.Store.save(tab, %{s | "effects" => s["effects"] ++ [e], "seq" => s["seq"] + 1})
+        | s: Ampd.Store.save(tab, %{s | "effects" => s["effects"] ++ [e], "seq" => s["seq"] + 1}),
+          ix: Map.put(st.ix, id, e)
       }
 
       st =
@@ -511,8 +541,8 @@ defmodule Ampd.Effects do
     end
   end
 
-  def handle_ordered({:claim, id}, %{s: s, inc: inc} = st) do
-    case Enum.find(s["effects"], &(&1["id"] == id)) do
+  def handle_ordered({:claim, id}, %{inc: inc} = st) do
+    case lookup(st, id) do
       nil ->
         {:reply, {:error, "effect-unknown · " <> id}, st}
 
@@ -603,6 +633,7 @@ defmodule Ampd.Effects do
       tseq: 0,
       n_lease: 0,
       n_ticket: 0,
+      deferred: [],
       log: Witness.open(epoch)
     }
 
@@ -639,6 +670,19 @@ defmodule Ampd.Effects do
       {:ok, :ok} ->
         :ok
 
+      # **A sealed participant is not waited for, and is not a reason to stop.**
+      # It refuses every ticket by name, whatever its fence says, so there is
+      # nothing to fence. Raising here took the whole runtime down instead: a
+      # dirty `receipts` or `grant_registry` store made this process fail to
+      # start and the application with it (6 of 72 random kills,
+      # `evidence/kill-battery/`), where `Ampd.Store` promises a sealed
+      # registry that refuses by name while the rest of the world stays
+      # reachable — and `Ampd.seals/0` names it.
+      {:ok, {:refused, %{"operator_detail" => %{"seal" => seal}}}} when is_binary(seal) ->
+        require Logger
+        Logger.warning("ampd: #{inspect(mod)} is sealed and was not fenced for #{epoch}: #{seal}")
+        :ok
+
       other when budget > 0 ->
         _ = other
         Process.sleep(@fence_retry_ms)
@@ -655,7 +699,16 @@ defmodule Ampd.Effects do
 
   defp log(%{inc: nil} = st, _event), do: st
 
+  # While this process serves the open authority transaction, the facts it
+  # just wrote are not durable yet — they are, together, at the commit. Their
+  # lines wait (in order) so that no line ever precedes its fact.
   defp log(%{inc: inc} = st, event) do
+    if Ampd.AuthorityLog.member?(),
+      do: %{st | inc: %{inc | deferred: [event | inc.deferred]}},
+      else: append_witness(st, event)
+  end
+
+  defp append_witness(%{inc: inc} = st, event) do
     tseq = inc.tseq + 1
     Witness.append!(inc.log, tseq, event)
     %{st | inc: %{inc | tseq: tseq}}
@@ -686,8 +739,8 @@ defmodule Ampd.Effects do
   # Creation is not a transition: `{:propose, _}` constructs the record with
   # PROPOSED hard-coded and does not pass through here; `nil → PROPOSED` is
   # safe by construction and tested apart (effect_lifecycle_test).
-  def admit(%{s: s}, id, state) do
-    case Enum.find(s["effects"], &(&1["id"] == id)) do
+  def admit(st, id, state) do
+    case lookup(st, id) do
       nil ->
         {:refused, transition_refusal("effect-unknown", id, nil, state)}
 
@@ -700,9 +753,9 @@ defmodule Ampd.Effects do
   end
 
   defp transition(%{tab: tab, s: s} = st, id, state, meta) do
-    with {:ok, _} <- admit(st, id, state) do
-      {e, s2} = put_state(s, id, state, meta)
-      st = %{st | s: Ampd.Store.save(tab, s2)}
+    with {:ok, e0} <- admit(st, id, state) do
+      {e, s2} = put_state(s, e0, state, meta)
+      st = %{st | s: Ampd.Store.save(tab, s2), ix: Map.put(st.ix, id, e)}
 
       event = %{"type" => "journal", "effect" => id, "state" => state}
       event = if meta["reason"], do: Map.put(event, "reason", meta["reason"]), else: event
@@ -862,31 +915,42 @@ defmodule Ampd.Effects do
     )
   end
 
-  defp put_state(s, id, state, meta) do
+  # The record changes; the journal's other records are the same terms they
+  # were. It was `Enum.map/2` over every effect, twice, to change one — the
+  # largest per-transition cost left once the store stopped rewriting history
+  # (measured with `:eprof` at ~2,000 retained effects). The element is found
+  # by IDENTITY (`lookup/2` returns the term the list holds), so the walk is a
+  # pointer comparison per record, and nothing after it is copied.
+  defp put_state(s, e, state, meta) do
     {attempt, meta} = Map.pop(meta, "__attempt")
-    updated = :erlang.make_ref()
 
-    effects =
-      Enum.map(s["effects"], fn e ->
-        if e["id"] == id do
-          e
-          |> Map.merge(meta)
-          |> Map.put("state", state)
-          |> Map.put("__u", updated)
-          |> Map.update("attempts", [], fn as -> if attempt, do: as ++ [attempt], else: as end)
-          |> Map.update("history", [], &(&1 ++ [%{"state" => state, "at" => now()}]))
-          |> then(fn e ->
-            if state == "UNKNOWN", do: Map.put(e, "needs_reconcile", true), else: e
-          end)
-        else
-          e
-        end
-      end)
+    e2 =
+      e
+      |> Map.merge(meta)
+      |> Map.put("state", state)
+      |> Map.update("attempts", [], fn as -> if attempt, do: as ++ [attempt], else: as end)
+      |> Map.update("history", [], &(&1 ++ [%{"state" => state, "at" => now()}]))
+      |> then(fn e -> if state == "UNKNOWN", do: Map.put(e, "needs_reconcile", true), else: e end)
 
-    e = Enum.find(effects, &(&1["__u"] == updated))
-    effects = Enum.map(effects, &Map.delete(&1, "__u"))
-    {e && Map.delete(e, "__u"), %{s | "effects" => effects}}
+    {e2, %{s | "effects" => replace(s["effects"], e, e2, [])}}
   end
+
+  defp replace([x | rest], old, new, acc) when x === old, do: :lists.reverse(acc, [new | rest])
+  defp replace([x | rest], old, new, acc), do: replace(rest, old, new, [x | acc])
+
+  # The index is this process's own; a record it points at is always in the
+  # list. Reaching the end means they disagree, which is a bug, not a state.
+  defp replace([], old, _new, _acc),
+    do: raise("effect #{inspect(old["id"])} is indexed but not in the journal")
+
+  # The effects by id, beside the list the store persists — the list stays
+  # the durable shape; the map is what lookups use instead of scanning it.
+  defp index(s), do: Map.new(s["effects"] || [], &{&1["id"], &1})
+
+  # A state without an index (a test handing `admit/3` a hand-built state)
+  # is still answered, by the scan the index replaced.
+  defp lookup(%{ix: ix}, id), do: Map.get(ix, id)
+  defp lookup(%{s: s}, id), do: Enum.find(s["effects"], &(&1["id"] == id))
 
   defp now, do: DateTime.utc_now() |> DateTime.to_iso8601()
 end

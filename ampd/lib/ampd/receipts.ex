@@ -48,8 +48,11 @@ defmodule Ampd.Receipts do
   @impl true
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
-      {:ok, tab, s} -> {:ok, %{tab: tab, s: s, sealed: nil}}
-      {:sealed, reason} -> {:ok, %{tab: nil, s: sealed_state(), sealed: reason}}
+      {:ok, tab, s} ->
+        {:ok, %{tab: tab, s: s, refs: refs(s), sealed: nil}}
+
+      {:sealed, reason} ->
+        {:ok, %{tab: nil, s: sealed_state(), refs: MapSet.new(), sealed: reason}}
     end
   end
 
@@ -258,6 +261,12 @@ defmodule Ampd.Receipts do
   """
   def ordered_ops, do: @ordered_ops
   @impl true
+  # A call made for the open authority transaction (`Ampd.AuthorityLog.group/1`)
+  # arrives wrapped with its origin, so this registry's writes join that
+  # transaction's one record.
+  def handle_call({:"$alog_origin", origin, msg}, from, st),
+    do: Ampd.AuthorityLog.as_member(origin, fn -> handle_call(msg, from, st) end)
+
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
              (is_atom(msg) and msg in @ordered_ops) do
@@ -281,7 +290,7 @@ defmodule Ampd.Receipts do
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
 
   def handle_call(:close_store, _f, st) do
-    if st.tab, do: :dets.close(st.tab)
+    if st.tab, do: Ampd.Store.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
 
@@ -370,7 +379,7 @@ defmodule Ampd.Receipts do
             {:refused, "write-unscoped",
              "the record names #{m["effect_ref"]}; the ticket targets #{target}"}
 
-          Enum.any?(s["log"], &(&1["effect_ref"] == target)) ->
+          MapSet.member?(refs_of(st), target) ->
             {:refused, "write-duplicate", "a receipt for #{target} is already in the ledger"}
 
           true ->
@@ -457,9 +466,19 @@ defmodule Ampd.Receipts do
     id = "rcpt-" <> String.pad_leading(Integer.to_string(seq), 4, "0")
     record = Map.merge(fields, %{"id" => id, "seq" => seq})
 
-    {record,
-     %{st | s: Ampd.Store.save(tab, %{s | "log" => s["log"] ++ [record], "seq" => seq + 1})}}
+    st = %{st | s: Ampd.Store.save(tab, %{s | "log" => s["log"] ++ [record], "seq" => seq + 1})}
+    ref = record["effect_ref"]
+    {record, if(ref, do: %{st | refs: MapSet.put(refs_of(st), ref)}, else: st)}
   end
+
+  # Receipt uniqueness per effect is checked against this set, not by scanning
+  # the ledger: the scan grew with every receipt ever emitted. Derived from the
+  # log, never persisted — the log stays the authority.
+  defp refs(s),
+    do: for(r <- s["log"] || [], r["effect_ref"] != nil, into: MapSet.new(), do: r["effect_ref"])
+
+  defp refs_of(%{refs: refs}), do: refs
+  defp refs_of(%{s: s}), do: refs(s)
 
   # The log is the authority for "has this already happened", and it is read
   # here rather than through `of_kind/1` because a `GenServer.call` to
@@ -575,10 +594,12 @@ defmodule Ampd.Receipts do
   def handle_ordered({:load_state, s}, st) do
     tab = st.tab || Ampd.Store.open!(@store)
 
-    {:reply, :ok,
-     %{st | tab: tab, s: Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s)), sealed: nil}}
+    s = Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s))
+    {:reply, :ok, Map.merge(st, %{tab: tab, s: s, refs: refs(s), sealed: nil})}
   end
 
-  def handle_ordered(:reset, %{tab: tab} = st),
-    do: {:reply, :ok, %{st | s: Ampd.Store.save(tab, Ampd.Fence.carry(initial(), st.s))}}
+  def handle_ordered(:reset, %{tab: tab} = st) do
+    s = Ampd.Store.save(tab, Ampd.Fence.carry(initial(), st.s))
+    {:reply, :ok, Map.merge(st, %{s: s, refs: refs(s)})}
+  end
 end

@@ -209,11 +209,15 @@ defmodule Ampd.World do
     "{" <> inner <> "}"
   end
 
-  @doc "Authority stores that physically exist on disk right now."
+  @doc """
+  Authority stores that physically exist on disk right now: a DETS table,
+  or a store the authority log holds (`Ampd.AuthorityLog`).
+  """
   def stores_on_disk do
     case File.ls(dir()) do
       {:ok, files} ->
-        Enum.filter(@authority_stores, &("#{&1}.dets" in files))
+        logged = Ampd.AuthorityLog.present(dir())
+        Enum.filter(@authority_stores, &("#{&1}.dets" in files or &1 in logged))
 
       {:error, _} ->
         []

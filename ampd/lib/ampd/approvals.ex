@@ -87,6 +87,12 @@ defmodule Ampd.Approvals do
   # These mutations are served only when the caller IS the total order.
   @ordered_ops [:push, :new_pending, :mark, :mark_consumed, :reset, :load_state]
   @impl true
+  # A call made for the open authority transaction (`Ampd.AuthorityLog.group/1`)
+  # arrives wrapped with its origin, so this registry's writes join that
+  # transaction's one record.
+  def handle_call({:"$alog_origin", origin, msg}, from, st),
+    do: Ampd.AuthorityLog.as_member(origin, fn -> handle_call(msg, from, st) end)
+
   def handle_call(msg, from, st)
       when (is_tuple(msg) and elem(msg, 0) in @ordered_ops) or
              (is_atom(msg) and msg in @ordered_ops) do
@@ -110,7 +116,7 @@ defmodule Ampd.Approvals do
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
 
   def handle_call(:close_store, _f, st) do
-    if st.tab, do: :dets.close(st.tab)
+    if st.tab, do: Ampd.Store.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
 

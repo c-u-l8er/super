@@ -18,14 +18,20 @@ defmodule Ampd.WorldTest do
   defp wait_up(mod, probe, n) do
     ok =
       Process.whereis(mod) != nil and
-        (try do
-           probe.()
-           true
-         catch
-           :exit, _ -> false
-         end)
+        try do
+          probe.()
+          true
+        catch
+          :exit, _ -> false
+        end
 
-    if ok, do: :ok, else: (Process.sleep(20); wait_up(mod, probe, n - 1))
+    if ok,
+      do: :ok,
+      else:
+        (
+          Process.sleep(20)
+          wait_up(mod, probe, n - 1)
+        )
   end
 
   # ------------------------------------------------------ the truth table
@@ -46,14 +52,16 @@ defmodule Ampd.WorldTest do
 
     assert GrantRegistry.sealed() == nil, "an intact world sealed itself"
 
-    refute Ampd.Conformance.authorize("github.repo.read", "traaviis/trvm", Gateway.ctx(), nil)["allow"],
+    refute Ampd.Conformance.authorize("github.repo.read", "traaviis/trvm", Gateway.ctx(), nil)[
+             "allow"
+           ],
            "restart reseeded defaults over persisted truth"
   end
 
   test "manifest plus a missing store seals" do
     Ampd.reset_demo()
     GrantRegistry.close_store()
-    File.rm_rf!(Path.join(dir(), "grant_registry.dets"))
+    Ampd.TestStoreLoss.lose!(dir(), "grant_registry")
     Process.exit(Process.whereis(GrantRegistry), :kill)
     wait_up(GrantRegistry, fn -> GrantRegistry.sealed() end)
 
@@ -78,7 +86,7 @@ defmodule Ampd.WorldTest do
     assert {:orphaned, _} = Bootstrap.new_world!()
     refute World.initialized?(), "a manifest was written over an orphaned world"
 
-    assert File.exists?(Path.join(dir(), "grant_registry.dets")),
+    assert Ampd.TestStoreLoss.on_disk?(dir(), "grant_registry"),
            "an orphaned world's authority store was destroyed"
 
     # And a registry booting into it seals rather than inventing defaults.
@@ -130,8 +138,10 @@ defmodule Ampd.WorldTest do
     good = World.read()
 
     # Everything correct except `generation`.
-    File.write!(Path.join(dir(), "world.json"),
-      ~s({"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":2}))
+    File.write!(
+      Path.join(dir(), "world.json"),
+      ~s({"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":2})
+    )
 
     assert World.manifest_state() == :malformed
     assert World.invalid_fields() == ["generation"]
@@ -147,8 +157,10 @@ defmodule Ampd.WorldTest do
     # Every field correct. Nothing corrupt. A version this build has never
     # met — so its fields mean whatever that build decided they mean, and
     # reading them here is a guess about world identity and lineage.
-    File.write!(Path.join(dir(), "world.json"),
-      ~s({"generation":1,"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":999}))
+    File.write!(
+      Path.join(dir(), "world.json"),
+      ~s({"generation":1,"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":999})
+    )
 
     assert World.manifest_state() == :unsupported
     refute World.valid?(World.read_raw()), "schema_version >= 1 counted 999 as valid"
@@ -183,8 +195,10 @@ defmodule Ampd.WorldTest do
     # shape-first it looks corrupt, and sends an operator hunting for
     # damage that is not there. Shape is versioned, so the version is read
     # before the shape.
-    File.write!(Path.join(dir(), "world.json"),
-      ~s({"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":1,"store_generation":1}))
+    File.write!(
+      Path.join(dir(), "world.json"),
+      ~s({"initialized_at":"#{good["initialized_at"]}","installation_id":"#{good["installation_id"]}","schema":"world-meta@1","schema_version":1,"store_generation":1})
+    )
 
     assert World.manifest_state() == :migration_required
     assert {:error, {:migration_required, _}} = World.may_initialize?()
@@ -212,7 +226,10 @@ defmodule Ampd.WorldTest do
     # store, sending an operator to repair a .dets file that was fine.
     assert Ampd.Refusal.seal_code("WORLD-META-UNTRUSTED · x: …") == "world-meta-untrusted"
     assert Ampd.Refusal.seal_code("WORLD-META-UNSUPPORTED · x: …") == "world-meta-unsupported"
-    assert Ampd.Refusal.seal_code("WORLD-META-MIGRATION-REQUIRED · x: …") == "world-meta-migration-required"
+
+    assert Ampd.Refusal.seal_code("WORLD-META-MIGRATION-REQUIRED · x: …") ==
+             "world-meta-migration-required"
+
     assert Ampd.Refusal.seal_code("ORPHANED-WORLD · x: …") == "orphaned-world"
     assert Ampd.Refusal.seal_code("RECOVERY-STATE-UNTRUSTED · x: …") == "recovery-state-untrusted"
     assert Ampd.Refusal.seal_code("RECOVERY-STATE-MISSING · x: …") == "recovery-state-missing"
@@ -280,7 +297,7 @@ defmodule Ampd.WorldTest do
   test "the sealed reason names the world, its generation, and what is missing" do
     Ampd.reset_demo()
     GrantRegistry.close_store()
-    File.rm_rf!(Path.join(dir(), "grant_registry.dets"))
+    Ampd.TestStoreLoss.lose!(dir(), "grant_registry")
     Process.exit(Process.whereis(GrantRegistry), :kill)
     wait_up(GrantRegistry, fn -> GrantRegistry.sealed() end)
 

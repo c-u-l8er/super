@@ -31,14 +31,20 @@ defmodule Ampd.ControlTest do
   defp wait_up(mod, probe, n) do
     ok =
       Process.whereis(mod) != nil and
-        (try do
-           probe.()
-           true
-         catch
-           :exit, _ -> false
-         end)
+        try do
+          probe.()
+          true
+        catch
+          :exit, _ -> false
+        end
 
-    if ok, do: :ok, else: (Process.sleep(20); wait_up(mod, probe, n - 1))
+    if ok,
+      do: :ok,
+      else:
+        (
+          Process.sleep(20)
+          wait_up(mod, probe, n - 1)
+        )
   end
 
   # ------------------------------------------------- the impersonation gate
@@ -88,11 +94,16 @@ defmodule Ampd.ControlTest do
     refute r["allow"]
     assert r["refusal"]["code"] == "human-consent-required"
 
-    assert Ampd.Conformance.authorize("github.pr.draft", "traaviis/trvm", Ampd.Gateway.ctx(), nil)["allow"],
+    assert Ampd.Conformance.authorize("github.pr.draft", "traaviis/trvm", Ampd.Gateway.ctx(), nil)[
+             "allow"
+           ],
            "an agent-channel revoke took effect"
 
     assert Control.command(human, :revoke_grant, [g["id"]])["revoked"] == g["id"]
-    refute Ampd.Conformance.authorize("github.pr.draft", "traaviis/trvm", Ampd.Gateway.ctx(), nil)["allow"]
+
+    refute Ampd.Conformance.authorize("github.pr.draft", "traaviis/trvm", Ampd.Gateway.ctx(), nil)[
+             "allow"
+           ]
   end
 
   test "a command from an unbound handle has no actor and is refused" do
@@ -152,7 +163,7 @@ defmodule Ampd.ControlTest do
     {human, agent} = fresh()
     dir = Application.get_env(:ampd, :data_dir)
     GrantRegistry.close_store()
-    File.rm_rf!(Path.join(dir, "grant_registry.dets"))
+    Ampd.TestStoreLoss.lose!(dir, "grant_registry")
     Process.exit(Process.whereis(GrantRegistry), :kill)
     wait_up(GrantRegistry, fn -> GrantRegistry.sealed() end)
 

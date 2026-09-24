@@ -41,6 +41,8 @@ defmodule Ampd.Application do
       # to a process that is not up yet is checked for rather than assumed.
       Ampd.Subscriptions,
       Ampd.Fleet,
+      # Before every registry that boots from it (`Ampd.Store.open/1`).
+      Ampd.AuthorityLog,
       Ampd.Session,
       Ampd.CapabilityRegistry,
       Ampd.GrantRegistry,

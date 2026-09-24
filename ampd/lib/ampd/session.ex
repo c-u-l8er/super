@@ -89,7 +89,7 @@ defmodule Ampd.Session do
   @impl true
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
   def handle_call(:close_store, _f, st) do
-    if st.tab, do: :dets.close(st.tab)
+    if st.tab, do: Ampd.Store.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
   def handle_call(:snap, _f, %{s: s} = st), do: {:reply, s, st}

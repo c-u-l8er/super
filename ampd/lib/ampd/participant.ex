@@ -161,8 +161,7 @@ defmodule Ampd.Participant do
         server: server,
         op: op,
         reason: reason,
-        message:
-          "#{inspect(server)} #{outcome} for #{inspect(op)}: #{inspect(reason)}"
+        message: "#{inspect(server)} #{outcome} for #{inspect(op)}: #{inspect(reason)}"
       }
     end
   end
@@ -196,16 +195,20 @@ defmodule Ampd.Participant do
   """
   def call(server, op, class, opts \\ []) when class in [:read, :mutate] do
     timeout = Keyword.get(opts, :timeout, 5_000)
+    # What goes on the wire carries the open transaction's origin when this
+    # call is made for it (`Ampd.AuthorityLog.wrap/2`); a failure still names
+    # the operation the caller asked for.
+    wire = Ampd.AuthorityLog.wrap(server, op)
 
     if inside?() do
-      guarded(server, op, class, timeout, Keyword.get(opts, :witness))
+      guarded(server, op, wire, class, timeout, Keyword.get(opts, :witness))
     else
-      GenServer.call(server, op, timeout)
+      GenServer.call(server, wire, timeout)
     end
   end
 
-  defp guarded(server, op, class, timeout, witness) do
-    case ask(server, op, timeout) do
+  defp guarded(server, op, wire, class, timeout, witness) do
+    case ask(server, wire, timeout) do
       {:reply, value} ->
         value
 

@@ -545,6 +545,12 @@ defmodule Ampd.EffectChannelTest do
                  "the channel epoch reached the durable store #{store}"
         end
       end
+
+      # The effect path's four stores live in one log, not in their own files;
+      # a check that only opened `.dets` files would skip them without saying so.
+      log = Ampd.AuthorityLog.path()
+      assert File.exists?(log)
+      refute File.read!(log) =~ epoch, "the channel epoch reached the authority log"
     end
 
     test "the incarnation dies with the world" do

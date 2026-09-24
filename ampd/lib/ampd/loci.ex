@@ -513,7 +513,7 @@ defmodule Ampd.Loci do
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
 
   def handle_call(:close_store, _f, st) do
-    if st.tab, do: :dets.close(st.tab)
+    if st.tab, do: Ampd.Store.close(st.tab)
     {:reply, :ok, %{st | tab: nil}}
   end
 

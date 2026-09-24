@@ -59,6 +59,31 @@ const rawDets = dataDir => {
   return Object.fromEntries(out.trim().split('\n').filter(Boolean).map(l => { const [f, ...r] = l.split(' '); return [f.replace('.dets', ''), r.join(' ')]; }));
 };
 
+/* The authority log's raw state (`Ampd.AuthorityLog`, when the tree under test has one), read from a
+   COPY: its frames checked the way replay checks them — header, declared lengths, CRC-32 — without the
+   runtime. `ok`, `torn` (a bad LAST frame: what replay truncates and names) or `damaged` (a bad frame
+   with bytes after it: what seals). The payloads are not decoded here, so a record-sequence gap is the
+   runtime's to find. */
+const CRC = (() => { const t = new Uint32Array(256); for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; t[n] = c >>> 0; } return t; })();
+const crc32 = b => { let c = 0xFFFFFFFF; for (let i = 0; i < b.length; i++) c = CRC[(c ^ b[i]) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+const HEADER = Buffer.from('AMPD-AUTHORITY-LOG/1\n');
+const rawLog = dataDir => {
+  const p = join(dataDir, 'authority.log'); if (!existsSync(p)) return null;
+  const b = readFileSync(p); let off = HEADER.length, frames = 0;
+  if (b.length < HEADER.length) return {state: 'torn', frames, bytes: b.length, torn_bytes: b.length, why: 'partial header'};
+  if (!b.subarray(0, HEADER.length).equals(HEADER)) return {state: 'damaged', frames, bytes: b.length, why: 'header'};
+  while (off < b.length) {
+    if (b.length - off < 8) return {state: 'torn', frames, bytes: b.length, torn_bytes: b.length - off, why: 'partial frame header'};
+    const len = b.readUInt32BE(off), crc = b.readUInt32BE(off + 4);
+    if (b.length - off - 8 < len) return {state: 'torn', frames, bytes: b.length, torn_bytes: b.length - off, why: 'frame shorter than declared'};
+    const ok = crc32(b.subarray(off + 8, off + 8 + len)) === crc, last = off + 8 + len === b.length;
+    if (!ok) return last ? {state: 'torn', frames, bytes: b.length, torn_bytes: b.length - off, why: 'checksum, last frame'}
+                         : {state: 'damaged', frames, bytes: b.length, why: `checksum at ${off} with bytes after`};
+    off += 8 + len; frames++;
+  }
+  return {state: 'ok', frames, bytes: b.length};
+};
+
 /* One boot of the driver. Resolves when the loop has started (so a kill can land), or when the boot
    ended on its own (sealed, refused). */
 const boot = ({world, acks, report, seed, log}) => new Promise(res => {
@@ -97,18 +122,20 @@ for (let k = 1; k <= KILLS; k++) {
   const evBefore = lines(acks);
   const ackedAtKill = evBefore.filter(e => e.event === 'ack' && e.allow).length;
   const raw = rawDets(world);
+  const alog = rawLog(world);
   bootN++;
   const report = join(OUT, `report-L${lineage}-b${bootN}.json`), log = join(OUT, `boot-L${lineage}-b${bootN}.log`);
   pending = await boot({world, acks, report, seed: false, log});
   const row = {kill: k, lineage, boot: bootN, delay_ms: Math.round(delay), acked_before_kill: ackedAtKill,
     last_event_before_kill: evBefore.at(-1)?.event ?? null, raw_dets: raw,
-    dirty_tables: Object.entries(raw).filter(([, v]) => v !== 'ok').map(([k]) => k)};
+    dirty_tables: Object.entries(raw).filter(([, v]) => v !== 'ok').map(([k]) => k), authority_log: alog};
   if (pending.state === 'looping' || existsSync(report)) {
     const rep = JSON.parse(readFileSync(report, 'utf8'));
     row.outcome = rep.seals.length ? 'SEALED' : 'CONTINUED';
     row.seals = rep.seals;
     row.witness_torn = rep.witness.filter(w => w.torn_tail_bytes > 0).map(w => ({file: w.file, bytes: w.torn_tail_bytes}));
     row.witness_undecodable_complete_lines = rep.witness.reduce((n, w) => n + w.undecodable_complete_lines, 0);
+    row.authority_log_status = rep.authority_log ?? null;
     // Only what was acknowledged BEFORE the kill: the reboot's own loop has already started writing
     // (its first grant would otherwise read as an acknowledged mint the report cannot contain).
     if (!rep.seals.length) Object.assign(row, check(rep, evBefore));
@@ -121,7 +148,7 @@ for (let k = 1; k <= KILLS; k++) {
     row.seal_codes = [...new Set([...text.matchAll(/(RECOVERY-STATE-[A-Z]+|ORPHANED-WORLD|WORLD-META-[A-Z-]+) · ([a-z_]+)/g)].map(m => `${m[1]} · ${m[2]}`))];
   }
   rows.push(row);
-  console.log(`kill ${k}/${KILLS} L${lineage}b${bootN} +${row.delay_ms} ms · acked ${row.acked_before_kill} · dirty [${row.dirty_tables}] · ${row.outcome}` +
+  console.log(`kill ${k}/${KILLS} L${lineage}b${bootN} +${row.delay_ms} ms · acked ${row.acked_before_kill} · dirty [${row.dirty_tables}]${alog ? ` · log ${alog.state}${alog.torn_bytes ? ' ' + alog.torn_bytes + 'B' : ''}` : ''} · ${row.outcome}` +
     (row.outcome === 'CONTINUED' ? ` · lost ${row.lost.length}${row.lost.length ? ' ' + JSON.stringify(row.lost.slice(0, 3)) : ''} · invented ${row.invented.length}${row.invented.length ? ' ' + JSON.stringify(row.invented.slice(0, 3)) : ''} · unrecorded ${JSON.stringify(row.unrecorded)} · in-flight ${JSON.stringify(row.inflight)}` : ` · ${row.seal_codes?.join(', ') ?? row.seals?.map(s => s.store).join(', ') ?? ''}`) +
     (row.witness_torn?.length ? ` · torn witness ${JSON.stringify(row.witness_torn)}` : ''));
   if (row.outcome !== 'CONTINUED') {
@@ -140,7 +167,8 @@ const summary = {
   route: 'github.pr.draft one-shot grant → Gateway.perform/4, default adapter (write-boundary C1)',
   counts: {
     continued: count(r => r.outcome === 'CONTINUED'), sealed_running: count(r => r.outcome === 'SEALED'), boot_refused: count(r => r.outcome === 'BOOT-REFUSED'),
-    any_dirty_table: count(r => r.dirty_tables.length), lost_acknowledged: rows.reduce((n, r) => n + (r.lost?.length ?? 0), 0),
+    any_dirty_table: count(r => r.dirty_tables.length), log_torn: count(r => r.authority_log?.state === 'torn'), log_damaged: count(r => r.authority_log?.state === 'damaged'),
+    lost_acknowledged: rows.reduce((n, r) => n + (r.lost?.length ?? 0), 0),
     invented: rows.reduce((n, r) => n + (r.invented?.length ?? 0), 0), kills_with_torn_witness: count(r => r.witness_torn?.length),
     recoveries_with_split_claim: count(r => r.split?.length), recoveries_with_conflict_listing: count(r => r.split?.some(x => x.includes('CONFLICT'))),
     recoveries_with_open_preclaim: count(r => r.open_preclaim?.length),

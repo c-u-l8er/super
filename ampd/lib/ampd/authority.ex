@@ -656,81 +656,92 @@ defmodule Ampd.Authority do
   The decision is taken **here**, not by the caller, which is what makes a
   revocation that returned before this call always win. Returns
   `{:refused, auth}` or `{:claimed, auth, effect}`.
+
+  **One durable record** (`Ampd.AuthorityLog.group/1`). The proposal, its
+  authorization, the claim and the consumption land together or not at all.
+  They were four saves in two stores, and a crash between the claim and the
+  consumption left an effect UNKNOWN beside a grant still active — which the
+  next effect then consumed, turning the recovery listing's `MISSING` into
+  `CONFLICT(foreign-consumption)` (measured, `evidence/kill-battery/`). The
+  caller is answered only after the record is synced.
   """
   def claim_and_consume(cap, resource, ctx, request) do
     tx(fn ->
-      auth = Gateway.decide(cap, resource, ctx, request)
+      Ampd.AuthorityLog.group(fn -> claim_and_consume_ordered(cap, resource, ctx, request) end)
+    end)
+  end
 
-      if auth["allow"] != true do
-        {:refused, auth}
-      else
-        pk = CapabilityRegistry.get(Core.pack_of(cap)) || %{}
-        req = request || %{}
+  defp claim_and_consume_ordered(cap, resource, ctx, request) do
+    auth = Gateway.decide(cap, resource, ctx, request)
 
-        # T2. The branch is written here from `decide/4`'s own two booleans —
-        # whether consent is bound and whether the grant is one-shot — never
-        # from anything a caller supplied. The journal derives every
-        # obligation set from it.
-        branch =
-          Ampd.Effects.Contract.branch_of(auth["approval_ref"] != nil, auth["one_shot"] == true)
+    if auth["allow"] != true do
+      {:refused, auth}
+    else
+      pk = CapabilityRegistry.get(Core.pack_of(cap)) || %{}
+      req = request || %{}
 
-        e =
-          Effects.propose(%{
-            "effect_key" => auth["effect_key"],
-            "approval_digest" => auth["request_hash"],
-            "capability" => cap,
-            "pack" => Core.pack_of(cap) <> "@" <> (pk["version"] || "0"),
-            "actor" => ctx["actor"],
-            "resource" => resource,
-            "request_id" => req["er"],
-            "request_revision" => req["rev"] || 1,
-            "request" => req["params"],
-            "branch" => branch,
-            "grant_ref" => auth["grant_ref"],
-            "approval_ref" => auth["approval_ref"]
-          })
+      # T2. The branch is written here from `decide/4`'s own two booleans —
+      # whether consent is bound and whether the grant is one-shot — never
+      # from anything a caller supplied. The journal derives every
+      # obligation set from it.
+      branch =
+        Ampd.Effects.Contract.branch_of(auth["approval_ref"] != nil, auth["one_shot"] == true)
 
-        Effects.authorized(e["id"], %{
+      e =
+        Effects.propose(%{
+          "effect_key" => auth["effect_key"],
+          "approval_digest" => auth["request_hash"],
+          "capability" => cap,
+          "pack" => Core.pack_of(cap) <> "@" <> (pk["version"] || "0"),
+          "actor" => ctx["actor"],
+          "resource" => resource,
+          "request_id" => req["er"],
+          "request_revision" => req["rev"] || 1,
+          "request" => req["params"],
+          "branch" => branch,
           "grant_ref" => auth["grant_ref"],
-          "authority_snapshot_at_entry" => auth["authority_snapshot_at_entry"],
-          "placement" => auth["placement"]
+          "approval_ref" => auth["approval_ref"]
         })
 
-        if auth["approval_ref"],
-          do: Effects.approved(e["id"], %{"approval_ref" => auth["approval_ref"]})
+      Effects.authorized(e["id"], %{
+        "grant_ref" => auth["grant_ref"],
+        "authority_snapshot_at_entry" => auth["authority_snapshot_at_entry"],
+        "placement" => auth["placement"]
+      })
 
-        case Effects.claim(e["id"]) do
-          {:error, why} ->
-            {:refused, Map.merge(auth, %{"allow" => false, "reason" => why})}
+      if auth["approval_ref"],
+        do: Effects.approved(e["id"], %{"approval_ref" => auth["approval_ref"]})
 
-          {:refused, r} ->
-            {:refused,
-             Map.merge(auth, %{"allow" => false, "reason" => r["code"], "refusal" => r})}
+      case Effects.claim(e["id"]) do
+        {:error, why} ->
+          {:refused, Map.merge(auth, %{"allow" => false, "reason" => why})}
 
-          {:ok, claimed, lease} ->
-            # The lease begins here — and since B2 it is an object the
-            # journal owner signed, not only a guarantee of the ordering.
-            # Consent is spent only now, with the claim already durable and
-            # the order already held, through tickets the participants
-            # verify themselves.
-            case Gateway.consume_leased!(auth, lease) do
-              :ok ->
-                {:claimed, auth, claimed, lease}
+        {:refused, r} ->
+          {:refused, Map.merge(auth, %{"allow" => false, "reason" => r["code"], "refusal" => r})}
 
-              {:refused, r} ->
-                # A refused consumption cannot proceed and must not stay
-                # CLAIMED: FAILED, with the participants' acknowledgment.
-                Effects.fail(e["id"], "consumption-refused · " <> r["code"])
+        {:ok, claimed, lease} ->
+          # The lease begins here — and since B2 it is an object the
+          # journal owner signed, not only a guarantee of the ordering.
+          # Consent is spent only now, with the claim already durable and
+          # the order already held, through tickets the participants
+          # verify themselves.
+          case Gateway.consume_leased!(auth, lease) do
+            :ok ->
+              {:claimed, auth, claimed, lease}
 
-                {:refused,
-                 Map.merge(auth, %{
-                   "allow" => false,
-                   "reason" => "consumption-refused · " <> r["code"],
-                   "refusal" => r
-                 })}
-            end
-        end
+            {:refused, r} ->
+              # A refused consumption cannot proceed and must not stay
+              # CLAIMED: FAILED, with the participants' acknowledgment.
+              Effects.fail(e["id"], "consumption-refused · " <> r["code"])
+
+              {:refused,
+               Map.merge(auth, %{
+                 "allow" => false,
+                 "reason" => "consumption-refused · " <> r["code"],
+                 "refusal" => r
+               })}
+          end
       end
-    end)
+    end
   end
 end

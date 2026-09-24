@@ -72,6 +72,13 @@ report = %{
       %{"id" => g["id"], "status" => g["status"], "consumptions" => g["consumptions"] || []}
     end,
   "recovery_listing" => (if seals == [], do: Effects.recovery_listing(), else: nil),
+  # The authority log's own account (a tree without one reports nil): the torn tails it truncated and
+  # named on this boot, and its counters.
+  "authority_log" =>
+    if(Code.ensure_loaded?(Ampd.AuthorityLog) and Process.whereis(Ampd.AuthorityLog),
+      do: Map.drop(Ampd.AuthorityLog.status(), ["stores"]),
+      else: nil
+    ),
   "witness" => witness
 }
 

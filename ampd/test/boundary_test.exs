@@ -22,12 +22,18 @@ defmodule Ampd.BoundaryTest do
     Authority.mint(%{"capability" => "github.repo.read", "actor" => "mallory"})
 
     kestrel_g =
-      Enum.find(GrantRegistry.list(),
-        &(&1["actor"] == "kestrel" and &1["capability"] == "github.repo.read" and &1["status"] == "active"))
+      Enum.find(
+        GrantRegistry.list(),
+        &(&1["actor"] == "kestrel" and &1["capability"] == "github.repo.read" and
+            &1["status"] == "active")
+      )
 
     mallory_g =
-      Enum.find(GrantRegistry.list(),
-        &(&1["actor"] == "mallory" and &1["capability"] == "github.repo.read" and &1["status"] == "active"))
+      Enum.find(
+        GrantRegistry.list(),
+        &(&1["actor"] == "mallory" and &1["capability"] == "github.repo.read" and
+            &1["status"] == "active")
+      )
 
     assert Control.command(human, :revoke_grant, [kestrel_g["id"]])["revoked"] == kestrel_g["id"]
 
@@ -116,7 +122,13 @@ defmodule Ampd.BoundaryTest do
     # never become a valid grant is a trap with a human's click at the end
     # of it — and the guard that was supposed to catch it at approval was
     # silently open (see the nil-rank test below).
-    q = Control.command(kestrel, :request_grant, ["github.pr.draft", "traaviis/trvm", %{"duration" => "forever"}])
+    q =
+      Control.command(kestrel, :request_grant, [
+        "github.pr.draft",
+        "traaviis/trvm",
+        %{"duration" => "forever"}
+      ])
+
     refute q["allow"]
     refute q["grant_request"], "an unenforceable duration must not create a durable request"
     assert q["refusal"]["code"] == "invalid-grant-duration"
@@ -132,9 +144,10 @@ defmodule Ampd.BoundaryTest do
     # Nothing was written down.
     refute Enum.any?(GrantRegistry.list(), &(&1["duration"] == "forever"))
 
-
     # Nor through the raw mint path, nor the draft duration.
-    assert {:refused, m} = Authority.mint(%{"capability" => "github.pr.draft", "duration" => "forever"})
+    assert {:refused, m} =
+             Authority.mint(%{"capability" => "github.pr.draft", "duration" => "forever"})
+
     assert m["code"] == "invalid-grant-duration"
     assert {:refused, d} = Authority.set_dur("forever")
     assert d["code"] == "invalid-grant-duration"
@@ -161,9 +174,15 @@ defmodule Ampd.BoundaryTest do
     assert Core.duration_rank("workspace") > Core.duration_rank("forever") == false
     assert Core.duration_rank("forever") == nil
 
-    legacy = %{"schema" => "grant-request@1", "id" => "gq_legacy", "status" => "pending",
-               "actor" => "kestrel", "capability" => "github.pr.draft",
-               "resource" => "traaviis/trvm", "requested_duration" => "forever"}
+    legacy = %{
+      "schema" => "grant-request@1",
+      "id" => "gq_legacy",
+      "status" => "pending",
+      "actor" => "kestrel",
+      "capability" => "github.pr.draft",
+      "resource" => "traaviis/trvm",
+      "requested_duration" => "forever"
+    }
 
     Ampd.AuthorityCoordinator.transact(fn ->
       s = %{GrantRegistry.demo_state() | "requests" => [legacy]}
@@ -193,7 +212,11 @@ defmodule Ampd.BoundaryTest do
     {human, kestrel} = fresh()
 
     before = Ampd.CapabilityRegistry.get("github")
-    q = Control.command(kestrel, :request_grant, ["github.repo.read", "traaviis/trvm", %{}])["grant_request"]
+
+    q =
+      Control.command(kestrel, :request_grant, ["github.repo.read", "traaviis/trvm", %{}])[
+        "grant_request"
+      ]
 
     # The request records which contract it was asked under, not just a
     # capability name.
@@ -208,26 +231,39 @@ defmodule Ampd.BoundaryTest do
     assert Ampd.CapabilityRegistry.get("github")["version"] != before["version"]
 
     r = Control.command(human, :approve_grant_request, [q["id"]])
-    refute r["allow"], "a request was approved against a contract that is not the one it asked about"
+
+    refute r["allow"],
+           "a request was approved against a contract that is not the one it asked about"
+
     assert r["refusal"]["code"] == "grant-request-stale"
     assert r["refusal"]["operator_detail"]["requested_under_version"] == before["version"]
     assert r["refusal"]["operator_detail"]["installed_version"] == "1.5.0"
 
     # Nothing was minted, and the request is still pending — a refused
     # approval must not consume the thing it refused.
-    refute Enum.any?(GrantRegistry.list(),
-             &(&1["capability"] == "github.repo.read" and &1["id"] not in demo_ids()))
+    refute Enum.any?(
+             GrantRegistry.list(),
+             &(&1["capability"] == "github.repo.read" and &1["id"] not in demo_ids())
+           )
 
     assert Enum.find(GrantRegistry.requests(), &(&1["id"] == q["id"]))["status"] == "pending"
 
     # Asking again, against the contract that is actually installed, works.
-    q2 = Control.command(kestrel, :request_grant, ["github.repo.read", "traaviis/trvm", %{}])["grant_request"]
+    q2 =
+      Control.command(kestrel, :request_grant, ["github.repo.read", "traaviis/trvm", %{}])[
+        "grant_request"
+      ]
+
     assert Control.command(human, :approve_grant_request, [q2["id"]])["allow"]
   end
 
   test "a request made and approved under one unchanged pack is not called stale" do
     {human, kestrel} = fresh()
-    q = Control.command(kestrel, :request_grant, ["github.pr.create", "traaviis/trvm", %{}])["grant_request"]
+
+    q =
+      Control.command(kestrel, :request_grant, ["github.pr.create", "traaviis/trvm", %{}])[
+        "grant_request"
+      ]
 
     # Installing a *different* pack is not a change to this one. Absence of
     # a reason to refuse is not a reason to refuse.
@@ -243,8 +279,13 @@ defmodule Ampd.BoundaryTest do
     # The scope check used to end in `_ -> true`, so this satisfied every
     # scope there is: it outlived its run, survived a workspace change, and
     # never spent a use. Constructed directly, because minting refuses now.
-    g = %{"status" => "active", "capability" => "github.pr.draft", "actor" => "kestrel",
-          "resource" => "traaviis/trvm", "duration" => "forever"}
+    g = %{
+      "status" => "active",
+      "capability" => "github.pr.draft",
+      "actor" => "kestrel",
+      "resource" => "traaviis/trvm",
+      "duration" => "forever"
+    }
 
     refute Core.duration_ok(g, Gateway.ctx(), fn _ -> false end),
            "an unenforceable duration satisfied the scope check"
@@ -256,7 +297,13 @@ defmodule Ampd.BoundaryTest do
   test "approving may narrow a request, never widen it" do
     {human, kestrel} = fresh()
 
-    q = Control.command(kestrel, :request_grant, ["github.pr.draft", "traaviis/trvm", %{"duration" => "once"}])
+    q =
+      Control.command(kestrel, :request_grant, [
+        "github.pr.draft",
+        "traaviis/trvm",
+        %{"duration" => "once"}
+      ])
+
     id = q["grant_request"]["id"]
 
     wide = Control.command(human, :approve_grant_request, [id, "workspace"])
@@ -294,11 +341,12 @@ defmodule Ampd.BoundaryTest do
     refute q["grant_request"]
     assert q["refusal"]["code"] == "capability-undeclared"
 
-
     # And through the raw mint path, which is what stops the dormant grant
     # from existing at all: refusing it only at the gateway would leave it
     # on disk, waiting for the install that would activate it.
-    assert {:refused, m} = Authority.mint(%{"capability" => "postgres.schema.read", "resource" => "db-main"})
+    assert {:refused, m} =
+             Authority.mint(%{"capability" => "postgres.schema.read", "resource" => "db-main"})
+
     assert m["code"] == "capability-undeclared"
     assert GrantRegistry.matching(%{"capability" => "postgres.schema.read"}) == []
 
@@ -319,9 +367,17 @@ defmodule Ampd.BoundaryTest do
     # Loaded straight into the registry, bypassing mint entirely.
     st = Ampd.GrantRegistry.initial()
 
-    forged = %{"id" => "gr_forged", "actor" => "kestrel", "capability" => "postgres.schema.read",
-               "resource" => "db-main", "duration" => "workspace", "status" => "active",
-               "placement" => ["local", "fleet"], "workspace" => "trvm", "run" => "run-b51"}
+    forged = %{
+      "id" => "gr_forged",
+      "actor" => "kestrel",
+      "capability" => "postgres.schema.read",
+      "resource" => "db-main",
+      "duration" => "workspace",
+      "status" => "active",
+      "placement" => ["local", "fleet"],
+      "workspace" => "trvm",
+      "run" => "run-b51"
+    }
 
     Ampd.AuthorityCoordinator.transact(fn ->
       Ampd.GrantRegistry.load_state(%{st | "grants" => [forged]})
@@ -343,7 +399,7 @@ defmodule Ampd.BoundaryTest do
 
     dir = Application.get_env(:ampd, :data_dir)
     GrantRegistry.close_store()
-    File.rm_rf!(Path.join(dir, "grant_registry.dets"))
+    Ampd.TestStoreLoss.lose!(dir, "grant_registry")
     Process.exit(Process.whereis(GrantRegistry), :kill)
     wait_sealed(GrantRegistry)
 
@@ -455,8 +511,10 @@ defmodule Ampd.BoundaryTest do
 
       assert is_map(r), "#{inspect(word)} did not return a map"
       assert r["allow"] == false
+
       assert r["refusal"]["code"] in ~w(unknown-command invalid-command-arguments invalid-peer-handle),
              "#{inspect(word)} → #{inspect(r["refusal"]["code"])}"
+
       assert is_binary(r["refusal"]["correlation_id"])
     end
 
@@ -517,9 +575,18 @@ defmodule Ampd.BoundaryTest do
   defp wait_sealed(_mod, 0), do: flunk("registry never sealed")
 
   defp wait_sealed(mod, n) do
-    if Process.whereis(mod) != nil and (try do mod.sealed() != nil catch :exit, _ -> false end),
-      do: :ok,
-      else: (Process.sleep(20); wait_sealed(mod, n - 1))
+    if Process.whereis(mod) != nil and
+         (try do
+            mod.sealed() != nil
+          catch
+            :exit, _ -> false
+          end),
+       do: :ok,
+       else:
+         (
+           Process.sleep(20)
+           wait_sealed(mod, n - 1)
+         )
   end
 
   defp wait_up(mod, n \\ 100)
@@ -528,13 +595,19 @@ defmodule Ampd.BoundaryTest do
   defp wait_up(mod, n) do
     alive =
       Process.whereis(mod) != nil and
-        (try do
-           Peer.epoch()
-           true
-         catch
-           :exit, _ -> false
-         end)
+        try do
+          Peer.epoch()
+          true
+        catch
+          :exit, _ -> false
+        end
 
-    if alive, do: :ok, else: (Process.sleep(20); wait_up(mod, n - 1))
+    if alive,
+      do: :ok,
+      else:
+        (
+          Process.sleep(20)
+          wait_up(mod, n - 1)
+        )
   end
 end

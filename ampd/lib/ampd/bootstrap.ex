@@ -151,6 +151,10 @@ defmodule Ampd.Bootstrap do
       if Process.whereis(reg), do: reg.close_store()
     end)
 
+    # The log's file is inside the directory the reset is about to remove; a
+    # writer still holding it would append to an unlinked inode.
+    Ampd.AuthorityLog.close()
+
     Enum.each(Ampd.World.authority_stores(), fn name ->
       tab = :"ampd_#{name}"
 

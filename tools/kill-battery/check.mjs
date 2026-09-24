@@ -25,6 +25,7 @@ export function check(rep, ev) {
   const effects = new Map(rep.effects.map(e => [e.id, e]));
   const grants = new Map(rep.grants.map(g => [g.id, g]));
   const receipts = rep.receipts.filter(r => r.kind === 'capability-effect-receipt@1');
+  const receiptById = new Map(receipts.map(r => [r.id, r]));
   const lost = [], invented = [], unrecorded = [], split = [];
 
   // 1. every acknowledged transition is there, whole
@@ -32,7 +33,7 @@ export function check(rep, ev) {
     const e = effects.get(a.effect_id);
     if (!e) { lost.push(`${a.effect_id}: acknowledged, absent`); continue; }
     if (e.state !== 'COMMITTED') lost.push(`${a.effect_id}: acknowledged COMMITTED, recovered ${e.state}`);
-    if (!receipts.some(r => r.id === a.receipt_id && r.effect_ref === a.effect_id)) lost.push(`${a.effect_id}: acknowledged receipt ${a.receipt_id} absent`);
+    if (receiptById.get(a.receipt_id)?.effect_ref !== a.effect_id) lost.push(`${a.effect_id}: acknowledged receipt ${a.receipt_id} absent`);
     const g = grants.get(e.grant_ref);
     if (!g) lost.push(`${a.effect_id}: its grant ${e.grant_ref} absent`);
     else if (g.status !== 'consumed' || JSON.stringify(g.consumptions) !== JSON.stringify([e.id])) lost.push(`${a.effect_id}: its grant ${g.id} reads ${g.status} ${JSON.stringify(g.consumptions)}`);
@@ -42,10 +43,19 @@ export function check(rep, ev) {
   // 2. nothing exists that neither an acknowledgement nor a kill boundary can account for
   const boundaries = segs.length;                           // every segment in `ev` ended in a kill
   const unackedEffects = rep.effects.filter(e => !ackedIds.has(e.id)).map(e => e.id).sort((x, y) => num(x) - num(y));
+  // For each segment: the last acknowledged effect number up to and including it, and the first
+  // acknowledged one after it. An unacknowledged effect sits at the kill that ended the segment it follows.
+  const ackNums = segs.map(t => t.filter(e => e.event === 'ack' && e.allow).map(e => num(e.effect_id)));
+  const bounds = []; let running = -1;
+  for (let i = 0; i < segs.length; i++) {
+    for (const n of ackNums[i]) running = Math.max(running, n);
+    let nextFirst = Infinity; for (let j = i + 1; j < segs.length && nextFirst === Infinity; j++) if (ackNums[j].length) nextFirst = Math.min(...ackNums[j]);
+    bounds.push([running, nextFirst]);
+  }
   const perBoundary = new Map();
   for (const id of unackedEffects) {
     // which kill boundary it sits at: the segment whose acknowledged ids it follows
-    let seg = segs.findIndex((s, i) => { const nextFirst = segs.slice(i + 1).flatMap(t => t.filter(e => e.event === 'ack' && e.allow)).map(e => num(e.effect_id))[0] ?? Infinity; const last = Math.max(-1, ...segs.slice(0, i + 1).flatMap(t => t.filter(e => e.event === 'ack' && e.allow)).map(e => num(e.effect_id))); return num(id) > last && num(id) < nextFirst; });
+    const seg = bounds.findIndex(([last, nextFirst]) => num(id) > last && num(id) < nextFirst);
     if (seg < 0 || seg >= boundaries) { invented.push(`${id}: unacknowledged and not at any kill boundary`); continue; }
     perBoundary.set(seg, [...(perBoundary.get(seg) ?? []), id]);
   }
