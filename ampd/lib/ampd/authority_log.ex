@@ -266,10 +266,10 @@ defmodule Ampd.AuthorityLog do
   the batch: the caller must not retire its rows).
   """
   def archive(rows) when is_map(rows),
-    do: GenServer.call(__MODULE__, {:archive, rows}, 60_000)
+    do: call({:archive, rows}, :mutate)
 
   @doc "Where batch `n` is: `{:ok, path, offset, length}` or `{:error, why}`."
-  def archive_slot(n), do: GenServer.call(__MODULE__, {:archive_slot, n}, 60_000)
+  def archive_slot(n), do: call({:archive_slot, n}, :read)
 
   @doc """
   Batch `n`'s rows, `{:ok, %{store => [row]}}` or `{:error, why}`, read by the
@@ -303,7 +303,7 @@ defmodule Ampd.AuthorityLog do
   `{:ok, rows}` or `{:error, why}` at the first batch that does not verify.
   """
   def archived_rows(store, field \\ "id") do
-    case GenServer.call(__MODULE__, :archive_slots, 60_000) do
+    case call(:archive_slots, :read) do
       {:ok, _path, []} ->
         {:ok, []}
 
