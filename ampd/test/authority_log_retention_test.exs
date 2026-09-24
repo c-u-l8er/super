@@ -341,7 +341,60 @@ defmodule Ampd.AuthorityLogRetentionTest do
     end
   end
 
+  describe "the trigger" do
+    test "performs poke it; a due batch is retired without anyone asking, and the lists stay bounded" do
+      Application.put_env(:ampd, :authority_retention,
+        enabled: true,
+        keep_recent: 8,
+        min_batch: 8,
+        max_batch: 64,
+        check_every: 4,
+        interval_ms: 3_600_000
+      )
+
+      before = Retention.status()
+      rs = performs!(120)
+      ids = Enum.map(rs, & &1["effect_id"])
+
+      # The last poke's pass may still be running when the last perform
+      # returns; the status table says so without a call.
+      Enum.reduce_while(1..200, nil, fn _, _ ->
+        if Retention.status()["running"] == nil, do: {:halt, :ok}, else: Process.sleep(10) && {:cont, nil}
+      end)
+
+      st = Retention.status()
+      assert st["passes"] > before["passes"]
+      assert st["retired"] - before["retired"] == Effects.retired_count()
+      assert st["errors"] == before["errors"]
+
+      # Bounded: keep_recent + a batch not yet due + what the last check left.
+      assert length(Effects.all()) <= 8 + 8 + 4
+      assert length(effect_receipts()) <= 8 + 8 + 4
+      assert Enum.count(GrantRegistry.list(), &(&1["status"] == "consumed")) <= 8 + 8 + 4
+
+      # And nothing acknowledged is gone: every effect reads back, working or archived.
+      for id <- ids do
+        e = Effects.get(id)
+        assert is_map(e) and e["state"] == "COMMITTED", "#{id}: #{inspect(e)}"
+        assert is_map(Receipts.for_effect(id)), id
+      end
+
+      {:ok, archived} = Effects.archived()
+      assert length(archived) == Effects.retired_count()
+    end
+  end
+
   describe "history" do
+    test "an actor's own windows count that actor's retired rows" do
+      performs!(5)
+      pass!(keep_recent: 2)
+      actor = Gateway.ctx()["actor"]
+      a = Projection.agent(actor)
+      assert a["effects_history"]["total"] == 5
+      assert a["receipts"]["total"] == 5
+      assert Projection.agent("nobody-at-all")["effects_history"]["total"] == 0
+    end
+
     test "windows count what was retired, and paging continues into the archive" do
       rs = performs!(5)
       ids = Enum.map(rs, & &1["effect_id"])

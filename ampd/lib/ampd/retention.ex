@@ -90,10 +90,32 @@ defmodule Ampd.Retention do
     Ampd.Authority.retire_settled(cfg)
   end
 
-  @doc "Passes run, rows retired and the last result, since this process started."
+  @table :ampd_retention_status
+
+  @doc """
+  Counters since this process started, read from a public table — never a
+  call, so it answers while a pass holds this process (and the total order)
+  and a harness can take it around every effect without waiting on one:
+
+      "pokes"        performs counted
+      "passes"       passes that completed (retired or not)
+      "retired"      effects retired by them
+      "errors"       passes that did not complete
+      "running"      nil, or the monotonic µs at which the current pass began
+      "last"         the last pass's summary (or its error, inspected)
+      "last_us"      how long the last pass held the order, in µs
+
+  `nil` when retention is not running.
+  """
   def status do
-    if Process.whereis(__MODULE__), do: GenServer.call(__MODULE__, :status), else: nil
+    case :ets.whereis(@table) do
+      :undefined -> nil
+      _ -> Map.new(:ets.tab2list(@table))
+    end
   end
+
+  defp put(k, v), do: :ets.insert(@table, {k, v})
+  defp bump(k, n), do: :ets.update_counter(@table, k, n)
 
   # ------------------------------------------------------------------- pass
 
@@ -233,14 +255,29 @@ defmodule Ampd.Retention do
   @impl true
   def init(:ok) do
     cfg = config()
+
+    if :ets.whereis(@table) == :undefined,
+      do: :ets.new(@table, [:named_table, :public, read_concurrency: true])
+
+    :ets.insert(@table, [
+      {"pokes", 0},
+      {"passes", 0},
+      {"retired", 0},
+      {"errors", 0},
+      {"running", nil},
+      {"last", nil},
+      {"last_us", nil}
+    ])
+
     Process.send_after(self(), :tick, cfg.interval_ms)
-    {:ok, %{pokes: 0, passes: 0, retired: 0, errors: 0, last: nil}}
+    {:ok, %{pokes: 0}}
   end
 
   @impl true
   def handle_cast(:poke, st) do
     cfg = config()
     st = %{st | pokes: st.pokes + 1}
+    bump("pokes", 1)
 
     if cfg.enabled and rem(st.pokes, max(cfg.check_every, 1)) == 0,
       do: {:noreply, run(st, cfg)},
@@ -259,10 +296,10 @@ defmodule Ampd.Retention do
     {:noreply, if(cfg.enabled, do: run(st, cfg), else: st)}
   end
 
-  @impl true
-  def handle_call(:status, _f, st), do: {:reply, st, st}
-
   defp run(st, cfg) do
+    t0 = System.monotonic_time(:microsecond)
+    put("running", t0)
+
     result =
       try do
         Ampd.Authority.retire_settled(cfg)
@@ -270,9 +307,14 @@ defmodule Ampd.Retention do
         kind, why -> {:error, {kind, why}}
       end
 
+    put("running", nil)
+    put("last_us", System.monotonic_time(:microsecond) - t0)
+
     case result do
       {:ok, %{"retired" => n} = r} ->
-        st = %{st | passes: st.passes + 1, retired: st.retired + n, last: r}
+        bump("passes", 1)
+        bump("retired", n)
+        put("last", r)
         # A full batch means more may be waiting; look again without waiting
         # for the next poke.
         if n >= cfg.max_batch, do: send(self(), :again)
@@ -280,7 +322,9 @@ defmodule Ampd.Retention do
 
       other ->
         Logger.warning("ampd: a retention pass did not complete: #{inspect(other)}")
-        %{st | errors: st.errors + 1, last: other}
+        bump("errors", 1)
+        put("last", inspect(other))
+        st
     end
   end
 end

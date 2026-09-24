@@ -72,9 +72,9 @@ end
        "archive_effect_rows" => length(ae),
        "index_without_row_count" => length(missing),
        "index_without_row" => Enum.take(Enum.sort(missing), 50),
-       "passes" => st[:passes],
-       "rows_retired_this_boot" => st[:retired],
-       "pass_errors" => st[:errors]
+       "passes" => st["passes"],
+       "rows_retired_this_boot" => st["retired"],
+       "pass_errors" => st["errors"]
      }}
   else
     {[], [], [], nil}
