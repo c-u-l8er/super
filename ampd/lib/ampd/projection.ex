@@ -693,8 +693,22 @@ defmodule Ampd.Projection do
 
   Lossless like `page/3`: every row is in exactly one of the working list or
   one committed batch (an orphan batch — archived, never retired — is not in
-  the index and never read). A batch that cannot be read makes the page say
-  so (`"archive_error"`) rather than end early as if history did.
+  the index and never read).
+
+  **Every archived row on a page has been checked against the digest its
+  retirement committed** (`Effects.archived_batch/1`,
+  `Receipts.archived_batch/1`). A row retired before digests existed is
+  served with `"archive_unverified"` set to the reason, and the page counts
+  them (`"archive_unverified"`); it is never presented as verified.
+
+  **A batch that cannot be read or does not check stops the page, and the
+  page says so.** It carries `"archive_error"` (the named reason:
+  `archive-row-mismatch · …`, `archive-batch-incomplete · …`,
+  `archive-unreadable · …`) and `"incomplete" => true`, holds only rows newer
+  than everything that batch could hold, and offers no cursor: a cursor past
+  it would present what follows as the next part of a history with a gap in
+  it. Nothing is sealed, re-archived or rewritten; the next request reads
+  the same batch and says the same thing.
   """
   def history_page(kind, actor, cursor, limit) when kind in [:effects, :receipts] do
     limit = limit |> min(200) |> max(1)
@@ -710,7 +724,8 @@ defmodule Ampd.Projection do
 
     {top, err} = collect(eligible, cands, kind, actor, k, limit + 1)
     items = Enum.take(top, limit)
-    more? = length(top) > limit
+    more? = err == nil and length(top) > limit
+    unverified = Enum.count(items, &Map.has_key?(&1, Ampd.AuthorityLog.unverified_key()))
 
     page = %{
       "schema" => "history-page@1",
@@ -721,7 +736,11 @@ defmodule Ampd.Projection do
       "next_cursor" => if(more?, do: List.last(items)["id"], else: nil)
     }
 
-    if err, do: Map.put(page, "archive_error", err), else: page
+    page = if unverified > 0, do: Map.put(page, "archive_unverified", unverified), else: page
+
+    if err,
+      do: page |> Map.put("archive_error", err) |> Map.put("incomplete", true),
+      else: page
   end
 
   defp older?(_r, nil), do: true
@@ -742,24 +761,22 @@ defmodule Ampd.Projection do
           acc = (acc ++ fresh) |> Enum.sort_by(&order_key/1, :desc) |> Enum.take(want)
           collect(rest, acc, kind, actor, k, want)
 
+        # Only rows newer than anything this batch could hold are certain to
+        # be the page's leading rows; below `hi` one of its rows may be missing.
         {:error, why} ->
-          {Enum.take(acc, want), why}
+          {acc |> Enum.filter(&(elem(order_key(&1), 0) > hi)) |> Enum.take(want), why}
       end
     end
   end
 
-  defp archived_batch(:effects, n) do
-    case Ampd.AuthorityLog.read_batch(n) do
-      {:ok, rows} -> {:ok, Map.get(rows, "effects", [])}
-      err -> err
-    end
-  end
+  # Checked against the store's retirement index before they are returned.
+  defp archived_batch(:effects, n), do: Effects.archived_batch(n)
 
   defp archived_batch(:receipts, n) do
     k = Receipts.default_kind()
 
-    case Ampd.AuthorityLog.read_batch(n) do
-      {:ok, rows} -> {:ok, Enum.filter(Map.get(rows, "receipts", []), &(&1["kind"] == k))}
+    case Receipts.archived_batch(n) do
+      {:ok, rows} -> {:ok, Enum.filter(rows, &(&1["kind"] == k))}
       err -> err
     end
   end

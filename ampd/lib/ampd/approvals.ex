@@ -80,12 +80,18 @@ defmodule Ampd.Approvals do
 
   @doc """
   Coordinator only, inside the retirement transaction: drop the consumed
-  approvals `ids` from the working list, indexed as archived in `batch`.
-  Refuses the whole batch if any is absent or not consumed.
+  approvals `archived` (the rows just written to archive batch `batch`) from
+  the working list, indexed as archived there, each entry committing the
+  digest of the WORKING row. Refuses the whole batch if any is absent, not
+  consumed, or not the row that was archived.
   """
-  def retire(ids, batch), do: ask({:retire, ids, batch})
+  def retire(archived, batch), do: ask({:retire, archived, batch})
 
-  @doc "A retired approval's compact entry — `[status, batch, consumed_by]` — or nil."
+  @doc """
+  A retired approval's compact entry — `[status, batch, consumed_by, digest]`,
+  or `[status, batch, consumed_by]` if retired before digests — or nil. No
+  reader reads a retired approval back from the archive.
+  """
   def retired(id), do: ask({:retired, id})
 
   def last_pending do
@@ -160,8 +166,10 @@ defmodule Ampd.Approvals do
      %{st | tab: tab, s: Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s)), sealed: nil}}
   end
 
-  def handle_ordered({:retire, ids, batch}, %{tab: tab, s: s} = st) do
+  def handle_ordered({:retire, archived, batch}, %{tab: tab, s: s} = st) do
+    ids = Enum.map(archived, & &1["id"])
     rows = Enum.map(ids, fn id -> {id, Enum.find(s["approvals"], &(&1["id"] == id))} end)
+    moved = Enum.find(Enum.zip(rows, archived), fn {{_id, a}, arch} -> a !== arch end)
 
     case Enum.find(rows, fn {_id, a} -> a == nil or a["status"] != "consumed" end) do
       {id, a} ->
@@ -175,13 +183,37 @@ defmodule Ampd.Approvals do
             operator_detail: %{"approval" => id, "status" => a && a["status"]}
           )}, st}
 
+      # The archive holds an approval this list no longer has; see `Ampd.Effects`.
+      nil when moved != nil ->
+        {{id, _a}, _arch} = moved
+
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("retire-row-changed",
+            component: "Ampd.Approvals",
+            retryable: true,
+            requires_human: false,
+            public_message: "An approval changed after it was archived for retirement.",
+            operator_detail: %{"approval" => id, "batch" => batch}
+          )}, st}
+
       nil ->
         set = MapSet.new(ids)
 
+        # Each entry commits the digest of the WORKING row, in the same record
+        # that removes it from the list.
         index =
           Map.merge(
             Map.get(s, "retired", %{}),
-            Map.new(rows, fn {id, a} -> {id, [a["status"], batch, a["consumed_by"]]} end)
+            Map.new(rows, fn {id, a} ->
+              {id,
+               [
+                 a["status"],
+                 batch,
+                 a["consumed_by"],
+                 Ampd.AuthorityLog.RowDigest.of(@store, "id", id, batch, a)
+               ]}
+            end)
           )
 
         s2 =

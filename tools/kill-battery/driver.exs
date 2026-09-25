@@ -59,8 +59,8 @@ end
 {arch_effects, arch_receipts, arch_grants, retention} =
   if Code.ensure_loaded?(Ampd.Retention) and seals == [] do
     ae = ok_rows.(Effects.archived())
-    ar = ok_rows.(Ampd.AuthorityLog.archived_rows("receipts"))
-    ag = ok_rows.(Ampd.AuthorityLog.archived_rows("grant_registry"))
+    ar = ok_rows.(Ampd.Receipts.archived())
+    ag = ok_rows.(Ampd.GrantRegistry.archived())
     idx = Effects.retired_index()
     have = MapSet.new(ae, & &1["id"])
     missing = for {id, _} <- idx, not MapSet.member?(have, id), do: id

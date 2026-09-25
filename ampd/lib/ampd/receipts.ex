@@ -2,6 +2,7 @@ defmodule Ampd.Receipts do
   @moduledoc "The durable effect ledger — feeds Evidence; never a second audit system."
   use GenServer
   @store "receipts"
+  alias Ampd.AuthorityLog.RowDigest
 
   @doc """
   The kind a producer gets when it does not say. `Ampd.Gateway` relies on
@@ -118,8 +119,10 @@ defmodule Ampd.Receipts do
   """
   def for_effect(effect_ref) do
     case ask({:for_effect, effect_ref}) do
-      {:archived, batch} ->
-        case Ampd.AuthorityLog.archived_row(batch, @store, effect_ref, "effect_ref") do
+      # A retired receipt is read from the archive by the caller and checked
+      # against the digest its retirement committed.
+      {:archived, batch, committed} ->
+        case Ampd.AuthorityLog.archived_row(batch, @store, effect_ref, "effect_ref", committed) do
           {:ok, r} -> r
           {:error, _} = err -> err
         end
@@ -130,14 +133,50 @@ defmodule Ampd.Receipts do
   end
 
   @doc """
-  Coordinator only, inside the retirement transaction: every record naming
-  one of `effect_refs` leaves the working ledger, indexed as archived in
-  `batch`. Records naming no effect (worktree, validation) are never retired.
+  Coordinator only, inside the retirement transaction: the receipts
+  `archived` (the rows just written to archive batch `batch`) leave the
+  working ledger, indexed by effect as archived there, each entry committing
+  the digest of the WORKING record. Refuses the whole batch if the working
+  records naming those effects are not exactly the ones archived. Records
+  naming no effect (worktree, validation) are never retired.
   """
-  def retire(effect_refs, batch), do: ask({:retire, effect_refs, batch})
+  def retire(archived, batch), do: ask({:retire, archived, batch})
 
-  @doc "A retired receipt's compact entry — `[receipt_id, batch]` — for an effect, or nil."
+  @doc """
+  A retired receipt's compact entry for an effect — `[receipt_id, batch,
+  digest]`, or `[receipt_id, batch]` if retired before digests — or nil.
+  """
   def retired_ref(effect_ref), do: ask({:retired_ref, effect_ref})
+
+  @doc false
+  # The whole retired index (effect_ref → entry), for tools. Copies it out.
+  def retired_refs, do: ask(:retired_refs)
+
+  @doc """
+  Every retired receipt, read from the batch its index entry names and
+  checked — tools and tests only: it reads every batch. `{:ok, rows}` or
+  `{:error, why}`.
+  """
+  def archived do
+    refs = Map.new(retired_refs(), fn {ref, [_rid, n | more]} -> {ref, {n, List.first(more)}} end)
+    Ampd.AuthorityLog.archived_rows(@store, "effect_ref", refs)
+  end
+
+  @doc """
+  The receipts batch `n` retired, each checked against the digest this
+  ledger's index committed for it: what `Ampd.Projection.history_page/4`
+  pages through. `{:ok, rows}` or `{:error, why}`.
+  """
+  def archived_batch(n) do
+    case Ampd.AuthorityLog.store_rows(n, @store) do
+      {:ok, rows} ->
+        {entries, expected} = ask({:archive_entries, n, Enum.map(rows, & &1["effect_ref"])})
+        Ampd.AuthorityLog.check_batch(n, @store, "effect_ref", rows, entries, expected)
+
+      err ->
+        err
+    end
+  end
 
   @doc "Every retired batch's `%{kind => [lowest seq, highest seq, rows, %{actor => rows}]}`, by batch."
   def retired_batches, do: ask(:retired_batches)
@@ -145,9 +184,9 @@ defmodule Ampd.Receipts do
   @doc "How many records of `kind` were retired: all of them (`nil`), or one actor's."
   def retired_count(kind, actor \\ nil), do: ask({:retired_count, kind, actor})
 
-  @doc "Every retired record of `kind`, from the archive — paged history only."
+  @doc "Every retired record of `kind`, from the archive and checked — tools and tests only."
   def archived_of_kind(kind) do
-    with {:ok, rows} <- Ampd.AuthorityLog.archived_rows(@store),
+    with {:ok, rows} <- archived(),
          do: {:ok, Enum.filter(rows, &(&1["kind"] == kind))}
   end
 
@@ -495,7 +534,7 @@ defmodule Ampd.Receipts do
       case Map.get(refs_of(st), ref) do
         nil ->
           case Map.get(Map.get(st.s, "retired_refs", %{}), ref) do
-            [_rid, batch | _] -> {:archived, batch}
+            [_rid, batch | more] -> {:archived, batch, List.first(more)}
             _ -> nil
           end
 
@@ -511,6 +550,26 @@ defmodule Ampd.Receipts do
 
   def handle_call({:retired_ref, ref}, _f, st),
     do: {:reply, Map.get(Map.get(st.s, "retired_refs", %{}), ref), st}
+
+  def handle_call(:retired_refs, _f, st), do: {:reply, Map.get(st.s, "retired_refs", %{}), st}
+
+  # For `archived_batch/1`: of `refs` (the effects batch `n`'s receipts name),
+  # the ones this index retired IN batch `n`, each with its committed digest,
+  # and how many receipts, of every kind, that retirement recorded there.
+  def handle_call({:archive_entries, n, refs}, _f, %{s: s} = st) do
+    idx = Map.get(s, "retired_refs", %{})
+
+    entries =
+      for ref <- refs, [_rid, ^n | more] <- [Map.get(idx, ref)], into: %{}, do: {ref, List.first(more)}
+
+    expected =
+      s
+      |> Map.get("retired_batches", %{})
+      |> Map.get(n, %{})
+      |> Enum.reduce(0, fn {_kind, [_lo, _hi, count | _]}, acc -> acc + count end)
+
+    {:reply, {entries, expected}, st}
+  end
 
   def handle_call({:retired_count, kind, actor}, _f, st),
     do:
@@ -664,14 +723,52 @@ defmodule Ampd.Receipts do
     end
   end
 
-  def handle_ordered({:retire, effect_refs, batch}, %{tab: tab, s: s} = st) do
+  def handle_ordered({:retire, archived, batch}, %{s: s} = st) do
+    effect_refs = Enum.map(archived, & &1["effect_ref"])
     set = MapSet.new(effect_refs)
     {gone, keep} = Enum.split_with(s["log"], &MapSet.member?(set, &1["effect_ref"]))
 
+    # The working records naming these effects must be exactly the ones the
+    # archive batch holds, or the digests below would commit to rows that are
+    # not the ones archived. The batch then stays an orphan.
+    if length(gone) != length(archived) or
+         Map.new(gone, &{&1["effect_ref"], &1}) !== Map.new(archived, &{&1["effect_ref"], &1}) do
+      {:reply,
+       {:refused,
+        Ampd.Refusal.new("retire-row-changed",
+          component: "Ampd.Receipts",
+          retryable: true,
+          requires_human: false,
+          public_message: "A receipt changed after it was archived for retirement.",
+          operator_detail: %{"batch" => batch, "archived" => length(archived), "working" => length(gone)}
+        )}, st}
+    else
+      retire_receipts(gone, keep, batch, effect_refs, st)
+    end
+  end
+
+  def handle_ordered({:load_state, s}, st) do
+    tab = st.tab || Ampd.Store.open!(@store)
+
+    s = Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s))
+    {:reply, :ok, Map.merge(st, %{tab: tab, s: s, refs: refs(s), sealed: nil})}
+  end
+
+  def handle_ordered(:reset, %{tab: tab} = st) do
+    s = Ampd.Store.save(tab, Ampd.Fence.carry(initial(), st.s))
+    {:reply, :ok, Map.merge(st, %{s: s, refs: refs(s)})}
+  end
+
+  defp retire_receipts(gone, keep, batch, effect_refs, %{tab: tab, s: s} = st) do
+    # Each entry commits the digest of the WORKING record, in the same record
+    # of the authority log that removes it from the ledger.
     refs_index =
       Map.merge(
         Map.get(s, "retired_refs", %{}),
-        Map.new(gone, &{&1["effect_ref"], [&1["id"], batch]})
+        Map.new(gone, fn r ->
+          ref = r["effect_ref"]
+          {ref, [r["id"], batch, RowDigest.of(@store, "effect_ref", ref, batch, r)]}
+        end)
       )
 
     counts =
@@ -707,17 +804,5 @@ defmodule Ampd.Receipts do
     st = %{st | s: Ampd.Store.save(tab, s2)}
     st = if Map.has_key?(st, :refs), do: %{st | refs: Map.drop(st.refs, effect_refs)}, else: st
     {:reply, {:ok, length(gone)}, st}
-  end
-
-  def handle_ordered({:load_state, s}, st) do
-    tab = st.tab || Ampd.Store.open!(@store)
-
-    s = Ampd.Store.save(tab, Ampd.Fence.carry(s, st.s))
-    {:reply, :ok, Map.merge(st, %{tab: tab, s: s, refs: refs(s), sealed: nil})}
-  end
-
-  def handle_ordered(:reset, %{tab: tab} = st) do
-    s = Ampd.Store.save(tab, Ampd.Fence.carry(initial(), st.s))
-    {:reply, :ok, Map.merge(st, %{s: s, refs: refs(s)})}
   end
 end

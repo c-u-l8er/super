@@ -69,6 +69,7 @@ defmodule Ampd.Effects do
   use GenServer
   alias Ampd.Effects.{Contract, Witness}
   alias Ampd.Fence
+  alias Ampd.AuthorityLog.RowDigest
   @store "effects"
 
   @terminal ~w(COMMITTED FAILED)
@@ -128,11 +129,13 @@ defmodule Ampd.Effects do
   # Looked up here, not by copying every effect out of this process to find
   # one: the copy grew with history (0.1 ms at an empty journal, 15–21 ms at
   # 2,000, measured). A retired effect is read from the archive by the CALLER,
-  # so the journal owner never waits on a history read.
+  # so the journal owner never waits on a history read, and checked there
+  # against the digest its retirement committed: a row the archive holds
+  # differently is `{:error, "archive-row-mismatch · …"}`, never the row.
   def get(id) do
     case ask({:get, id}) do
-      {:archived, batch} ->
-        case Ampd.AuthorityLog.archived_row(batch, @store, id) do
+      {:archived, batch, committed} ->
+        case Ampd.AuthorityLog.archived_row(batch, @store, id, "id", committed) do
           {:ok, e} -> e
           {:error, _} = err -> err
         end
@@ -144,12 +147,16 @@ defmodule Ampd.Effects do
 
   def count, do: length(all())
 
-  @doc "A retired effect's compact entry — `[final_state, batch]` — or nil."
+  @doc """
+  A retired effect's compact entry — `[final_state, batch, digest]` — or nil.
+  `digest` is the `Ampd.AuthorityLog.RowDigest` its retirement committed; an
+  effect retired before digests existed has `[final_state, batch]`.
+  """
   def retired(id), do: ask({:retired, id})
 
   @doc false
-  # The whole retired index (id → [state, batch]), for tools that check the
-  # archive against it. Copies it out: never on a decision path.
+  # The whole retired index (id → [state, batch, digest]), for tools that
+  # check the archive against it. Copies it out: never on a decision path.
   def retired_index, do: ask(:retired_index)
 
   @doc "Every retired batch's `[lowest key, highest key, rows, %{actor => rows}]`, by batch."
@@ -159,10 +166,31 @@ defmodule Ampd.Effects do
   def retired_count(actor \\ nil), do: ask({:retired_count, actor})
 
   @doc """
-  Every retired effect, read from the archive — for paged history only, never
-  for a decision. `{:ok, rows}` or `{:error, why}`.
+  Every retired effect, read from the batch its index entry names and checked
+  against the digest there — for tools and tests only, never for a decision
+  or a page: it reads every batch. `{:ok, rows}` or `{:error, why}`.
   """
-  def archived, do: Ampd.AuthorityLog.archived_rows(@store)
+  def archived do
+    refs = Map.new(retired_index(), fn {id, [_state, n | more]} -> {id, {n, List.first(more)}} end)
+    Ampd.AuthorityLog.archived_rows(@store, "id", refs)
+  end
+
+  @doc """
+  The effects batch `n` retired, each checked against the digest this
+  store's index committed for it: what `Ampd.Projection.history_page/4`
+  pages through. `{:ok, rows}` (an unverified row carries
+  `"archive_unverified"`) or `{:error, why}`.
+  """
+  def archived_batch(n) do
+    case Ampd.AuthorityLog.store_rows(n, @store) do
+      {:ok, rows} ->
+        {entries, expected} = ask({:archive_entries, n, Enum.map(rows, & &1["id"])})
+        Ampd.AuthorityLog.check_batch(n, @store, "id", rows, entries, expected)
+
+      err ->
+        err
+    end
+  end
 
   @doc """
   The oldest terminal effects that may be retired: all but the newest
@@ -172,11 +200,14 @@ defmodule Ampd.Effects do
   def retirable(keep_recent, max), do: ask({:retirable, keep_recent, max})
 
   @doc """
-  Coordinator only, inside the retirement transaction: drop `ids` from the
-  working journal and index them as archived in `batch`. Refuses the whole
-  batch, by name, if any id is not a terminal effect without a live lease.
+  Coordinator only, inside the retirement transaction: drop the effects
+  `archived` (the rows just written to archive batch `batch`) from the
+  working journal and index them as archived there, each entry committing
+  the digest of the WORKING row. Refuses the whole batch, by name, if any is
+  not a terminal effect without a live lease, or if its working row is not
+  the row that was archived.
   """
-  def retire(ids, batch), do: ask({:retire, ids, batch})
+  def retire(archived, batch), do: ask({:retire, archived, batch})
 
   @doc """
   Open a proposal. `env["branch"]` is the one declaration field the
@@ -294,7 +325,7 @@ defmodule Ampd.Effects do
       case lookup(st, id) do
         nil ->
           case retired_entry(st.s, id) do
-            [_state, batch | _] -> {:archived, batch}
+            [_state, batch | more] -> {:archived, batch, List.first(more)}
             _ -> nil
           end
 
@@ -310,6 +341,24 @@ defmodule Ampd.Effects do
 
   def handle_call(:retired_batches, _f, st),
     do: {:reply, Map.get(st.s, "retired_batches", %{}), st}
+
+  # For `archived_batch/1`: of `ids` (the keys batch `n` holds), the ones this
+  # index retired IN batch `n`, each with its committed digest, and how many
+  # effects that retirement recorded for the batch.
+  def handle_call({:archive_entries, n, ids}, _f, %{s: s} = st) do
+    idx = Map.get(s, "retired", %{})
+
+    entries =
+      for id <- ids, [_state, ^n | more] <- [Map.get(idx, id)], into: %{}, do: {id, List.first(more)}
+
+    expected =
+      case Map.get(Map.get(s, "retired_batches", %{}), n) do
+        [_lo, _hi, count | _] -> count
+        _ -> 0
+      end
+
+    {:reply, {entries, expected}, st}
+  end
 
   def handle_call({:retired_count, actor}, _f, %{s: s} = st),
     do: {:reply, Map.get(Map.get(s, "retired_count", %{}), actor || "*", 0), st}
@@ -635,9 +684,11 @@ defmodule Ampd.Effects do
     end
   end
 
-  def handle_ordered({:retire, ids, batch}, %{tab: tab, s: s} = st) do
+  def handle_ordered({:retire, archived, batch}, %{tab: tab, s: s} = st) do
     live = live_effects(st)
+    ids = Enum.map(archived, & &1["id"])
     rows = Enum.map(ids, &{&1, lookup(st, &1)})
+    moved = Enum.find(Enum.zip(rows, archived), fn {{_id, e}, a} -> e !== a end)
 
     case Enum.find(rows, fn {id, e} ->
            e == nil or e["state"] not in @terminal or MapSet.member?(live, id)
@@ -657,13 +708,33 @@ defmodule Ampd.Effects do
             }
           )}, st}
 
+      # The archive holds a row this journal no longer has: the digest below
+      # would commit to a row that is not the one archived. The batch stays an
+      # orphan and every row stays working; the next pass archives it again.
+      nil when moved != nil ->
+        {{id, _e}, _a} = moved
+
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("retire-row-changed",
+            component: "Ampd.Effects",
+            retryable: true,
+            requires_human: false,
+            public_message: "An effect changed after it was archived for retirement.",
+            operator_detail: %{"effect" => id, "batch" => batch}
+          )}, st}
+
       nil ->
         set = MapSet.new(ids)
 
+        # Each entry commits the digest of the WORKING row, the one this
+        # journal holds as authoritative, in the same record that removes it.
         index =
           Map.merge(
             Map.get(s, "retired", %{}),
-            Map.new(rows, fn {id, e} -> {id, [e["state"], batch]} end)
+            Map.new(rows, fn {id, e} ->
+              {id, [e["state"], batch, RowDigest.of(@store, "id", id, batch, e)]}
+            end)
           )
 
         counts =

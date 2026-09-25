@@ -78,9 +78,16 @@ defmodule Ampd.AuthorityLog do
   it is READ is named in the reader's answer; it never seals the authority
   stores, whose decisions read the index, not the archive.
 
-  Readers read the file themselves (`read_batch/1`, `archived_rows/1`), by
-  the offsets this process hands out, so a history read never holds up an
-  append.
+  Readers read the file themselves, by the offsets this process hands out,
+  so a history read never holds up an append.
+
+  **Each retired row's index entry also commits a digest of the row**
+  (`Ampd.AuthorityLog.RowDigest`), taken by the retiring store from its
+  working row and written in the same record, and every reader checks the
+  rows it returns against it (`archived_row/5`, `check_batch/6`,
+  `archived_rows/3`). The CRC catches an accident; the digest catches an
+  archive that holds something other than what the log retired, including a
+  frame rewritten with a valid CRC.
 
   ## Worlds written before this
 
@@ -94,7 +101,7 @@ defmodule Ampd.AuthorityLog do
   use GenServer
   require Logger
 
-  alias Ampd.AuthorityLog.Delta
+  alias Ampd.AuthorityLog.{Delta, RowDigest}
 
   @stores ~w(effects receipts grant_registry approvals)
   @registries %{
@@ -271,65 +278,166 @@ defmodule Ampd.AuthorityLog do
   @doc "Where batch `n` is: `{:ok, path, offset, length}` or `{:error, why}`."
   def archive_slot(n), do: call({:archive_slot, n}, :read)
 
-  @doc """
-  Batch `n`'s rows, `{:ok, %{store => [row]}}` or `{:error, why}`, read by the
-  caller from the file — never through this process's mailbox beyond the
-  offset lookup.
-  """
-  def read_batch(n) do
-    with {:ok, path, off, len} <- archive_slot(n) do
-      read_frame(path, off, len, n)
-    end
-  end
+  # ------------------------------------------------- reading archived rows
+  #
+  # **Every archived row a reader is given has been checked against the log.**
+  # The frame's CRC-32 says the bytes are what was written; the digest the
+  # retiring store committed (`Ampd.AuthorityLog.RowDigest`) says they are the
+  # row the log retired. A reader gets one of three answers per row:
+  #
+  #   verified     the row, as it is
+  #   unverified   the row with `"archive_unverified"` set to the reason: it
+  #                was retired without a digest. Named, and never upgraded
+  #                from what the archive holds
+  #   refused      `{:error, "archive-row-mismatch · …"}` (or absent,
+  #                duplicate, incomplete): the archive holds something other
+  #                than what the log committed
+  #
+  # **The index decides which batch holds a row, not the archive.** A batch
+  # appended and synced whose retirement record never followed (an orphan:
+  # the process died between the two) is named by no index entry, so no
+  # reader takes a row from it, whatever position it has in the file.
+  #
+  # A refused read seals nothing. The authority stores decide from their
+  # indexes, never from the archive, so a damaged archive loses history
+  # reads, and only those.
 
-  @doc """
-  One archived row: the row in batch `n` of `store` whose `field` (default
-  `"id"`) is `value`, or `{:error, why}`.
-  """
-  def archived_row(n, store, value, field \\ "id") do
-    with {:ok, rows} <- read_batch(n) do
-      case Enum.find(Map.get(rows, store, []), &(&1[field] == value)) do
-        nil -> {:error, "archive-row-absent · #{store} #{value} is not in batch #{n}"}
-        row -> {:ok, row}
-      end
-    end
-  end
+  @unverified "archive_unverified"
 
-  @doc """
-  Every archived row of `store`, oldest batch first, each id once (the latest
-  batch that holds it: an orphan batch — archived, then the process died
-  before its retirement record — is followed by the batch that retired the
-  same rows for real). Reads the whole archive; for paged history only.
-  `{:ok, rows}` or `{:error, why}` at the first batch that does not verify.
-  """
-  def archived_rows(store, field \\ "id") do
-    case call(:archive_slots, :read) do
-      {:ok, _path, []} ->
-        {:ok, []}
+  @doc "The field an unverified archived row carries, holding the reason."
+  def unverified_key, do: @unverified
 
-      {:ok, path, slots} ->
-        slots
-        |> Enum.reduce_while({:ok, []}, fn {n, off, len}, {:ok, acc} ->
-          case read_frame(path, off, len, n) do
-            {:ok, rows} -> {:cont, {:ok, [Map.get(rows, store, []) | acc]}}
-            err -> {:halt, err}
-          end
-        end)
-        |> case do
-          {:ok, per_batch} ->
-            rows = per_batch |> Enum.reverse() |> Enum.concat()
-            last = Map.new(Enum.with_index(rows), fn {r, i} -> {r[field], i} end)
-
-            {:ok,
-             for({r, i} <- Enum.with_index(rows), Map.fetch!(last, r[field]) == i, do: r)}
-
-          err ->
-            err
+  @doc false
+  # The rows of `store` in batch `n` AS THE FILE HOLDS THEM: the frame's CRC
+  # and batch number are checked, the rows are NOT. Two callers only, each of
+  # which passes every row it keeps through `check_batch/6`: the readers in
+  # this module, and the stores' `archived_batch/1`, which must ask their own
+  # index which keys batch `n` retired before they can check. A test reads the
+  # compiled callers so that stays true (`archive_digest_test.exs`).
+  def store_rows(n, store) do
+    case archive_slot(n) do
+      {:ok, path, off, len} ->
+        case read_frame(path, off, len, n) do
+          {:ok, rows} -> {:ok, Map.get(rows, store, [])}
+          err -> err
         end
 
       err ->
         err
     end
+  end
+
+  @doc """
+  One archived row, checked: the row of `store` whose `field` is `key` in
+  batch `n`, the batch its retirement index entry names, against `committed`,
+  the digest that entry holds (`nil` for a row retired before digests).
+  `{:ok, row}` (marked when unverified) or `{:error, why}`.
+  """
+  def archived_row(n, store, key, field, committed) do
+    case store_rows(n, store) do
+      {:ok, rows} ->
+        case Enum.filter(rows, &(&1[field] == key)) do
+          [] -> {:error, "archive-row-absent · #{store} #{key} is not in batch #{n}"}
+          [row] -> check_row(n, store, field, key, row, committed)
+          _ -> {:error, duplicate(n, store, key)}
+        end
+
+      err ->
+        err
+    end
+  end
+
+  @doc """
+  The rows of batch `n` that `store`'s index retired there, each checked.
+
+  `entries` maps each key the index names in batch `n` to its committed
+  digest (`nil` for none); `expected` is how many rows of `store` the
+  retirement recorded for that batch. A row whose key is not in `entries` was
+  not retired in this batch — part of a retirement refused part-way, whose
+  rows are still working — and is not returned. `{:ok, rows}` in archive
+  order, unverified rows marked, or `{:error, why}` for the first row that
+  does not check, a key held twice, or a batch holding fewer of the retired
+  rows than its retirement recorded.
+  """
+  def check_batch(n, store, field, rows, entries, expected) do
+    case first_duplicate(Enum.map(rows, & &1[field]), MapSet.new()) do
+      {:duplicate, k} ->
+        {:error, duplicate(n, store, k)}
+
+      nil ->
+        mine = Enum.filter(rows, &Map.has_key?(entries, &1[field]))
+
+        if length(mine) != expected do
+          {:error,
+           "archive-batch-incomplete · batch #{n} holds #{length(mine)} of the #{expected} " <>
+             "#{store} rows its retirement recorded"}
+        else
+          mine
+          |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+            k = row[field]
+
+            case check_row(n, store, field, k, row, Map.fetch!(entries, k)) do
+              {:ok, r} -> {:cont, {:ok, [r | acc]}}
+              err -> {:halt, err}
+            end
+          end)
+          |> case do
+            {:ok, acc} -> {:ok, Enum.reverse(acc)}
+            err -> err
+          end
+        end
+    end
+  end
+
+  @doc """
+  Every archived row of `store`, oldest batch first, each read from the batch
+  its index entry names and checked. `index` maps a key to `{batch,
+  committed}`, the store's whole retirement index: this reads every batch it
+  names, so it is for tools and tests, never for a decision or a page.
+  `{:ok, rows}` or `{:error, why}` at the first batch that does not check,
+  including one that lacks a row its index names.
+  """
+  def archived_rows(store, field, index) do
+    index
+    |> Enum.group_by(fn {_k, {n, _}} -> n end, fn {k, {_n, d}} -> {k, d} end)
+    |> Enum.sort()
+    |> Enum.reduce_while({:ok, []}, fn {n, named}, {:ok, acc} ->
+      entries = Map.new(named)
+
+      case store_rows(n, store) do
+        {:ok, rows} ->
+          case check_batch(n, store, field, rows, entries, map_size(entries)) do
+            {:ok, got} -> {:cont, {:ok, [got | acc]}}
+            err -> {:halt, err}
+          end
+
+        err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, per_batch} -> {:ok, per_batch |> Enum.reverse() |> Enum.concat()}
+      err -> err
+    end
+  end
+
+  defp check_row(n, store, field, key, row, committed) do
+    case RowDigest.check(store, field, key, n, row, committed) do
+      :verified -> {:ok, row}
+      {:unverified, why} -> {:ok, Map.put(row, @unverified, why)}
+      {:mismatch, why} -> {:error, why}
+    end
+  end
+
+  defp duplicate(n, store, key),
+    do: "archive-row-duplicate · #{store} #{key} appears more than once in batch #{n}"
+
+  defp first_duplicate([], _seen), do: nil
+
+  defp first_duplicate([k | more], seen) do
+    if MapSet.member?(seen, k),
+      do: {:duplicate, k},
+      else: first_duplicate(more, MapSet.put(seen, k))
   end
 
   defp read_frame(path, off, len, n) do

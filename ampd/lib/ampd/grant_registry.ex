@@ -209,11 +209,14 @@ defmodule Ampd.GrantRegistry do
   """
   def active, do: ask(:active)
 
-  @doc "One grant by id, or nil — a retired grant is read from the archive by the caller."
+  @doc """
+  One grant by id, or nil — a retired grant is read from the archive by the
+  caller and checked against the digest its retirement committed.
+  """
   def get(id) do
     case ask({:get, id}) do
-      {:archived, batch} ->
-        case Ampd.AuthorityLog.archived_row(batch, @store, id) do
+      {:archived, batch, committed} ->
+        case Ampd.AuthorityLog.archived_row(batch, @store, id, "id", committed) do
           {:ok, g} -> g
           {:error, _} = err -> err
         end
@@ -224,18 +227,37 @@ defmodule Ampd.GrantRegistry do
   end
 
   @doc """
-  A retired grant's compact entry — `[status, batch, consumptions]` — or nil.
+  A retired grant's compact entry — `[status, batch, consumptions, digest]`,
+  or `[status, batch, consumptions]` if retired before digests — or nil.
   What stays in the working state so a used grant can never be spent again,
   and a replayed consumption is still refused as the duplicate it is.
   """
   def retired(id), do: ask({:retired, id})
 
+  @doc false
+  # The whole retired index (id → entry), for tools. Copies it out.
+  def retired_index, do: ask(:retired_index)
+
+  @doc """
+  Every retired grant, read from the batch its index entry names and checked
+  — tools and tests only: it reads every batch. `{:ok, rows}` or `{:error,
+  why}`.
+  """
+  def archived do
+    refs =
+      Map.new(retired_index(), fn {id, [_status, n, _cs | more]} -> {id, {n, List.first(more)}} end)
+
+    Ampd.AuthorityLog.archived_rows(@store, "id", refs)
+  end
+
   @doc """
   Coordinator only, inside the retirement transaction: drop the used grants
-  `ids` from the working list, indexed as archived in `batch`. Refuses the
-  whole batch if any is absent or still active.
+  `archived` (the rows just written to archive batch `batch`) from the
+  working list, indexed as archived there, each entry committing the digest
+  of the WORKING row. Refuses the whole batch if any is absent, still
+  active, or not the row that was archived.
   """
-  def retire(ids, batch), do: ask({:retire, ids, batch})
+  def retire(archived, batch), do: ask({:retire, archived, batch})
 
   def snapshot do
     # `snapshot_of/2` keeps only active grants; handing it only those is the
@@ -397,7 +419,7 @@ defmodule Ampd.GrantRegistry do
       case get_of(s["grants"], id) do
         nil ->
           case retired_entry(s, id) do
-            [_status, batch | _] -> {:archived, batch}
+            [_status, batch, _cs | more] -> {:archived, batch, List.first(more)}
             _ -> nil
           end
 
@@ -409,6 +431,7 @@ defmodule Ampd.GrantRegistry do
   end
 
   def handle_call({:retired, id}, _f, %{s: s} = st), do: {:reply, retired_entry(s, id), st}
+  def handle_call(:retired_index, _f, %{s: s} = st), do: {:reply, Map.get(s, "retired", %{}), st}
 
   # The write fence (E3-1). Guarded by "from the journal owner", not by the
   # total order — see `Ampd.Ordered.from_journal_owner?/1`.
@@ -665,8 +688,10 @@ defmodule Ampd.GrantRegistry do
     end
   end
 
-  def handle_ordered({:retire, ids, batch}, %{tab: tab, s: s} = st) do
+  def handle_ordered({:retire, archived, batch}, %{tab: tab, s: s} = st) do
+    ids = Enum.map(archived, & &1["id"])
     rows = Enum.map(ids, &{&1, get_of(s["grants"], &1)})
+    moved = Enum.find(Enum.zip(rows, archived), fn {{_id, g}, a} -> g !== a end)
 
     case Enum.find(rows, fn {_id, g} -> g == nil or g["status"] == "active" end) do
       {id, g} ->
@@ -680,13 +705,37 @@ defmodule Ampd.GrantRegistry do
             operator_detail: %{"grant" => id, "status" => g && g["status"]}
           )}, st}
 
+      # The archive holds a grant this list no longer has; see `Ampd.Effects`.
+      nil when moved != nil ->
+        {{id, _g}, _a} = moved
+
+        {:reply,
+         {:refused,
+          Ampd.Refusal.new("retire-row-changed",
+            component: "Ampd.GrantRegistry",
+            retryable: true,
+            requires_human: false,
+            public_message: "A grant changed after it was archived for retirement.",
+            operator_detail: %{"grant" => id, "batch" => batch}
+          )}, st}
+
       nil ->
         set = MapSet.new(ids)
 
+        # Each entry commits the digest of the WORKING row, in the same record
+        # that removes it from the list.
         index =
           Map.merge(
             Map.get(s, "retired", %{}),
-            Map.new(rows, fn {id, g} -> {id, [g["status"], batch, g["consumptions"] || []]} end)
+            Map.new(rows, fn {id, g} ->
+              {id,
+               [
+                 g["status"],
+                 batch,
+                 g["consumptions"] || [],
+                 Ampd.AuthorityLog.RowDigest.of(@store, "id", id, batch, g)
+               ]}
+            end)
           )
 
         s2 =

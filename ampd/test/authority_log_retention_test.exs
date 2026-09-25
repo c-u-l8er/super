@@ -128,12 +128,12 @@ defmodule Ampd.AuthorityLogRetentionTest do
 
       # Every retired row reads back exactly as it was.
       for id <- gone do
-        assert ["COMMITTED", b] = Effects.retired(id)
+        assert ["COMMITTED", b, "ard1:" <> _] = Effects.retired(id)
         assert b == r["batch"]
         assert Effects.get(id) == before[id]
         assert Receipts.for_effect(id) == receipts_before[id]
         assert GrantRegistry.get(before[id]["grant_ref"]) == grants_before[id]
-        assert ["consumed", ^b, [^id]] = GrantRegistry.retired(before[id]["grant_ref"])
+        assert ["consumed", ^b, [^id], "ard1:" <> _] = GrantRegistry.retired(before[id]["grant_ref"])
         refute Enum.any?(GrantRegistry.list(), &(&1["id"] == before[id]["grant_ref"]))
       end
 
@@ -333,7 +333,7 @@ defmodule Ampd.AuthorityLogRetentionTest do
 
       p = pass!(keep_recent: 1)
       assert p["batch"] == 2
-      assert ["COMMITTED", 2] = Effects.retired(id)
+      assert ["COMMITTED", 2, "ard1:" <> _] = Effects.retired(id)
       assert Effects.get(id) == row
 
       {:ok, archived} = Effects.archived()

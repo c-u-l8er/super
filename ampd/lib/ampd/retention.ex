@@ -35,7 +35,13 @@ defmodule Ampd.Retention do
   are archived and synced first; then Effects, Receipts, Approvals and the
   grant registry drop them and index them, and the four stores' changes are
   written as one record. A crash before that record leaves an orphan archive
-  batch and every row still live — the next pass archives them again.
+  batch and every row still live — the next pass archives them again, and no
+  reader takes a row from a batch no index entry names.
+
+  Each index entry commits a digest of the row it retires
+  (`Ampd.AuthorityLog.RowDigest`), computed by the store from its own working
+  row after checking that row is the one archived, so a reader can tell the
+  archive holding anything else from the row the log retired.
 
   The drops run in that order so that a refusal part-way (which the group
   would still commit) leaves nothing pointing at a row that is gone: an
@@ -182,10 +188,6 @@ defmodule Ampd.Retention do
         "approvals" => gone_approvals
       }
 
-      ids = Enum.map(settled, & &1["id"])
-      aids = Enum.map(gone_approvals, & &1["id"])
-      gids = Enum.map(gone_grants, & &1["id"])
-
       summary = %{
         "retired" => length(settled),
         "candidates" => length(cands),
@@ -197,7 +199,7 @@ defmodule Ampd.Retention do
 
       case AuthorityLog.archive(rows) do
         {:ok, batch} ->
-          case drop_effects(batch, ids, gone_receipts != [], aids, gids) do
+          case drop_effects(batch, settled, gone_receipts, gone_approvals, gone_grants) do
             :ok -> {:ok, Map.put(summary, "batch", batch)}
             err -> err
           end
@@ -212,35 +214,40 @@ defmodule Ampd.Retention do
   # no `with … else` (whose else compiles to a closure): the ordered-
   # reachability census follows every one of these. Nothing to drop is not a
   # call, because an empty retirement would still be a round trip in the order.
-  defp drop_effects(b, ids, receipts?, aids, gids) do
-    case Effects.retire(ids, b) do
-      {:ok, _} -> drop_receipts(b, ids, receipts?, aids, gids)
+  #
+  # Each store is handed the rows exactly as they went into batch `b`. It
+  # checks them against its own working rows and commits a digest of its OWN
+  # row (`Ampd.AuthorityLog.RowDigest`), so the index can never commit to a row
+  # other than the one archived.
+  defp drop_effects(b, effects, receipts, approvals, grants) do
+    case Effects.retire(effects, b) do
+      {:ok, _} -> drop_receipts(b, receipts, approvals, grants)
       other -> failed(other)
     end
   end
 
-  defp drop_receipts(b, _ids, false, aids, gids), do: drop_approvals(b, aids, gids)
+  defp drop_receipts(b, [], approvals, grants), do: drop_approvals(b, approvals, grants)
 
-  defp drop_receipts(b, ids, true, aids, gids) do
-    case Receipts.retire(ids, b) do
-      {:ok, _} -> drop_approvals(b, aids, gids)
+  defp drop_receipts(b, receipts, approvals, grants) do
+    case Receipts.retire(receipts, b) do
+      {:ok, _} -> drop_approvals(b, approvals, grants)
       other -> failed(other)
     end
   end
 
-  defp drop_approvals(b, [], gids), do: drop_grants(b, gids)
+  defp drop_approvals(b, [], grants), do: drop_grants(b, grants)
 
-  defp drop_approvals(b, aids, gids) do
-    case Approvals.retire(aids, b) do
-      {:ok, _} -> drop_grants(b, gids)
+  defp drop_approvals(b, approvals, grants) do
+    case Approvals.retire(approvals, b) do
+      {:ok, _} -> drop_grants(b, grants)
       other -> failed(other)
     end
   end
 
   defp drop_grants(_b, []), do: :ok
 
-  defp drop_grants(b, gids) do
-    case GrantRegistry.retire(gids, b) do
+  defp drop_grants(b, grants) do
+    case GrantRegistry.retire(grants, b) do
       {:ok, _} -> :ok
       other -> failed(other)
     end
