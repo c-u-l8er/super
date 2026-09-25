@@ -161,6 +161,10 @@ one is still refused by its exact name (`write-lease-retired` / `-closed`).
 
 ## Evidence
 
-(Filled in as each run completes: the new tests, the full suite against
-candidate 2's failing names, the kill battery with retention active, and the
-foundation lane's timing on this build.)
+`evidence/retention-c3/README.md`: gates 9/0; full suite 1096/107 with the same 99
+failing names as `b68e6da`; kill battery with retention active 36+36 all zeros (to
+10,637 / 111,719 effects); the foundation lane's timing, OFF against ON — past 5,000
+effects the tmpfs p95 goes 28.6 → 8.1 ms and ext4 88.5 → 13.9 ms, long GCs to zero, VM
+668 → 247 MB, boot at 10k 660 → 101 ms. The costs it leaves: archived by-id reads are
+O(batch) (~6.6 ms each), and the retired indexes grow (AuthorityLog 9.6 → 20.7 MB from
+500 to 10k). The restore rehearsal: ProjectAmp2 `superlane/restore-rehearsal/`.
