@@ -95,7 +95,9 @@ defmodule Ampd.ArchiveDigestTest do
   defp snapshot(ids) do
     Map.new(ids, fn id ->
       e = Effects.get(id)
-      {id, %{effect: e, receipt: Receipts.for_effect(id), grant: GrantRegistry.get(e["grant_ref"])}}
+
+      {id,
+       %{effect: e, receipt: Receipts.for_effect(id), grant: GrantRegistry.get(e["grant_ref"])}}
     end)
   end
 
@@ -148,14 +150,18 @@ defmodule Ampd.ArchiveDigestTest do
       assert File.stat!(AuthorityLog.archive_path()).size == size
 
       for {a, b} <- Enum.zip(before, recs),
-          do: assert(IO.iodata_length(AuthorityLog.frame(a)) == IO.iodata_length(AuthorityLog.frame(b)))
+          do:
+            assert(
+              IO.iodata_length(AuthorityLog.frame(a)) == IO.iodata_length(AuthorityLog.frame(b))
+            )
     end
 
     hits
   end
 
   # One hex character of a "sha256:<hex>" field, changed: same length.
-  defp flip_hex(<<"sha256:", c, rest::binary>>), do: <<"sha256:", if(c == ?0, do: ?1, else: ?0), rest::binary>>
+  defp flip_hex(<<"sha256:", c, rest::binary>>),
+    do: <<"sha256:", if(c == ?0, do: ?1, else: ?0), rest::binary>>
 
   # An id's last digit, changed: same length.
   defp flip_last(id) do
@@ -165,8 +171,12 @@ defmodule Ampd.ArchiveDigestTest do
 
   defp page_all(kind, limit) do
     Stream.unfold(nil, fn
-      :done -> nil
-      c -> (p = Projection.history_page(kind, nil, c, limit); {p, if(p["more"], do: p["next_cursor"], else: :done)})
+      :done ->
+        nil
+
+      c ->
+        p = Projection.history_page(kind, nil, c, limit)
+        {p, if(p["more"], do: p["next_cursor"], else: :done)}
     end)
     |> Enum.to_list()
   end
@@ -215,7 +225,11 @@ defmodule Ampd.ArchiveDigestTest do
       pairs = [{:a, "a"}, {1, 1.0}, {[1], {1}}, {nil, "nil"}, {"1", 1}, {0.0, -0.0}, {[], %{}}]
 
       for {x, y} <- pairs,
-          do: refute(RowDigest.of("s", "id", "k", 1, x) == RowDigest.of("s", "id", "k", 1, y), inspect({x, y}))
+          do:
+            refute(
+              RowDigest.of("s", "id", "k", 1, x) == RowDigest.of("s", "id", "k", 1, y),
+              inspect({x, y})
+            )
     end
 
     test "orders a map's pairs by the key's canonical bytes, whatever the runtime's map order" do
@@ -240,12 +254,22 @@ defmodule Ampd.ArchiveDigestTest do
     end
 
     test "is total: nothing a row could hold makes it raise" do
-      for t <- [self(), make_ref(), fn -> :ok end, [1 | 2], [1, 2 | :t], <<1::3>>, {:a, [b: 1]}, %{{1, 2} => [3]}],
+      for t <- [
+            self(),
+            make_ref(),
+            fn -> :ok end,
+            [1 | 2],
+            [1, 2 | :t],
+            <<1::3>>,
+            {:a, [b: 1]},
+            %{{1, 2} => [3]}
+          ],
           do: assert("ard1:" <> _ = RowDigest.of("s", "id", "k", 1, %{"v" => t}))
     end
 
     test "a row with no digest is unverified; an unknown version is unverified; neither is verified" do
-      assert {:unverified, "archive-row-unverified · effects ef_1 in batch 2 was retired without a content digest"} =
+      assert {:unverified,
+              "archive-row-unverified · effects ef_1 in batch 2 was retired without a content digest"} =
                RowDigest.check("effects", "id", "ef_1", 2, %{}, nil)
 
       assert {:unverified, why} = RowDigest.check("effects", "id", "ef_1", 2, %{}, "ard9:xyz")
@@ -280,7 +304,12 @@ defmodule Ampd.ArchiveDigestTest do
       # The first retirement a store makes writes its index whole (`:set`); later
       # ones write what it gained (`:merge`).
       for store <- ~w(effects receipts grant_registry) do
-        [added] = for {op, ^store, idx, a} <- ops, op in [:set, :merge], idx in ~w(retired retired_refs), do: a
+        [added] =
+          for {op, ^store, idx, a} <- ops,
+              op in [:set, :merge],
+              idx in ~w(retired retired_refs),
+              do: a
+
         assert map_size(added) == 4, store
         assert Enum.all?(Map.values(added), &match?("ard1:" <> _, List.last(&1))), store
       end
@@ -307,9 +336,11 @@ defmodule Ampd.ArchiveDigestTest do
       %{effect: e, receipt: rc, grant: g} = snapshot(ids)[id]
 
       for {store, row, retire, still} <- [
-            {"effects", e, &Effects.retire/2, fn -> Effects.retired(id) == nil and Enum.any?(Effects.all(), &(&1["id"] == id)) end},
+            {"effects", e, &Effects.retire/2,
+             fn -> Effects.retired(id) == nil and Enum.any?(Effects.all(), &(&1["id"] == id)) end},
             {"receipts", rc, &Receipts.retire/2, fn -> Receipts.retired_ref(id) == nil end},
-            {"grant_registry", g, &GrantRegistry.retire/2, fn -> GrantRegistry.retired(g["id"]) == nil end}
+            {"grant_registry", g, &GrantRegistry.retire/2,
+             fn -> GrantRegistry.retired(g["id"]) == nil end}
           ] do
         changed = Map.put(row, "changed_after_archiving", true)
         assert {:ok, n} = AuthorityLog.archive(%{store => [changed]})
@@ -324,7 +355,9 @@ defmodule Ampd.ArchiveDigestTest do
       # The orphans are never read, and the next pass retires the rows for real.
       p = pass!(keep_recent: 1)
       assert p["batch"] == 4
-      assert Effects.get(id) == e and Receipts.for_effect(id) == rc and GrantRegistry.get(g["id"]) == g
+
+      assert Effects.get(id) == e and Receipts.for_effect(id) == rc and
+               GrantRegistry.get(g["id"]) == g
     end
   end
 
@@ -356,7 +389,12 @@ defmodule Ampd.ArchiveDigestTest do
 
         for kind <- [:effects, :receipts] do
           pages = page_all(kind, 5)
-          refute Enum.any?(pages, &(Map.has_key?(&1, "archive_error") or Map.has_key?(&1, @unverified)))
+
+          refute Enum.any?(
+                   pages,
+                   &(Map.has_key?(&1, "archive_error") or Map.has_key?(&1, @unverified))
+                 )
+
           items = Enum.flat_map(pages, & &1["items"])
           assert length(items) == 14
           refute Enum.any?(items, &Map.has_key?(&1, @unverified))
@@ -387,11 +425,17 @@ defmodule Ampd.ArchiveDigestTest do
       [a | _] = ids
       g = before[Enum.at(ids, 5)].grant
 
-      tamper!("receipts", &(&1["effect_ref"] == a), &Map.update!(&1, "authority_snapshot_after", fn s -> flip_hex(s) end),
+      tamper!(
+        "receipts",
+        &(&1["effect_ref"] == a),
+        &Map.update!(&1, "authority_snapshot_after", fn s -> flip_hex(s) end),
         same_length: true
       )
 
-      tamper!("grant_registry", &(&1["id"] == g["id"]), &Map.update!(&1, "consumptions", fn [c] -> [flip_last(c)] end),
+      tamper!(
+        "grant_registry",
+        &(&1["id"] == g["id"]),
+        &Map.update!(&1, "consumptions", fn [c] -> [flip_last(c)] end),
         same_length: true
       )
 
@@ -405,7 +449,11 @@ defmodule Ampd.ArchiveDigestTest do
       [a | _] = ids
       g = before[Enum.at(ids, 5)].grant
 
-      tamper!("receipts", &(&1["effect_ref"] == a), &Map.update!(&1, "authority_snapshot_after", fn s -> flip_hex(s) end))
+      tamper!(
+        "receipts",
+        &(&1["effect_ref"] == a),
+        &Map.update!(&1, "authority_snapshot_after", fn s -> flip_hex(s) end)
+      )
 
       tamper!("grant_registry", &(&1["id"] == g["id"]), fn r ->
         %{r | "status" => "active", "uses_remaining" => 1, "consumptions" => []}
@@ -424,7 +472,8 @@ defmodule Ampd.ArchiveDigestTest do
 
   defp assert_refused_exactly(ids, before, a, g, b) do
     assert Receipts.for_effect(a) ==
-             {:error, "archive-row-mismatch · receipts #{a} in batch #{b} does not match its retirement digest"}
+             {:error,
+              "archive-row-mismatch · receipts #{a} in batch #{b} does not match its retirement digest"}
 
     assert GrantRegistry.get(g["id"]) ==
              {:error,
@@ -516,13 +565,30 @@ defmodule Ampd.ArchiveDigestTest do
 
   # What the installed build (`9fc4f87`) writes: the same entries, no digest.
   defp strip_digests! do
-    legacy = fn idx -> Map.new(idx, fn {k, v} -> {k, Enum.reject(v, &match?("ard1:" <> _, &1))} end) end
-
-    :ok = AuthorityLog.append("effects", [{:set, "effects", "retired", legacy.(Effects.retired_index())}], nil)
-    :ok = AuthorityLog.append("receipts", [{:set, "receipts", "retired_refs", legacy.(Receipts.retired_refs())}], nil)
+    legacy = fn idx ->
+      Map.new(idx, fn {k, v} -> {k, Enum.reject(v, &match?("ard1:" <> _, &1))} end)
+    end
 
     :ok =
-      AuthorityLog.append("grant_registry", [{:set, "grant_registry", "retired", legacy.(GrantRegistry.retired_index())}], nil)
+      AuthorityLog.append(
+        "effects",
+        [{:set, "effects", "retired", legacy.(Effects.retired_index())}],
+        nil
+      )
+
+    :ok =
+      AuthorityLog.append(
+        "receipts",
+        [{:set, "receipts", "retired_refs", legacy.(Receipts.retired_refs())}],
+        nil
+      )
+
+    :ok =
+      AuthorityLog.append(
+        "grant_registry",
+        [{:set, "grant_registry", "retired", legacy.(GrantRegistry.retired_index())}],
+        nil
+      )
 
     reboot_registries!()
   end
@@ -539,10 +605,15 @@ defmodule Ampd.ArchiveDigestTest do
       check_old = fn ->
         for id <- old do
           e = Effects.get(id)
-          assert e[@unverified] == "archive-row-unverified · effects #{id} in batch #{b} was retired without a content digest"
+
+          assert e[@unverified] ==
+                   "archive-row-unverified · effects #{id} in batch #{b} was retired without a content digest"
+
           assert Map.delete(e, @unverified) == before[id].effect
           assert Receipts.for_effect(id)[@unverified] =~ "archive-row-unverified · receipts #{id}"
-          assert GrantRegistry.get(before[id].grant["id"])[@unverified] =~ "archive-row-unverified · grant_registry"
+
+          assert GrantRegistry.get(before[id].grant["id"])[@unverified] =~
+                   "archive-row-unverified · grant_registry"
         end
 
         assert {:ok, es} = Effects.archived()
@@ -552,7 +623,11 @@ defmodule Ampd.ArchiveDigestTest do
         [p] = page_all(:effects, 200)
         refute Map.has_key?(p, "archive_error")
         assert p["archive_unverified"] == 4
-        assert p["items"] |> Enum.filter(&Map.has_key?(&1, @unverified)) |> Enum.map(& &1["id"]) |> Enum.sort() == old
+
+        assert p["items"]
+               |> Enum.filter(&Map.has_key?(&1, @unverified))
+               |> Enum.map(& &1["id"])
+               |> Enum.sort() == old
       end
 
       check_old.()
@@ -578,7 +653,13 @@ defmodule Ampd.ArchiveDigestTest do
       _ = snapshot(ids)
       pass!(keep_recent: 1)
       strip_digests!()
-      tamper!("receipts", &(&1["effect_ref"] == id), &Map.update!(&1, "authority_snapshot_after", fn s -> flip_hex(s) end))
+
+      tamper!(
+        "receipts",
+        &(&1["effect_ref"] == id),
+        &Map.update!(&1, "authority_snapshot_after", fn s -> flip_hex(s) end)
+      )
+
       reboot_registries!()
       assert Receipts.for_effect(id)[@unverified] =~ "without a content digest"
     end
@@ -622,13 +703,22 @@ defmodule Ampd.ArchiveDigestTest do
       assert shown == ids |> Enum.sort_by(&key/1, :desc) |> Enum.take(length(shown))
 
       # The same request says the same thing; nothing sealed; the world goes on.
-      assert Projection.history_page(:effects, nil, List.last(Enum.at(pages, -2)["items"])["id"], 3)["archive_error"] =~ why
+      assert Projection.history_page(
+               :effects,
+               nil,
+               List.last(Enum.at(pages, -2)["items"])["id"],
+               3
+             )["archive_error"] =~ why
+
       no_seals!()
       assert is_binary(perform!())
     end
 
     test "a row altered in place: archive-row-mismatch", %{ids: ids, m: m, hi: hi, victim: v} do
-      tamper!("effects", &(&1["id"] == v), &Map.update!(&1, "resource", fn r -> String.reverse(r) end),
+      tamper!(
+        "effects",
+        &(&1["id"] == v),
+        &Map.update!(&1, "resource", fn r -> String.reverse(r) end),
         same_length: true
       )
 
@@ -640,7 +730,12 @@ defmodule Ampd.ArchiveDigestTest do
 
       write_frames!(
         Enum.map(recs, fn %{"b" => b, "rows" => rows} = rec ->
-          if b == m, do: %{rec | "rows" => Map.update!(rows, "effects", &Enum.reject(&1, fn r -> r["id"] == v end))}, else: rec
+          if b == m,
+            do: %{
+              rec
+              | "rows" => Map.update!(rows, "effects", &Enum.reject(&1, fn r -> r["id"] == v end))
+            },
+            else: rec
         end)
       )
 
@@ -654,13 +749,50 @@ defmodule Ampd.ArchiveDigestTest do
       write_frames!(
         Enum.map(recs, fn %{"b" => b, "rows" => rows} = rec ->
           if b == m,
-            do: %{rec | "rows" => Map.update!(rows, "effects", fn rs -> rs ++ Enum.filter(rs, &(&1["id"] == v)) end)},
+            do: %{
+              rec
+              | "rows" =>
+                  Map.update!(rows, "effects", fn rs ->
+                    rs ++ Enum.filter(rs, &(&1["id"] == v))
+                  end)
+            },
             else: rec
         end)
       )
 
       reboot_registries!()
-      assert_stops(ids, hi, "archive-row-duplicate · effects #{v} appears more than once in batch #{m}")
+
+      assert_stops(
+        ids,
+        hi,
+        "archive-row-duplicate · effects #{v} appears more than once in batch #{m}"
+      )
+    end
+
+    test "a row retired in another batch, copied in: archive-row-unretired", %{
+      ids: ids,
+      m: m,
+      hi: hi
+    } do
+      recs = frames!()
+      [copied | _] = hd(recs)["rows"]["effects"]
+      assert [_, 1 | _] = Effects.retired(copied["id"])
+
+      write_frames!(
+        Enum.map(recs, fn %{"b" => b, "rows" => rows} = rec ->
+          if b == m,
+            do: %{rec | "rows" => Map.update!(rows, "effects", &(&1 ++ [copied]))},
+            else: rec
+        end)
+      )
+
+      reboot_registries!()
+
+      assert_stops(
+        ids,
+        hi,
+        "archive-row-unretired · effects #{copied["id"]} is in batch #{m} but was not retired there"
+      )
     end
 
     test "a frame that no longer verifies: archive-unreadable", %{ids: ids, m: m, hi: hi} do
@@ -707,11 +839,20 @@ defmodule Ampd.ArchiveDigestTest do
   # Does this abstract code call `{m, f, a}` — remotely, or locally from `m`?
   defp calls?(t, self, {m, f, a} = target) do
     case t do
-      {:call, _, {:remote, _, {:atom, _, ^m}, {:atom, _, ^f}}, args} when length(args) == a -> true
-      {:call, _, {:atom, _, ^f}, args} when self == m and length(args) == a -> true
-      t when is_tuple(t) -> t |> Tuple.to_list() |> calls?(self, target)
-      [h | rest] -> calls?(h, self, target) or calls?(rest, self, target)
-      _ -> false
+      {:call, _, {:remote, _, {:atom, _, ^m}, {:atom, _, ^f}}, args} when length(args) == a ->
+        true
+
+      {:call, _, {:atom, _, ^f}, args} when self == m and length(args) == a ->
+        true
+
+      t when is_tuple(t) ->
+        t |> Tuple.to_list() |> calls?(self, target)
+
+      [h | rest] ->
+        calls?(h, self, target) or calls?(rest, self, target)
+
+      _ ->
+        false
     end
   end
 end

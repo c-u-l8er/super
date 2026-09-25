@@ -99,7 +99,8 @@ defmodule Ampd.AuthorityLog.RowDigest do
   end
 
   def check(store, _field, key, batch, _row, other) do
-    tag = if is_binary(other), do: other |> String.split(":", parts: 2) |> hd(), else: inspect(other)
+    tag =
+      if is_binary(other), do: other |> String.split(":", parts: 2) |> hd(), else: inspect(other)
 
     {:unverified,
      "archive-row-unverified · #{store} #{key} in batch #{batch} carries a digest this build cannot check (#{tag})"}

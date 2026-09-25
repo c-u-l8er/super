@@ -350,14 +350,14 @@ defmodule Ampd.AuthorityLog do
   @doc """
   The rows of batch `n` that `store`'s index retired there, each checked.
 
-  `entries` maps each key the index names in batch `n` to its committed
-  digest (`nil` for none); `expected` is how many rows of `store` the
-  retirement recorded for that batch. A row whose key is not in `entries` was
-  not retired in this batch — part of a retirement refused part-way, whose
-  rows are still working — and is not returned. `{:ok, rows}` in archive
-  order, unverified rows marked, or `{:error, why}` for the first row that
-  does not check, a key held twice, or a batch holding fewer of the retired
-  rows than its retirement recorded.
+  `entries` maps the keys the index names in batch `n` to their committed
+  digests (`nil` for none); `expected` is how many rows of `store` the
+  retirement recorded for that batch. A store's retirement is all or
+  nothing, so a batch its index names holds exactly the rows it retired
+  there. `{:ok, rows}` in archive order, unverified rows marked, or `{:error,
+  why}` for a key held twice, a row that was not retired in this batch, a
+  batch holding fewer rows than its retirement recorded, or the first row
+  that does not match its digest.
   """
   def check_batch(n, store, field, rows, entries, expected) do
     case first_duplicate(Enum.map(rows, & &1[field]), MapSet.new()) do
@@ -365,27 +365,35 @@ defmodule Ampd.AuthorityLog do
         {:error, duplicate(n, store, k)}
 
       nil ->
-        mine = Enum.filter(rows, &Map.has_key?(entries, &1[field]))
+        case Enum.find(rows, &(not Map.has_key?(entries, &1[field]))) do
+          nil when length(rows) != expected ->
+            {:error,
+             "archive-batch-incomplete · batch #{n} holds #{length(rows)} of the #{expected} " <>
+               "#{store} rows its retirement recorded"}
 
-        if length(mine) != expected do
-          {:error,
-           "archive-batch-incomplete · batch #{n} holds #{length(mine)} of the #{expected} " <>
-             "#{store} rows its retirement recorded"}
-        else
-          mine
-          |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-            k = row[field]
+          nil ->
+            check_rows(n, store, field, rows, entries)
 
-            case check_row(n, store, field, k, row, Map.fetch!(entries, k)) do
-              {:ok, r} -> {:cont, {:ok, [r | acc]}}
-              err -> {:halt, err}
-            end
-          end)
-          |> case do
-            {:ok, acc} -> {:ok, Enum.reverse(acc)}
-            err -> err
-          end
+          r ->
+            {:error,
+             "archive-row-unretired · #{store} #{r[field]} is in batch #{n} but was not retired there"}
         end
+    end
+  end
+
+  defp check_rows(n, store, field, rows, entries) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      k = row[field]
+
+      case check_row(n, store, field, k, row, Map.fetch!(entries, k)) do
+        {:ok, r} -> {:cont, {:ok, [r | acc]}}
+        err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      err -> err
     end
   end
 

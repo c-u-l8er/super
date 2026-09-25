@@ -703,8 +703,9 @@ defmodule Ampd.Projection do
 
   **A batch that cannot be read or does not check stops the page, and the
   page says so.** It carries `"archive_error"` (the named reason:
-  `archive-row-mismatch · …`, `archive-batch-incomplete · …`,
-  `archive-unreadable · …`) and `"incomplete" => true`, holds only rows newer
+  `archive-row-mismatch`, `archive-row-unretired`, `archive-row-duplicate`,
+  `archive-batch-incomplete` or `archive-unreadable`, each with what and
+  where) and `"incomplete" => true`, holds only rows newer
   than everything that batch could hold, and offers no cursor: a cursor past
   it would present what follows as the next part of a history with a gap in
   it. Nothing is sealed, re-archived or rewritten; the next request reads
