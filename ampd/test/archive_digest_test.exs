@@ -18,7 +18,9 @@ defmodule Ampd.ArchiveDigestTest do
     * an orphan batch is never read, wherever it sits in the file;
     * rows retired before digests read as unverified, by name, and stay so;
     * a page that meets a batch that does not check stops, says why, keeps
-      only rows it is sure of and offers no cursor; nothing seals.
+      only rows it is sure of and offers no cursor; nothing seals;
+    * an agent's page names only the refusal and the batch, never a row or
+      a count: the batch holds other actors' rows too.
   """
   use ExUnit.Case, async: false
   alias Ampd.{AuthorityCoordinator, AuthorityLog, Authority, Effects, Gateway, GrantRegistry}
@@ -1040,6 +1042,90 @@ defmodule Ampd.ArchiveDigestTest do
       refute got == before[id].receipt
       assert got == forged, "served, and as verified: no refusal and no archive_unverified mark"
       refute Map.has_key?(got, @unverified)
+    end
+  end
+
+  # ------------------------------------------------------------ an agent's page
+
+  describe "an agent's page that meets a batch that does not check" do
+    # Two actors' effects retired into one batch. The session's actor gets a
+    # one-shot grant; another actor's grant is requested for it and approved.
+    setup do
+      mine = performs!(6)
+      theirs = for _ <- 1..6, do: perform_as!("wren")
+      recent = performs!(2)
+      %{"batch" => b, "retired" => 12} = pass!(keep_recent: 2)
+      {:ok, me: Gateway.ctx()["actor"], mine: mine, theirs: theirs, recent: recent, b: b}
+    end
+
+    defp perform_as!(actor) do
+      q =
+        Authority.request_grant(%{
+          "capability" => @cap,
+          "resource" => @resource,
+          "actor" => actor
+        })
+
+      assert {:ok, %{"actor" => ^actor}} = Authority.approve_grant_request(q["id"], "once")
+      r = Gateway.perform(@cap, @resource, %{Gateway.ctx() | "actor" => actor}, req())
+      assert r["allow"], inspect(Map.take(r, ["reason", "refusal"]))
+      r["effect_id"]
+    end
+
+    defp assert_agent_stops(ctx, victim, code) do
+      operator = Projection.history_page(:effects, nil, nil, 200)
+      assert operator["archive_error"] =~ "#{code} · "
+      assert operator["archive_error"] =~ victim or code == "archive-batch-incomplete"
+
+      for {actor, working} <- [{ctx.me, ctx.recent}, {"wren", []}] do
+        p = Projection.history_page(:effects, actor, nil, 200)
+
+        assert p["archive_error"] ==
+                 "#{code} · batch #{ctx.b} (the operator's history names the row)"
+
+        refute p["archive_error"] =~ victim
+        assert p["incomplete"] == true and p["more"] == false and p["next_cursor"] == nil
+        assert Enum.map(p["items"], & &1["id"]) == Enum.reverse(working)
+      end
+
+      no_seals!()
+    end
+
+    test "another actor's row altered: the agent is told the refusal and the batch, never the row",
+         ctx do
+      victim = hd(ctx.theirs)
+
+      tamper!(
+        "effects",
+        &(&1["id"] == victim),
+        &Map.update!(&1, "resource", fn r -> String.reverse(r) end),
+        same_length: true
+      )
+
+      assert_agent_stops(ctx, victim, "archive-row-mismatch")
+    end
+
+    test "another actor's row taken out: no count of anyone else's rows either", ctx do
+      victim = hd(ctx.theirs)
+
+      write_frames!(
+        Enum.map(frames!(), fn %{"b" => b, "rows" => rows} = rec ->
+          if b == ctx.b,
+            do: %{
+              rec
+              | "rows" =>
+                  Map.update!(rows, "effects", &Enum.reject(&1, fn r -> r["id"] == victim end))
+            },
+            else: rec
+        end)
+      )
+
+      reboot_registries!()
+
+      assert Projection.history_page(:effects, nil, nil, 200)["archive_error"] =~
+               "holds 11 of the 12"
+
+      assert_agent_stops(ctx, victim, "archive-batch-incomplete")
     end
   end
 

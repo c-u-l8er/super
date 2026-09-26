@@ -705,7 +705,9 @@ defmodule Ampd.Projection do
   page says so.** It carries `"archive_error"` (the named reason:
   `archive-row-mismatch`, `archive-row-unretired`, `archive-row-duplicate`,
   `archive-batch-incomplete` or `archive-unreadable`, each with what and
-  where) and `"incomplete" => true`, holds only rows newer
+  where on the operator's page; an agent's names only the refusal and the
+  batch, whose rows may be another actor's) and `"incomplete" => true`,
+  holds only rows newer
   than everything that batch could hold, and offers no cursor: a cursor past
   it would present what follows as the next part of a history with a gap in
   it. Nothing is sealed, re-archived or rewritten; the next request reads
@@ -765,10 +767,20 @@ defmodule Ampd.Projection do
         # Only rows newer than anything this batch could hold are certain to
         # be the page's leading rows; below `hi` one of its rows may be missing.
         {:error, why} ->
+          why = if actor == nil, do: why, else: agent_reason(why, n)
           {acc |> Enum.filter(&(elem(order_key(&1), 0) > hi)) |> Enum.take(want), why}
       end
     end
   end
+
+  # An agent's page names the refusal and the batch, not the row. A batch
+  # holds every actor's retired rows, and the reason can name another actor's
+  # (`archive-row-mismatch · effects ef_0007 in batch 1 …`) or count them
+  # (`archive-batch-incomplete · batch 1 holds 11 of the 12 …`); an agent sees
+  # only its own. The operator's page (`actor == nil`) keeps the whole reason,
+  # as a refusal keeps `operator_detail` apart from its `public_message`.
+  defp agent_reason(why, n),
+    do: "#{why |> String.split(" · ", parts: 2) |> hd()} · batch #{n} (the operator's history names the row)"
 
   # Checked against the store's retirement index before they are returned.
   defp archived_batch(:effects, n), do: Effects.archived_batch(n)
