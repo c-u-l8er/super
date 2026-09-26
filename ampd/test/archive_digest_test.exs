@@ -805,6 +805,61 @@ defmodule Ampd.ArchiveDigestTest do
     end
   end
 
+  describe "a page whose batches overlap" do
+    test "keeps only rows newer than the batch that failed, never one from below the gap" do
+      [_, b | _] = ids = performs!(12)
+
+      # b's receipt goes missing, so b stays working (MISSING) while its
+      # neighbours retire; once it is back, b retires in a LATER batch, with
+      # newer effects: batch 2 = {b, 9, 10} reaches back over batch 1 = {1, 3..8}.
+      full = :sys.get_state(Receipts).s
+      [hidden] = Enum.filter(full["log"], &(&1["effect_ref"] == b))
+
+      :ok =
+        AuthorityCoordinator.transact(fn ->
+          Receipts.load_state(%{
+            full
+            | "log" => Enum.reject(full["log"], &(&1["effect_ref"] == b))
+          })
+        end)
+
+      assert %{"batch" => 1, "retired" => 7} = pass!(keep_recent: 4)
+      now = :sys.get_state(Receipts).s
+
+      :ok =
+        AuthorityCoordinator.transact(fn ->
+          Receipts.load_state(%{now | "log" => now["log"] ++ [hidden]})
+        end)
+
+      assert %{"batch" => 2, "retired" => 3} = pass!(keep_recent: 2)
+      assert %{1 => [1, 8 | _], 2 => [2, 10 | _]} = Effects.retired_batches()
+
+      # A row of batch 1 altered in place; batch 1 now fails its check.
+      five = Enum.at(ids, 4)
+
+      tamper!(
+        "effects",
+        &(&1["id"] == five),
+        &Map.update!(&1, "resource", fn r -> String.reverse(r) end), same_length: true)
+
+      p1 = Projection.history_page(:effects, nil, nil, 3)
+
+      assert Enum.map(p1["items"], & &1["id"]) == [
+               Enum.at(ids, 11),
+               Enum.at(ids, 10),
+               Enum.at(ids, 9)
+             ]
+
+      p2 = Projection.history_page(:effects, nil, p1["next_cursor"], 3)
+      assert p2["archive_error"] =~ "archive-row-mismatch · effects #{five} in batch 1"
+      assert p2["incomplete"] == true and p2["next_cursor"] == nil
+
+      # 9 is newer than anything batch 1 could hold; b is not, and showing it
+      # after 9 would present 3..8 as absent rather than unreadable.
+      assert Enum.map(p2["items"], & &1["id"]) == [Enum.at(ids, 8)]
+    end
+  end
+
   # ------------------------------------------------------------ no unchecked path
 
   describe "the readers" do
