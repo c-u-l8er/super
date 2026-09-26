@@ -1,4 +1,5 @@
 import {REVIEW_FILE_BYTES,bytesOf} from './review-limits.js';
+import {applyFilePatch,validatePatchRecord} from './file-patch.js';
 // A bot proposal survives a restart only as a RECOVERY RECORD: the target path, the exact proposed
 // content, the shared draft and original it was made against, the `selected-file-basis@1` record
 // the host produced at share time, and the plan link. A proposal recorded without a basis is kept
@@ -18,15 +19,23 @@ export function validateRecovery(r){
   if(out.path.startsWith('/')||out.path.split('/').some(s=>!s||s==='.'||s==='..'))throw Error('Invalid recovery path.');
   if(out.source.path!==out.path)throw Error('Recovery basis names a different file.');
   if(r.task!==null&&r.task!==undefined){const t=r.task;if(typeof t.id!=='string'||!Number.isSafeInteger(t.revision)||t.revision<1||typeof t.world!=='string')throw Error('Invalid recovery plan link.');out.task={id:text(t.id,100,'plan id'),revision:t.revision,world:text(t.world,500,'plan world')};}
+  /* T22b: a proposal that arrived as a patch keeps the patch exactly as sent. The record is then
+     self-verifying: the patch applied to the recorded draft must give the recorded content, or the
+     record is refused whole. A record without a patch keeps T22a's shape exactly. */
+  if(r.patch!==null&&r.patch!==undefined){
+    out.patch=validatePatchRecord(r.patch);
+    let derived;try{derived=applyFilePatch(out.draft,out.patch.edits);}catch{throw Error('Recovery patch does not apply to its recorded draft.');}
+    if(out.content===null||derived!==out.content)throw Error('Recovery patch does not reproduce its recorded content.');
+  }
   return out;
 }
 /* From a live Editor reference and the bot's proposal to the record that is saved beside the card.
    Returns null when the share carried no basis: such a proposal is not recoverable, and saying so is
    the point. */
-export function recoveryRecord(reference,proposal){
+export function recoveryRecord(reference,proposal,patch=null){
   if(!reference||reference.kind!=='editor'||typeof reference.draft!=='string'||!reference.source)return null;
   if(!proposal||proposal.path!==reference.key)return null;
-  try{return validateRecovery({schema:RECOVERY_SCHEMA,path:reference.key,content:proposal.content,draft:reference.draft,original:reference.original??null,source:reference.source,task:reference.task??null});}
+  try{return validateRecovery({schema:RECOVERY_SCHEMA,path:reference.key,content:proposal.content,draft:reference.draft,original:reference.original??null,source:reference.source,task:reference.task??null,...(patch?{patch}:{})});}
   catch{return null;}
 }
 /* Why a saved proposal cannot be applied — the explanation a card shows instead of a Review button. */

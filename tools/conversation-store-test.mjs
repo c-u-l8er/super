@@ -27,3 +27,15 @@ test('a proposal whose recovery record does not validate is refused whole, never
   assert.throws(()=>s.save('claude',null,d),/Invalid recovery/);
   assert.equal(disk.getItem(STORAGE_KEY),null,'nothing was written');
 });
+const patched=()=>{const r=recoverable();const edits=[{old_text:'old',new_text:'new'}];return {text:'Proposed patch\na.js · 1 edit · 3 bytes after the patch',recovery:recoveryRecord({kind:'editor',key:'a.js',original:'old',draft:'old',source:r.recovery.source,task:null},{path:'a.js',content:'new'},{schema:'file-patch@1',edits})};};
+test('T22b · a patch proposal is saved with its patch and comes back exactly, self-verifying',()=>{
+  const disk=storage(),s=createConversationStore(disk),d=data();d.entries[0].proposals=[recoverable(),patched()];
+  const id=s.save('claude',null,d);const back=createConversationStore(disk).get('claude',id).entries[0].proposals;
+  assert.deepEqual(back[0],recoverable(),'a full-content record is unchanged beside it');assert.ok(!('patch' in back[0].recovery));
+  assert.deepEqual(back[1],patched());assert.deepEqual(back[1].recovery.patch,{schema:'file-patch@1',edits:[{old_text:'old',new_text:'new'}]});
+});
+test('T22b · a patch record whose content is not the patch applied to its draft is refused whole',()=>{
+  const disk=storage(),s=createConversationStore(disk),d=data(),p=patched();p.recovery={...p.recovery,content:'tampered'};d.entries[0].proposals=[p];
+  assert.throws(()=>s.save('claude',null,d),/does not reproduce its recorded content/);
+  assert.equal(disk.getItem(STORAGE_KEY),null,'nothing was written');
+});

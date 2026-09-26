@@ -10,6 +10,7 @@ import {initBotWork} from './bot-work-view.js';
 import { heldProjection, registeredBot, registrationUnavailable, runtimeWorld, profileOf, botFields, waitForBot } from './runtime-bots.js';
 import { referenceText, renderMessage, referenceWorld, refreshReferenceText } from './references.js'
 import { recoveryRecord, recoveredReference, unavailableReason } from './proposal-recovery.js';
+import { reviewableActions } from './file-patch.js';
 /* Conversation state is separate from runtime projection state. Model output
  * supplies proposals only; an explicit Apply click uses existing human controls. */
 import { node, selectedWorkspace, bindDisclosure, navigate } from './app-shell.js';
@@ -337,7 +338,11 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
       liveReply?.remove();liveReply=null;
       const entry=line('assistant',reply.text||'Review the proposed step below.');
       messages.push({role:'assistant',content:[reply.text,reply.actions.length?`Proposed only, not executed: ${JSON.stringify(reply.actions)}`:''].filter(Boolean).join('\n')});
-      const fileEdits=reply.actions.filter(a=>a.name==='propose_file_edit');
+      /* T22b: a patch is applied HERE, to the exact snapshot this conversation shared, and from then on it
+         is a file proposal carrying the derived content: review, combined review, Save's stale checks and
+         recovery run unchanged. The history pushed above keeps the patch as sent, never the expanded file. */
+      const shown=reviewableActions(reply.actions,path=>sentReferences.filter(r=>r.key===path).at(-1));
+      const fileEdits=shown.filter(a=>a.name==='propose_file_edit');
       if(fileEdits.length>1){
         const items=fileEdits.map(a=>({proposal:a.args,reference:sentReferences.filter(r=>r.key===a.args.path).at(-1)}));
         const card=node('div',undefined,'bot-proposal bot-proposal-set'),button=node('button','Review files together','primary'),result=node('p','Review all replacements before staging. Nothing has changed.','bot-status');button.type='button';button.dataset.reviewFileSet='';
@@ -345,13 +350,17 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
         proposals.push({name:'review_file_set',button,state:'proposed',reference:items.every(i=>i.reference)});
         button.onclick=()=>{if(button.disabled)return;const detail={items,error:null};if(!document.dispatchEvent(new CustomEvent('review-file-proposal-set',{detail,cancelable:true})))result.textContent=detail.error||'The combined review could not open.';else result.textContent='Combined review opened. Staging leaves all files unsaved.';};
       }
-      for(const action of reply.actions){
+      for(const action of shown){
+        if(action.name==='propose_file_patch'){
+          const n=Array.isArray(action.args.edits)?action.args.edits.length:0,card=node('div',undefined,'bot-proposal');
+          card.append(node('h2','Proposed patch'),node('p',`${action.args.path} · ${n} edit${n===1?'':'s'}`,'proposal-field'),node('p','Cannot be reviewed: '+action.refused,'bot-status'));entry.append(card);continue;
+        }
         if(action.name==='propose_file_edit'){
           const reference=sentReferences.filter(r=>r.key===action.args.path).at(-1),proposal=node('div',undefined,'bot-proposal'),button=node('button','Review in Editor','primary'),result=node('p',reference?'Proposed · no file changed':'Share this file from Editor and request a fresh proposal to review it.','bot-status');button.type='button';
-          proposal.append(node('h2','Proposed file edit'),node('p',action.args.path+(action.args.content===null?' · Delete file — use combined review':' · '+new TextEncoder().encode(action.args.content).length+' bytes'),'proposal-field'),result,button);const a={...action,button,state:'proposed',reference};proposals.push(a);
+          proposal.append(node('h2',action.patch?'Proposed patch':'Proposed file edit'),node('p',action.args.path+(action.args.content===null?' · Delete file — use combined review':(action.patch?` · ${action.patch.edits.length} edit${action.patch.edits.length===1?'':'s'} · `:' · ')+new TextEncoder().encode(action.args.content).length+(action.patch?' bytes after the patch':' bytes')),'proposal-field'),result,button);const a={...action,button,state:'proposed',reference};proposals.push(a);
           /* T22a: a proposal made against a shared basis is saved WITH that basis and its content, so a
              restart keeps it reviewable. Without a basis nothing is recorded, and the card says so later. */
-          {const record=recoveryRecord(reference,action.args);if(record)proposal.dataset.recovery=JSON.stringify(record);}
+          {const record=recoveryRecord(reference,action.args,action.patch??null);if(record)proposal.dataset.recovery=JSON.stringify(record);}
           button.onclick=()=>{if(button.disabled)return;const detail={reference,proposal:action.args,error:null,onIdentity:record=>{proposal.querySelector('.proposal-source-record')?.remove();const identity=node('details',undefined,'proposal-source-record');identity.append(node('summary','Recorded source and result'),node('pre',JSON.stringify(record,null,2)));proposal.append(identity);saveCurrent();}};const event=new CustomEvent('review-file-proposal',{detail,cancelable:true});if(!document.dispatchEvent(event)){result.textContent=detail.error||'The file review could not open.';return;}result.textContent='Review opened in Editor. The file stays unchanged until you choose a draft and Save.';};entry.append(proposal);continue;
         }
 
@@ -463,7 +472,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     if(reply){
       const user=turn.sent.userMessage,assistantText=reply.text||'Review the proposed step below.';
       data.messages.push(user,{role:'assistant',content:[reply.text,reply.actions?.length?`Proposed only, not executed: ${JSON.stringify(reply.actions)}`:''].filter(Boolean).join('\n')});
-      const proposals=(reply.actions??[]).map(a=>a.name==='propose_file_edit'?`${a.name}: ${a.args?.path??'unknown path'} · ${a.args?.content===null?'delete':new TextEncoder().encode(a.args?.content??'').length+' bytes'}`:`${a.name}: ${JSON.stringify(a.args??{})}`);
+      const proposals=(reply.actions??[]).map(a=>a.name==='propose_file_edit'?`${a.name}: ${a.args?.path??'unknown path'} · ${a.args?.content===null?'delete':new TextEncoder().encode(a.args?.content??'').length+' bytes'}`:a.name==='propose_file_patch'?`${a.name}: ${a.args?.path??'unknown path'} · ${Array.isArray(a.args?.edits)?a.args.edits.length:0} edits`:`${a.name}: ${JSON.stringify(a.args??{})}`);
       data.entries.push({role:'assistant',label:sentLabel,text:assistantText,referenceWorld:null,proposals});
       data.draft='';data.files=[];
     }else{

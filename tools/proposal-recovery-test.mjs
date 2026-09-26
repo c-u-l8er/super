@@ -51,3 +51,19 @@ test('a recorded plan link is rebound across a restart only when incarnation and
   assert.throws(()=>rebindTaskWorld('not json',current),/unreadable/);
   assert.throws(()=>rebindTaskWorld(JSON.stringify(['inc-a']),current),/unreadable/);
 });
+test('T22b · a patch proposal becomes a self-verifying record; a full-content record keeps its exact shape',()=>{
+  const edits=[{old_text:'before',new_text:'after'}];
+  const r=recoveryRecord(reference,proposal,{schema:'file-patch@1',edits});
+  assert.deepEqual(r.patch,{schema:'file-patch@1',edits});assert.equal(r.content,'after');assert.deepEqual(validateRecovery(r),r);
+  const plain=recoveryRecord(reference,proposal);assert.ok(!('patch' in plain),'no patch key without a patch');
+  assert.deepEqual(Object.keys(plain),['schema','path','content','draft','original','source','task']);
+  // a record whose content the patch does not produce, or whose patch does not apply, is refused whole
+  assert.throws(()=>validateRecovery({...r,content:'other'}),/does not reproduce its recorded content/);
+  assert.throws(()=>validateRecovery({...r,patch:{schema:'file-patch@1',edits:[{old_text:'absent',new_text:'x'}]}}),/does not apply to its recorded draft/);
+  assert.throws(()=>validateRecovery({...r,content:null}),/does not reproduce/);
+  assert.throws(()=>validateRecovery({...r,patch:{schema:'file-patch@1',edits:[]}}),/no edits/);
+  // recoveryRecord never manufactures a record from a patch that does not match the proposal
+  assert.equal(recoveryRecord(reference,{...proposal,content:'x'},{schema:'file-patch@1',edits}),null);
+  // the recovered reference reviews the derived content, exactly as a full-content one does
+  const ref=recoveredReference(r);assert.equal(ref.draft,'before');assert.equal(ref.key,'a/b.js');
+});
