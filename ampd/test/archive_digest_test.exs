@@ -840,7 +840,9 @@ defmodule Ampd.ArchiveDigestTest do
       tamper!(
         "effects",
         &(&1["id"] == five),
-        &Map.update!(&1, "resource", fn r -> String.reverse(r) end), same_length: true)
+        &Map.update!(&1, "resource", fn r -> String.reverse(r) end),
+        same_length: true
+      )
 
       p1 = Projection.history_page(:effects, nil, nil, 3)
 
@@ -857,6 +859,187 @@ defmodule Ampd.ArchiveDigestTest do
       # 9 is newer than anything batch 1 could hold; b is not, and showing it
       # after 9 would present 3..8 as absent rather than unreadable.
       assert Enum.map(p2["items"], & &1["id"]) == [Enum.at(ids, 8)]
+    end
+  end
+
+  # ------------------------------------------------------------ the log's side
+  #
+  # The acceptance controls the benchmarking lane relayed from GPT's review
+  # (2026-09-25): A, the row alone changed, is the tamper tests above; B, the
+  # committed digest alone changed; C, both changed consistently. Nothing in the
+  # world directory is anchored outside it: the log's frames carry CRC-32s and
+  # no hash chain, and the checkpoint's sha256 is stored inside the checkpoint.
+  # So what is proven is that the ARCHIVE cannot diverge from the LOG unseen,
+  # not historical authenticity, and C says so in a form that runs.
+
+  @cp_header "AMPD-AUTHORITY-CHECKPOINT/1\n"
+
+  # Rewrite the active log, every record re-framed with a valid CRC-32; returns
+  # how many records `fun` changed.
+  defp rewrite_log!(fun) do
+    {:ok, recs} = AuthorityLog.records(File.read!(AuthorityLog.path()))
+    out = Enum.map(recs, fun)
+
+    File.write!(
+      AuthorityLog.path(),
+      IO.iodata_to_binary([AuthorityLog.header() | Enum.map(out, &AuthorityLog.frame/1)])
+    )
+
+    Enum.count(Enum.zip(recs, out), fn {a, b} -> a != b end)
+  end
+
+  # `key`'s entry in `store`'s index `field`, through `fun`, wherever a record writes it.
+  defp alter_entry(rec, store, field, key, fun) do
+    ops =
+      Enum.map(rec["ops"], fn
+        {k, ^store, ^field, idx} when k in [:set, :merge] and is_map_key(idx, key) ->
+          {k, store, field, Map.update!(idx, key, fun)}
+
+        op ->
+          op
+      end)
+
+    %{rec | "ops" => ops}
+  end
+
+  # The same checkpoint with one index entry changed, and its own sha256 and CRC recomputed.
+  defp tamper_checkpoint!(store, field, key, fun) do
+    <<@cp_header, len::32, _crc::32, payload::binary-size(len)>> =
+      File.read!(AuthorityLog.checkpoint_path())
+
+    %{"images" => bin} = cp = :erlang.binary_to_term(payload)
+    images = :erlang.binary_to_term(bin)
+    {:v, idx} = images[store][field]
+    assert Map.has_key?(idx, key)
+    bin = :erlang.term_to_binary(put_in(images, [store, field], {:v, Map.update!(idx, key, fun)}))
+
+    cp = %{
+      cp
+      | "images" => bin,
+        "sha256" => Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
+    }
+
+    File.write!(
+      AuthorityLog.checkpoint_path(),
+      IO.iodata_to_binary([@cp_header | AuthorityLog.frame(cp)])
+    )
+  end
+
+  # Another digest of the same version: one base64url character changed.
+  defp other_digest("ard1:" <> rest) do
+    {head, <<c>>} = String.split_at(rest, -1)
+    "ard1:" <> head <> <<if(c == ?A, do: ?B, else: ?A)>>
+  end
+
+  describe "the log's side of the binding" do
+    test "B · only the committed digest changed, in the log, re-framed with valid CRCs: refused" do
+      [id | _] = ids = performs!(4)
+      before = snapshot(ids)
+      %{"batch" => b} = pass!(keep_recent: 1)
+      archive = File.read!(AuthorityLog.archive_path())
+      AuthorityLog.close()
+
+      assert rewrite_log!(
+               &alter_entry(&1, "effects", "retired", id, fn [st, n, d] ->
+                 [st, n, other_digest(d)]
+               end)
+             ) == 1
+
+      reboot_registries!()
+
+      assert File.read!(AuthorityLog.archive_path()) == archive,
+             "the archive is exactly what was written"
+
+      # The refusal names the disagreement, not a side: here the archive is the one telling the truth.
+      assert Effects.get(id) ==
+               {:error,
+                "archive-row-mismatch · effects #{id} in batch #{b} does not match its retirement digest"}
+
+      assert Projection.history_page(:effects, nil, nil, 200)["archive_error"] =~
+               "archive-row-mismatch · effects #{id}"
+
+      for other <- tl(ids), do: assert(Effects.get(other) == before[other].effect)
+      no_seals!()
+    end
+
+    test "B · only the committed digest changed, in the checkpoint, its own sha256 recomputed: refused" do
+      prev = Application.get_env(:ampd, :authority_log_checkpoint_every)
+      Application.put_env(:ampd, :authority_log_checkpoint_every, 7)
+
+      try do
+        [id | _] = ids = performs!(4)
+        before = snapshot(ids)
+        %{"batch" => b} = pass!(keep_recent: 1)
+        t = AuthorityLog.status()["tseq"]
+
+        # Writes until a checkpoint covers the retirement and has finished.
+        Enum.reduce_while(1..60, nil, fn _, _ ->
+          st = AuthorityLog.status()
+
+          if st["checkpoint_t"] >= t and st["checkpoint_running"] == nil,
+            do: {:halt, :ok},
+            else: perform!() && {:cont, nil}
+        end)
+
+        assert AuthorityLog.status()["checkpoint_t"] >= t
+        AuthorityLog.close()
+
+        # The index is now in the checkpoint alone: no record of the active log writes it.
+        {:ok, recs} = AuthorityLog.records(File.read!(AuthorityLog.path()))
+
+        refute Enum.any?(recs, fn r ->
+                 Enum.any?(r["ops"], &match?({_, "receipts", "retired_refs", _}, &1))
+               end)
+
+        tamper_checkpoint!("receipts", "retired_refs", id, fn [rid, n, d] ->
+          [rid, n, other_digest(d)]
+        end)
+
+        reboot_registries!()
+
+        assert AuthorityLog.status()["damaged"] == nil,
+               "the checkpoint verifies: its own sha256 was recomputed"
+
+        assert Receipts.for_effect(id) ==
+                 {:error,
+                  "archive-row-mismatch · receipts #{id} in batch #{b} does not match its retirement digest"}
+
+        assert Effects.get(id) == before[id].effect
+      after
+        if prev,
+          do: Application.put_env(:ampd, :authority_log_checkpoint_every, prev),
+          else: Application.delete_env(:ampd, :authority_log_checkpoint_every)
+      end
+    end
+
+    # DECLARED OPEN. This passes because nothing outside the world directory
+    # anchors the authority log: a writer who changes an archived row AND the
+    # digest its retirement committed, consistently, is believed. It asserts the
+    # limit so that the limit runs. The day the log head is anchored (a key held
+    # outside the world directory, or the head witnessed somewhere append-only),
+    # this must FAIL, and the claim in `superlane/archive-digest-1/README.md` §6
+    # changes with it; it is not to be "fixed" by editing the expectation.
+    @tag :declared_open
+    test "C · DECLARED OPEN: a row and its digest changed together are served as VERIFIED" do
+      [id | _] = ids = performs!(4)
+      before = snapshot(ids)
+      %{"batch" => b} = pass!(keep_recent: 1)
+      forged = Map.update!(before[id].receipt, "authority_snapshot_after", &flip_hex/1)
+
+      tamper!("receipts", &(&1["effect_ref"] == id), fn _ -> forged end, same_length: true)
+      AuthorityLog.close()
+
+      assert rewrite_log!(
+               &alter_entry(&1, "receipts", "retired_refs", id, fn [rid, ^b, _] ->
+                 [rid, b, RowDigest.of("receipts", "effect_ref", id, b, forged)]
+               end)
+             ) == 1
+
+      reboot_registries!()
+      got = Receipts.for_effect(id)
+      refute got == before[id].receipt
+      assert got == forged, "served, and as verified: no refusal and no archive_unverified mark"
+      refute Map.has_key?(got, @unverified)
     end
   end
 
