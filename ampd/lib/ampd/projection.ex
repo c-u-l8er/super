@@ -192,11 +192,12 @@ defmodule Ampd.Projection do
         Ampd.Loci.development_tasks_archive()
         |> archived_cards(@archived_plan_omits, "read_development_task")
         |> Map.merge(Ampd.Loci.development_tasks_live()),
-      "development_attempts" =>
-        Ampd.Loci.development_attempts_archive()
-        |> archived_cards(@archived_attempt_omits, "read_development_attempt")
-        |> Map.merge(Ampd.Loci.development_attempts_live())
-        |> attempt_views(),
+      # **T23 · live attempts here, archived ones through `with_attempt_window/1`.**
+      # T17 carded every archived attempt, and the cards still grew with every
+      # attempt ever finished: 32 of them were 115,646 bytes when the default
+      # world's frame reached 262,905 of 262,144 and stopped publishing. The
+      # window below is the same rule again, one step further.
+      "development_attempts" => attempt_views(Ampd.Loci.development_attempts_live()),
       "bots" => Ampd.Loci.bots(),
       "workspaces" => Ampd.Loci.workspaces(),
       "goals" => Ampd.Loci.goals(),
@@ -275,7 +276,239 @@ defmodule Ampd.Projection do
       "effects_history" =>
         window(Enum.filter(Effects.all(), &Effects.terminal?/1), Effects.retired_count())
     }
+    |> with_attempt_window()
     |> with_capacity()
+  end
+
+  # ------------------------------------------------ T23 · the attempt window
+  #
+  # **What T17 left proportional to history.** T17 made an archived attempt a
+  # card, a third of its record, and kept `acceptance` and `test_runs` on it on
+  # purpose (see `@archived_attempt_omits`). But every card still rode every
+  # frame, so the archive's share of the frame grew with every attempt ever
+  # finished. On 2026-09-27 the default world's operator frame reached 262,905
+  # bytes of 262,144 (32 archived cards were 115,646 of them) and the runtime
+  # stopped publishing: every cockpit on that world, the person's installed
+  # app included, froze on its last frame.
+  #
+  # So archived attempts now ride in a WINDOW, by the rule this module already
+  # states for receipts: current actionable truth in full, history as a window
+  # that says how much it is a window onto.
+  #
+  #   * **Current truth is untouched.** Live attempts are published exactly as
+  #     before, whatever their status or their plan's.
+  #   * **Whole plans, newest finished first, as a prefix.** A plan's reviews
+  #     are read together, so the window never splits one. It stops at the first
+  #     plan that does not fit rather than skipping to a smaller older one, so it
+  #     is always "the N most recently finished", never a gappy selection.
+  #   * **The budget yields to current truth: `min(32 KiB, target - base)`.**
+  #     A fixed budget alone is a delay, not a bound. The frame carries a live
+  #     attempt at ~1.09x its directory bytes, so a live directory at its own
+  #     128 KiB budget is ~143 KB of frame. Measured on the default world, that
+  #     is ~233 KB with no archived attempt on the frame at all, and a fixed
+  #     32 KiB window would take it over the cap. With this budget, history can
+  #     no longer be what takes a frame over. Current truth still can, and that
+  #     is what `capacity` announces.
+  #   * **A withheld plan says so, on its card.** A plan with no attempts on the
+  #     frame and a plan whose attempts were left out are different facts. The
+  #     second is the one a renderer must never state as "never reviewed".
+  #
+  # Archived plan CARDS are not windowed here (ruled 2026-09-27: the attempt
+  # projection, not the plans). At ~750 bytes each they are now the largest
+  # term still proportional to history. Their growth first shrinks this window,
+  # then the margin.
+  @attempt_window_bytes 32 * 1024
+  @frame_margin_bytes 32 * 1024
+  # See `with_attempt_window/5`: the window block's own digits, written after
+  # the base is measured, are at most 20 bytes.
+  @window_digits_slack 64
+
+  @doc "The most archived-attempt card bytes a frame carries."
+  def attempt_window_bytes, do: @attempt_window_bytes
+
+  @doc """
+  What the window aims the whole projection at: the frame cap less a margin.
+
+  The margin holds the three things the base measure below does not count: the
+  `capacity` block, the snapshot envelope around the projection, and this
+  window's own digits (see `window_projection/6`). Together they are under 1 KB.
+  The rest of it is headroom that a person sees on the capacity bar before
+  anything refuses.
+  """
+  def frame_target, do: Ampd.Frame.max_bytes() - @frame_margin_bytes
+
+  @doc false
+  def with_attempt_window(projection),
+    do:
+      with_attempt_window(
+        projection,
+        Ampd.Loci.development_attempts_archive(),
+        Ampd.Loci.development_tasks_archive(),
+        frame_target(),
+        @attempt_window_bytes
+      )
+
+  @doc """
+  The window, over explicit inputs: a projection whose `development_attempts`
+  holds the live attempts only, the attempt archive, the plan archive (full
+  records, because the order needs each plan's history), the target and the
+  most the window may carry.
+
+  **The base is measured, not estimated.** `base` is the encoded projection
+  with every windowed plan WITHHELD. Carrying a plan adds exactly its cards'
+  entries, and swaps the plan's marker for a smaller one. The one thing that
+  grows otherwise is this block's own numbers, written after the measure: at
+  most 20 bytes of digits (`base_bytes` up to 7, `budget_bytes` and
+  `carried.bytes` up to 5, three counts up to 3). So the budget is taken 64
+  bytes short of the target, and `final <= base + budget + 20 < target`. The
+  property test holds this over random worlds rather than trusting the
+  arithmetic.
+
+  An archived attempt whose plan is NOT an archived card on this projection is
+  carried as T17 carried it. It has no plan card to be withheld onto, and a
+  record withheld without a marker is exactly the `undefined` this module keeps
+  refusing. The archive predicate (`DevelopmentAttempt.archive_finished/3`)
+  makes such a record impossible, so this is the safe answer to a state that
+  should not occur. It is counted as `unwindowed`.
+  """
+  def with_attempt_window(projection, archive, plans, target, limit) do
+    cards =
+      archive
+      |> archived_cards(@archived_attempt_omits, "read_development_attempt")
+      |> attempt_views()
+
+    plan_cards = projection["development_tasks"] || %{}
+
+    {windowed, loose} =
+      Enum.split_with(cards, fn {_id, card} -> archived_card?(plan_cards[card["task_ref"]]) end)
+
+    groups =
+      windowed
+      |> Enum.group_by(fn {_id, card} -> card["task_ref"] end)
+      |> Enum.map(fn {plan, members} -> window_group(plan, members, plans[plan]) end)
+      |> Enum.sort_by(&{&1.finished, &1.order}, :desc)
+
+    loose = Map.new(loose)
+    base_bytes = encoded_bytes(window_projection(projection, loose, groups, [], target, limit))
+    budget = max(0, min(limit, target - base_bytes - @window_digits_slack))
+    carried = carried_prefix(groups, budget)
+
+    projection
+    |> window_projection(loose, groups, carried, target, limit)
+    |> put_in(["development_attempts_window", "base_bytes"], base_bytes)
+    |> put_in(["development_attempts_window", "budget_bytes"], budget)
+  end
+
+  defp archived_card?(%{"archived" => %{"schema" => "archived-record-card@1"}}), do: true
+  defp archived_card?(_), do: false
+
+  defp window_group(plan, members, record) do
+    %{
+      plan: plan,
+      finished: finished_at(record),
+      order: numeric_tail(plan),
+      cards: Map.new(members),
+      bytes: members |> Enum.map(&entry_bytes/1) |> Enum.sum(),
+      runs: members |> Enum.map(&run_count/1) |> Enum.sum()
+    }
+  end
+
+  # When the plan became terminal: its last transition. For a completed plan
+  # this equals `completion.at`; a cancelled plan has no `completion`, and its
+  # last history entry is the cancellation. A plan with no readable time sorts
+  # after every plan with one.
+  #
+  # A `case` in a named function rather than `with ... else`: the ordered-closure
+  # census cannot follow the anonymous dispatch `else` compiles to, and this
+  # runs inside the total order.
+  defp finished_at(%{"history" => [_ | _] = history}), do: unix_us(List.last(history)["at"])
+  defp finished_at(_), do: -1
+
+  defp unix_us(at) when is_binary(at) do
+    case DateTime.from_iso8601(at) do
+      {:ok, dt, _} -> DateTime.to_unix(dt, :microsecond)
+      _ -> -1
+    end
+  end
+
+  defp unix_us(_), do: -1
+
+  # One member of a JSON object: `"id":card` and its separator.
+  defp entry_bytes({id, card}),
+    do: byte_size(JSON.encode!(id)) + byte_size(JSON.encode!(card)) + 2
+
+  defp run_count({_id, card}), do: map_size(card["test_runs"] || %{})
+
+  # The newest plans whose cards fit, stopping at the first that does not.
+  defp carried_prefix(groups, budget) do
+    groups
+    |> Enum.reduce_while({0, []}, fn g, {used, acc} ->
+      if used + g.bytes <= budget,
+        do: {:cont, {used + g.bytes, [g.plan | acc]}},
+        else: {:halt, {used, acc}}
+    end)
+    |> elem(1)
+  end
+
+  defp window_projection(projection, loose, groups, carried, target, limit) do
+    {taken, left} = Enum.split_with(groups, &(&1.plan in carried))
+
+    attempts =
+      taken
+      |> Enum.map(& &1.cards)
+      |> Enum.reduce(loose, &Map.merge(&2, &1))
+      # Archive under live, the direction `Ampd.Loci` merges and T17 kept.
+      |> Map.merge(projection["development_attempts"] || %{})
+
+    tasks =
+      Enum.reduce(groups, projection["development_tasks"], fn g, tasks ->
+        update_in(
+          tasks,
+          [g.plan, "archived"],
+          &Map.put(&1, "attempts", attempts_marker(g, g in taken))
+        )
+      end)
+
+    projection
+    |> Map.put("development_attempts", attempts)
+    |> Map.put("development_tasks", tasks)
+    |> Map.put("development_attempts_window", %{
+      "schema" => "archived-attempt-window@1",
+      "max_bytes" => limit,
+      "target_bytes" => target,
+      "base_bytes" => 0,
+      "budget_bytes" => 0,
+      "carried" => %{
+        "plans" => length(taken),
+        "attempts" => Enum.sum(Enum.map(taken, &map_size(&1.cards))) + map_size(loose),
+        "unwindowed" => map_size(loose),
+        "runs" => Enum.sum(Enum.map(taken, & &1.runs)),
+        "bytes" => Enum.sum(Enum.map(taken, & &1.bytes))
+      },
+      "withheld" => %{
+        "plans" => length(left),
+        "attempts" => Enum.sum(Enum.map(left, &map_size(&1.cards))),
+        "runs" => Enum.sum(Enum.map(left, & &1.runs))
+      },
+      "read_with" => "read_development_attempt"
+    })
+  end
+
+  defp attempts_marker(g, true), do: %{"carried" => true, "count" => map_size(g.cards)}
+
+  defp attempts_marker(g, false),
+    do: %{
+      "carried" => false,
+      "count" => map_size(g.cards),
+      "refs" => g.cards |> Map.keys() |> Enum.sort_by(&numeric_tail/1),
+      "runs" => g.runs
+    }
+
+  defp encoded_bytes(map) do
+    case Ampd.Frame.encode(map) do
+      {:ok, bytes} -> byte_size(bytes)
+      {:error, _, detail} -> detail["bytes"]
+    end
   end
 
   @doc """

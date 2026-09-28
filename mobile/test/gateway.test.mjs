@@ -75,3 +75,5 @@ test('paired cookie survives gateway restart and logout stays revoked',async t=>
  const second=await setup(t,{sessionFile});assert.equal((await second.request('/api/snapshot',{cookie})).status,200);assert.equal((await second.request('/api/logout',{method:'POST',cookie,body:{}})).status,200);second.server.closeAllConnections();await new Promise(r=>second.server.close(r));
  const third=await setup(t,{sessionFile});assert.equal((await third.request('/api/snapshot',{cookie})).status,401);
 });
+// T23: the phone's plan view states a withheld plan's attempts through the same module the desktop uses.
+test('the archived-record module is served, byte for byte the desktop one',async t=>{const {request}=await setup(t);const {readFileSync}=await import('node:fs');const r=await request('/archived-record.js');assert.equal(r.status,200);assert.match(r.headers['content-type'],/text\/javascript/);assert.equal(r.text,readFileSync(new URL('../../cockpit/ui/archived-record.js',import.meta.url),'utf8'));});

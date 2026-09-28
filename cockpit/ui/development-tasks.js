@@ -10,7 +10,7 @@ import {taskSessionView} from './task-session.js';
 import {taskProgress} from './task-progress.js';
 import {planSteps,completionReason} from './plan-steps.js';
 import {reviewTestPanel} from './review-test-panel.js';
-import {fieldState,withheldNote} from './archived-record.js';
+import {fieldState,withheldNote,withheldAttempts,withheldAttemptsNote} from './archived-record.js';
 import {node,navigate,selectedWorkspace} from './app-shell.js';
 import {heldProjection,runtimeWorld,waitForBot} from './runtime-bots.js';
 export function taskScope(p,workspace='',botClient=''){
@@ -26,6 +26,15 @@ export function taskReviewCounts(p,taskId){
     else if(attempt.status==='needs_changes')counts.needsChanges++;
   }
   return counts;
+}
+/* T23: the line under a plan in the list. A plan whose archived attempts are
+ * outside the frame's window has none on the frame, and `taskReviewCounts`
+ * would read that as "0 accepted" about a plan finished on an accepted review.
+ * Its live attempts (a cancelled plan can keep undecided ones) still count. */
+export function reviewSummary(p,task){
+  const counts=taskReviewCounts(p,task.id),withheld=withheldAttempts(task);
+  if(!withheld)return `${counts.accepted} accepted · ${counts.awaiting} awaiting decision · ${counts.needsChanges} need changes`;
+  return [`${withheld.count} archived review${withheld.count===1?'':'s'} not in this view`,...(counts.awaiting?[`${counts.awaiting} awaiting decision`]:[]),...(counts.needsChanges?[`${counts.needsChanges} need changes`]:[])].join(' · ');
 }
 import {readContent,retainedSide} from './review-content.js';
 export function initDevelopmentTasks({invoke,actions,current}){
@@ -169,9 +178,14 @@ export function initDevelopmentTasks({invoke,actions,current}){
   document.addEventListener('task-session-changed',renderSession);
   function renderAttempts(task,into){
     const rows=Object.values(heldProjection(current)?.development_attempts??{}).filter(a=>a.task_ref===task.id);
+    // T23: an archived plan outside the frame's window has attempts the frame
+    // does not carry. Counting only `rows` said "(0)" and then told a person
+    // how to record the first review of a plan finished on an accepted one.
+    const withheld=withheldAttempts(task);
     const section=node('section',undefined,'development-attempts');section.id='development-attempts';
-    section.append(node('h3',`Review attempts (${rows.length})`),node('p','Retained review material and human notes. Recording does not save a file, run checks or accept a result.','directory-note'));
-    if(!rows.length)section.append(node('p','Open a plan-linked file proposal and choose Save review attempt to retain it here.','availability-note'));
+    section.append(node('h3',`Review attempts (${rows.length+(withheld?withheld.count:0)})`),node('p','Retained review material and human notes. Recording does not save a file, run checks or accept a result.','directory-note'));
+    if(withheld){const note=node('p',withheldAttemptsNote(task),'availability-note');note.dataset.attemptsWithheld=String(withheld.count);section.append(note);}
+    else if(!rows.length)section.append(node('p','Open a plan-linked file proposal and choose Save review attempt to retain it here.','availability-note'));
     for(const attempt of rows){
       const combined=attempt.schema==='development-review-set@1';
       const card=node('details',undefined,'development-attempt');card.dataset.attemptId=attempt.id;
@@ -302,8 +316,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     if(!lane.options.length)list.append(node('p','Create a goal and repository lane for a registered bot to plan development work.','availability-note'));
     for(const task of rows){
       const row=node('article',undefined,'bot-work-lane');
-      const counts=taskReviewCounts(p,task.id);
-      const summary=node('p',`${counts.accepted} accepted · ${counts.awaiting} awaiting decision · ${counts.needsChanges} need changes`,'availability-note');summary.dataset.taskReviewSummary=task.id;
+      const summary=node('p',reviewSummary(p,task),'availability-note');summary.dataset.taskReviewSummary=task.id;
       row.append(button(task.title,()=>show(task)),node('span',task.status,'status-chip'),summary,node('p',taskProgress(p,task).label,'availability-note'));list.append(row);
     }
     if(selection&&!rows.some(t=>t.id===selection.id)){show(null);}

@@ -101,6 +101,29 @@ export function archivedRecords(projection) {
   return {plans: plans.sort(order), attempts: attempts.sort(order)};
 }
 
+/**
+ * What the frame's archived-attempt window left out, said where it matters.
+ *
+ * T23. Archived attempts ride in a window of the most recently finished plans,
+ * so the archived-review list and the run history below are windows too. A list
+ * that shortened silently would present "the reviews this world holds" and
+ * "every profile run" as complete. `null` for each when nothing is withheld,
+ * including a runtime from before T23, which publishes no window.
+ */
+export function windowNotes(projection) {
+  const w = attemptWindowOf(projection);
+  if (!w || !w.withheldAttempts) return {reviews: null, runs: null};
+  const n = (k, one, many) => `${k} ${k === 1 ? one : many}`;
+  const plans = n(w.withheldPlans, 'earlier finished plan', 'earlier finished plans');
+  return {
+    reviews: `${n(w.withheldAttempts, 'review', 'reviews')} of ${plans} ${w.withheldAttempts === 1 ? 'is' : 'are'} kept in the world ` +
+      `and not in this view, which carries the reviews of the ${n(w.carriedPlans, 'most recently finished plan', 'most recently finished plans')}.`,
+    runs: w.withheldRuns
+      ? `${n(w.withheldRuns, 'more profile run', 'more profile runs')}, on the reviews of ${plans}, ${w.withheldRuns === 1 ? 'is' : 'are'} kept in the world and not in this view.`
+      : null,
+  };
+}
+
 /** The worst bound, for a one-line summary. `null` when nothing is reported. */
 export function worstBound(rows) {
   if (!rows.length) return null;
@@ -186,6 +209,7 @@ export function nowRows(projection, reply) {
  * is the shape `retainedSide()` and `fieldState()` already use here and the
  * reason those two are under test while a renderer is not.                    */
 import {node, panel} from './app-shell.js';
+import {attemptWindowOf} from './archived-record.js';
 
 const bytes = n => (n >= 1024 ? `${(n / 1024).toFixed(1)} KB` : `${n} B`);
 
@@ -236,12 +260,20 @@ export function activityPanel(projection, reply) {
   // T21. The capacity rows have counted what is archived since T18a; this is
   // the first place in the app that says WHAT. It adds nothing to the frame —
   // T17 already put every archived record on it as a card.
-  const gone = archivedRecords(projection);
+  const gone = archivedRecords(projection), notes = windowNotes(projection);
   for (const [kind, label, rows2] of [['plans', 'plans', gone.plans], ['attempts', 'reviews', gone.attempts]]) {
-    if (!rows2.length) continue;
+    // T23: a window that carries no archived review still has reviews to say
+    // are kept, so an empty list is not a reason to say nothing.
+    const withheld = kind === 'attempts' ? notes.reviews : null;
+    if (!rows2.length && !withheld) continue;
     const box = node('details', undefined, 'activity-archived');
     box.dataset.archived = kind;
-    box.append(node('summary', `${rows2.length} archived ${label}`));
+    box.append(node('summary', `${rows2.length} archived ${label}${withheld ? ' in view' : ''}`));
+    if (withheld) {
+      const kept = node('p', withheld, 'directory-note');
+      kept.dataset.archivedWithheld = '';
+      box.append(kept);
+    }
     box.append(node('p', kind === 'plans'
       ? 'Finished plans. They hold no directory budget and cannot be reopened — finishing is terminal.'
       : 'Reviews of finished plans. Their identity, acceptance and runs are kept; the working material was released.',
@@ -282,7 +314,12 @@ export function activityPanel(projection, reply) {
   const all = runRows(projection), tally = runTally(all);
   runs.append(node('h2', `Runs (${all.length})`),
     node('p', `${tally.passed} passed · ${tally.failed} failed · ${tally.running} running · ${tally.incomplete} incomplete`, 'directory-note'));
-  if (!all.length) runs.append(node('p', 'No profile run is recorded in this world.', 'availability-note'));
+  if (notes.runs) {
+    const kept = node('p', notes.runs, 'directory-note');
+    kept.dataset.runsWithheld = '';
+    runs.append(kept);
+  }
+  if (!all.length && !notes.runs) runs.append(node('p', 'No profile run is recorded in this world.', 'availability-note'));
   for (const r of all.slice(0, 50)) {
     const item = node('article', undefined, 'guidance-item');
     item.dataset.activityRun = r.run_id ?? '';

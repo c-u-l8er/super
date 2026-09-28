@@ -185,3 +185,19 @@ test('T21 · a marker of another schema is not an archived record', () => {
   assert.deepEqual(archivedRecords({}).plans, []);
   assert.deepEqual(archivedRecords(null).attempts, []);
 });
+
+// T23 · the archived-review list and the run history are windows now, and say so.
+import {windowNotes} from '../cockpit/ui/activity.js';
+test('T23 · the window names what it left out, and says nothing when it left nothing', () => {
+  const window = (withheld, carried = {plans: 6, attempts: 7, runs: 6}) =>
+    ({development_attempts_window: {schema: 'archived-attempt-window@1', carried, withheld}});
+  const n = windowNotes(window({plans: 12, attempts: 25, runs: 29}));
+  assert.match(n.reviews, /^25 reviews of 12 earlier finished plans are kept in the world and not in this view/);
+  assert.match(n.reviews, /the 6 most recently finished plans\.$/);
+  assert.match(n.runs, /^29 more profile runs, on the reviews of 12 earlier finished plans, are kept/);
+  const one = windowNotes(window({plans: 1, attempts: 1, runs: 0}, {plans: 1, attempts: 1, runs: 1}));
+  assert.match(one.reviews, /^1 review of 1 earlier finished plan is kept .* the 1 most recently finished plan\.$/);
+  assert.equal(one.runs, null, 'no withheld runs, no runs note');
+  assert.deepEqual(windowNotes(window({plans: 0, attempts: 0, runs: 0})), {reviews: null, runs: null});
+  assert.deepEqual(windowNotes({}), {reviews: null, runs: null}, 'a runtime before T23 withholds nothing');
+});

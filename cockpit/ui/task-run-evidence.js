@@ -1,5 +1,6 @@
 import {node} from './app-shell.js';
 import {runtimeWorld} from './runtime-bots.js';
+import {withheldAttemptsNote} from './archived-record.js';
 
 // Compare retained observations; an earlier run is not automatically an unchanged-code baseline.
 export function comparisonNotes(before,after){
@@ -12,6 +13,13 @@ export function comparisonNotes(before,after){
  if(before.snapshot&&before.snapshot===after.snapshot)notes.push('Both runs checked the same source snapshot; this does not demonstrate a code change.');
  if(before.toolchain!==after.toolchain)notes.push('The toolchain identity differs; compare performance with care.');
  return notes;
+}
+/* T23: what the status line says. An archived plan outside the frame's window
+ * has runs on attempts the frame does not carry, so "No baseline has been
+ * recorded" would be said of a plan whose checks passed. It names them instead. */
+export function runEvidenceStatus(count,failures,task){
+  const kept=withheldAttemptsNote(task);
+  return `${count} recorded runs${kept?' in this view':''}.${failures?' Some local history could not be loaded.':''}${kept?' '+kept:''}${!count&&!kept?' Run task checks to capture output. No baseline has been recorded.':''}`;
 }
 export function taskRunEvidence({task,invoke,current}){
  const panel=node('section',undefined,'task-run-evidence task-screenshots');
@@ -41,7 +49,7 @@ export function taskRunEvidence({task,invoke,current}){
    for(const id of ids){const local=runs.find(r=>r.run_id===id),record=saved[id],r=local?.result||record?.outcome||{};found.push({id:a.id+'/'+id,profile:r.profile||record?.profile||'Local tests',machine:'This device',revision:a.task_revision,snapshot:r.snapshot_sha256,toolchain:r.toolchain_sha256||r.node_sha256,verdict:r.verdict||local?.state||record?.state||'unknown',confirmed:record?.state==='completed',at:r.finished_at||record?.started_at||'',output:r.output,truncated:!!r.omitted_bytes||(!local?.result&&!!r.output_omitted),exit:r.exit_code,benchmark:r.benchmark,stage:r.baseline?'After proposal':null});if(r.baseline){const b=r.baseline;found.push({id:a.id+'/'+id+'/baseline',profile:r.profile||record?.profile||'Local tests',machine:'This device',revision:a.task_revision,snapshot:b.snapshot_sha256,toolchain:r.toolchain_sha256||r.node_sha256,verdict:b.verdict||b.state,confirmed:b.state==='completed',at:b.finished_at,output:b.output,truncated:!!b.omitted_bytes,exit:b.exit_code,stage:'Before proposal',sameSuites:b.same_suites});}}
   }));
   try{const remote=await invoke('fleet_checks',{request:{operation:'list',world:JSON.parse(origin),task_ref:task.id}});for(const r of remote.runs||[])found.push({id:r.id,profile:'Remote committed-file checks',machine:[r.binding?.host,r.binding?.guest].filter(Boolean).join(' / ')||'Unknown host',revision:r.binding?.revision,snapshot:r.snapshot||r.binding?.head,verdict:r.verdict||r.state,confirmed:r.state==='completed',at:r.finishedAt?new Date(r.finishedAt).toISOString():r.createdAt?new Date(r.createdAt).toISOString():'',toolchain:r.nodeSha256,exit:r.exitCode,output:r.output,truncated:!!r.omittedBytes});}catch{failures++;}
-  if(valid()){rows=found.sort((a,b)=>String(a.at).localeCompare(String(b.at))||a.id.localeCompare(b.id));for(const side of ['before','after'])if(!rows.some(r=>r.id===selected[side]))selected[side]='';if(!selected.after)selected.after=rows.at(-1)?.id||'';const latest=rows.find(r=>r.id===selected.after);if(!selected.before)selected.before=rows.filter(r=>r.id!==latest?.id&&r.profile===latest?.profile&&r.machine===latest?.machine).at(-1)?.id||'';draw();status.textContent=`${rows.length} recorded runs.${failures?' Some local history could not be loaded.':''}${!rows.length?' Run task checks to capture output. No baseline has been recorded.':''}`;}
+  if(valid()){rows=found.sort((a,b)=>String(a.at).localeCompare(String(b.at))||a.id.localeCompare(b.id));for(const side of ['before','after'])if(!rows.some(r=>r.id===selected[side]))selected[side]='';if(!selected.after)selected.after=rows.at(-1)?.id||'';const latest=rows.find(r=>r.id===selected.after);if(!selected.before)selected.before=rows.filter(r=>r.id!==latest?.id&&r.profile===latest?.profile&&r.machine===latest?.machine).at(-1)?.id||'';draw();status.textContent=runEvidenceStatus(rows.length,failures,task);}
   busy=false;refresh.disabled=false;
  }
  refresh.onclick=load;

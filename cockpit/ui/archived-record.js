@@ -73,3 +73,77 @@ export function withheldNote(record, field, subject = 'material') {
   if (!card || fieldState(record, field) !== 'withheld') return null;
   return `This record is archived. Its ${subject} is kept in the world; this screen does not carry it.`;
 }
+
+/* ── T23 · an archived plan whose review attempts the frame does not carry ──
+ *
+ * T17 kept every archived attempt on the frame as a card, and the cards still
+ * grew with every attempt ever finished, until the default world's frame
+ * passed its cap and stopped publishing. Archived attempts now ride in a window
+ * of whole plans, newest finished first (`Ampd.Projection.with_attempt_window`),
+ * and a plan outside it says so on its own card: `archived.attempts`.
+ *
+ * **This is the same problem as `fieldState`, one level up.** A plan whose
+ * attempts are not on the frame and a plan that was never reviewed both arrive
+ * as "no attempt has this task_ref". Every surface that filters attempts by
+ * plan would therefore say "no review attempts", "0 accepted" or "not run"
+ * about a plan with accepted, tested reviews. T17's comment explains why a
+ * false "not run" is worse than the bytes it saves. So the decision is made
+ * here, once, and each surface reads it.
+ *
+ * Nothing here fetches either. The window's `read_with` names the door, and
+ * the page still has no read (see the top of this file).
+ */
+
+/** `{carried, count, refs?, runs?}` for an archived plan with archived attempts; null otherwise. */
+export function attemptsOf(plan) {
+  if (!cardOf(plan)) return null;
+  const a = plan.archived.attempts;
+  if (!a || typeof a !== 'object' || !Number.isInteger(a.count) || a.count < 1) return null;
+  if (a.carried === true) return {carried: true, count: a.count};
+  if (a.carried !== false) return null;
+  return {
+    carried: false,
+    count: a.count,
+    refs: Array.isArray(a.refs) ? a.refs.filter(r => typeof r === 'string') : [],
+    runs: Number.isInteger(a.runs) && a.runs >= 0 ? a.runs : null,
+  };
+}
+
+/** The withheld marker, or null when the plan's attempts are on the frame (or it has none). */
+export function withheldAttempts(plan) {
+  const a = attemptsOf(plan);
+  return a && !a.carried ? a : null;
+}
+
+const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * The sentence that goes where a withheld plan's attempts would have been.
+ * `null` for any plan whose attempts are on the frame — said beside attempts a
+ * screen does show, it would be false.
+ */
+export function withheldAttemptsNote(plan) {
+  const w = withheldAttempts(plan);
+  if (!w) return null;
+  const single = w.count === 1 && !w.runs;
+  const runs = w.runs ? ` and ${count(w.runs, 'profile run', 'profile runs')}` : '';
+  return `This plan is archived. Its ${count(w.count, 'review attempt', 'review attempts')}${runs} ` +
+    `${single ? 'is' : 'are'} kept in the world; this screen does not carry ${single ? 'it' : 'them'}.`;
+}
+
+/**
+ * The whole window, for a surface that reads across every plan (Activity).
+ * `null` when the runtime does not publish one — a runtime from before T23
+ * carries every archived attempt, and nothing is withheld.
+ */
+export function attemptWindowOf(projection) {
+  const w = projection?.development_attempts_window;
+  if (!w || w.schema !== 'archived-attempt-window@1') return null;
+  const n = x => (Number.isInteger(x) && x >= 0 ? x : 0);
+  return {
+    carriedPlans: n(w.carried?.plans),
+    withheldPlans: n(w.withheld?.plans),
+    withheldAttempts: n(w.withheld?.attempts),
+    withheldRuns: n(w.withheld?.runs),
+  };
+}

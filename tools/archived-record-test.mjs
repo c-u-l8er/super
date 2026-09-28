@@ -86,3 +86,56 @@ test('a malformed omitted list is treated as claiming nothing', () => {
   assert.deepEqual(cardOf(c).omitted, []);
   assert.equal(fieldState(c, 'history'), 'absent');
 });
+
+/* ── T23 · a plan whose archived attempts the window left out ─────────────── */
+import {attemptsOf, withheldAttempts, withheldAttemptsNote, attemptWindowOf} from '../cockpit/ui/archived-record.js';
+
+const plan = attempts => card(['history', 'criteria'], 'read_development_task', {}) && {
+  ...card(['history', 'criteria']),
+  archived: {...card(['history', 'criteria']).archived, attempts},
+};
+
+test('T23 · a withheld plan is told apart from a carried plan and from a plan with none', () => {
+  const withheld = plan({carried: false, count: 2, refs: ['da_0003', 'da_0004'], runs: 3});
+  assert.deepEqual(attemptsOf(withheld), {carried: false, count: 2, refs: ['da_0003', 'da_0004'], runs: 3});
+  assert.equal(withheldAttempts(withheld).count, 2);
+
+  const carried = plan({carried: true, count: 1});
+  assert.deepEqual(attemptsOf(carried), {carried: true, count: 1});
+  assert.equal(withheldAttempts(carried), null, 'a plan whose attempts ARE on the frame withholds nothing');
+  assert.equal(withheldAttemptsNote(carried), null);
+
+  // An archived plan with no marker had no archived attempts; a live plan is not a card.
+  assert.equal(attemptsOf(card(['history'])), null);
+  assert.equal(attemptsOf({id: 'dt_1', status: 'planned', history: []}), null);
+});
+
+test('T23 · a marker is read only off a card, and only when it is well formed', () => {
+  // The same block on a record that is NOT an archived card is not a marker.
+  assert.equal(attemptsOf({id: 'dt_1', archived: {schema: 'other@1', attempts: {carried: false, count: 2}}}), null);
+  for (const bad of [{carried: false, count: 0}, {carried: false}, {carried: 'no', count: 2}, null, 'x'])
+    assert.equal(attemptsOf(plan(bad)), null, JSON.stringify(bad));
+  // refs and runs are read defensively, never trusted into a sentence as garbage
+  assert.deepEqual(attemptsOf(plan({carried: false, count: 1, refs: ['da_1', 7], runs: -1})),
+    {carried: false, count: 1, refs: ['da_1'], runs: null});
+});
+
+test('T23 · the note says archived, counted and kept, and never "no attempts"', () => {
+  const two = withheldAttemptsNote(plan({carried: false, count: 2, refs: [], runs: 3}));
+  assert.match(two, /archived/);
+  assert.match(two, /2 review attempts and 3 profile runs are kept in the world/);
+  assert.match(two, /does not carry them/);
+  assert.doesNotMatch(two, /no (review )?attempts|not run|never/i);
+  assert.doesNotMatch(two, /read_development_attempt/, 'the page cannot open that door, so it does not name it');
+
+  const one = withheldAttemptsNote(plan({carried: false, count: 1, refs: ['da_1'], runs: 0}));
+  assert.match(one, /Its 1 review attempt is kept in the world; this screen does not carry it\./);
+});
+
+test('T23 · the window block is read only under its own schema', () => {
+  const w = {schema: 'archived-attempt-window@1', carried: {plans: 6, attempts: 7, runs: 6}, withheld: {plans: 12, attempts: 25, runs: 29}};
+  assert.deepEqual(attemptWindowOf({development_attempts_window: w}),
+    {carriedPlans: 6, withheldPlans: 12, withheldAttempts: 25, withheldRuns: 29});
+  assert.equal(attemptWindowOf({}), null, 'a runtime before T23 publishes no window and withholds nothing');
+  assert.equal(attemptWindowOf({development_attempts_window: {...w, schema: 'x@1'}}), null);
+});

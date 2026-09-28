@@ -1,5 +1,6 @@
 import {initConversations} from '/conversations.js';
 import {taskProgress} from '/task-progress.js';
+import {withheldAttemptsNote} from '/archived-record.js';
 import {referenceText,setReferenceFrame,setReferenceRouting} from './references.js';
 const $=s=>document.querySelector(s), content=$('#content'), notice=$('#notice');
 let current=null,view='attention',selected=null,busy=false,paired=false,lastSuccess=0,serial=0,lastWorld=null;
@@ -32,7 +33,9 @@ function render(){
     const progress=taskProgress(p,task),next=node('section',undefined,'card');next.append(node('h2','Next action'),node('p',progress.label),node('p',progress.reason,'muted'));content.append(next);
     content.append(node('h2','Review evidence'),node('p','Inspect retained results here. File checks, decisions and execution remain in desktop Super.','muted'));
     const attempts=Object.values(p.development_attempts??{}).filter(a=>a.task_ref===task.id);
-    if(!attempts.length)content.append(node('p','No review has been recorded for this plan.','empty'));
+    // T23: a finished plan outside the frame's window has attempts the frame does not carry.
+    const kept=withheldAttemptsNote(task);
+    if(kept)content.append(node('p',kept,'muted'));else if(!attempts.length)content.append(node('p','No review has been recorded for this plan.','empty'));
     for(const a of attempts){const card=node('article',undefined,'card');card.append(node('span',a.status,'badge'),node('h2',a.title||'Retained review'),node('p',`Plan revision ${a.task_revision}${a.task_revision!==task.revision?' · Earlier revision':''}`,'meta'));
       for(const r of Object.values(a.test_runs??{}))card.append(node('p',`${r.profile??'Check'} · ${r.state} · ${r.outcome?.verdict??'No final verdict'}`,'meta'));
       if(a.acceptance)card.append(node('p','An acceptance is retained. This does not confirm that files still match on disk.','muted'));
