@@ -364,12 +364,18 @@ defmodule Ampd.Projection do
   property test holds this over random worlds rather than trusting the
   arithmetic.
 
-  An archived attempt whose plan is NOT an archived card on this projection is
-  carried as T17 carried it. It has no plan card to be withheld onto, and a
-  record withheld without a marker is exactly the `undefined` this module keeps
-  refusing. The archive predicate (`DevelopmentAttempt.archive_finished/3`)
-  makes such a record impossible, so this is the safe answer to a state that
-  should not occur. It is counted as `unwindowed`.
+  **T25 · a LIVE plan's archived attempts are windowed too.** Since T25 a
+  dismissed attempt leaves the live directory while its plan is open, so a live
+  plan can own archived attempts. They form a group like an archived plan's,
+  ordered BEFORE every finished plan (current work's own history first; the
+  higher plan id first among them), and a withheld one is marked on the live
+  plan as `archived_attempts` rather than under `archived`, which would make the
+  plan read as a card.
+
+  An archived attempt whose plan is on NEITHER side of this projection is
+  carried as T17 carried it. It has no plan to be withheld onto, and a record
+  withheld without a marker is exactly the `undefined` this module keeps
+  refusing. It is counted as `unwindowed`.
   """
   def with_attempt_window(projection, archive, plans, target, limit) do
     cards =
@@ -379,14 +385,20 @@ defmodule Ampd.Projection do
 
     plan_cards = projection["development_tasks"] || %{}
 
+    # T25: a LIVE plan's archived attempts (dismissed ones leave the directory
+    # while the plan is open) are windowed like an archived plan's. Left loose
+    # they would ride every frame unbounded, which is the failure this window
+    # exists to end. Only an attempt whose plan is on neither side is loose.
     {windowed, loose} =
-      Enum.split_with(cards, fn {_id, card} -> archived_card?(plan_cards[card["task_ref"]]) end)
+      Enum.split_with(cards, fn {_id, card} -> Map.has_key?(plan_cards, card["task_ref"]) end)
 
     groups =
       windowed
       |> Enum.group_by(fn {_id, card} -> card["task_ref"] end)
-      |> Enum.map(fn {plan, members} -> window_group(plan, members, plans[plan]) end)
-      |> Enum.sort_by(&{&1.finished, &1.order}, :desc)
+      |> Enum.map(fn {plan, members} ->
+        window_group(plan, members, plans[plan], not archived_card?(plan_cards[plan]))
+      end)
+      |> Enum.sort_by(&{live_rank(&1), &1.finished, &1.order}, :desc)
 
     loose = Map.new(loose)
     base_bytes = encoded_bytes(window_projection(projection, loose, groups, [], target, limit))
@@ -402,9 +414,15 @@ defmodule Ampd.Projection do
   defp archived_card?(%{"archived" => %{"schema" => "archived-record-card@1"}}), do: true
   defp archived_card?(_), do: false
 
-  defp window_group(plan, members, record) do
+  # Current work's own history first: a live plan's archived attempts come
+  # before any finished plan's, the higher plan id first among them.
+  defp live_rank(%{live: true}), do: 1
+  defp live_rank(_), do: 0
+
+  defp window_group(plan, members, record, live) do
     %{
       plan: plan,
+      live: live,
       finished: finished_at(record),
       order: numeric_tail(plan),
       cards: Map.new(members),
@@ -462,11 +480,7 @@ defmodule Ampd.Projection do
 
     tasks =
       Enum.reduce(groups, projection["development_tasks"], fn g, tasks ->
-        update_in(
-          tasks,
-          [g.plan, "archived"],
-          &Map.put(&1, "attempts", attempts_marker(g, g in taken))
-        )
+        put_marker(tasks, g, attempts_marker(g, g in taken))
       end)
 
     projection
@@ -493,6 +507,16 @@ defmodule Ampd.Projection do
       "read_with" => "read_development_attempt"
     })
   end
+
+  # An archived plan's card carries the marker under `archived`, as T23 put it.
+  # A live plan is not a card, and `archived` on it would make every reader take
+  # it for one, so its marker is `archived_attempts` (projection-only; the stored
+  # plan is unchanged).
+  defp put_marker(tasks, %{live: true, plan: plan}, marker),
+    do: put_in(tasks, [plan, "archived_attempts"], marker)
+
+  defp put_marker(tasks, %{plan: plan}, marker),
+    do: update_in(tasks, [plan, "archived"], &Map.put(&1, "attempts", marker))
 
   defp attempts_marker(g, true), do: %{"carried" => true, "count" => map_size(g.cards)}
 

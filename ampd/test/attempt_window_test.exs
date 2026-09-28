@@ -407,6 +407,151 @@ defmodule Ampd.AttemptWindowTest do
     end
   end
 
+  # ── T25 · a LIVE plan's archived attempts ─────────────────────────────────
+  #
+  # Since T25 a dismissed attempt leaves the live directory while its plan is
+  # open. Those records must ride in this window, not loose: loose, they would
+  # grow every frame without bound, the failure T23 ended.
+
+  describe "T25 · live plans" do
+    defp dismissed(id, plan, pad \\ 900),
+      do: Map.put(attempt(id, plan, pad), "status", "dismissed")
+
+    defp live_plan(id), do: %{"id" => id, "status" => "in_progress", "history" => []}
+
+    # `world/2` plus live plans owning archived (dismissed) attempts: [{plan, [attempt]}].
+    defp with_live(plans, live, opts \\ []) do
+      {proj, archive, parch} =
+        world(
+          plans,
+          Keyword.put(opts, :live_plans, Map.new(live, fn {p, _} -> {p, live_plan(p)} end))
+        )
+
+      {proj,
+       Enum.reduce(live, archive, fn {_p, as}, acc ->
+         Enum.reduce(as, acc, &Map.put(&2, &1["id"], &1))
+       end), parch}
+    end
+
+    test "T25 · a live plan's archived attempts are carried as the T17 cards, marked on the live plan" do
+      as = [dismissed("da_0901", "dt_0900"), dismissed("da_0902", "dt_0900")]
+      {proj, archive, parch} = with_live([], [{"dt_0900", as}])
+
+      out =
+        Projection.with_attempt_window(proj, archive, parch, Projection.frame_target(), 32 * 1024)
+
+      cards = t17_cards(archive)
+
+      for a <- as,
+          do:
+            assert(out["development_attempts"][a["id"]]["archived"] == cards[a["id"]]["archived"])
+
+      assert out["development_tasks"]["dt_0900"]["archived_attempts"] == %{
+               "carried" => true,
+               "count" => 2
+             }
+
+      refute Map.has_key?(out["development_tasks"]["dt_0900"], "archived")
+      assert out["development_attempts_window"]["carried"]["unwindowed"] == 0
+    end
+
+    test "T25 · withheld, a live plan says so, and its refs are exactly its archive" do
+      as = for n <- [3, 1, 2], do: dismissed("da_091#{n}", "dt_0910")
+      {proj, archive, parch} = with_live([], [{"dt_0910", as}])
+      out = Projection.with_attempt_window(proj, archive, parch, Projection.frame_target(), 0)
+      marker = out["development_tasks"]["dt_0910"]["archived_attempts"]
+
+      assert marker["carried"] == false and marker["count"] == 3 and marker["runs"] == 3
+      assert marker["refs"] == ["da_0911", "da_0912", "da_0913"]
+      for a <- as, do: refute(Map.has_key?(out["development_attempts"], a["id"]))
+      assert out["development_attempts_window"]["withheld"]["attempts"] == 3
+    end
+
+    test "T25 · a live plan's group comes before every finished plan's" do
+      live = [dismissed("da_0921", "dt_0920", 900)]
+      finished = [{"dt_0003", at(900), [attempt("da_0031", "dt_0003", 900)]}]
+      {proj, archive, parch} = with_live(finished, [{"dt_0920", live}])
+      only_one = group_bytes(archive, ["da_0921"])
+
+      out =
+        Projection.with_attempt_window(proj, archive, parch, Projection.frame_target(), only_one)
+
+      assert out["development_tasks"]["dt_0920"]["archived_attempts"]["carried"] == true
+      assert out["development_tasks"]["dt_0003"]["archived"]["attempts"]["carried"] == false
+    end
+
+    test "T25 · among live plans, the higher plan id first" do
+      {proj, archive, parch} =
+        with_live([], [
+          {"dt_0930", [dismissed("da_0931", "dt_0930")]},
+          {"dt_0940", [dismissed("da_0941", "dt_0940")]}
+        ])
+
+      one = group_bytes(archive, ["da_0941"])
+      out = Projection.with_attempt_window(proj, archive, parch, Projection.frame_target(), one)
+      assert out["development_tasks"]["dt_0940"]["archived_attempts"]["carried"] == true
+      assert out["development_tasks"]["dt_0930"]["archived_attempts"]["carried"] == false
+    end
+
+    test "T25 · property: with live plans owning archived attempts, history still never takes a frame over its target" do
+      :rand.seed(:exsss, {25, 9, 28})
+
+      for _ <- 1..150 do
+        plans =
+          for p <- 1..:rand.uniform(10) do
+            id = "dt_#{6000 + p}"
+
+            {id, at(:rand.uniform(50)),
+             for(
+               a <- 1..:rand.uniform(3)//1,
+               do: attempt("da_#{p * 10 + a}", id, :rand.uniform(4_000))
+             )}
+          end
+
+        live =
+          for p <- 1..:rand.uniform(6) do
+            id = "dt_#{7000 + p}"
+
+            {id,
+             for(
+               a <- 1..:rand.uniform(5)//1,
+               do: dismissed("da_#{70_000 + p * 10 + a}", id, :rand.uniform(4_000))
+             )}
+          end
+
+        {proj, archive, parch} = with_live(plans, live, pad: :rand.uniform(40_000))
+
+        base =
+          Projection.with_attempt_window(proj, archive, parch, 0, 0)[
+            "development_attempts_window"
+          ]["base_bytes"]
+
+        target = base + :rand.uniform(30_000) - 5_000
+        limit = :rand.uniform(32 * 1024)
+
+        out = Projection.with_attempt_window(proj, archive, parch, target, limit)
+        w = out["development_attempts_window"]
+        final = bytes(out)
+
+        assert w["carried"]["bytes"] <= w["budget_bytes"]
+        assert final <= w["base_bytes"] + w["budget_bytes"] + 20
+
+        if w["base_bytes"] + 64 <= target,
+          do: assert(final <= target, "history took a frame over its target")
+
+        assert w["carried"]["unwindowed"] == 0
+        assert w["carried"]["attempts"] + w["withheld"]["attempts"] == map_size(archive)
+
+        # every live plan with archived attempts is marked, and never dressed as a card
+        for {id, as} <- live do
+          plan = out["development_tasks"][id]
+          assert plan["archived_attempts"]["count"] == length(as)
+          refute Map.has_key?(plan, "archived")
+        end
+      end
+    end
+  end
+
   # ── through the real projection ────────────────────────────────────────────
 
   describe "wired" do

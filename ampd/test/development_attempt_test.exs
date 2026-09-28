@@ -1671,4 +1671,187 @@ defmodule Ampd.DevelopmentAttemptTest do
 
     assert Projection.operator()["capacity"]["attempts"]["archived"] == 1
   end
+
+  # ------------------------------------------------------------------ T25
+  # A dismissed attempt can never be tested, accepted or changed, yet under an
+  # OPEN plan it stayed in the live directory: on 2026-09-28 six dismissed
+  # attempts of one plan held 50.5 KB of a directory at 127,482 of 131,072
+  # bytes, and the next review of that plan was refused. `superlane/t25/TASK.md`.
+
+  test "T25 · dismissing moves the attempt to the archive in the same write, and the directory figure drops",
+       c do
+    a = Authority.record_development_attempt(fields(c))
+    before = DevelopmentAttempt.directory_usage()["bytes"]
+    dismissed = Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded")
+
+    assert dismissed["status"] == "dismissed"
+    refute Map.has_key?(Loci.development_attempts_live(), a["id"])
+    assert Loci.development_attempts_archive()[a["id"]]["status"] == "dismissed"
+    assert DevelopmentAttempt.directory_usage()["bytes"] < before
+    # the plan is still open: the move does not wait for it
+    assert Loci.development_tasks()[a["task_ref"]]["status"] not in ~w(completed cancelled)
+    # and the reader that merges the two still has the whole history
+    assert List.last(Loci.development_attempts()[a["id"]]["history"])["note"] == "Superseded"
+  end
+
+  test "T25 · a dismissed attempt with a started run stays live; the run's finish moves it, outcome recorded",
+       c do
+    a = Authority.record_development_attempt(fields(c))
+    refute match?({:refused, _}, Authority.begin_development_test(a["id"], test_start(a)))
+    started = Loci.development_attempts_live()[a["id"]]
+
+    dismissed =
+      Authority.update_development_attempt(a["id"], started["revision"], "dismissed", "Mid-run")
+
+    assert dismissed["status"] == "dismissed"
+    assert Map.has_key?(Loci.development_attempts_live(), a["id"]), "a started run was stranded"
+    refute Map.has_key?(Loci.development_attempts_archive(), a["id"])
+
+    refute match?(
+             {:refused, _},
+             Authority.finish_development_test(
+               a["id"],
+               "run-fixture",
+               a["source"]["world"],
+               test_outcome(a)
+             )
+           )
+
+    refute Map.has_key?(Loci.development_attempts_live(), a["id"])
+    run = Loci.development_attempts_archive()[a["id"]]["test_runs"]["run-fixture"]
+    assert run["state"] == "completed" and run["outcome"]["verdict"] == "pass"
+  end
+
+  test "T25 · a dismiss replayed after the move answers the same record and changes nothing", c do
+    a = Authority.record_development_attempt(fields(c))
+    dismissed = Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded")
+    before = {Loci.development_attempts_live(), Loci.development_attempts_archive()}
+
+    assert Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded") == dismissed
+    assert {Loci.development_attempts_live(), Loci.development_attempts_archive()} == before
+  end
+
+  test "T25 · every other write to a moved attempt is refused, never attempt-unknown", c do
+    a = Authority.record_development_attempt(fields(c))
+    Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded")
+    before = {Loci.development_attempts_live(), Loci.development_attempts_archive()}
+
+    writes = [
+      Authority.update_development_attempt(a["id"], 2, "recorded", "Reopen it"),
+      Authority.update_development_attempt(a["id"], 1, "dismissed", "A different note"),
+      Authority.begin_development_test(a["id"], test_start(Map.put(a, "revision", 2)))
+    ]
+
+    for w <- writes do
+      assert {:refused, %{"code" => code}} = w
+      refute code == "attempt-unknown", "a moved attempt answered attempt-unknown"
+    end
+
+    assert {Loci.development_attempts_live(), Loci.development_attempts_archive()} == before
+  end
+
+  test "T25 · a clause that would CHANGE an archived record is refused attempt-archived", c do
+    # Unreachable through the commands (every clause already refuses a change to
+    # a dismissed record), so this pins the mechanism itself: a record the archive
+    # holds is placed live, a note update would change it, and the answer is
+    # attempt-archived with the state untouched.
+    a = Authority.record_development_attempt(fields(c))
+    live = Loci.development_attempts_live()[a["id"]]
+
+    s =
+      Loci.initial()
+      |> Map.put("development_tasks", Loci.development_tasks_live())
+      |> Map.put("development_attempts", %{})
+      |> Map.put("development_attempts_archive", %{a["id"] => live})
+
+    assert {:refused, %{"code" => "attempt-archived"}} =
+             DevelopmentAttempt.update(a["id"], {1, "needs_changes", "Changed"}, s)
+
+    # and an exact replay of the note that is already its last answers ok, state untouched
+    noted =
+      live
+      |> Map.put("revision", 2)
+      |> Map.put("status", "needs_changes")
+      |> Map.update!("history", &(&1 ++ [%{"note" => "Same", "revision" => 2, "status" => "needs_changes"}]))
+
+    s = put_in(s, ["development_attempts_archive", a["id"]], noted)
+    assert {:ok, ^noted, ^s} = DevelopmentAttempt.update(a["id"], {1, "needs_changes", "Same"}, s)
+  end
+
+  test "T25 · the residual, pinned: a finish replayed after the move is refused test-outcome-invalid",
+       c do
+    # `retire/1` keeps a run without its `source_basis_id` and `result_sha256`
+    # and an outcome without its `output`, so the archived run no longer admits
+    # the outcome it was finished with. (TASK.md predicted `test-outcome-conflict`;
+    # measured, the identity check refuses first.) By D1 this replay can
+    # only follow a finish that was already recorded (a started run keeps its
+    # attempt live), so nothing is lost; it is stated rather than discovered.
+    a = Authority.record_development_attempt(fields(c))
+    world = a["source"]["world"]
+    refute match?({:refused, _}, Authority.begin_development_test(a["id"], test_start(a)))
+    Authority.finish_development_test(a["id"], "run-fixture", world, test_outcome(a))
+    revision = Loci.development_attempts_live()[a["id"]]["revision"]
+    Authority.update_development_attempt(a["id"], revision, "dismissed", "Superseded")
+    refute Map.has_key?(Loci.development_attempts_live(), a["id"])
+
+    assert {:refused, %{"code" => "test-outcome-invalid"}} =
+             Authority.finish_development_test(a["id"], "run-fixture", world, test_outcome(a))
+  end
+
+  test "T25 · an ACCEPTED attempt of an open plan stays live", c do
+    a = Authority.record_development_attempt(fields(c))
+    world = a["source"]["world"]
+    refute match?({:refused, _}, Authority.begin_development_test(a["id"], test_start(a)))
+    Authority.finish_development_test(a["id"], "run-fixture", world, test_outcome(a))
+    checked = Authority.prepare_development_acceptance(a["id"], acceptance_fields(a))
+
+    accepted =
+      Authority.accept_development_attempt(
+        a["id"],
+        checked["revision"],
+        checked["acceptance_check"]["token"],
+        "Meets criteria",
+        world
+      )
+
+    assert accepted["status"] == "accepted"
+    assert Map.has_key?(Loci.development_attempts_live(), a["id"])
+    refute Map.has_key?(Loci.development_attempts_archive(), a["id"])
+  end
+
+  test "T25 · a create replayed after its attempt moved answers the same record, not a second one", c do
+    f = fields(c)
+    a = Authority.record_development_attempt(f)
+    Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded")
+    count = map_size(Loci.development_attempts())
+
+    replay = Authority.record_development_attempt(f)
+    assert replay["id"] == a["id"]
+    assert map_size(Loci.development_attempts()) == count
+  end
+
+  test "T25 · the door returns a moved attempt whole", c do
+    a = Authority.record_development_attempt(fields(c))
+    Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded")
+
+    assert %{"allow" => true, "development_attempt" => full} =
+             Control.command(c.human, :read_development_attempt, [a["id"]])
+
+    assert full["id"] == a["id"] and full["status"] == "dismissed"
+    assert full == Loci.development_attempts()[a["id"]]
+  end
+
+  test "T25 · the operator frame carries a live plan's moved attempts as cards, never as nothing", c do
+    a = Authority.record_development_attempt(fields(c))
+    Authority.update_development_attempt(a["id"], 1, "dismissed", "Superseded")
+    p = Projection.operator()
+    card = p["development_attempts"][a["id"]]
+    plan = p["development_tasks"][a["task_ref"]]
+
+    assert card["archived"]["schema"] == "archived-record-card@1"
+    assert card["status"] == "dismissed"
+    assert plan["archived_attempts"] == %{"carried" => true, "count" => 1}
+    refute Map.has_key?(plan, "archived"), "a live plan was dressed as an archived card"
+    assert p["development_attempts_window"]["carried"]["unwindowed"] == 0
+  end
 end

@@ -139,3 +139,42 @@ test('T23 · the window block is read only under its own schema', () => {
   assert.equal(attemptWindowOf({}), null, 'a runtime before T23 publishes no window and withholds nothing');
   assert.equal(attemptWindowOf({development_attempts_window: {...w, schema: 'x@1'}}), null);
 });
+
+/* ── T25 · a LIVE plan that owns archived (dismissed) attempts ────────────── */
+const livePlan = attempts => ({id: 'dt_0138', status: 'planned', history: [], archived_attempts: attempts});
+
+test('T25 · a live plan\'s marker is read like an archived plan\'s, and it is not a card', () => {
+  const withheld = livePlan({carried: false, count: 6, refs: ['da_0139', 'da_0140'], runs: 6});
+  assert.deepEqual(attemptsOf(withheld), {carried: false, count: 6, refs: ['da_0139', 'da_0140'], runs: 6});
+  assert.equal(withheldAttempts(withheld).count, 6);
+  assert.equal(cardOf(withheld), null, 'a live plan must never read as an archived card');
+
+  const carried = livePlan({carried: true, count: 6});
+  assert.deepEqual(attemptsOf(carried), {carried: true, count: 6});
+  assert.equal(withheldAttemptsNote(carried), null);
+
+  for (const bad of [{carried: false, count: 0}, {carried: 'no', count: 2}, null, 'x'])
+    assert.equal(attemptsOf(livePlan(bad)), null, JSON.stringify(bad));
+});
+
+test('T25 · a live plan\'s note speaks of DISMISSED attempts and never calls the plan archived', () => {
+  const six = withheldAttemptsNote(livePlan({carried: false, count: 6, refs: [], runs: 6}));
+  assert.equal(six, '6 dismissed review attempts of this plan and 6 profile runs are kept in the world; this screen does not carry them.');
+  assert.doesNotMatch(six, /archived/i);
+  assert.doesNotMatch(six, /no (review )?attempts|not run|never/i);
+
+  const one = withheldAttemptsNote(livePlan({carried: false, count: 1, refs: ['da_1'], runs: 0}));
+  assert.equal(one, '1 dismissed review attempt of this plan is kept in the world; this screen does not carry it.');
+
+  // the archived plan's wording is unchanged by T25
+  assert.match(withheldAttemptsNote(plan({carried: false, count: 2, refs: [], runs: 3})),
+    /^This plan is archived\. Its 2 review attempts and 3 profile runs are kept in the world/);
+});
+
+test('T25 · a plan\'s attempt count adds what its marker withholds, for a live plan and an archived one', async () => {
+  const {attemptTotal} = await import('../cockpit/ui/archived-record.js');
+  assert.equal(attemptTotal(5, livePlan({carried: false, count: 6, refs: [], runs: 6})), 11);
+  assert.equal(attemptTotal(11, livePlan({carried: true, count: 6})), 11, 'carried attempts are already rows');
+  assert.equal(attemptTotal(0, plan({carried: false, count: 2, refs: [], runs: 3})), 2, 'never (0) for a withheld archived plan');
+  assert.equal(attemptTotal(3, {id: 'dt_1', status: 'planned'}), 3);
+});

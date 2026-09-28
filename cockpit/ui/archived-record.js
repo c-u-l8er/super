@@ -94,10 +94,15 @@ export function withheldNote(record, field, subject = 'material') {
  * the page still has no read (see the top of this file).
  */
 
-/** `{carried, count, refs?, runs?}` for an archived plan with archived attempts; null otherwise. */
+/* T25 · a LIVE plan can own archived attempts too: a dismissed attempt now
+ * leaves the live directory while its plan is open. The runtime marks such a
+ * plan `archived_attempts` rather than `archived.attempts`, because `archived`
+ * on a live plan would make every reader here take it for a card. */
+const markerOf = plan => (cardOf(plan) ? plan.archived.attempts : plan && typeof plan === 'object' ? plan.archived_attempts : null);
+
+/** `{carried, count, refs?, runs?}` for a plan with archived attempts (archived or live); null otherwise. */
 export function attemptsOf(plan) {
-  if (!cardOf(plan)) return null;
-  const a = plan.archived.attempts;
+  const a = markerOf(plan);
   if (!a || typeof a !== 'object' || !Number.isInteger(a.count) || a.count < 1) return null;
   if (a.carried === true) return {carried: true, count: a.count};
   if (a.carried !== false) return null;
@@ -115,6 +120,15 @@ export function withheldAttempts(plan) {
   return a && !a.carried ? a : null;
 }
 
+/**
+ * How many review attempts a plan has: the ones on the frame plus the ones its marker says are withheld. A withheld
+ * attempt left out of this number is the "(0)" T23 exists to stop (and T25 made it possible for open plans too).
+ */
+export function attemptTotal(onFrame, plan) {
+  const w = withheldAttempts(plan);
+  return onFrame + (w ? w.count : 0);
+}
+
 const count = (n, one, many) => `${n} ${n === 1 ? one : many}`;
 
 /**
@@ -127,8 +141,10 @@ export function withheldAttemptsNote(plan) {
   if (!w) return null;
   const single = w.count === 1 && !w.runs;
   const runs = w.runs ? ` and ${count(w.runs, 'profile run', 'profile runs')}` : '';
-  return `This plan is archived. Its ${count(w.count, 'review attempt', 'review attempts')}${runs} ` +
-    `${single ? 'is' : 'are'} kept in the world; this screen does not carry ${single ? 'it' : 'them'}.`;
+  const kept = `${single ? 'is' : 'are'} kept in the world; this screen does not carry ${single ? 'it' : 'them'}.`;
+  // A live plan's archived attempts are its DISMISSED ones (T25); it is not archived, and must not be called so.
+  if (!cardOf(plan)) return `${count(w.count, 'dismissed review attempt', 'dismissed review attempts')} of this plan${runs} ${kept}`;
+  return `This plan is archived. Its ${count(w.count, 'review attempt', 'review attempts')}${runs} ${kept}`;
 }
 
 /**

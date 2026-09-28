@@ -10,7 +10,7 @@ import {taskSessionView} from './task-session.js';
 import {taskProgress} from './task-progress.js';
 import {planSteps,completionReason} from './plan-steps.js';
 import {reviewTestPanel} from './review-test-panel.js';
-import {fieldState,withheldNote,withheldAttempts,withheldAttemptsNote} from './archived-record.js';
+import {cardOf,fieldState,withheldNote,withheldAttempts,withheldAttemptsNote,attemptTotal} from './archived-record.js';
 import {node,navigate,selectedWorkspace} from './app-shell.js';
 import {heldProjection,runtimeWorld,waitForBot} from './runtime-bots.js';
 export function taskScope(p,workspace='',botClient=''){
@@ -33,7 +33,11 @@ export function taskReviewCounts(p,taskId){
  * Its live attempts (a cancelled plan can keep undecided ones) still count. */
 export function reviewSummary(p,task){
   const counts=taskReviewCounts(p,task.id),withheld=withheldAttempts(task);
-  if(!withheld)return `${counts.accepted} accepted · ${counts.awaiting} awaiting decision · ${counts.needsChanges} need changes`;
+  const full=`${counts.accepted} accepted · ${counts.awaiting} awaiting decision · ${counts.needsChanges} need changes`;
+  if(!withheld)return full;
+  // T25: an OPEN plan's withheld attempts are its dismissed ones; its accepted ones are live and on the frame, so
+  // its counts stay whole. Dropping "accepted" here would say less than the plan holds.
+  if(!cardOf(task))return `${full} · ${withheld.count} dismissed review${withheld.count===1?'':'s'} not in this view`;
   return [`${withheld.count} archived review${withheld.count===1?'':'s'} not in this view`,...(counts.awaiting?[`${counts.awaiting} awaiting decision`]:[]),...(counts.needsChanges?[`${counts.needsChanges} need changes`]:[])].join(' · ');
 }
 import {readContent,retainedSide} from './review-content.js';
@@ -183,7 +187,7 @@ export function initDevelopmentTasks({invoke,actions,current}){
     // how to record the first review of a plan finished on an accepted one.
     const withheld=withheldAttempts(task);
     const section=node('section',undefined,'development-attempts');section.id='development-attempts';
-    section.append(node('h3',`Review attempts (${rows.length+(withheld?withheld.count:0)})`),node('p','Retained review material and human notes. Recording does not save a file, run checks or accept a result.','directory-note'));
+    section.append(node('h3',`Review attempts (${attemptTotal(rows.length,task)})`),node('p','Retained review material and human notes. Recording does not save a file, run checks or accept a result.','directory-note'));
     if(withheld){const note=node('p',withheldAttemptsNote(task),'availability-note');note.dataset.attemptsWithheld=String(withheld.count);section.append(note);}
     else if(!rows.length)section.append(node('p','Open a plan-linked file proposal and choose Save review attempt to retain it here.','availability-note'));
     for(const attempt of rows){

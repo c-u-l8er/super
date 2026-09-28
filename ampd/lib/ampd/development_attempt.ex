@@ -104,10 +104,15 @@ defmodule Ampd.DevelopmentAttempt do
     source = fields["source"]
     keys = Enum.sort(Map.keys(fields))
 
+    # T25: the archive too. A dismissed attempt now leaves the live directory
+    # while its plan is open, so a retried create (same request identity) can
+    # arrive after its record moved; looking in the live map alone would record
+    # the same review a second time.
     old =
-      Enum.find_value(s["development_attempts"], fn {_, a} ->
-        if a["client_ref"] == fields["client_ref"], do: a
-      end)
+      Enum.find_value(
+        Map.merge(s["development_attempts_archive"] || %{}, s["development_attempts"]),
+        fn {_, a} -> if a["client_ref"] == fields["client_ref"], do: a end
+      )
 
     fault =
       cond do
@@ -208,10 +213,12 @@ defmodule Ampd.DevelopmentAttempt do
       Enum.sort(Map.keys(f)) == Enum.sort(keys) and nonempty?(f["client_ref"], 100) and
         is_map(f["material"]) and Map.keys(f["material"]) == ["files"] and is_list(files)
 
+    # T25: the archive too, as in `create/2`.
     old =
-      Enum.find_value(s["development_attempts"], fn {_, a} ->
-        if a["client_ref"] == f["client_ref"], do: a
-      end)
+      Enum.find_value(
+        Map.merge(s["development_attempts_archive"] || %{}, s["development_attempts"]),
+        fn {_, a} -> if a["client_ref"] == f["client_ref"], do: a end
+      )
 
     cond do
       not envelope? ->
@@ -842,12 +849,67 @@ defmodule Ampd.DevelopmentAttempt do
       end)
   end
 
+  @doc """
+  Every write to an attempt. A live attempt is updated as it always was.
+
+  **T25 · an archived attempt answers like the terminal record it is, never
+  `attempt-unknown`.** Since T25 a dismissed attempt leaves the live directory on
+  the write that dismisses it (`archive_finished/3`), so the page's retry of a
+  dismiss whose confirmation was lost (same request identity) now meets the
+  archive. `attempt-unknown` there would tell a person that a dismiss which
+  happened did not; T14's comment records that exact trap for cancelled plans.
+
+  So the clause runs against the record placed live, and:
+    * an exact replay (the record comes back unchanged) answers `{:ok, record}`
+      and the state is returned untouched;
+    * a clause that would CHANGE it is refused `attempt-archived`. A
+      `attempt-directory-full` from that trial is the same fact: `persist/2` is
+      only reached by a change;
+    * every other refusal passes through as the clause gives it.
+
+  This also covers records T14 and T16 archived, which answered
+  `attempt-unknown` before; the widening is deliberate (`superlane/t25/TASK.md`
+  D2). **The residual, pinned by a test:** `retire/1` keeps a run without its
+  `source_basis_id` and `result_sha256`, so a `finish_test` replay against an
+  archived record is refused `test-outcome-invalid` rather than answered. `archive_finished/3`
+  keeps an attempt live while any of its runs is `started`, so such a replay can
+  only follow a finish that was already recorded.
+  """
+  def update(id, operation, %{"development_attempts" => live} = s) do
+    case archived_only(live, s["development_attempts_archive"], id) do
+      nil -> apply_update(id, operation, s)
+      record -> settled(id, operation, record, s)
+    end
+  end
+
+  defp archived_only(live, archive, id) when is_map(live) and is_map(archive) do
+    if Map.has_key?(live, id), do: nil, else: Map.get(archive, id)
+  end
+
+  defp archived_only(_live, _archive, _id), do: nil
+
+  defp settled(id, operation, record, s) do
+    case apply_update(id, operation, put_in(s, ["development_attempts", id], record)) do
+      {:ok, ^record, _} -> {:ok, record, s}
+      {:ok, _changed, _} -> archived_refusal()
+      {:refused, %{"code" => "attempt-directory-full"}} -> archived_refusal()
+      refusal -> refusal
+    end
+  end
+
+  defp archived_refusal,
+    do:
+      refuse(
+        "attempt-archived",
+        "This review attempt is settled history and cannot change. Record a new proposal to continue."
+      )
+
   # Fixed, non-executing checks derived here from immutable retained bytes.
   # This is not a Carrier validation receipt or a test of the current checkout.
-  def update(id, operation, %{"development_attempts" => attempts} = s)
-      when is_map_key(attempts, id) and is_map_key(:erlang.map_get(id, attempts), "files") and
-             tuple_size(operation) > 0 and
-             elem(operation, 0) in [:check_text] do
+  defp apply_update(id, operation, %{"development_attempts" => attempts} = s)
+       when is_map_key(attempts, id) and is_map_key(:erlang.map_get(id, attempts), "files") and
+              tuple_size(operation) > 0 and
+              elem(operation, 0) in [:check_text] do
     _ = s
 
     refuse(
@@ -856,7 +918,7 @@ defmodule Ampd.DevelopmentAttempt do
     )
   end
 
-  def update(id, {:begin_test, fields}, s) when is_map(fields) do
+  defp apply_update(id, {:begin_test, fields}, s) when is_map(fields) do
     a = s["development_attempts"][id]
     profile = Map.get(fields, "profile", "super-javascript-behavior@1")
     run_id = fields["run_id"]
@@ -922,7 +984,7 @@ defmodule Ampd.DevelopmentAttempt do
 
   # The host bridge supplies the current coordinator epoch before entering the
   # ordered receiver. Never query that coordinator from inside this handler.
-  def update(id, {:recover_tests, world}, s) do
+  defp apply_update(id, {:recover_tests, world}, s) do
     a = s["development_attempts"][id]
 
     cond do
@@ -970,7 +1032,7 @@ defmodule Ampd.DevelopmentAttempt do
     end
   end
 
-  def update(id, {:finish_test, run_id, world, outcome}, s) do
+  defp apply_update(id, {:finish_test, run_id, world, outcome}, s) do
     a = s["development_attempts"][id]
     run = if a, do: Map.get(a, "test_runs", %{})[run_id]
 
@@ -1004,7 +1066,7 @@ defmodule Ampd.DevelopmentAttempt do
     end
   end
 
-  def update(id, {:prepare_acceptance, f}, s) when is_map(f) do
+  defp apply_update(id, {:prepare_acceptance, f}, s) when is_map(f) do
     a = s["development_attempts"][id]
     run = if a, do: Map.get(a, "test_runs", %{})[f["run_id"]]
 
@@ -1044,7 +1106,7 @@ defmodule Ampd.DevelopmentAttempt do
     end
   end
 
-  def update(id, {:accept, revision, token, note, world}, s) do
+  defp apply_update(id, {:accept, revision, token, note, world}, s) do
     a = s["development_attempts"][id]
     check = if a, do: a["acceptance_check"]
     run = if check, do: Map.get(a, "test_runs", %{})[check["run_id"]]
@@ -1113,7 +1175,7 @@ defmodule Ampd.DevelopmentAttempt do
     end
   end
 
-  def update(id, {:check_text, revision}, s) do
+  defp apply_update(id, {:check_text, revision}, s) do
     attempt = s["development_attempts"][id]
 
     cond do
@@ -1178,7 +1240,7 @@ defmodule Ampd.DevelopmentAttempt do
     end
   end
 
-  def update(id, {revision, status, note}, s) do
+  defp apply_update(id, {revision, status, note}, s) do
     attempt = s["development_attempts"][id]
 
     cond do
@@ -1226,7 +1288,8 @@ defmodule Ampd.DevelopmentAttempt do
     end
   end
 
-  def update(_, _, _), do: refuse("attempt-update-invalid", "Use a versioned review update.")
+  defp apply_update(_, _, _),
+    do: refuse("attempt-update-invalid", "Use a versioned review update.")
 
   defp latest_profile_runs(a) do
     a
@@ -1479,18 +1542,42 @@ defmodule Ampd.DevelopmentAttempt do
   # alone made that write refuse `attempt-unknown` instead. It is still a bound,
   # because every attempt reaches `dismissed` or `accepted` and nothing returns
   # from either.
+  #
+  # **T25 · a DISMISSED attempt leaves whatever its plan's state.** A dismissed
+  # attempt can never be tested, accepted or changed again (`update/3` refuses
+  # `attempt-dismissed` and `test-review-stale`), so under an OPEN plan it was
+  # pure weight on this budget. On 2026-09-28 r3's round 2 met exactly that: the
+  # six attempts one plan had dismissed held 50.5 KB of a directory at 127,482
+  # of 131,072 bytes, and the next review of the same plan was refused.
+  #
+  # **Except while one of its runs is `started`.** A dismiss does not wait for a
+  # run, and a run that finished against the archive would be lost. Such an
+  # attempt stays live, reserve and all, until the write that finishes or
+  # recovers the run, and that write moves it. Every started run ends in one of
+  # those two, so this is still a bound.
+  #
+  # Accepted attempts of an open plan stay live: they are what the plan's
+  # completion rests on, and nothing asked to move them (`superlane/t25/TASK.md`).
+  # A dismissed attempt whose plan is absent now leaves too, which shrinks the
+  # residual described above rather than widening it.
   @terminal ~w(dismissed accepted)
 
   def archive_finished(attempts, archive, tasks)
       when is_map(attempts) and is_map(archive) and is_map(tasks) do
     {done, live} =
       Enum.split_with(attempts, fn {_id, a} ->
-        a["status"] in @terminal and finished?(Map.get(tasks, a["task_ref"]))
+        (a["status"] in @terminal and finished?(Map.get(tasks, a["task_ref"]))) or
+          settled_dismissal?(a)
       end)
 
     {Map.new(live),
      Enum.reduce(done, archive, fn {id, a}, acc -> Map.put(acc, id, retire(a)) end)}
   end
+
+  defp settled_dismissal?(%{"status" => "dismissed"} = a),
+    do: not Enum.any?(Map.values(Map.get(a, "test_runs", %{})), &(&1["state"] == "started"))
+
+  defp settled_dismissal?(_), do: false
 
   defp finished?(%{"status" => status}), do: status in ~w(completed cancelled)
   defp finished?(_), do: false
@@ -1507,7 +1594,8 @@ defmodule Ampd.DevelopmentAttempt do
       )
 
     # The record being written is itself archivable when its plan is already
-    # closed; it is then the archive's copy that is authoritative, not the input.
+    # closed, or (T25) when this write dismisses it; it is then the archive's
+    # copy that is authoritative, not the input.
     record = Map.get(attempts, record["id"]) || Map.get(archive, record["id"]) || record
 
     reserved = reserved_bytes(attempts)

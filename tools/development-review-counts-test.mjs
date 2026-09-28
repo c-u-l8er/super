@@ -31,3 +31,16 @@ test('T23 · a carried or live plan reads exactly as before',()=>{
  for(const task of [{id:'one',status:'planned'},withheldPlan({carried:true,count:1})])
   assert.equal(reviewSummary(p,task),'1 accepted · 1 awaiting decision · 0 need changes');
 });
+
+// T25 · an OPEN plan can have withheld attempts too: its DISMISSED ones, which left the live directory. Its accepted
+// and undecided attempts are live, so its counts stay whole and the withheld ones are named as dismissed.
+test('T25 · an open plan with withheld dismissed reviews keeps its counts and names them dismissed',()=>{
+ const task={id:'one',status:'planned',archived_attempts:{carried:false,count:6,refs:[],runs:6}};
+ const p={development_attempts:{a:{task_ref:'one',status:'accepted',acceptance:accepted},b:{task_ref:'one',status:'recorded'}}};
+ const s=reviewSummary(p,task);
+ assert.equal(s,'1 accepted · 1 awaiting decision · 0 need changes · 6 dismissed reviews not in this view');
+ assert.doesNotMatch(s,/archived/);
+ assert.equal(reviewSummary({development_attempts:{}},{...task,archived_attempts:{carried:false,count:1,refs:['da_1'],runs:0}}),'0 accepted · 0 awaiting decision · 0 need changes · 1 dismissed review not in this view');
+ // carried: the cards are rows already, and the line reads exactly as before
+ assert.equal(reviewSummary(p,{...task,archived_attempts:{carried:true,count:6}}),'1 accepted · 1 awaiting decision · 0 need changes');
+});
