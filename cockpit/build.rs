@@ -64,6 +64,7 @@ fn main() {
             "mobile_status",
             "conversation_exchange",
             "task_screenshots",
+            "conversation_bodies",
             "mobile_new_code",
             "bot_configure",
             "bot_forget_key",

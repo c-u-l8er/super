@@ -9,16 +9,20 @@ import {validateContextBatch} from './related-files.js';
 import {initBotWork} from './bot-work-view.js';
 import { heldProjection, registeredBot, registrationUnavailable, runtimeWorld, profileOf, botFields, waitForBot } from './runtime-bots.js';
 import { referenceText, renderMessage, referenceWorld, refreshReferenceText } from './references.js'
-import { recoveryRecord, recoveredReference, unavailableReason } from './proposal-recovery.js';
+import { recoveryRecord, recoveredReference, unavailableReason, validateRecovery } from './proposal-recovery.js';
+import { createBodyService, isBodyRef, problemText } from './conversation-bodies.js';
 import { reviewableActions } from './file-patch.js';
 /* Conversation state is separate from runtime projection state. Model output
  * supplies proposals only; an explicit Apply click uses existing human controls. */
 import { node, selectedWorkspace, bindDisclosure, navigate } from './app-shell.js';
 import { initBotDirectory } from './bot-directory.js';
 import {initConversationSidebar} from './conversation-sidebar.js';
-import { createConversationStore } from './conversation-store.js';
+import { createConversationStore, STORAGE_KEY } from './conversation-store.js';
 import {createTurnRegistry,holdingRefusal} from './conversation-turns.js';
-export function initBots({ invoke, apply, current, runtimeBotActions }) {
+export function initBots({ invoke, apply, current, runtimeBotActions, bodies = null, migration = [] }) {
+  /* T24 · file bodies live in the device body store; the saved record keeps references. One service for the page,
+   * shared with the start-up migration, so a body persisted there is known here. */
+  bodies = bodies ?? createBodyService({invoke});
   const root = document.getElementById('bot-surface');
   let conversationSidebar=null,liveReply=null;
   /* Opening a saved chat also navigates to its bot, and that navigation is the
@@ -77,6 +81,8 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   const deleteConversation=node('button','Delete saved conversation');deleteConversation.type='button';deleteConversation.id='bot-delete-conversation';
   const historyStatus=node('p','Conversations and text attachments are saved on this device.','availability-note');historyStatus.id='bot-save-status';historyStatus.setAttribute('role','status');
   const historyRow=node('div',undefined,'connection-row');historyRow.append(field('Saved conversations',historyPicker),deleteConversation);
+  /* T24 · a store the start-up migration could not move is left exactly as it was; say which and why. */
+  {const stuck=migration.filter(r=>!['migrated','nothing to move','empty'].includes(r.state));if(stuck.length)historyStatus.textContent=`Saved conversations were not all moved out of browser storage (${stuck.map(r=>`${r.key}: ${r.state}${r.detail?' — '+r.detail:''}`).join('; ')}). Nothing in them was changed.`;}
   const conversation=node('section',undefined,'bot-conversation');
   const activity=initBotActivity({root:conversation,connect,input,cancel:cancelReply});
   const botSettings=node('section',undefined,'bot-settings-panel');botSettings.id='bot-settings';botSettings.append(conversation.querySelector('#bot-activity'),connection,settings,sharing,historyStatus,historyRow);historyRow.hidden=true;
@@ -86,10 +92,14 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   let taskReply=null,taskReplyRefs=[],taskRecovery=null;
   let active=null, busy=false, messages=[], proposals=[], pending=false, poll=null;
   const preferences=new Map(), sessions=new Map();let selected=provider.value,catalog=[],files=[];
-  const newHistory=()=>createConversationStore({getItem:key=>localStorage.getItem(storageKey(key)),setItem:(key,value)=>localStorage.setItem(storageKey(key),value)});
+  const newHistory=()=>createConversationStore({getItem:key=>localStorage.getItem(storageKey(key)),setItem:(key,value)=>localStorage.setItem(storageKey(key),value)},{bodies,key:storageKey(STORAGE_KEY)});
   let history=newHistory();
   let conversationTaskLinks=[];
-  let conversationId=null,lastSaved='',restoring=false,historyNavigation=0;
+  let conversationId=null,lastSaved='',lastFailed='',restoring=false,historyNavigation=0;
+  /* T24 · while a reopened conversation's bodies are being read back, and whether any history attachment could not
+   * be: sending waits for the first and is refused for the second, so a provider never receives a history with a
+   * body silently missing. */
+  let bodiesReady=true,bodiesBlocked=null,resolveToken=0;
   const turns=createTurnRegistry();
   const openTurn=()=>turns.turnFor(bot.id,selected,conversationId);
   const turnProjection=()=>turns.current();
@@ -115,7 +125,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   function snapshot(){
     const turn=openTurn();
     return {...(conversationTaskLinks.length?{taskLinks:conversationTaskLinks}:{}),messages:turn?messages.slice(0,turn.messageCount):messages,
-      entries:[...transcript.children].filter(e=>!e.classList.contains('live-reply')).map(e=>({role:e.classList.contains('bot-user')?'user':e.classList.contains('bot-assistant')?'assistant':'result',label:e.querySelector('.eyebrow')?.textContent??'',text:e.querySelector('.bot-message-text')?.dataset.rawText??e.querySelector('.bot-message-text')?.textContent??'',referenceWorld:e.querySelector('.bot-message-text')?.dataset.referenceWorld||null,proposals:[...e.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].map(p=>{const text=p.dataset.savedText??[...p.children].filter(c=>c.tagName!=='BUTTON'&&!c.classList.contains('proposal-source-record')).map(c=>c.dataset.rawText??c.textContent).join('\n');return p.dataset.recovery?{text,recovery:JSON.parse(p.dataset.recovery)}:text;})})),
+      entries:[...transcript.children].filter(e=>!e.classList.contains('live-reply')).map(e=>({role:e.classList.contains('bot-user')?'user':e.classList.contains('bot-assistant')?'assistant':'result',label:e.querySelector('.eyebrow')?.textContent??'',text:e.querySelector('.bot-message-text')?.dataset.rawText??e.querySelector('.bot-message-text')?.textContent??'',referenceWorld:e.querySelector('.bot-message-text')?.dataset.referenceWorld||null,proposals:[...e.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].map(p=>{const text=p.dataset.savedText??[...p.children].filter(c=>c.tagName!=='BUTTON'&&!c.classList.contains('proposal-source-record')&&!c.classList.contains('proposal-meta')).map(c=>c.dataset.rawText??c.textContent).join('\n');if(!p.dataset.recovery)return text;const out={text,recovery:JSON.parse(p.dataset.recovery)};if(p.dataset.provenance)out.provenance=JSON.parse(p.dataset.provenance);if(p.dataset.supersedes)out.supersedes=JSON.parse(p.dataset.supersedes);if(p.dataset.supersededBy)out.superseded_by=JSON.parse(p.dataset.supersededBy);return out;})})),
       draft:turn?.sent.draft??input.value,files:turn?.sent.files??files,includeContext:include.checked,replyPending:!!turn};
   }
   function saveCurrent(){
@@ -123,34 +133,122 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     const data=snapshot(),encoded=JSON.stringify(data);
     if(!conversationId&&!data.messages.length&&!data.entries.length&&!data.draft&&!data.files.length){updateHistory();return true;}
     if(encoded===lastSaved)return true;
-    try{conversationId=history.save(selected,conversationId,data);lastSaved=encoded;historyStatus.textContent='Saved on this device · includes messages and text attachments. Provider credentials are stored separately.';updateHistory();return true;}
-    catch(error){historyStatus.textContent=String(error);return false;}
+    /* T24 · the transcript is watched by MutationObserver(saveCurrent) (below), and painting a card's persistence changes
+     * the transcript. So an identical failed save is not tried or repainted again, and paintPersistence only writes text
+     * that differs: without both, a refused save repainted, the repaint saved, and the page spun (found live, quota
+     * phase). */
+    if(encoded===lastFailed)return false;
+    try{conversationId=history.save(selected,conversationId,data);lastSaved=encoded;lastFailed='';status.classList.remove('save-refused');historyStatus.classList.remove('save-refused');historyStatus.textContent='Saved on this device · messages here, file bodies in the device body store. Provider credentials are stored separately.';updateHistory();paintPersistence();return true;}
+    catch(error){lastFailed=encoded;historyStatus.textContent=String(error);paintPersistence(String(error?.message||error));return false;}
+  }
+  /* T24 · every proposal card says whether it would survive Super closing, and never says so early. The answer is
+   * read from the COMMITTED record, not from the last attempt: a card is saved only if the record in storage holds
+   * this proposal at its position with every body present — inline, or a reference the host confirmed for exactly
+   * these bytes. A body saved only as a pending placeholder is "saving" until written and NOT SAVED if the write
+   * failed; a proposal the committed record does not hold (its save failed) is NOT SAVED. */
+  function cardPosition(card){const entries=[...transcript.children].filter(e=>!e.classList.contains('live-reply')),entry=card.closest('.bot-message');return [entries.indexOf(entry),[...(entry?.querySelectorAll('.bot-proposal:not(.bot-proposal-set)')??[])].indexOf(card)];}
+  function committedState(card,committed,owner){
+    const [i,k]=cardPosition(card),rec=committed?.entries?.[i]?.proposals?.[k];
+    if(!rec||typeof rec!=='object'||!rec.recovery)return {state:'absent'};
+    let cr;try{cr=JSON.parse(card.dataset.recovery);}catch{return {state:'absent'};}
+    let pending=null;
+    for(const f of ['content','draft','original']){
+      const cv=cr[f],rv=rec.recovery[f];
+      if(cv===null&&rv===null)continue;
+      if(typeof rv==='string'){if(rv!==cv)return {state:'absent'};continue;}
+      if(isBodyRef(rv)&&rv.pending){const t=bodies.pendingTextOf(rv.pending_id);if(t===null||(t!==cv&&!(isBodyRef(cv)&&cv.pending_id===rv.pending_id)))return {state:'absent'};pending=t;continue;}
+      if(isBodyRef(rv)){const known=typeof cv==='string'?bodies.refFor(owner,cv):cv;if(!known||known.sha256!==rv.sha256)return {state:'absent'};continue;}
+      return {state:'absent'};
+    }
+    return pending===null?{state:'present'}:{state:'pending',text:pending};
+  }
+  function paintPersistence(failure=null){
+    const owner=conversationId?history.owner(conversationId):null,committed=conversationId?history.get(selected,conversationId):null;
+    const refused=failure??(conversationId?history.outcome(conversationId):null)?.error??null;
+    for(const card of transcript.querySelectorAll('.bot-proposal[data-recovery]')){
+      const c=committedState(card,committed,owner);let state,reason='';
+      if(c.state==='present')state='saved';
+      else if(c.state==='pending'){const s=bodies.stateOf(owner,c.text);if(s==='failed'){state='unsaved';reason=bodies.failureOf(owner,c.text)??'';}else state='saving';}
+      else{state='unsaved';reason=refused??'It is not in the saved conversation.';}
+      let line=card.querySelector('.proposal-persist');if(!line){line=node('p','','bot-status proposal-persist proposal-meta');card.append(line);}
+      card.dataset.persist=state;line.classList.toggle('proposal-unsaved',state==='unsaved');
+      if(state==='unsaved')line.setAttribute('role','alert');else line.removeAttribute('role');
+      const text=state==='saved'?'Saved on this device · recoverable after a restart':state==='saving'?'Saving to this device… not yet recoverable after a restart':`NOT SAVED — this proposal will be lost when Super closes.${reason?' '+reason:''}`;
+      if(line.textContent!==text)line.textContent=text;
+    }
+    if(failure){const text=`NOT SAVED: ${failure} What is not in the saved conversation will be lost when Super closes.`;if(historyStatus.textContent!==text)historyStatus.textContent=text;if(status.textContent!==text)status.textContent=text;status.classList.add('save-refused');historyStatus.classList.add('save-refused');}
+  }
+  bodies.on(owner=>{if(conversationId&&owner===history.owner(conversationId))setTimeout(()=>paintPersistence(),0);});
+  /* T24 · read a reopened conversation's bodies back. Messages and draft files get their texts (sending waits for
+   * this); each proposal card gets its resolved record, validated whole, or the reason it cannot be. */
+  async function resolveBodies(saved,id,token){
+    const owner=history.owner(id);let result;
+    try{result=await bodies.resolve(saved,owner);}catch(error){result={data:saved,problems:[{kind:'attachment',name:'(all)',state:'missing'}]};}
+    if(token!==resolveToken||conversationId!==id)return;
+    const {data,problems}=result;
+    messages=data.messages;files=data.files;const open=openTurn();if(open?.sent.userMessage)messages.push(open.sent.userMessage);showFiles();
+    const blocked=problems.filter(p=>p.kind==='attachment'||p.kind==='draft file');
+    bodiesBlocked=blocked.length?blocked.map(problemText).join(' ')+' Sending is paused in this conversation so the provider never receives a history with a body missing; start a new conversation to continue.':null;
+    for(const card of transcript.querySelectorAll('.bot-proposal[data-slot]')){
+      const [i,k]=card.dataset.slot.split(':').map(Number),rec=data.entries[i]?.proposals?.[k];if(!rec||typeof rec!=='object'||!rec.recovery)continue;
+      const mine=problems.filter(p=>p.entry===i&&p.index===k),result=card.querySelector('.bot-status'),button=card.querySelector('button');
+      if(mine.length){result.textContent=mine.map(problemText).join(' ')+' Ask the assistant for a fresh proposal.';result.setAttribute('role','alert');if(button)button.disabled=true;continue;}
+      try{const record=validateRecovery(rec.recovery);card.dataset.recovery=JSON.stringify(record);result.textContent='Recovered with its original basis · no file changed';if(button)button.disabled=false;}
+      catch(error){result.textContent=`This saved proposal no longer validates: ${error.message||error} Ask the assistant for a fresh proposal.`;result.setAttribute('role','alert');if(button)button.disabled=true;}
+    }
+    bodiesReady=true;if(bodiesBlocked)status.textContent=bodiesBlocked;paintPersistence();refresh();
+  }
+  /* T24 · a newer file proposal for a path supersedes every earlier one in this conversation, and both say so, by
+   * position (reply, proposal). Recorded in the save that records the newer proposal, so a restart shows which
+   * version was the latest. If that save fails, neither is recorded — and the newer card says NOT SAVED, which is
+   * what keeps a person from taking the older one for the current one. */
+  function markSupersession(entry){
+    const entries=[...transcript.children].filter(e=>!e.classList.contains('live-reply')),at=card=>[entries.indexOf(card.closest('.bot-message')),[...card.closest('.bot-message').querySelectorAll('.bot-proposal:not(.bot-proposal-set)')].indexOf(card)];
+    const pathOf=card=>{try{return JSON.parse(card.dataset.recovery).path;}catch{return null;}};
+    for(const card of entry.querySelectorAll('.bot-proposal[data-recovery]')){
+      const path=pathOf(card),[ei,pi]=at(card),older=[];
+      for(const prior of transcript.querySelectorAll('.bot-proposal[data-recovery]')){
+        if(prior===card||prior.closest('.bot-message')===entry||pathOf(prior)!==path)continue;
+        const [e,i]=at(prior);if(e>=ei)continue;
+        older.push({entry:e,index:i});
+        if(!prior.dataset.supersededBy){prior.dataset.supersededBy=JSON.stringify({entry:ei,index:pi});prior.append(node('p',`Superseded by a later proposal for this file (reply ${ei+1}).`,'availability-note proposal-meta'));}
+      }
+      if(older.length){card.dataset.supersedes=JSON.stringify(older.slice(-8));card.append(node('p',`Replaces the earlier proposal for this file in reply ${older.map(o=>o.entry+1).join(', ')}.`,'directory-note proposal-meta'));}
+    }
   }
   function restoreSaved(id){
     conversationTaskLinks=[];taskReply=null;taskReplyRefs=[];taskRecovery=null;activity.reset();
     root.querySelectorAll('.task-conversation-backlink').forEach(n=>n.remove());
     restoring=true;conversationId=id;lastSaved='';messages=[];proposals=[];files=[];input.value='';transcript.replaceChildren();liveReply=null;
-    const saved=id?history.get(selected,id):null;
+    const saved=id?history.get(selected,id):null;const token=++resolveToken;bodiesReady=!saved;bodiesBlocked=null;
     if(saved){
       conversationTaskLinks=saved.taskLinks??[];
       messages=saved.messages;files=saved.files;input.value=saved.draft;include.checked=saved.includeContext;
-      for(const e of saved.entries){const entry=line(e.role,e.text);renderMessage(entry.querySelector('.bot-message-text'),e.text,e.referenceWorld??null);referenceText(entry.querySelector('.eyebrow'),e.label,e.referenceWorld??null);
-        for(const saved of e.proposals){const text=typeof saved==='string'?saved:saved.text;const card=node('div',undefined,'bot-proposal');card.dataset.savedText=text;card.append(node('div',undefined,'bot-message-text'));renderMessage(card.querySelector('.bot-message-text'),text,e.referenceWorld??null);
+      saved.entries.forEach((e,entryIndex)=>{const entry=line(e.role,e.text);renderMessage(entry.querySelector('.bot-message-text'),e.text,e.referenceWorld??null);referenceText(entry.querySelector('.eyebrow'),e.label,e.referenceWorld??null);
+        e.proposals.forEach((saved,proposalIndex)=>{const text=typeof saved==='string'?saved:saved.text;const card=node('div',undefined,'bot-proposal');card.dataset.savedText=text;card.dataset.slot=`${entryIndex}:${proposalIndex}`;card.append(node('div',undefined,'bot-message-text'));renderMessage(card.querySelector('.bot-message-text'),text,e.referenceWorld??null);
           const why=unavailableReason(saved);
-          if(why){card.append(node('p',why,'availability-note'));entry.append(card);continue;}
+          if(why){card.append(node('p',why,'availability-note'));entry.append(card);return;}
+          /* T24 · where it came from and what replaced it, as recorded; nothing is inferred for older records. */
+          if(saved.provenance){card.dataset.provenance=JSON.stringify(saved.provenance);card.append(node('p',`From ${saved.provenance.provider}${saved.provenance.model?' · '+saved.provenance.model:''}${saved.provenance.request_id?' · request '+saved.provenance.request_id:''} · ${saved.provenance.received_at}`,'directory-note'));}
+          if(saved.supersedes?.length){card.dataset.supersedes=JSON.stringify(saved.supersedes);card.append(node('p',`Replaces the earlier proposal for this file in reply ${saved.supersedes.map(p=>p.entry+1).join(', ')}.`,'directory-note'));}
+          if(saved.superseded_by){card.dataset.supersededBy=JSON.stringify(saved.superseded_by);card.append(node('p',`Superseded by a later proposal for this file (reply ${saved.superseded_by.entry+1}).`,'availability-note'));}
           /* T22a: a saved proposal with its recovery record is reviewable again. The reference is
              unbound; the Editor binds it only after the host re-verifies the file on disk against the
              recorded basis, so the stale-file protection is the host's own, not a copy. */
           card.dataset.recovery=JSON.stringify(saved.recovery);
-          const button=node('button','Review in Editor','primary'),result=node('p','Recovered with its original basis · no file changed','bot-status');button.type='button';card.append(result,button);
-          button.onclick=()=>{if(button.disabled)return;let reference;try{reference=recoveredReference(saved.recovery);}catch(error){result.textContent=String(error.message||error);return;}
-            const detail={reference,proposal:{path:saved.recovery.path,content:saved.recovery.content},error:null,pending:null,onIdentity:record=>{card.querySelector('.proposal-source-record')?.remove();const identity=node('details',undefined,'proposal-source-record');identity.append(node('summary','Recorded source and result'),node('pre',JSON.stringify(record,null,2)));card.append(identity);saveCurrent();}};
+          /* T24 · a record whose bodies are references is reviewable only once they are read back and the whole record
+           * re-validated (a patch must still reproduce its content). Until then, and if they cannot be read, it says so. */
+          const unresolved=[saved.recovery.content,saved.recovery.draft,saved.recovery.original].some(isBodyRef);
+          const button=node('button','Review in Editor','primary'),result=node('p',unresolved?'Reading the saved proposal from this device…':'Recovered with its original basis · no file changed','bot-status');button.type='button';button.disabled=unresolved;card.append(result,button);
+          button.onclick=()=>{if(button.disabled)return;let reference,recovery;try{recovery=JSON.parse(card.dataset.recovery);reference=recoveredReference(recovery);}catch(error){result.textContent=String(error.message||error);return;}
+            const detail={reference,proposal:{path:recovery.path,content:recovery.content},error:null,pending:null,onIdentity:record=>{card.querySelector('.proposal-source-record')?.remove();const identity=node('details',undefined,'proposal-source-record');identity.append(node('summary','Recorded source and result'),node('pre',JSON.stringify(record,null,2)));card.append(identity);saveCurrent();}};
             const event=new CustomEvent('review-file-proposal',{detail,cancelable:true});
             if(!document.dispatchEvent(event)){result.textContent=detail.error||'The file review could not open.';return;}
             result.textContent='Checking the file on disk against the proposal\'s recorded basis…';button.disabled=true;
             Promise.resolve(detail.pending).then(()=>{result.textContent='Review opened in Editor. The file stays unchanged until you choose a draft and Save.';},error=>{result.textContent=String(error?.message||error);}).finally(()=>{button.disabled=false;});};
-          entry.append(card);}
-      }
+          entry.append(card);});
+      });
+      resolveBodies(saved,id,token);
       if(saved.replyPending)line('result','The previous reply was not completed in this conversation. Your draft and attachments are restored; nothing was resent.');
       status.textContent='Saved conversation reopened. Historical proposals are read-only. Links look up current records; the original message is preserved.';
       historyStatus.textContent='Saved locally · messages and attachments return here. No message is sent by reopening.';
@@ -188,7 +286,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     connectionNote.textContent=isClaude?'Use your local Claude Code sign-in. Claude manages the credentials; account access and limits apply.':isCodex?'Sign in with ChatGPT in your browser. Your connection is managed automatically.':cloud?'Connect using your saved key. Add or replace a key in Manage connections.':'Use models running on your computer. No API key needed.';
     sharingText.textContent=` Include workspace names, goals, lane/worker summaries and repository references with messages sent to ${active?.provider??provider.value}. Only files you explicitly attach are included; API keys are never included.`;
     historyPicker.disabled=busy;deleteConversation.disabled=busy||!conversationId||!!openTurn();
-    send.disabled=busy||turns.inFlight()||!active;fresh.disabled=busy;effort.disabled=connectionLocked;attach.disabled=busy;attachButton.disabled=busy;reload.disabled=connectionLocked||!active;
+    send.disabled=busy||turns.inFlight()||!active||!bodiesReady||!!bodiesBlocked;fresh.disabled=busy;effort.disabled=connectionLocked;attach.disabled=busy;attachButton.disabled=busy;reload.disabled=connectionLocked||!active;
     for(const n of form.elements)n.disabled=connectionLocked;
     include.disabled=connectionLocked;
     for(const a of proposals) a.button.disabled=busy||a.state!=='proposed'||(['propose_file_edit','review_file_set'].includes(a.name)?!a.reference:(!live()||worldKey(live())!==a.world||selectedWorkspace()!==a.workspace));
@@ -199,7 +297,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     renderMessage(entry.querySelector('.bot-message-text'),text);transcript.append(entry);return entry;
   }
   function reset() { restoreSaved(null); }
-  function showFiles(){attached.replaceChildren();for(const f of files){const row=node('div');const remove=node('button',`Remove ${f.name}`);remove.type='button';remove.addEventListener('click',()=>{if(busy)return;files=files.filter(x=>x!==f);showFiles();});row.append(node('span',`${f.name} · ${f.content.length} characters `),remove);attached.append(row);}}
+  function showFiles(){attached.replaceChildren();for(const f of files){const row=node('div');const remove=node('button',`Remove ${f.name}`);remove.type='button';remove.addEventListener('click',()=>{if(busy)return;files=files.filter(x=>x!==f);showFiles();});row.append(node('span',`${f.name} · ${typeof f.content==='string'?f.content.length+' characters':'reading from this device…'} `),remove);attached.append(row);}}
   attachButton.addEventListener('click',async()=>{if(busy)return;busy=true;refresh();status.textContent='Choose files in the attachment window.';try{const result=await invoke('choose_attachments');if(files.length+result.files.length>4)throw new Error('Attach up to four files per message. Remove a file before adding more.');files.push(...result.files);showFiles();status.textContent=result.files.length?'Files attached. They will be shared when you send.':'File selection cancelled.';saveCurrent();}catch(error){status.textContent=String(error);}finally{busy=false;refresh();}});
   attach.addEventListener('change',async()=>{if(busy)return;busy=true;refresh();const chosen=[...attach.files];attach.value='';try{const additions=[];for(const f of chosen){if(files.length+additions.length>=4||f.size>REVIEW_FILE_BYTES)throw new Error('Attach up to four text/code files, each at most '+REVIEW_FILE_LABEL+'.');const content=new TextDecoder('utf-8',{fatal:true}).decode(await f.arrayBuffer());if(content.includes('\0')||!/\.(txt|md|json|csv|js|ts|tsx|jsx|rs|py|ex|exs|html|css|yaml|yml|toml|xml|log)$/i.test(f.name))throw new Error('This attachment type is not supported yet. Choose a UTF-8 text or code file.');additions.push({name:f.name,content});}files.push(...additions);showFiles();status.textContent='Attachments will be shared with the selected provider when you send.';}catch(error){status.textContent=String(error);}finally{busy=false;refresh();}});
   function showModels(){modelPicker.replaceChildren();const list=[...catalog];if(active&&!list.some(m=>m.id===active.model))list.push({id:active.model,name:active.model});for(const m of list){const o=node('option',m.name||m.id);o.value=m.id;modelPicker.append(o);}modelPicker.hidden=!active;if(active)modelPicker.value=active.model;showEfforts();}
@@ -301,6 +399,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   composer.addEventListener('submit',async e=>{
     e.preventDefault();
     if(turns.inFlight()){const held=turns.current(),title=storeFor(held.botId).list(held.provider).find(c=>c.id===held.conversationId)?.title;status.textContent=holdingRefusal(held,title);refresh();return;}
+    if(!bodiesReady||bodiesBlocked){status.textContent=bodiesBlocked??'Reading this conversation\'s saved attachments from this device… Send again in a moment.';refresh();return;}
     const draft=input.value;const sentFiles=[...files];const sentReferences=sentFiles.map(f=>editReferences.get(f)).filter(Boolean);const text=input.value.trim();if(busy||!active||(!text&&!files.length))return;
     if(messages.length>=44){status.textContent='Start a new conversation to continue.';return;}
     const wantsTitle=!conversationId||history.list(selected).find(c=>c.id===conversationId)?.titleSource==='fallback';
@@ -360,7 +459,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
           proposal.append(node('h2',action.patch?'Proposed patch':'Proposed file edit'),node('p',action.args.path+(action.args.content===null?' · Delete file — use combined review':(action.patch?` · ${action.patch.edits.length} edit${action.patch.edits.length===1?'':'s'} · `:' · ')+new TextEncoder().encode(action.args.content).length+(action.patch?' bytes after the patch':' bytes')),'proposal-field'),result,button);const a={...action,button,state:'proposed',reference};proposals.push(a);
           /* T22a: a proposal made against a shared basis is saved WITH that basis and its content, so a
              restart keeps it reviewable. Without a basis nothing is recorded, and the card says so later. */
-          {const record=recoveryRecord(reference,action.args,action.patch??null);if(record)proposal.dataset.recovery=JSON.stringify(record);}
+          {const record=recoveryRecord(reference,action.args,action.patch??null);if(record){proposal.dataset.recovery=JSON.stringify(record);proposal.dataset.provenance=JSON.stringify({provider:sentActive.provider,model:sentActive.model??null,request_id:requestId,received_at:new Date().toISOString()});}}
           button.onclick=()=>{if(button.disabled)return;const detail={reference,proposal:action.args,error:null,onIdentity:record=>{proposal.querySelector('.proposal-source-record')?.remove();const identity=node('details',undefined,'proposal-source-record');identity.append(node('summary','Recorded source and result'),node('pre',JSON.stringify(record,null,2)));proposal.append(identity);saveCurrent();}};const event=new CustomEvent('review-file-proposal',{detail,cancelable:true});if(!document.dispatchEvent(event)){result.textContent=detail.error||'The file review could not open.';return;}result.textContent='Review opened in Editor. The file stays unchanged until you choose a draft and Save.';};entry.append(proposal);continue;
         }
 
@@ -381,6 +480,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
         dismiss.addEventListener('click',()=>{if(busy||a.state!=='proposed')return;a.state='dismissed';result.textContent='Dismissed · no change made';dismiss.disabled=true;messages.push({role:'user',content:`I dismissed the proposed ${a.name} action. It was not executed.`});refresh();});
         proposal.append(result,button,dismiss);entry.append(proposal);
       }
+      markSupersession(entry);
       activity.finish(false);taskReply='Reply received';status.textContent='Reply received.';
       const done=turns.finish(token);clearTimeout(replyPoll);cancelReply.hidden=true;
       saveCurrent();
@@ -390,7 +490,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
     finally{clearTimeout(replyPoll);paintLive();saveCurrent();refresh();if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}
   });
   historyPicker.addEventListener('change',()=>{if(busy)return;historyNavigation++;const id=historyPicker.value;if(!saveCurrent()){updateHistory();return;}restoreSaved(id||null);saveCurrent();refresh();});
-  deleteConversation.addEventListener('click',()=>{if(busy||!conversationId||openTurn())return;if(!confirm('Delete this saved conversation and its locally saved attachments?'))return;try{history.remove(selected,conversationId);sessions.delete(selected);reset();historyStatus.textContent='Conversation deleted from this device.';refresh();}catch(error){historyStatus.textContent=String(error);}});
+  deleteConversation.addEventListener('click',()=>{if(busy||!conversationId||openTurn())return;if(!confirm('Delete this saved conversation and its locally saved attachments?'))return;try{const released=history.remove(selected,conversationId);sessions.delete(selected);reset();historyStatus.textContent='Conversation deleted from this device.';refresh();released.then(r=>{if(r)historyStatus.textContent=`Conversation deleted from this device; ${r.released} saved bod${r.released===1?'y':'ies'} released.`;},e=>{historyStatus.textContent=`Conversation deleted. Its saved bodies could not be released (${e?.message||e}); they stay on this device.`;});}catch(error){historyStatus.textContent=String(error);}});
   input.addEventListener('input',()=>{historyNavigation++;saveCurrent();});
   document.addEventListener('before-page-select',()=>{historyNavigation++;});
   include.addEventListener('change',saveCurrent);
@@ -464,7 +564,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   document.addEventListener('runtime-view-rendered',showIdentity);
   new MutationObserver(showIdentity).observe(document.getElementById('world'),{childList:true});
   showIdentity();
-  const storeFor=id=>id===bot.id?history:createConversationStore({getItem:key=>localStorage.getItem(id==='assistant'?key:`${key}:bot:${id}`),setItem:(key,value)=>localStorage.setItem(id==='assistant'?key:`${key}:bot:${id}`,value)});
+  const storeFor=id=>id===bot.id?history:createConversationStore({getItem:key=>localStorage.getItem(id==='assistant'?key:`${key}:bot:${id}`),setItem:(key,value)=>localStorage.setItem(id==='assistant'?key:`${key}:bot:${id}`,value)},{bodies,key:id==='assistant'?STORAGE_KEY:`${STORAGE_KEY}:bot:${id}`});
   function landReply(turn,{reply=null,titled=null,error=null,partial='',sentLabel='',wantsTitle=false}={}){
     const store=storeFor(turn.botId),base=store.get(turn.provider,turn.conversationId);
     if(!base)throw new Error('The conversation that sent this reply is unavailable.');
@@ -486,7 +586,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions }) {
   }
   conversationSidebar=initConversationSidebar({root,fresh,get:()=>({bot,items:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),bots:roster.list(),active:{id:conversationId,botId:bot.id,provider:selected},turn:turnProjection(),selected:conversationId,provider:selected,busy:busy||pending}),
     update:(b,p,id,patch)=>{storeFor(b).update(p,id,patch);updateHistory();},
-    remove:(b,p,id)=>{if(turns.owns({botId:b,provider:p,conversationId:id}))throw Error('Cancel the generating reply before deleting this conversation.');if(!confirm('Delete this conversation and its saved attachments?'))return;storeFor(b).remove(p,id);sessions.delete(p);if(bot.id===b&&conversationId===id)reset();updateHistory();},
+    remove:(b,p,id)=>{if(turns.owns({botId:b,provider:p,conversationId:id}))throw Error('Cancel the generating reply before deleting this conversation.');if(!confirm('Delete this conversation and its saved attachments?'))return;storeFor(b).remove(p,id).catch(e=>{historyStatus.textContent=`Conversation deleted. Its saved bodies could not be released (${e?.message||e}); they stay on this device.`;});sessions.delete(p);if(bot.id===b&&conversationId===id)reset();updateHistory();},
     open:async(b,p,id)=>{if(busy||pending||!saveCurrent())return;if(b!==bot.id){openingConversation(()=>navigate('bot:'+b,true));for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));if(bot.id!==b||busy||loadingProvider)throw Error('Connection setup is still busy. Try again shortly.');}let token=++historyNavigation;if(p!==selected){provider.value=p;provider.dispatchEvent(new Event('change'));token=historyNavigation;for(let i=0;(loadingProvider||busy)&&i<300&&token===historyNavigation;i++)await new Promise(r=>setTimeout(r,100));}if(token!==historyNavigation||selected!==p)return;if(busy||loadingProvider){status.textContent='Connection setup is still busy. Reopen this conversation when it finishes.';return;}restoreSaved(id);saveCurrent();refresh();workView.conversation();}
   });conversationSidebar.render();
 

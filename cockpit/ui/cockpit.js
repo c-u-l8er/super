@@ -1,4 +1,6 @@
 import {fleetPanel} from './fleet-view.js';
+import {createBodyService} from './conversation-bodies.js';
+import {migrateConversationStores} from './conversation-migration.js';
 import {activityPanel, refreshNow} from './activity.js';
 import {initSchematics} from './schematics-view.js';
 import {initWorkFocus} from './work-focus-view.js';
@@ -1389,7 +1391,14 @@ function current(generation) {
 window.cockpit.deliver = deliver;
 window.cockpit.bind = bind;
 
-initBots({ invoke, apply: submit, current: () => window.cockpit, runtimeBotActions:{
+/* T24 · move saved conversations' file bodies out of localStorage BEFORE any store is opened for writing, and share
+ * the one body service with the bots page. A failure leaves every store as it was and is reported there. */
+const conversationBodies = createBodyService({invoke});
+let conversationMigration = [];
+try { conversationMigration = await migrateConversationStores(localStorage, conversationBodies); }
+catch (e) { conversationMigration = [{key: '(all)', state: 'failed', detail: String(e?.message || e)}]; }
+window.__conversationMigration = conversationMigration;
+initBots({ invoke, apply: submit, current: () => window.cockpit, bodies: conversationBodies, migration: conversationMigration, runtimeBotActions:{
   register:args=>submit('register_bot',args),
   update:args=>submit('update_bot',args),
   remove:args=>submit('remove_bot',args)

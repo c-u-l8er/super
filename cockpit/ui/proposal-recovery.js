@@ -1,5 +1,6 @@
 import {REVIEW_FILE_BYTES,bytesOf} from './review-limits.js';
 import {applyFilePatch,validatePatchRecord} from './file-patch.js';
+import {isBodyRef,validBodyRef} from './conversation-bodies.js';
 // A bot proposal survives a restart only as a RECOVERY RECORD: the target path, the exact proposed
 // content, the shared draft and original it was made against, the `selected-file-basis@1` record
 // the host produced at share time, and the plan link. A proposal recorded without a basis is kept
@@ -27,6 +28,21 @@ export function validateRecovery(r){
     let derived;try{derived=applyFilePatch(out.draft,out.patch.edits);}catch{throw Error('Recovery patch does not apply to its recorded draft.');}
     if(out.content===null||derived!==out.content)throw Error('Recovery patch does not reproduce its recorded content.');
   }
+  return out;
+}
+/* T24: a saved record whose bodies are references to the device body store. Everything but the bodies is
+   validated exactly as validateRecovery does; the bodies are validated as references. The patch's self-verification
+   needs the bytes, so it runs when the bodies are resolved — validateRecovery on the resolved record — and a record
+   whose bodies are all inline is validated whole, here, exactly as before. */
+export function validateRecoveryShape(r){
+  if(!r||typeof r!=='object'||r.schema!==RECOVERY_SCHEMA)throw Error('Invalid proposal recovery record.');
+  if(![r.content,r.draft,r.original].some(isBodyRef))return validateRecovery(r);
+  const body=(v,nullable,what)=>v===null&&nullable?null:isBodyRef(v)?validBodyRef(v):text(v,REVIEW_FILE_BYTES,what);
+  const out={schema:RECOVERY_SCHEMA,path:text(r.path,512,'path'),content:body(r.content,true,'content'),draft:body(r.draft,false,'draft'),original:body(r.original,true,'original'),source:validateBasis(r.source),task:null};
+  if(out.path.startsWith('/')||out.path.split('/').some(s=>!s||s==='.'||s==='..'))throw Error('Invalid recovery path.');
+  if(out.source.path!==out.path)throw Error('Recovery basis names a different file.');
+  if(r.task!==null&&r.task!==undefined){const t=r.task;if(typeof t.id!=='string'||!Number.isSafeInteger(t.revision)||t.revision<1||typeof t.world!=='string')throw Error('Invalid recovery plan link.');out.task={id:text(t.id,100,'plan id'),revision:t.revision,world:text(t.world,500,'plan world')};}
+  if(r.patch!==null&&r.patch!==undefined){out.patch=validatePatchRecord(r.patch);if(out.content===null)throw Error('Recovery patch does not reproduce its recorded content.');}
   return out;
 }
 /* From a live Editor reference and the bot's proposal to the record that is saved beside the card.

@@ -249,6 +249,12 @@
           "markdownDescription": "Enables the choose_workbench command without any pre-configured scope."
         },
         {
+          "description": "Enables the conversation_bodies command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-conversation-bodies",
+          "markdownDescription": "Enables the conversation_bodies command without any pre-configured scope."
+        },
+        {
           "description": "Enables the conversation_exchange command without any pre-configured scope.",
           "type": "string",
           "const": "allow-conversation-exchange",
@@ -529,6 +535,12 @@
           "type": "string",
           "const": "deny-choose-workbench",
           "markdownDescription": "Denies the choose_workbench command without any pre-configured scope."
+        },
+        {
+          "description": "Denies the conversation_bodies command without any pre-configured scope.",
+          "type": "string",
+          "const": "deny-conversation-bodies",
+          "markdownDescription": "Denies the conversation_bodies command without any pre-configured scope."
         },
         {
           "description": "Denies the conversation_exchange command without any pre-configured scope.",

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-conversation-bodies"
+description = "Enables the conversation_bodies command without any pre-configured scope."
+commands.allow = ["conversation_bodies"]
+
+[[permission]]
+identifier = "deny-conversation-bodies"
+description = "Denies the conversation_bodies command without any pre-configured scope."
+commands.deny = ["conversation_bodies"]

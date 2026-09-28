@@ -26,6 +26,7 @@
     "allow-mobile-status",
     "allow-conversation-exchange",
     "allow-task-screenshots",
+    "allow-conversation-bodies",
     "allow-mobile-new-code",
     "allow-choose-workbench",
     "allow-open-workbench-repository",

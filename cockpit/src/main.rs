@@ -95,6 +95,7 @@
 mod accepted_builds;
 mod accepted_preview;
 mod attachments;
+mod bodies;
 mod bots;
 mod bot_stream;
 mod claude_connection;
@@ -664,6 +665,15 @@ async fn task_screenshots(request:Value,app:tauri::AppHandle)->Result<Value,Stri
 #[tauri::command]
 fn conversation_exchange(request:Value)->Result<Value,String>{ mobile_conversations::exchange(request) }
 
+/// T24 · the file bodies a saved conversation needs, stored on this device by SHA-256 (`bodies.rs`). The page
+/// supplies text, an owner name and a digest; never a path. Granted to the trusted `main` webview only.
+#[tauri::command]
+async fn conversation_bodies(request: Value) -> Result<Value, String> {
+    tauri::async_runtime::spawn_blocking(move || bodies::request(request))
+        .await
+        .map_err(|_| "The conversation body store could not finish.".to_string())?
+}
+
 #[tauri::command]
 fn mobile_status() -> Value {
     crate::mobile_gateway::status()
@@ -1012,6 +1022,7 @@ fn main() {
             mobile_status,
             conversation_exchange,
             task_screenshots,
+            conversation_bodies,
             mobile_new_code,
             bot_configure,
             bot_forget_key,
@@ -1048,6 +1059,7 @@ fn main() {
         })
         .setup(move |app| {
             screenshots::init(app.path().app_data_dir()?);
+            bodies::init(app.path().app_data_dir()?);
             tier1_proof::install(app.handle());
             if std::env::var("SUPER_ROAD").as_deref() == Ok("1") {
                 tier1_proof::open(app.handle()).map_err(std::io::Error::other)?;
