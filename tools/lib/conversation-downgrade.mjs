@@ -75,12 +75,13 @@ export function downgradeValue(raw, read, {dropUnrecoverable = false, validateWi
     }
     return {...c, data};
   });
-  if (problems.length && !dropUnrecoverable) return {state: 'refused', problems, dropped, inlined};
-  const value = JSON.stringify({...parsed, version: 1, conversations});
-  // The result must be a version-1 store with every body inline, and must load under the store code — and, when a
-  // pre-T24 tree is named, under THAT tree's store code, which is what will read it after a rollback.
+  // The result must be a version-1 store with every body inline — ONE guard, which is also what refuses an unresolved
+  // body when nothing was dropped (a separate early refusal was removed: mutant D3 showed it was redundant with this) —
+  // and must load under the store code and, when a pre-T24 tree is named, under THAT tree's store code, which is what
+  // will read it after a rollback.
   const left = conversations.flatMap(c => bodySlots(c.data).filter(s => isBodyRef(valueAt(c.data, s.path))));
-  if (left.length) return {state: 'refused', problems: [...problems, `${left.length} reference(s) left after the downgrade`], dropped, inlined};
+  if (left.length) return {state: 'refused', problems: [...problems, `${left.length} reference(s) could not be re-inlined`], dropped, inlined};
+  const value = JSON.stringify({...parsed, version: 1, conversations});
   for (const create of [createConversationStore, ...(validateWith ? [validateWith] : [])]) {
     const store = create({getItem: k => (k === STORAGE_KEY ? value : null), setItem: () => { throw Error('read-only'); }});
     if (store.error) return {state: 'refused', problems: [...problems, `the version-1 value does not load: ${store.error}`], dropped, inlined};
