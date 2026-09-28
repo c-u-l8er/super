@@ -119,8 +119,10 @@ function device(values, blobs) {
   for (const [d, t] of blobs) writeFileSync(join(dir, 'conversation-bodies', 'blobs', d), t);
   return dir;
 }
-const cli = (...a) => { try { return {code: 0, out: JSON.parse(execFileSync('node', [join(HERE, 'conversation-bodies-downgrade.mjs'), ...a], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']}))}; }
-  catch (e) { return {code: e.status, out: JSON.parse(e.stdout)}; } };
+// process.execPath, never 'node' by name: the review profile's sandbox has no node on PATH (/usr/bin only), and a
+// spawn that never started must fail as itself, not as JSON.parse(undefined).
+const cli = (...a) => { try { return {code: 0, out: JSON.parse(execFileSync(process.execPath, [join(HERE, 'conversation-bodies-downgrade.mjs'), ...a], {encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore']}))}; }
+  catch (e) { if (typeof e.stdout !== 'string' || e.status == null) throw e; return {code: e.status, out: JSON.parse(e.stdout)}; } };
 const stored = (dir, key) => { const db = new DatabaseSync(join(dir, 'localstorage', 'tauri_localhost_0.localstorage'), {readOnly: true}); const v = Buffer.from(db.prepare('SELECT value FROM ItemTable WHERE key = ?').get(key).value).toString('utf16le'); db.close(); return v; };
 
 test('T24 downgrade · the CLI: a dry run writes nothing; --write backs up, writes, reads back; a second run has nothing to do', async () => {
