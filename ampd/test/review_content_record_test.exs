@@ -466,6 +466,80 @@ defmodule Ampd.ReviewContentRecordTest do
            "the check read the staged proposed text: #{inspect(check)}"
   end
 
+  # ------------------------------------------------ T26 · L7 (superlane/t26/TASK.md)
+  #
+  # A bot may now propose a whole file of 64 KiB (`cockpit/src/bots.rs`
+  # `BOT_FILE_BYTES`). Nothing in the runtime changed for it, because nothing
+  # here binds: the page publishes the bodies first and records the basis
+  # alone. These pin both halves of that: the record of a 64 KiB review weighs
+  # what a 1-byte one does, and the inline shape keeps the caps that are the
+  # only thing bounding a record that carries its own bytes.
+
+  test "T26 · a 64 KiB single-file review is recorded staged, and its record weighs what a 1-byte one does",
+       c do
+    big =
+      staged_member(
+        c.task,
+        "home.py",
+        String.duplicate("c", 65_536),
+        String.duplicate("p", 65_536)
+      )
+
+    small = staged_member(c.task, "wire.py", "c", "p")
+
+    assert %{"allow" => true, "development_attempt" => a} = record_file(c, big, "file-0064k")
+    assert %{"allow" => true, "development_attempt" => b} = record_file(c, small, "file-0001b")
+    [sa, sb] = Enum.map([a, b], &Loci.development_attempts()[&1["id"]])
+
+    for stored <- [sa, sb],
+        do: refute(Map.has_key?(stored, "shared_draft") or Map.has_key?(stored, "proposed_text"))
+
+    assert sa["source"]["result_bytes"] == 65_536 and sa["source"]["draft_bytes"] == 65_536
+
+    assert {:ok, %{"proposed" => proposed}} = Ampd.DevelopmentAttempt.member_content(sa)
+    assert proposed == String.duplicate("p", 65_536)
+
+    # Only the digits of two byte counts differ (5 against 1, twice).
+    weigh = fn x -> byte_size(JSON.encode!(x)) end
+    assert abs(weigh.(sa) - weigh.(sb)) <= 16, "record #{weigh.(sa)} vs #{weigh.(sb)}"
+
+    view = Projection.operator()["development_attempts"]
+    [va, vb] = [view[a["id"]], view[b["id"]]]
+    refute Map.has_key?(va, "proposed_text") or Map.has_key?(va, "shared_draft")
+    assert va["content"]["held"] == "staged" and va["content"]["proposed"]["bytes"] == 65_536
+    assert abs(weigh.(va) - weigh.(vb)) <= 16, "projected #{weigh.(va)} vs #{weigh.(vb)}"
+    refute String.contains?(JSON.encode!(Projection.operator()), String.duplicate("p", 64))
+  end
+
+  test "T26 · the inline shape keeps its caps: a 32,001-byte inline proposed text is refused by the command and by the record",
+       c do
+    draft = "c"
+    proposed = String.duplicate("p", 32_001)
+
+    inline = %{
+      "source" => source(c.task, "home.py", draft, proposed),
+      "shared_draft" => draft,
+      "proposed_text" => proposed
+    }
+
+    # the command's field cap (`Ampd.CommandSpec`)
+    assert %{"allow" => false} = record_file(c, inline)
+
+    # and the record's own, which is what stands if a caller reaches it another way
+    assert {:refused,
+            %{"code" => "review-file-too-large", "operator_detail" => %{"side" => "proposed"}}} =
+             Ampd.Authority.record_development_attempt(%{
+               "client_ref" => "inline-over",
+               "task_ref" => c.task["id"],
+               "task_revision" => c.task["revision"],
+               "source" => inline["source"],
+               "shared_draft" => draft,
+               "proposed_text" => proposed
+             })
+
+    assert Loci.development_attempts() == %{}
+  end
+
   test "a single-file record naming content that was never published refuses as UNAVAILABLE, naming the side, and records nothing",
        c do
     member = %{"source" => source(c.task, "a.js", "one", "two")}

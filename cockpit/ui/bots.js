@@ -12,6 +12,7 @@ import { referenceText, renderMessage, referenceWorld, refreshReferenceText } fr
 import { recoveryRecord, recoveredReference, unavailableReason, validateRecovery } from './proposal-recovery.js';
 import { createBodyService, isBodyRef, problemText } from './conversation-bodies.js';
 import { reviewableActions } from './file-patch.js';
+import { waitingText, effortWarning } from './reply-budget.js';
 /* Conversation state is separate from runtime projection state. Model output
  * supplies proposals only; an explicit Apply click uses existing human controls. */
 import { node, selectedWorkspace, bindDisclosure, navigate } from './app-shell.js';
@@ -75,7 +76,10 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
   attach.hidden=true;const attachButton=node('button','Attach files…');attachButton.type='button';attachButton.id='bot-attach';
   const attached=node('div');attached.id='bot-attachment-list';
   const toolbar=node('div',undefined,'connection-row');toolbar.append(field('Thinking',effort),attach,attachButton,send,cancelReply);
-  composer.append(input,attached,toolbar);
+  /* T26 · S1: `max` is offered with what was measured, never changed for the person. */
+  const effortNote=node('p','','availability-note');effortNote.id='bot-effort-note';effortNote.setAttribute('role','note');effortNote.hidden=true;
+  const paintEffortNote=()=>{const w=effortWarning(effort.value);effortNote.textContent=w??'';effortNote.hidden=!w;};
+  composer.append(input,attached,toolbar,effortNote);
   const reload=node('button','Refresh models');reload.type='button';reload.id='bot-refresh-models';connectionRow.insertBefore(reload,manage);
   const historyPicker=node('select');historyPicker.id='bot-history';historyPicker.setAttribute('aria-label','Saved conversations for this provider');
   const deleteConversation=node('button','Delete saved conversation');deleteConversation.type='button';deleteConversation.id='bot-delete-conversation';
@@ -301,8 +305,8 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
   attachButton.addEventListener('click',async()=>{if(busy)return;busy=true;refresh();status.textContent='Choose files in the attachment window.';try{const result=await invoke('choose_attachments');if(files.length+result.files.length>4)throw new Error('Attach up to four files per message. Remove a file before adding more.');files.push(...result.files);showFiles();status.textContent=result.files.length?'Files attached. They will be shared when you send.':'File selection cancelled.';saveCurrent();}catch(error){status.textContent=String(error);}finally{busy=false;refresh();}});
   attach.addEventListener('change',async()=>{if(busy)return;busy=true;refresh();const chosen=[...attach.files];attach.value='';try{const additions=[];for(const f of chosen){if(files.length+additions.length>=4||f.size>REVIEW_FILE_BYTES)throw new Error('Attach up to four text/code files, each at most '+REVIEW_FILE_LABEL+'.');const content=new TextDecoder('utf-8',{fatal:true}).decode(await f.arrayBuffer());if(content.includes('\0')||!/\.(txt|md|json|csv|js|ts|tsx|jsx|rs|py|ex|exs|html|css|yaml|yml|toml|xml|log)$/i.test(f.name))throw new Error('This attachment type is not supported yet. Choose a UTF-8 text or code file.');additions.push({name:f.name,content});}files.push(...additions);showFiles();status.textContent='Attachments will be shared with the selected provider when you send.';}catch(error){status.textContent=String(error);}finally{busy=false;refresh();}});
   function showModels(){modelPicker.replaceChildren();const list=[...catalog];if(active&&!list.some(m=>m.id===active.model))list.push({id:active.model,name:active.model});for(const m of list){const o=node('option',m.name||m.id);o.value=m.id;modelPicker.append(o);}modelPicker.hidden=!active;if(active)modelPicker.value=active.model;showEfforts();}
-  function showEfforts(){const info=catalog.find(m=>m.id===active?.model)??(provider.value==='claude'?catalog.find(m=>m.id.replace(/\[1m\]$/,'')===active?.model):null);const levels=info?.supportedReasoningEfforts?.map(x=>x.reasoningEffort)??[];effort.replaceChildren();for(const value of ['',...levels]){const o=node('option',value?value[0].toUpperCase()+value.slice(1):'Provider default');o.value=value;effort.append(o);}const saved=preferences.get(provider.value)?.efforts?.[active?.model];effort.value=levels.includes(saved)?saved:'';}
-  effort.addEventListener('change',()=>rememberChoice(provider.value,{efforts:{...preferences.get(provider.value)?.efforts,[active.model]:effort.value}}));
+  function showEfforts(){const info=catalog.find(m=>m.id===active?.model)??(provider.value==='claude'?catalog.find(m=>m.id.replace(/\[1m\]$/,'')===active?.model):null);const levels=info?.supportedReasoningEfforts?.map(x=>x.reasoningEffort)??[];effort.replaceChildren();for(const value of ['',...levels]){const o=node('option',value?value[0].toUpperCase()+value.slice(1):'Provider default');o.value=value;effort.append(o);}const saved=preferences.get(provider.value)?.efforts?.[active?.model];effort.value=levels.includes(saved)?saved:'';paintEffortNote();}
+  effort.addEventListener('change',()=>{paintEffortNote();rememberChoice(provider.value,{efforts:{...preferences.get(provider.value)?.efforts,[active.model]:effort.value}});});
   function stash(){saveCurrent();sessions.set(selected,{active,messages,proposals,catalog,files,draft:input.value,children:[...transcript.childNodes].filter(n=>!n.classList?.contains('live-reply')),taskLinks:conversationTaskLinks,status:status.textContent,conversationId,includeContext:include.checked});}
   let changingBot=false,loadingProvider=false;
   provider.addEventListener('change',async()=>{
@@ -416,7 +420,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
     const token=turns.begin({botId:sentBot.id,provider:sentProvider,conversationId,requestId,messageCount:messages.length,title,draft,files:sentFiles,userMessage});
     taskReplyRefs=sentReferences.map(r=>r.task).filter(Boolean);taskReply='Waiting for reply';taskRecovery=null;
     const activityId=crypto.randomUUID();beginTaskActivity({id:activityId,botId:bot.id,world:runtimeWorld(current),tasks:taskReplyRefs,provider:active.provider,model:active.model});
-    transcript.dataset.follow='true';messages.push(userMessage);line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();paintLive();refresh();status.textContent=sentActive.provider==='codex'?'Waiting for Codex… Large file replies can take up to five minutes.':`Waiting for ${sentActive.provider}… Replies can take up to ${sentActive.provider==='claude'?({max:'30',xhigh:'15',high:'10'}[sentEffort]||'five'):'two'} minutes.`;saveCurrent();
+    transcript.dataset.follow='true';messages.push(userMessage);line('user',[text,...sentFiles.map(f=>`Attached: ${f.name}`)].join('\n'));input.value='';files=[];showFiles();paintLive();refresh();status.textContent=waitingText(sentActive.provider,sentEffort);saveCurrent();
     activity.start(['codex','claude'].includes(sentActive.provider));
     const observeLive=r=>{if(!turns.observe(token,r))return;if(turns.owns({botId:bot.id,provider:selected,conversationId})){activity.observe(r);paintLive();}else conversationSidebar?.render();};
     const onEvent=new window.__TAURI__.core.Channel();onEvent.onmessage=observeLive;
@@ -674,7 +678,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
       if(!request.text.trim())throw Error('Enter a message before sending.');
       if(messages.length>=44)throw Error('Start a new conversation to continue.');
       if(files.length)throw Error('This desktop draft has attachments. Review and send them from desktop.');
-      effort.value=request.effort??'';
+      effort.value=request.effort??'';paintEffortNote();
     }
     input.value=request.text;if(!saveCurrent())throw Error('Could not save the shared draft.');
     if(request.operation==='send'){composer.requestSubmit();return {message:'Message dispatched. Follow its progress in this conversation.'};}

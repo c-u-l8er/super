@@ -602,12 +602,32 @@ impl Connection {
 /// time". Extended reasoning is the thing the higher levels are for; a budget
 /// that cannot contain it makes them unusable. The person can still stop a
 /// reply at any point with Cancel, so this is a ceiling, not a wait.
+///
+/// T26 (F7, superlane/t26/TASK.md) · sized so ONE whole file of up to
+/// `bots::BOT_FILE_BYTES` (64 KiB) fits at `high` with real headroom. Measured
+/// 2026-10-01 on opus[1m] at `high` from the turns' own streams
+/// (superlane/silow/RUN.md; superlane/t26/measure-streams.txt): `wire.py`
+/// 23,866 B replied in 321 s, `journal.py` 21,994 B in 332 s, and `home.py`
+/// 42,679 B took about 590 s of a 600 s budget. The slowest rate was 101
+/// tokens/s (P3's thinking); the worst ratios were 1.032 thinking tokens and
+/// 0.597 other output tokens per byte proposed; 35 s of overhead. One 64 KiB
+/// file: 35 + 65,536 x 1.629 / 101 = 1,092 s, so 1,800 s is 1.65x that, and
+/// outlasts one full 128,000-token response (1,302 s at that rate). No level
+/// (F7) gets `high`'s budget: the CLI's default is not announced and measured
+/// like `high` (gitec: 32,350 thinking tokens cut at 300 s). `low` and
+/// `medium` too: the file's body alone needs 422 s. At `max` a whole 128,000-
+/// token response can be thinking alone (S1), so it gets room for that and
+/// then the file; `xhigh` sits between, unmeasured. Mirrored for the page in
+/// `ui/reply-budget.js`, held equal by `tools/reply-budget-test.mjs`.
 fn reply_budget(effort: Option<&str>) -> u64 {
     match effort {
-        Some("max") => 1800,
-        Some("xhigh") => 900,
-        Some("high") => 600,
-        _ => 300,
+        None => 1800,
+        Some("low" | "medium") => 1800,
+        Some("high") => 1800,
+        Some("xhigh") => 2700,
+        Some("max") => 3600,
+        // Refused before it gets here (`chat`); if one ever does, the floor.
+        Some(_) => 1800,
     }
 }
 fn configure_chat(c: &mut Command, model: &str, schema: &Value) {
@@ -899,20 +919,32 @@ mod streaming_tests {
         assert!(!s.text.contains("SECRET"), "actions still never cross");
         assert!(!s.text.contains("draft prose"));
     }
+    /// L4 · T26's budgets, from the measurements declared in superlane/t26/TASK.md (C3).
     #[test]
     fn the_reply_budget_matches_the_reasoning_being_paid_for() {
-        assert_eq!(reply_budget(None), 300);
-        assert_eq!(reply_budget(Some("low")), 300);
-        assert_eq!(reply_budget(Some("medium")), 300);
-        assert_eq!(reply_budget(Some("high")), 600);
-        assert_eq!(reply_budget(Some("xhigh")), 900);
-        assert_eq!(reply_budget(Some("max")), 1800);
+        let levels = [None, Some("low"), Some("medium"), Some("high"), Some("xhigh"), Some("max")];
+        let table: Vec<u64> = levels.iter().map(|l| reply_budget(*l)).collect();
+        assert_eq!(table, vec![1800, 1800, 1800, 1800, 2700, 3600], "the predeclared table");
+        // F7: no level sent is the CLI's own default, which measured like `high`.
+        assert_eq!(reply_budget(None), reply_budget(Some("high")));
+        // A higher level never gets less time than a lower one.
+        assert!(table.windows(2).all(|w| w[0] <= w[1]), "non-decreasing: {table:?}");
         // An unknown level is refused before it reaches here; if one ever does,
-        // it gets the conservative budget rather than an unbounded wait.
-        assert_eq!(reply_budget(Some("enormous")), 300);
-        // Every level must outlast the 262.5 s measured for one ordinary request.
-        for e in ["low", "medium", "high", "xhigh", "max"] {
-            assert!(reply_budget(Some(e)) >= 300);
+        // it gets the floor rather than an unbounded wait.
+        assert_eq!(reply_budget(Some("enormous")), 1800);
+        // Every level holds one 64 KiB file at `high` with 1.5x headroom, and one
+        // complete 128,000-token CLI response, at the slowest measured rate.
+        const RATE: f64 = 101.0; // tokens/s: P3's thinking, 44,037 tokens in 436 s
+        const THINKING: f64 = 1.032; // thinking tokens per byte proposed (P3)
+        const BODY: f64 = 0.597; // other output tokens per byte proposed (P1b)
+        const OVERHEAD: f64 = 35.0; // s: send, spawn and the page around the CLI
+        let file = crate::bots::BOT_FILE_BYTES as f64;
+        let envelope = OVERHEAD + file * (THINKING + BODY) / RATE;
+        let one_response = OVERHEAD + 128_000.0 / RATE;
+        assert_eq!((envelope.round(), one_response.round()), (1092.0, 1302.0));
+        for (level, budget) in levels.iter().zip(&table) {
+            assert!(*budget as f64 >= 1.5 * envelope, "{level:?}: {budget} s < 1.5 x {envelope:.0} s");
+            assert!(*budget as f64 >= one_response, "{level:?}: {budget} s < {one_response:.0} s");
         }
     }
     #[test]
@@ -944,6 +976,70 @@ mod streaming_tests {
         state.lock().unwrap().cancelled = true;
         assert!(handle.join().unwrap().unwrap_err().contains("cancelled"));
         assert!(!state.lock().unwrap().active);
+    }
+    /// T26 · a stream shaped like the CLI's (superlane/t26/measure-streams.txt, P3 and S1): every line in the
+    /// `stream_event` envelope, the structured reply in ~20-character `input_json_delta` chunks, a 453,063-character
+    /// signature (S1's, for 128,000 thinking tokens), the assistant events and the result.
+    fn realistic_stream(content: &str, text: &str) -> (Vec<String>, Value) {
+        let structured = json!({"text":text,"actions":[{"name":"propose_file_edit","args":{"path":"runtime/python/silow/home.py","content":content}}]});
+        let ids = json!({"session_id":"6f1c0b0e-6c55-4c55-9b7a-0c3b9d1f2e01","parent_tool_use_id":null,"uuid":"0a8f2c1d-3b4e-4f50-8a6b-7c8d9e0f1a2b"});
+        let event = |e: Value| { let mut v = json!({"type":"stream_event","event":e}); for (k, x) in ids.as_object().unwrap() { v[k] = x.clone(); } v.to_string() };
+        let signature = "S".repeat(453_063);
+        let mut lines = vec![json!({"type":"system","subtype":"init","model":"claude-opus-5-5[1m]","session_id":ids["session_id"]}).to_string()];
+        lines.push(event(json!({"type":"message_start","message":{"id":"msg_1","role":"assistant","model":"claude-opus-5-5[1m]","content":[]}})));
+        lines.push(event(json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}})));
+        for _ in 0..1468 { lines.push(event(json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"","estimated_tokens":250}}))); }
+        lines.push(event(json!({"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":signature}})));
+        lines.push(event(json!({"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"toolu_1","name":"StructuredOutput","input":{}}})));
+        // In the order the model writes it, `text` first: serde_json's map would sort `actions` ahead of it, and then
+        // the preview (`structured_prefix`) would never run.
+        let ordered = format!("{{\"text\":{},\"actions\":{}}}", serde_json::to_string(text).unwrap(), structured["actions"]);
+        assert_eq!(serde_json::from_str::<Value>(&ordered).unwrap(), structured);
+        let raw: Vec<char> = ordered.chars().collect();
+        for chunk in raw.chunks(20) { lines.push(event(json!({"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":chunk.iter().collect::<String>()}}))); }
+        lines.push(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"","signature":signature}]},"session_id":ids["session_id"]}).to_string());
+        lines.push(json!({"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"toolu_1","name":"StructuredOutput","input":structured}]},"session_id":ids["session_id"]}).to_string());
+        lines.push(event(json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"output_tokens":106_760}})));
+        lines.push(event(json!({"type":"message_stop"})));
+        lines.push(json!({"type":"result","subtype":"success","is_error":false,"duration_ms":1_057_000,"num_turns":2,"result":text,"structured_output":structured}).to_string());
+        (lines, structured)
+    }
+    /// L3 · the 65,536-character buffers in this file are the live PREVIEW. The reply that is kept is the result's
+    /// `structured_output`, and a whole 64 KiB file crosses the stream and comes out byte for byte.
+    #[cfg(unix)]
+    #[test]
+    fn a_whole_64_kib_proposal_crosses_the_stream_whole_and_the_preview_stays_bounded() {
+        // Python-like text with everything JSON must escape, and multi-byte characters: exactly 65,536 bytes.
+        let unit = "    if frame[\"kind\"] == 'INTENT':\t# naïve → résumé \\ path\r\n";
+        let mut content = unit.repeat(crate::bots::BOT_FILE_BYTES / unit.len());
+        while content.len() < crate::bots::BOT_FILE_BYTES { content.push('#'); }
+        assert_eq!(content.len(), crate::bots::BOT_FILE_BYTES);
+        let text = "The reply's own words. ".repeat(64_000 / 23) + &"w".repeat(64_000 % 23);
+        assert_eq!(text.len(), 64_000);
+        let (lines, structured) = realistic_stream(&content, &text);
+        let total: usize = lines.iter().map(|l| l.len() + 1).sum();
+        let longest = lines.iter().map(String::len).max().unwrap();
+        // shaped like the measured streams: more than a mebibyte in all, one line over 256 KiB
+        assert!(total > 1_048_576 && longest > 262_144, "total {total}, longest {longest}");
+        let dir = std::env::temp_dir().join(format!("t26-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("stream.jsonl");
+        std::fs::write(&file, lines.join("\n") + "\n").unwrap();
+        let mut command = Command::new("cat");
+        command.arg(&file);
+        let state = Arc::new(Mutex::new(ReplyState { id: "t26".into(), active: true, ..ReplyState::default() }));
+        let started = Instant::now();
+        let (ok, value) = run_reply(command, String::new(), state.clone(), 600).expect("the stream is read whole");
+        eprintln!("t26 L3: {} lines, {total} bytes (longest {longest}) read in {:?}", lines.len(), started.elapsed());
+        let _ = std::fs::remove_dir_all(&dir);
+        let reply = decode_reply(ok, value).expect("the reply decodes");
+        assert_eq!(reply, structured);
+        assert_eq!(reply["actions"][0]["args"]["content"].as_str().unwrap(), content, "byte for byte");
+        let preview = state.lock().unwrap();
+        assert!(preview.text.len() <= 65_536, "the preview is bounded: {}", preview.text.len());
+        assert_eq!(preview.text, text, "the preview is the reply's own words, whole");
+        assert!(!preview.text.contains("INTENT") && !preview.text.contains("propose_file_edit"), "the file never crosses into the preview");
+        assert!(preview.partial.len() <= 262_144);
     }
     #[cfg(unix)]
     #[test]
