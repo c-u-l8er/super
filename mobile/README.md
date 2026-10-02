@@ -1,10 +1,18 @@
 # Super mobile companion
 
-Opt-in developer alpha with task observation and shared bot conversations. Run `./mobile/start-local.sh` from the Super repository after closing the existing desktop instance. It uses the existing release build and Node 22+. Pair at http://127.0.0.1:4318 with the code in the file printed at launch. Code: one use / ten minutes. Session: eight hours. The launcher persists unexpired sessions privately across restarts; logout revokes the current session. Upgrading from a gateway without persistence requires a fresh pairing code once.
+Opt-in developer alpha with task observation and shared bot conversations. Run `./mobile/start-local.sh` from the Super repository after closing the existing desktop instance. It uses the existing release build and Node 22+. Pair at http://127.0.0.1:4318 by pasting the code from desktop Super's Mobile device page (or from the file printed at launch). Code: one use / ten minutes. Session: eight hours. The launcher persists unexpired sessions privately across restarts; logout revokes the current session. Upgrading from a gateway without persistence requires a fresh pairing code once.
+
+## What a paired phone can do
+
+A paired phone reads this host's plans, review evidence and screenshots, and chats with its bots. In Chat it can open, start, rename and pin conversations, save a draft to the desktop, and **send a message, which runs on desktop Super with that conversation's provider**. Opening a conversation on the phone also selects it on the desktop: there is one shared active conversation. Decisions, file changes, checks, acceptance and every runtime intent stay on the desktop, because the gateway has no control channel (below). The phone's **Stack** tab says the same.
+
+## Pairing code
+
+The code is 48 hexadecimal characters (`randomBytes(24)`), for one use within ten minutes. **Paste it.** Before sending, the companion removes every space, line break and dash (including the dashes iOS substitutes for a typed `--`) and folds capital letters, so the desktop's grouped display, the text of its QR code, or a code typed in fours with dashes all pair (R126). Nothing is checked on the phone: a wrong code of any shape is sent, refused, and counted toward the gateway's limit of ten failures a minute.
 
 The desktop shows that code itself: **Runtime → Mobile device** in the sidebar, or **File → Pair a phone…**. That page reports whether the companion is running, shows the code in four-character groups with the time left, and states what a paired phone can and can never do.
 
-`SUPER_MOBILE_PANEL=1 ./mobile/start-local.sh` also shows it in a separate window, in four-character groups so it can be typed onto a phone; `./mobile/pairing-panel.sh $SUPER_MOBILE_PAIR_FILE` opens the same window for an observer that is already running. It reads the 0600 file directly and passes the code to the dialog on stdin, so the code stays out of `ps`, out of URLs and out of logs. It needs `yad`; without it the script prints the grouped code to the terminal instead. A new code does not need a restart: the desktop mints one from Runtime → Mobile device → “New pairing code”, which resets the code and its ten minutes and touches no session, so a device that is already paired stays paired.
+`SUPER_MOBILE_PANEL=1 ./mobile/start-local.sh` also shows it in a separate window, in four-character groups for reading (pasting stays the easy path); `./mobile/pairing-panel.sh $SUPER_MOBILE_PAIR_FILE` opens the same window for an observer that is already running. It reads the 0600 file directly and passes the code to the dialog on stdin, so the code stays out of `ps`, out of URLs and out of logs. It needs `yad`; without it the script prints the grouped code to the terminal instead. A new code does not need a restart: the desktop mints one from Runtime → Mobile device → “New pairing code”, which resets the code and its ten minutes and touches no session, so a device that is already paired stays paired.
 
 For private phone access, put a trusted HTTPS proxy in front of the loopback listener and set `SUPER_MOBILE_ORIGIN` to its exact origin. Do not publish it publicly. No Tailscale setup is performed automatically.
 
@@ -16,7 +24,7 @@ This requires the desktop to stay open. Native packages, task execution and revi
 
 ## Android browser recovery regression
 
-The web companion accepts the grouped code displayed by desktop Super and marks the input as a one-time code rather than a password. Pairing invalidates earlier unauthenticated refreshes so they cannot overwrite the new session. Task lists and details include stable task IDs. Temporary observation/network loss removes live task content while retaining the selected task for the same runtime world; a replacement world clears that selection. Successful reconnect clears stale warnings. Failed logout is reported as unconfirmed, and successful logout points to New pairing code instead of requiring a host restart.
+The web companion accepts the code however it is grouped (see Pairing code) and marks the input as a one-time code rather than a password. Pairing invalidates earlier unauthenticated refreshes so they cannot overwrite the new session. Task lists and details include stable task IDs. Temporary observation/network loss removes live task content while retaining the selected task for the same runtime world; a replacement world clears that selection. Successful reconnect clears stale warnings. Failed logout is reported as unconfirmed, and successful logout points to New pairing code instead of requiring a host restart.
 
 Run `tools/mobile-android-smoke.mjs` with `ADB` set to the Android platform-tools executable and `SUPER_VISUAL_EVIDENCE_DIR` for screenshots. It requires a booted Android emulator with Chrome first-run setup completed. It owns a fixture gateway on loopback 4342 and a Chrome debugging forward on 9223. Those ports are for this test only. It creates two distinctly identified tasks with the same title, uses test pairing codes, interrupts the forwarded connection and existing sockets, backgrounds/resumes Chrome, changes the fixture world, and checks logout and code renewal. It does not pair with real user records.
 
@@ -59,3 +67,9 @@ Direct Ollama NDJSON and OpenAI/Anthropic SSE replies are decoded incrementally,
 Super still has one active provider turn at a time. Chats remain navigable while it runs; the generating indicator follows the owning conversation and a second send is refused until that reply finishes or is cancelled. External provider/account behavior must be checked with an explicitly selected model; the automated streaming smoke uses a delayed local fixture only.
 
 Checks: `node --test tools/conversation-list-test.mjs`, `cargo test --manifest-path cockpit/Cargo.toml bot_stream`, and `tools/native-ui-test.sh node tools/mobile-streaming-smoke.mjs`.
+
+### iOS navigation and layout
+
+Where you are lives in the URL (`#/tasks/dt_0052`, `#/tasks?show=all&bot=bt_0003`) and in history. Safari's back swipe returns from a plan to its list, at the position you left it, and a reload or pull-to-refresh returns to the same place. A plan opens at its top, and the two-second refresh never moves the page. Tasks lists the plans that need attention first, then the other open ones, and finished plans under **Done** or **All**; each badge is coloured by its state. Tapping a bot opens its plans. **Disconnect** asks before it ends the session. Under 600 px the header is compact, and the page starts below the status bar (`env(safe-area-inset-top)`).
+
+Checks: `node --test mobile/test/*.test.mjs`. The phone tests run the real `ui/app.js` and `ui/conversations.js` in a small DOM built from `ui/index.html` (`mobile/test/phone.mjs`), against a real gateway over loopback HTTP, with the page's timers ticked by the test.
