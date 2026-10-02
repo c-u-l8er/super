@@ -3279,20 +3279,26 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
     // A row ALLOWED in the confined run reaches no grade at all. It is named
     // UNRESOLVED GAP and its check fails — an available dangerous syscall
     // must never pass quietly, which is the whole of the objection.
+    //
+    // **By name since T27**: `libc::SYS_*`, numbered by the target, where this
+    // table was x86-64 numbers. `fork`, `vfork` and the x32 rows exist on
+    // x86-64 only (aarch64 has no `fork`/`vfork` and no x32 space).
     const CENSUS: &[(&str, u32, &str)] = &[
-        ("memfd_create", 319, "a file with no name to execute from"),
-        ("execveat_other_binary", 322, "execution by descriptor, around Landlock's pathnames"),
-        ("clone", 56, "a second process"),
-        ("clone3", 435, "a second process by the newer call"),
-        ("fork", 57, "a second process by the oldest call"),
-        ("vfork", 58, "a second process sharing this one's memory"),
-        ("process_vm_readv", 310, "another process's memory, read"),
-        ("process_vm_writev", 311, "another process's memory, written"),
-        ("keyctl", 250, "the kernel keyring"),
-        ("bpf", 321, "loading kernel bytecode"),
-        ("perf_event_open", 298, "the performance counters"),
-        ("mount", 165, "the mount table"),
-        ("pivot_root", 155, "the root of the filesystem"),
+        ("memfd_create", libc::SYS_memfd_create as u32, "a file with no name to execute from"),
+        ("execveat_other_binary", libc::SYS_execveat as u32, "execution by descriptor, around Landlock's pathnames"),
+        ("clone", libc::SYS_clone as u32, "a second process"),
+        ("clone3", libc::SYS_clone3 as u32, "a second process by the newer call"),
+        #[cfg(target_arch = "x86_64")]
+        ("fork", libc::SYS_fork as u32, "a second process by the oldest call"),
+        #[cfg(target_arch = "x86_64")]
+        ("vfork", libc::SYS_vfork as u32, "a second process sharing this one's memory"),
+        ("process_vm_readv", libc::SYS_process_vm_readv as u32, "another process's memory, read"),
+        ("process_vm_writev", libc::SYS_process_vm_writev as u32, "another process's memory, written"),
+        ("keyctl", libc::SYS_keyctl as u32, "the kernel keyring"),
+        ("bpf", libc::SYS_bpf as u32, "loading kernel bytecode"),
+        ("perf_event_open", libc::SYS_perf_event_open as u32, "the performance counters"),
+        ("mount", libc::SYS_mount as u32, "the mount table"),
+        ("pivot_root", libc::SYS_pivot_root as u32, "the root of the filesystem"),
         // --- the same numbers in the other numbering space ---------------
         //
         // D.1.3b·2e. Every row above compares a syscall number, and until
@@ -3307,11 +3313,16 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
         // *made processes*, which is the physical-lifetime claim rather than
         // a confinement one, and the rest because they succeed unconfined
         // and so earn a real DIFFERENTIAL rather than an ambient excuse.
-        ("fork_x32", 57 | 0x4000_0000, "a second process, by the x32 number"),
-        ("clone_x32", 56 | 0x4000_0000, "a second process, by the x32 number"),
-        ("unshare_user_ns_x32", 272 | 0x4000_0000, "a new user namespace, by the x32 number"),
-        ("kill_x32", 62 | 0x4000_0000, "signalling, by the x32 number"),
-        ("pidfd_open_x32", 434 | 0x4000_0000, "a pidfd, by the x32 number"),
+        #[cfg(target_arch = "x86_64")]
+        ("fork_x32", libc::SYS_fork as u32 | 0x4000_0000, "a second process, by the x32 number"),
+        #[cfg(target_arch = "x86_64")]
+        ("clone_x32", libc::SYS_clone as u32 | 0x4000_0000, "a second process, by the x32 number"),
+        #[cfg(target_arch = "x86_64")]
+        ("unshare_user_ns_x32", libc::SYS_unshare as u32 | 0x4000_0000, "a new user namespace, by the x32 number"),
+        #[cfg(target_arch = "x86_64")]
+        ("kill_x32", libc::SYS_kill as u32 | 0x4000_0000, "signalling, by the x32 number"),
+        #[cfg(target_arch = "x86_64")]
+        ("pidfd_open_x32", libc::SYS_pidfd_open as u32 | 0x4000_0000, "a pidfd, by the x32 number"),
     ];
 
     let mut covered = 0usize;
@@ -3422,13 +3433,13 @@ fn carrier_confinement(b: &mut Battery, scratch: &Path, adopted: &[u64]) {
          DIFFERENTIAL, never ATTRIBUTED",
         matches!(ex.bare, Some((true, _)))
             && matches!(ex.confined, Some((false, e)) if e == 13)
-            && !confine::denies(59),
+            && !confine::denies(libc::SYS_execve as u32),
         format!(
             "bare={:?} confined={:?} · seccomp denies execve: {} · expected EACCES(13) from \
              Landlock, not {} from the filter",
             ex.bare,
             ex.confined,
-            confine::denies(59),
+            confine::denies(libc::SYS_execve as u32),
             confine::SUPER_DENY_ERRNO
         ),
     );
@@ -4191,10 +4202,7 @@ fn read_frame_with_fds(fd: std::os::fd::RawFd)
     while body.len() < n {
         let mut buf = vec![0u8; n - body.len()];
         let got = unsafe {
-            extern "C" {
-                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            }
-            read(fd, buf.as_mut_ptr(), buf.len())
+            libc::read(fd, buf.as_mut_ptr().cast(), buf.len())
         };
         if got <= 0 {
             for f in &fds {
@@ -4218,20 +4226,16 @@ fn read_frame_with_fds(fd: std::os::fd::RawFd)
 /// each of these has a terminating condition that is itself under test, and a
 /// blocking read turns a failed property into a wedged battery.
 fn slurp(fd: std::os::fd::RawFd, want: &str, tries: usize) -> String {
-    extern "C" {
-        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-        fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
-    }
     unsafe {
-        let fl = fcntl(fd, 3, 0);
+        let fl = libc::fcntl(fd, libc::F_GETFL, 0);
         if fl >= 0 {
-            fcntl(fd, 4, fl | 0o4000);
+            libc::fcntl(fd, libc::F_SETFL, fl | libc::O_NONBLOCK);
         }
     }
     let mut seen = String::new();
     for _ in 0..tries {
         let mut buf = [0u8; 4096];
-        let n = unsafe { read(fd, buf.as_mut_ptr(), buf.len()) };
+        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n > 0 {
             seen.push_str(&String::from_utf8_lossy(&buf[..n as usize]));
         }
@@ -4245,13 +4249,12 @@ fn slurp(fd: std::os::fd::RawFd, want: &str, tries: usize) -> String {
 
 /// Is this descriptor a terminal? Asked of the kernel.
 fn is_a_terminal(fd: std::os::fd::RawFd) -> bool {
-    extern "C" {
-        fn syscall(num: i64, ...) -> i64;
-    }
     let mut termios = [0u8; 64];
     // TCGETS. On anything that is not a terminal this is `ENOTTY`, which is
-    // the entire claim being made about an attachment endpoint.
-    unsafe { syscall(16, fd as i64, 0x5401u64, termios.as_mut_ptr()) >= 0 }
+    // the entire claim being made about an attachment endpoint. Through
+    // `libc::ioctl` since T27; it was `syscall(16, fd, 0x5401, …)`, x86-64's
+    // numbers for both.
+    unsafe { libc::ioctl(fd, libc::TCGETS, termios.as_mut_ptr()) >= 0 }
 }
 
 /// D.1.3c·2 — the terminal attachment, over the production lifecycle channel.
@@ -4444,11 +4447,8 @@ fn pty_attachment(b: &mut Battery, scratch: &Path) {
     // directions and proves the thing on the far end is a real terminal. A
     // pipe returns nothing at all.
     {
-        extern "C" {
-            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-        }
         let msg = b"hello-attachment\n";
-        let put = unsafe { write(stream_a, msg.as_ptr(), msg.len()) };
+        let put = unsafe { libc::write(stream_a, msg.as_ptr().cast(), msg.len()) };
         let echoed = slurp(stream_a, "hello-attachment", 60);
         b.check(
             "bytes written to the attachment reach the terminal, and its echo comes back",
@@ -4472,11 +4472,8 @@ fn pty_attachment(b: &mut Battery, scratch: &Path) {
         // Anything B's terminal echoes must not appear on A's stream. Written
         // to B and read from A, which is the direction a mis-wired pump would
         // actually fail in.
-        extern "C" {
-            fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-        }
         let m = b"belongs-to-b\n";
-        let _ = unsafe { write(stream_b, m.as_ptr(), m.len()) };
+        let _ = unsafe { libc::write(stream_b, m.as_ptr().cast(), m.len()) };
         let on_b = slurp(stream_b, "belongs-to-b", 40);
         let on_a = slurp(stream_a, "", 8);
         b.check(
@@ -4566,13 +4563,10 @@ fn pty_attachment(b: &mut Battery, scratch: &Path) {
     b.check(
         "the detached holder sees EOF on its endpoint",
         {
-            extern "C" {
-                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            }
             let mut eof = false;
             for _ in 0..40 {
                 let mut buf = [0u8; 256];
-                if unsafe { read(stream_a, buf.as_mut_ptr(), buf.len()) } == 0 {
+                if unsafe { libc::read(stream_a, buf.as_mut_ptr().cast(), buf.len()) } == 0 {
                     eof = true;
                     break;
                 }
@@ -4638,11 +4632,8 @@ fn pty_attachment(b: &mut Battery, scratch: &Path) {
     b.check(
         "and the replacement attachment still carries bytes after the stale detach",
         {
-            extern "C" {
-                fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-            }
             let m = b"survived-the-stale-detach\n";
-            let _ = unsafe { write(stream_re, m.as_ptr(), m.len()) };
+            let _ = unsafe { libc::write(stream_re, m.as_ptr().cast(), m.len()) };
             slurp(stream_re, "survived-the-stale-detach", 40)
                 .contains("survived-the-stale-detach")
         },
@@ -4717,11 +4708,8 @@ fn pty_attachment(b: &mut Battery, scratch: &Path) {
     b.check(
         "and bytes flow both ways on the attachment that replaced the orphan",
         {
-            extern "C" {
-                fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-            }
             let m = b"after-the-orphan\n";
-            let put = unsafe { write(stream_post, m.as_ptr(), m.len()) };
+            let put = unsafe { libc::write(stream_post, m.as_ptr().cast(), m.len()) };
             put == m.len() as isize
                 && slurp(stream_post, "after-the-orphan", 60).contains("after-the-orphan\r\n")
         },
@@ -4750,13 +4738,10 @@ fn pty_attachment(b: &mut Battery, scratch: &Path) {
     b.check(
         "a Carrier's death closes its attachment — the holder sees EOF",
         {
-            extern "C" {
-                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            }
             let mut eof = false;
             for _ in 0..40 {
                 let mut buf = [0u8; 256];
-                if unsafe { read(stream_post, buf.as_mut_ptr(), buf.len()) } == 0 {
+                if unsafe { libc::read(stream_post, buf.as_mut_ptr().cast(), buf.len()) } == 0 {
                     eof = true;
                     break;
                 }
@@ -4804,13 +4789,10 @@ fn pty_attachment(b: &mut Battery, scratch: &Path) {
     b.check(
         "the surviving attachment saw EOF when its Carrier was drained",
         {
-            extern "C" {
-                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            }
             let mut eof = false;
             for _ in 0..40 {
                 let mut buf = [0u8; 256];
-                if unsafe { read(stream_b, buf.as_mut_ptr(), buf.len()) } == 0 {
+                if unsafe { libc::read(stream_b, buf.as_mut_ptr().cast(), buf.len()) } == 0 {
                     eof = true;
                     break;
                 }
@@ -4884,13 +4866,9 @@ fn pty_attachment_payload(b: &mut Battery, scratch: &Path) {
                  not a second /dev/ptmx open", host_ptmx_count(), before + 1),
     );
 
-    extern "C" {
-        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-    }
-
     // ---------------------------------------------- input reaches the payload
     let msg = b"through-the-pump\n";
-    let put = unsafe { write(stream, msg.as_ptr(), msg.len()) };
+    let put = unsafe { libc::write(stream, msg.as_ptr().cast(), msg.len()) };
     let heard = c.speak("HEAR", 3_000).unwrap_or_default();
     b.check(
         "input written to the attachment is read by the Carrier from its own stdin",
@@ -4977,13 +4955,10 @@ fn pty_attachment_payload(b: &mut Battery, scratch: &Path) {
     b.check(
         "the holder is told the terminal is gone before the Carrier is disposed of",
         {
-            extern "C" {
-                fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-            }
             let mut eof = false;
             for _ in 0..40 {
                 let mut buf = [0u8; 4096];
-                if unsafe { read(stream, buf.as_mut_ptr(), buf.len()) } == 0 {
+                if unsafe { libc::read(stream, buf.as_mut_ptr().cast(), buf.len()) } == 0 {
                     eof = true;
                     break;
                 }

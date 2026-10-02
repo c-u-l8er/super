@@ -834,7 +834,7 @@ impl Carrier {
         // whole reason the field is an `Option` and not a number that has to
         // be remembered to be invalid.
         drop(self.control.take());
-        unsafe { libc_kill(self.pid as i32, 15) };
+        unsafe { libc::kill(self.pid as i32, libc::SIGTERM) };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(grace_ms);
         let mut reaped = false;
         while std::time::Instant::now() < deadline {
@@ -869,26 +869,21 @@ impl Carrier {
     }
 }
 
-extern "C" {
-    #[link_name = "kill"]
-    fn libc_kill(pid: i32, sig: i32) -> i32;
-    /// D.1.3c·1. Both are called only from inside `pre_exec`, where the rule
-    /// is async-signal-safety — and both are bare syscalls, which satisfies
-    /// it. `syscall(2)` is declared here with the same signature `confine.rs`
-    /// and `pty.rs` use.
-    fn setsid() -> i32;
-    fn syscall(num: i64, ...) -> i64;
-}
+// D.1.3c·1. `setsid` and `ioctl_int` are called only from inside `pre_exec`,
+// where the rule is async-signal-safety — and both are bare syscalls in
+// glibc, which satisfies it. Declared by the `libc` crate since T27 (R122):
+// this file had its own `extern` block, and `ioctl` went through
+// `syscall(16, …)`, x86-64's number for it.
+use libc::setsid;
 
 /// `ioctl` with an integer argument, for the two `pre_exec` calls.
 ///
-/// Through `syscall(2)` rather than a fourth `extern` declaration of `ioctl`:
-/// `confine.rs:73` already records why two blocks describing one symbol
-/// differently is a calling-convention bug in waiting, and `ioctl`'s
-/// variadic tail is exactly the shape that goes wrong quietly.
-unsafe fn ioctl_int(fd: RawFd, request: u64, arg: i64) -> i64 {
-    const SYS_IOCTL: i64 = 16;
-    syscall(SYS_IOCTL, fd as i64, request, arg)
+/// One declaration of `ioctl` for the whole host now, libc's, with the request
+/// typed as libc's `Ioctl`: `ioctl`'s variadic tail is exactly the shape that
+/// goes wrong quietly, so the argument is passed as the `long` the kernel
+/// reads, as it was through `syscall(2)`.
+unsafe fn ioctl_int(fd: RawFd, request: libc::Ioctl, arg: i64) -> i64 {
+    libc::ioctl(fd, request, arg as libc::c_long) as i64
 }
 
 impl Drop for Carrier {

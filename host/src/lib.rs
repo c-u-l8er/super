@@ -59,14 +59,10 @@ const MAX_FRAME: usize = 256 * 1024;
 // that allocates first has made the attack cheaper rather than more
 // expensive.
 fn read_exact(fd: RawFd, n: usize) -> io::Result<Vec<u8>> {
-    extern "C" {
-        fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-    }
-
     let mut buf = vec![0u8; n];
     let mut got = 0;
     while got < n {
-        let r = unsafe { read(fd, buf.as_mut_ptr().add(got), n - got) };
+        let r = unsafe { libc::read(fd, buf.as_mut_ptr().add(got).cast(), n - got) };
         if r == 0 {
             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "channel closed"));
         }
@@ -79,13 +75,9 @@ fn read_exact(fd: RawFd, n: usize) -> io::Result<Vec<u8>> {
 }
 
 fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
-    extern "C" {
-        fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-    }
-
     let mut sent = 0;
     while sent < buf.len() {
-        let r = unsafe { write(fd, buf.as_ptr().add(sent), buf.len() - sent) };
+        let r = unsafe { libc::write(fd, buf.as_ptr().add(sent).cast(), buf.len() - sent) };
         if r <= 0 {
             return Err(io::Error::last_os_error());
         }
@@ -410,9 +402,7 @@ pub fn world_dir_for_carriers() -> PathBuf {
     d
 }
 
-extern "C" {
-    fn getuid() -> u32;
-}
+use libc::getuid;
 
 /// Content identity of the Carrier payload **as installed**.
 ///
@@ -2403,7 +2393,7 @@ impl Runtime {
     /// that has to reason about which of the VM's descriptors to forgive
     /// is a check that will forgive one of ours.
     pub fn runtime_unix_fds(&self) -> std::collections::BTreeMap<String, bool> {
-        const O_CLOEXEC: u32 = 0o2000000;
+        const O_CLOEXEC: u32 = libc::O_CLOEXEC as u32;
         let pid = self.child.id();
         let mut out = std::collections::BTreeMap::new();
 

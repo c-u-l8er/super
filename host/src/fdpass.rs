@@ -4,38 +4,27 @@
 //! capability *is* the descriptor, so the code that creates and passes one
 //! should be readable in full rather than delegated to a dependency whose
 //! flags you have to go and check.
+//!
+//! **`libc` since T27 (R122), and it changes none of that.** It supplies the C
+//! declarations, the target's constants and the target's `msghdr`/`cmsghdr`
+//! layouts. Every flag, every field and every call is still written below.
 
 use std::io;
 use std::os::unix::io::RawFd;
 
 // ---------------------------------------------------------------- libc
 //
-// Declared here rather than pulled in, for the reason above. These are the
-// four calls the trust model rests on.
-extern "C" {
-    fn socketpair(domain: i32, ty: i32, protocol: i32, sv: *mut i32) -> i32;
-    fn flock(fd: i32, operation: i32) -> i32;
-    fn open(path: *const u8, flags: i32, mode: i32) -> i32;
-    fn sendmsg(fd: i32, msg: *const MsgHdr, flags: i32) -> isize;
-    fn recvmsg(fd: i32, msg: *mut MsgHdr, flags: i32) -> isize;
-    fn close(fd: i32) -> i32;
-    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
-    fn dup2(old: i32, new: i32) -> i32;
-    fn shutdown(fd: i32, how: i32) -> i32;
-    /// Variadic, exactly as `confine.rs` declares it and for the same
-    /// reason: `close_range(2)` is reached as a raw syscall rather than
-    /// through glibc's wrapper, so the failure this floor must not survive
-    /// — the kernel not having it — arrives as `ENOSYS` from the kernel
-    /// instead of as whatever a libc chose to do about it.
-    fn syscall(num: i64, ...) -> i64;
-}
+// The libc crate's declarations of the calls the trust model rests on (they
+// were an `extern` block here until T27). `close_range(2)` is not among them
+// on purpose: see `seal_inheritance`.
+use libc::{close, dup2, fcntl, flock, recvmsg, sendmsg, shutdown, socketpair};
 
-const SHUT_RDWR: i32 = 2;
+const SHUT_RDWR: i32 = libc::SHUT_RDWR;
 
-const AF_UNIX: i32 = 1;
-const SOCK_STREAM: i32 = 1;
-const SOCK_SEQPACKET: i32 = 5;
-/// `SOCK_CLOEXEC` — Linux `0o2000000`.
+const AF_UNIX: i32 = libc::AF_UNIX;
+const SOCK_STREAM: i32 = libc::SOCK_STREAM;
+const SOCK_SEQPACKET: i32 = libc::SOCK_SEQPACKET;
+/// `SOCK_CLOEXEC` — Linux `0o2000000` on x86-64 and aarch64; libc's, so the target's.
 ///
 /// **Every descriptor is close-on-exec by default; explicit inheritance is
 /// a capability transfer.** Without this, `socketpair(2)` returns two
@@ -51,43 +40,45 @@ const SOCK_SEQPACKET: i32 = 5;
 /// the person's socket and the bridge that mints identities. "The agent
 /// cannot issue human commands" stopped being enforced by possession at
 /// the moment the agent possessed it.
-const SOCK_CLOEXEC: i32 = 0o2000000;
+const SOCK_CLOEXEC: i32 = libc::SOCK_CLOEXEC;
 /// `MSG_CMSG_CLOEXEC` — the same rule for descriptors that *arrive*.
-pub const MSG_CMSG_CLOEXEC: i32 = 0x40000000;
-const SOL_SOCKET: i32 = 1;
-const SCM_RIGHTS: i32 = 1;
-const F_SETFD: i32 = 2;
-const F_GETFD: i32 = 1;
-const FD_CLOEXEC: i32 = 1;
+pub const MSG_CMSG_CLOEXEC: i32 = libc::MSG_CMSG_CLOEXEC;
+const SOL_SOCKET: i32 = libc::SOL_SOCKET;
+const SCM_RIGHTS: i32 = libc::SCM_RIGHTS;
+const F_SETFD: i32 = libc::F_SETFD;
+const F_GETFD: i32 = libc::F_GETFD;
+const FD_CLOEXEC: i32 = libc::FD_CLOEXEC;
 
-/// `close_range(2)` — x86-64 syscall 436, Linux 5.9.
-const SYS_CLOSE_RANGE: i64 = 436;
 /// `CLOSE_RANGE_CLOEXEC` — Linux 5.11. **Marks the range close-on-exec; it
 /// does not close it.** That distinction is the whole of `seal_inheritance`.
-const CLOSE_RANGE_CLOEXEC: u32 = 1 << 2;
+const CLOSE_RANGE_CLOEXEC: u32 = libc::CLOSE_RANGE_CLOEXEC;
 
-#[repr(C)]
-struct IoVec {
-    base: *mut u8,
-    len: usize,
+/// The control-message header, as this target lays it out. It was a
+/// hand-written `CmsgHdr {len: usize, level: i32, ty: i32}` until T27, which
+/// is glibc's layout on every 64-bit Linux; `libc::cmsghdr` is that and
+/// stays right elsewhere.
+type CmsgHdr = libc::cmsghdr;
+
+/// A `msghdr` for one buffer and an optional control buffer.
+///
+/// Built from zero and then field by field, because `libc::msghdr` is the
+/// target's own layout (glibc's has no padding fields, musl's has two). Zero is
+/// what T26's hand-written struct put in every field this does not set:
+/// no name, no flags.
+fn msghdr(iov: &mut libc::iovec, control: *mut u8, controllen: usize) -> libc::msghdr {
+    let mut m: libc::msghdr = unsafe { std::mem::zeroed() };
+    m.msg_iov = iov;
+    m.msg_iovlen = 1;
+    m.msg_control = control.cast();
+    m.msg_controllen = controllen as _;
+    m
 }
 
-#[repr(C)]
-struct MsgHdr {
-    name: *mut u8,
-    namelen: u32,
-    iov: *mut IoVec,
-    iovlen: usize,
-    control: *mut u8,
-    controllen: usize,
-    flags: i32,
-}
-
-#[repr(C)]
-struct CmsgHdr {
-    len: usize,
-    level: i32,
-    ty: i32,
+fn iovec(buf: &mut [u8]) -> libc::iovec {
+    libc::iovec {
+        iov_base: buf.as_mut_ptr().cast(),
+        iov_len: buf.len(),
+    }
 }
 
 const CMSG_ALIGN_TO: usize = std::mem::size_of::<usize>();
@@ -206,9 +197,13 @@ pub fn make_inheritable(fd: RawFd) -> io::Result<()> {
 ///
 /// Runs after `fork`, before `exec`: one syscall, no allocation.
 pub fn seal_inheritance(first: RawFd) -> io::Result<()> {
+    // **A raw syscall on purpose**, numbered by libc since T27 (it was x86-64's
+    // 436): not glibc's `close_range` wrapper, so the failure this floor must
+    // not survive — the kernel not having it — arrives as `ENOSYS` from the
+    // kernel instead of as whatever a libc chose to do about it.
     let rc = unsafe {
-        syscall(
-            SYS_CLOSE_RANGE,
+        libc::syscall(
+            libc::SYS_close_range,
             first as u32 as i64,
             u32::MAX as i64,
             CLOSE_RANGE_CLOEXEC as i64,
@@ -246,7 +241,7 @@ pub fn dup_onto(fd: RawFd, target: RawFd) -> io::Result<()> {
 ///
 /// Runs after `fork`, before `exec`, so only `async-signal-safe` calls.
 pub fn ensure_std_fds() -> io::Result<()> {
-    const O_RDWR: i32 = 2;
+    const O_RDWR: i32 = libc::O_RDWR;
 
     for target in 0..3 {
         if unsafe { fcntl(target, F_GETFD, 0) } != -1 {
@@ -255,7 +250,7 @@ pub fn ensure_std_fds() -> io::Result<()> {
         // `open` takes the lowest free descriptor, and `target` is free by
         // the test above — but only if every number below it is taken,
         // which the loop's order guarantees.
-        let fd = unsafe { open(b"/dev/null\0".as_ptr(), O_RDWR, 0) };
+        let fd = unsafe { libc::open(c"/dev/null".as_ptr(), O_RDWR, 0 as libc::c_int) };
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
@@ -314,16 +309,16 @@ pub fn shutdown_fd(fd: RawFd) {
 /// Returns the held descriptor, which must stay open: an advisory lock
 /// lives on the open file description, so closing it releases the world.
 pub fn lock_world(path: &std::path::Path) -> Result<RawFd, String> {
-    const O_RDWR: i32 = 2;
-    const O_CREAT: i32 = 0o100;
-    const O_CLOEXEC: i32 = 0o2000000;
-    const LOCK_EX: i32 = 2;
-    const LOCK_NB: i32 = 4;
+    const O_RDWR: i32 = libc::O_RDWR;
+    const O_CREAT: i32 = libc::O_CREAT;
+    const O_CLOEXEC: i32 = libc::O_CLOEXEC;
+    const LOCK_EX: i32 = libc::LOCK_EX;
+    const LOCK_NB: i32 = libc::LOCK_NB;
 
     let mut c = path.as_os_str().as_encoded_bytes().to_vec();
     c.push(0);
 
-    let fd = unsafe { open(c.as_ptr(), O_RDWR | O_CREAT | O_CLOEXEC, 0o600) };
+    let fd = unsafe { libc::open(c.as_ptr().cast(), O_RDWR | O_CREAT | O_CLOEXEC, 0o600 as libc::c_int) };
     if fd < 0 {
         return Err(format!("world lock: {}", io::Error::last_os_error()));
     }
@@ -360,10 +355,7 @@ pub fn send_with_fd(sock: RawFd, bytes: &[u8], fd: RawFd) -> io::Result<()> {
 /// leak bounded.
 pub fn send_with_fds(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
     let mut buf = bytes.to_vec();
-    let mut iov = IoVec {
-        base: buf.as_mut_ptr(),
-        len: buf.len(),
-    };
+    let mut iov = iovec(&mut buf);
 
     let hdr_len = std::mem::size_of::<CmsgHdr>();
     let payload = std::mem::size_of::<i32>() * fds.len();
@@ -375,24 +367,16 @@ pub fn send_with_fds(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<()>
 
     unsafe {
         let cmsg = control.as_mut_ptr() as *mut CmsgHdr;
-        (*cmsg).len = hdr_len + payload;
-        (*cmsg).level = SOL_SOCKET;
-        (*cmsg).ty = SCM_RIGHTS;
+        (*cmsg).cmsg_len = (hdr_len + payload) as _;
+        (*cmsg).cmsg_level = SOL_SOCKET;
+        (*cmsg).cmsg_type = SCM_RIGHTS;
         let data = control.as_mut_ptr().add(cmsg_align(hdr_len)) as *mut i32;
         for (i, fd) in fds.iter().enumerate() {
             *data.add(i) = *fd;
         }
     }
 
-    let msg = MsgHdr {
-        name: std::ptr::null_mut(),
-        namelen: 0,
-        iov: &mut iov,
-        iovlen: 1,
-        control: control.as_mut_ptr(),
-        controllen: space,
-        flags: 0,
-    };
+    let msg = msghdr(&mut iov, control.as_mut_ptr(), space);
 
     let n = unsafe { sendmsg(sock, &msg, 0) };
     if n < 0 {
@@ -417,20 +401,9 @@ pub fn spare_fd() -> io::Result<RawFd> {
 /// Send `bytes` with no descriptor attached.
 pub fn send_plain(sock: RawFd, bytes: &[u8]) -> io::Result<()> {
     let mut buf = bytes.to_vec();
-    let mut iov = IoVec {
-        base: buf.as_mut_ptr(),
-        len: buf.len(),
-    };
+    let mut iov = iovec(&mut buf);
 
-    let msg = MsgHdr {
-        name: std::ptr::null_mut(),
-        namelen: 0,
-        iov: &mut iov,
-        iovlen: 1,
-        control: std::ptr::null_mut(),
-        controllen: 0,
-        flags: 0,
-    };
+    let msg = msghdr(&mut iov, std::ptr::null_mut(), 0);
 
     let n = unsafe { sendmsg(sock, &msg, 0) };
     if n < 0 {
@@ -445,20 +418,9 @@ pub fn send_plain(sock: RawFd, bytes: &[u8]) -> io::Result<()> {
 /// close-on-exec too, so the rule holds on both sides of a handoff.
 pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; max];
-    let mut iov = IoVec {
-        base: buf.as_mut_ptr(),
-        len: buf.len(),
-    };
+    let mut iov = iovec(&mut buf);
 
-    let mut msg = MsgHdr {
-        name: std::ptr::null_mut(),
-        namelen: 0,
-        iov: &mut iov,
-        iovlen: 1,
-        control: std::ptr::null_mut(),
-        controllen: 0,
-        flags: 0,
-    };
+    let mut msg = msghdr(&mut iov, std::ptr::null_mut(), 0);
 
     let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC) };
     if n < 0 {
@@ -485,26 +447,15 @@ pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
 /// be looking for a reason the attachment did not work in the wrong half of
 /// the system.
 pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<(Vec<u8>, Vec<RawFd>)> {
-    const MSG_CTRUNC: i32 = 0x8;
+    const MSG_CTRUNC: i32 = libc::MSG_CTRUNC;
 
     let mut buf = vec![0u8; max];
-    let mut iov = IoVec {
-        base: buf.as_mut_ptr(),
-        len: buf.len(),
-    };
+    let mut iov = iovec(&mut buf);
 
     let space = cmsg_align(std::mem::size_of::<CmsgHdr>()) + cmsg_align(max_fds * 4);
     let mut ctrl = vec![0u8; space];
 
-    let mut msg = MsgHdr {
-        name: std::ptr::null_mut(),
-        namelen: 0,
-        iov: &mut iov,
-        iovlen: 1,
-        control: ctrl.as_mut_ptr(),
-        controllen: ctrl.len(),
-        flags: 0,
-    };
+    let mut msg = msghdr(&mut iov, ctrl.as_mut_ptr(), ctrl.len());
 
     let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC) };
     if n < 0 {
@@ -513,12 +464,15 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
     buf.truncate(n as usize);
 
     let mut fds: Vec<RawFd> = Vec::new();
-    if msg.controllen >= std::mem::size_of::<CmsgHdr>() {
+    if msg.msg_controllen as usize >= std::mem::size_of::<CmsgHdr>() {
         // One control message is all this protocol ever sends. Walking a
         // chain would be a generality with no second case to keep it honest.
         let h = unsafe { &*(ctrl.as_ptr() as *const CmsgHdr) };
-        if h.level == SOL_SOCKET && h.ty == SCM_RIGHTS && h.len >= std::mem::size_of::<CmsgHdr>() {
-            let payload = h.len - std::mem::size_of::<CmsgHdr>();
+        if h.cmsg_level == SOL_SOCKET
+            && h.cmsg_type == SCM_RIGHTS
+            && h.cmsg_len as usize >= std::mem::size_of::<CmsgHdr>()
+        {
+            let payload = h.cmsg_len as usize - std::mem::size_of::<CmsgHdr>();
             let base = unsafe {
                 ctrl.as_ptr()
                     .add(cmsg_align(std::mem::size_of::<CmsgHdr>()))
@@ -531,7 +485,7 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
         }
     }
 
-    if (msg.flags & MSG_CTRUNC) != 0 {
+    if (msg.msg_flags & MSG_CTRUNC) != 0 {
         // Whatever did arrive is still this process's to close.
         for f in &fds {
             close_fd(*f);
@@ -543,4 +497,95 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
     }
 
     Ok((buf, fds))
+}
+
+// ------------------------------------------------------------------ T27 laws
+#[cfg(test)]
+mod t27 {
+    use super::*;
+
+    fn dev_ino(fd: RawFd) -> (u64, u64) {
+        let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+        assert_eq!(unsafe { libc::fstat(fd, st.as_mut_ptr()) }, 0, "fstat({fd})");
+        let st = unsafe { st.assume_init() };
+        (st.st_dev as u64, st.st_ino as u64)
+    }
+
+    /// **L3b** — `close_range` (raw, numbered by libc) still marks exactly
+    /// `[first, ∞)` close-on-exec and closes nothing: in the child, right
+    /// after the seal, `first` is still open and `FD_CLOEXEC` and the
+    /// descriptor below it is untouched; after `exec`, only the one below
+    /// `first` was inherited.
+    #[test]
+    fn t27_l3b_close_range_marks_exactly_from_first() {
+        use std::os::unix::process::CommandExt;
+        let null = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDWR | libc::O_CLOEXEC) };
+        assert!(null >= 0);
+        // Three inheritable copies (F_DUPFD sets no FD_CLOEXEC): below the
+        // seal, AT it, and far above it.
+        let below = unsafe { fcntl(null, libc::F_DUPFD, 40) };
+        let first = unsafe { fcntl(null, libc::F_DUPFD, 80) };
+        let far = unsafe { fcntl(null, libc::F_DUPFD, 160) };
+        assert!(below >= 40 && below < first && first < far, "{below} {first} {far}");
+        for fd in [below, first, far] {
+            assert_eq!(fd_state(fd), FdState::Inheritable, "fd {fd} before the seal");
+        }
+        let out = unsafe {
+            std::process::Command::new("/bin/sh")
+                .arg("-c")
+                .arg(format!(
+                    "for f in {below} {first} {far}; do [ -e /proc/self/fd/$f ] && echo $f; done; true"
+                ))
+                .pre_exec(move || {
+                    seal_inheritance(first)?;
+                    let at = fcntl(first, F_GETFD, 0);
+                    let under = fcntl(below, F_GETFD, 0);
+                    if at == -1 || at & FD_CLOEXEC == 0 || under == -1 || under & FD_CLOEXEC != 0 {
+                        return Err(io::Error::from_raw_os_error(libc::ENOTRECOVERABLE));
+                    }
+                    Ok(())
+                })
+                .output()
+        };
+        for fd in [null, below, first, far] {
+            close_fd(fd);
+        }
+        let out = out.expect("the sealed child: the seal marked, and did not close");
+        let seen: Vec<i32> = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .map(|v| v.parse().unwrap())
+            .collect();
+        assert_eq!(seen, vec![below], "inherited across exec (below={below} first={first} far={far})");
+    }
+
+    /// **L3d** — rights still cross by `SCM_RIGHTS` in libc's `msghdr` and
+    /// `cmsghdr`: two descriptors sent in one message arrive as two new
+    /// descriptors naming the same open files, close-on-exec on arrival
+    /// (`MSG_CMSG_CLOEXEC`); a third beyond the receiver's room is refused as
+    /// truncation, never silently dropped.
+    #[test]
+    fn t27_l3d_rights_cross_by_scm_rights_and_arrive_close_on_exec() {
+        let Pair(a, b) = pair_seqpacket().expect("a seqpacket pair");
+        let x = spare_fd().expect("a spare socket");
+        let y = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        assert!(y >= 0);
+
+        send_with_fds(a, b"two", &[x, y]).expect("sendmsg with two rights");
+        let (bytes, got) = recv_msg_with_fds(b, 64, 4).expect("recvmsg");
+        assert_eq!(bytes, b"two");
+        assert_eq!(got.len(), 2, "two rights sent, {} arrived", got.len());
+        for (sent, arrived) in [x, y].iter().zip(&got) {
+            assert_ne!(sent, arrived, "a right arrives as a new descriptor");
+            assert_eq!(fd_state(*arrived), FdState::Cloexec, "arrived without MSG_CMSG_CLOEXEC");
+            assert_eq!(dev_ino(*sent), dev_ino(*arrived), "not the open file that was sent");
+        }
+
+        send_with_fds(a, b"three", &[x, y, x]).expect("sendmsg with three rights");
+        let e = recv_msg_with_fds(b, 64, 1).expect_err("room for two, three sent");
+        assert!(e.to_string().contains("truncated"), "{e}");
+
+        for fd in got.into_iter().chain([x, y, a, b]) {
+            close_fd(fd);
+        }
+    }
 }

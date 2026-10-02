@@ -62,24 +62,37 @@ use std::path::Path;
 
 // ---------------------------------------------------------------- syscalls
 //
-// Declared here rather than pulled in, for the reason `fdpass.rs` gives: the
-// host has exactly one declared dependency and a confinement slice is a poor
-// reason to make it two. `landlock` and `seccompiler` are both good crates;
-// neither is worth the census movement for six syscalls.
+// **Through the `libc` crate since T27 (R122), and for one reason: numbers.**
+// This file used to declare its own `extern` block and spell every syscall
+// as an x86-64 number (444, 317, the whole of `DENIED`), which made the floor
+// x86-64's floor and nothing else's. `libc` supplies the C declarations and
+// each target's own numbers; it supplies no behaviour. Every call below is
+// still written here, argument by argument, and the six raw syscalls are
+// still raw: `landlock_*` and `seccomp` have no libc wrapper, so they go
+// through `libc::syscall` with `libc::SYS_*`. `landlock` and `seccompiler`
+// remain good crates that this slice still does not need.
 
-extern "C" {
-    fn syscall(num: i64, ...) -> i64;
-    fn prctl(option: i32, a2: u64, a3: u64, a4: u64, a5: u64) -> i32;
-    // Signature matches `fdpass.rs`'s declaration exactly. Two `extern`
-    // blocks describing the same symbol differently is a warning today and a
-    // calling-convention bug the day one of them changes.
-    fn open(path: *const u8, flags: i32, mode: i32) -> i32;
-    fn close(fd: i32) -> i32;
-    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
-    fn getppid() -> i32;
+use libc::{close, fcntl, getppid};
+
+/// `prctl(2)` with every argument the `unsigned long` the kernel reads.
+///
+/// `libc::prctl` is variadic, and an untyped integer literal passed through
+/// `...` is a C `int`: four bytes, with nothing promising what sits in the
+/// upper half of the register. `PR_SET_NO_NEW_PRIVS` refuses `EINVAL` unless
+/// arguments 3–5 are zero, so the width is part of the call. The signature
+/// here is the one this file declared before T27, which keeps every call site
+/// passing exactly what it passed then.
+unsafe fn prctl(option: i32, a2: u64, a3: u64, a4: u64, a5: u64) -> i32 {
+    libc::prctl(
+        option,
+        a2 as libc::c_ulong,
+        a3 as libc::c_ulong,
+        a4 as libc::c_ulong,
+        a5 as libc::c_ulong,
+    )
 }
 
-const F_DUPFD_CLOEXEC: i32 = 1030;
+const F_DUPFD_CLOEXEC: i32 = libc::F_DUPFD_CLOEXEC;
 
 /// The ruleset descriptor is moved above every number the Carrier's
 /// descriptor allowlist can name.
@@ -120,18 +133,13 @@ fn relocate_above_allowlist(fd: i32) -> Result<i32, String> {
     Ok(hi)
 }
 
-const SYS_LANDLOCK_CREATE_RULESET: i64 = 444;
-const SYS_LANDLOCK_ADD_RULE: i64 = 445;
-const SYS_LANDLOCK_RESTRICT_SELF: i64 = 446;
-const SYS_SECCOMP: i64 = 317;
+const PR_SET_NO_NEW_PRIVS: i32 = libc::PR_SET_NO_NEW_PRIVS;
+const PR_GET_NO_NEW_PRIVS: i32 = libc::PR_GET_NO_NEW_PRIVS;
+const PR_SET_PDEATHSIG: i32 = libc::PR_SET_PDEATHSIG;
+const SIGKILL: u64 = libc::SIGKILL as u64;
 
-const PR_SET_NO_NEW_PRIVS: i32 = 38;
-const PR_GET_NO_NEW_PRIVS: i32 = 39;
-const PR_SET_PDEATHSIG: i32 = 1;
-const SIGKILL: u64 = 9;
-
-const O_PATH: i32 = 0o10000000;
-const O_CLOEXEC: i32 = 0o2000000;
+const O_PATH: i32 = libc::O_PATH;
+const O_CLOEXEC: i32 = libc::O_CLOEXEC;
 
 const LANDLOCK_CREATE_RULESET_VERSION: u32 = 1 << 0;
 const LANDLOCK_RULE_PATH_BENEATH: i32 = 1;
@@ -252,8 +260,8 @@ struct PathBeneathAttr {
 /// assumption this function exists to refuse.
 pub fn landlock_abi() -> Option<i32> {
     let v = unsafe {
-        syscall(
-            SYS_LANDLOCK_CREATE_RULESET,
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
             std::ptr::null::<RulesetAttr>(),
             0usize,
             LANDLOCK_CREATE_RULESET_VERSION as u64,
@@ -374,7 +382,7 @@ impl Drop for Prepared {
 
 fn grant(rs: RawFd, path: &str, access: u64) -> Result<(), String> {
     let c = CString::new(path).map_err(|_| format!("path has a NUL: {path}"))?;
-    let fd = unsafe { open(c.as_ptr() as *const u8, O_PATH | O_CLOEXEC, 0) };
+    let fd = unsafe { libc::open(c.as_ptr(), O_PATH | O_CLOEXEC, 0 as libc::c_int) };
     if fd < 0 {
         return Err(format!(
             "cannot open {path} to grant it: {}",
@@ -386,8 +394,8 @@ fn grant(rs: RawFd, path: &str, access: u64) -> Result<(), String> {
         parent_fd: fd,
     };
     let rc = unsafe {
-        syscall(
-            SYS_LANDLOCK_ADD_RULE,
+        libc::syscall(
+            libc::SYS_landlock_add_rule,
             rs as i64,
             LANDLOCK_RULE_PATH_BENEATH as i64,
             &attr as *const PathBeneathAttr,
@@ -431,8 +439,8 @@ pub fn prepare(policy: &Policy) -> Result<Prepared, String> {
         scoped: hscope,
     };
     let rs = unsafe {
-        syscall(
-            SYS_LANDLOCK_CREATE_RULESET,
+        libc::syscall(
+            libc::SYS_landlock_create_ruleset,
             &attr as *const RulesetAttr,
             std::mem::size_of::<RulesetAttr>() as u64,
             0u64,
@@ -586,15 +594,15 @@ impl Prepared {
         if prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
             return Err(io::Error::last_os_error());
         }
-        if syscall(SYS_LANDLOCK_RESTRICT_SELF, self.ruleset as i64, 0u32) != 0 {
+        if libc::syscall(libc::SYS_landlock_restrict_self, self.ruleset as i64, 0u32) != 0 {
             return Err(io::Error::last_os_error());
         }
         let prog = SockFprog {
             len: self.filter.len() as u16,
             filter: self.filter.as_ptr(),
         };
-        if syscall(
-            SYS_SECCOMP,
+        if libc::syscall(
+            libc::SYS_seccomp,
             SECCOMP_SET_MODE_FILTER,
             0u64,
             &prog as *const SockFprog,
@@ -642,11 +650,42 @@ const OFF_NR: u32 = 0;
 const OFF_ARCH: u32 = 4;
 const OFF_ARG0: u32 = 16;
 
-const AUDIT_ARCH_X86_64: u32 = 0xc000_003e;
+/// The architecture this filter's syscall numbers belong to, as
+/// `seccomp_data.arch` reports it: `AUDIT_ARCH_<machine>` in `linux/audit.h`,
+/// the ELF machine number with two flag bits (the kernel spells them
+/// `__AUDIT_ARCH_64BIT` and `__AUDIT_ARCH_LE`).
+///
+/// **Per target since T27, and with no default.** Every number this filter
+/// compares is `libc::SYS_*`, which is the target's own table; this check is
+/// what says *which* table, so it has to name the same target. libc 0.2.189
+/// has no `AUDIT_ARCH_*` constants, so the value is composed the way the
+/// kernel header composes it, from libc's `EM_*`. On x86-64 it is
+/// `0xc000_003e`, exactly what this file wrote before (L1 holds it).
+///
+/// A target this file has not been written for does not compile. A filter
+/// that guessed would kill every Carrier at its first syscall or, worse,
+/// compare the numbers of one table against the calls of another. The little
+/// endian requirement is `OFF_ARG1`'s: see the ioctl clause.
+const AUDIT_ARCH_64BIT: u32 = 0x8000_0000;
+const AUDIT_ARCH_LE: u32 = 0x4000_0000;
+#[cfg(target_arch = "x86_64")]
+const AUDIT_ARCH: u32 = libc::EM_X86_64 as u32 | AUDIT_ARCH_64BIT | AUDIT_ARCH_LE;
+#[cfg(target_arch = "aarch64")]
+const AUDIT_ARCH: u32 = libc::EM_AARCH64 as u32 | AUDIT_ARCH_64BIT | AUDIT_ARCH_LE;
+#[cfg(not(all(
+    target_os = "linux",
+    any(target_arch = "x86_64", target_arch = "aarch64"),
+    target_endian = "little",
+    target_pointer_width = "64"
+)))]
+compile_error!(
+    "the Carrier floor's seccomp filter names its architecture, and is written for 64-bit \
+     little-endian Linux on x86_64 and aarch64 only (T27). It has no default."
+);
 
 // offset of `args[1]` — the `ioctl` request. See `IOCTL_ALLOWED`.
 const OFF_ARG1: u32 = 24;
-const NR_IOCTL: u32 = 16;
+const NR_IOCTL: u32 = libc::SYS_ioctl as u32;
 
 /// The **only** `ioctl` requests a Carrier may issue. Everything else is
 /// refused, including requests that do not exist yet.
@@ -689,10 +728,14 @@ const NR_IOCTL: u32 = 16;
 /// `TIOCNOTTY`, `TIOCSPGRP`, `TIOCCONS`, `TIOCSETD`, `TIOCLINUX`,
 /// `TIOCVHANGUP`, `TIOCPKT`, `TIOCSIG` — not because each is listed, but
 /// because nothing is permitted that is not listed here.
+///
+/// The request numbers are libc's, so they are the target's: generic Linux
+/// (x86-64, aarch64) uses `0x5401`/`0x5413`/`0x540f`; powerpc, mips and sparc
+/// do not.
 const IOCTL_ALLOWED: &[u32] = &[
-    0x5401, // TCGETS
-    0x5413, // TIOCGWINSZ
-    0x540f, // TIOCGPGRP
+    libc::TCGETS as u32,
+    libc::TIOCGWINSZ as u32,
+    libc::TIOCGPGRP as u32,
 ];
 
 pub fn ioctl_allowed(request: u32) -> bool {
@@ -702,11 +745,23 @@ pub fn ioctl_allowed(request: u32) -> bool {
 /// `__X32_SYSCALL_BIT` — bit 30, set in `nr` by every x32 syscall. x32
 /// reports `AUDIT_ARCH_X86_64`, so this is the *only* thing distinguishing
 /// the two numbering spaces inside a filter. See `build_filter`.
+///
+/// **x86-64 only.** x32 is an x86-64 ABI; no other architecture has a second
+/// numbering space behind the same `AUDIT_ARCH`, so elsewhere the guard (its
+/// two instructions, `denies`'s clause, the census's x32 rows) does not exist.
+#[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
 
-const AF_UNIX: u32 = 1;
+const AF_UNIX: u32 = libc::AF_UNIX as u32;
 
-/// Syscalls a Carrier is refused, by number on x86-64.
+/// Syscalls a Carrier is refused, by name, numbered by the target.
+///
+/// **By name since T27.** The list was x86-64 numbers; each entry is now
+/// `libc::SYS_<name>`, which is the same number on x86-64 (L1 holds the whole
+/// program byte for byte) and the right one elsewhere. `fork`, `vfork` and
+/// `sysfs` exist on x86-64 and not on aarch64, whose table never had them: a
+/// syscall the architecture does not have cannot be called, so there is
+/// nothing to refuse, and the entries are x86-64 only.
 ///
 /// The list is the process-introspection and privilege-boundary family, not
 /// an attempt at a general policy. A deterministic fixture that opens nothing
@@ -729,28 +784,31 @@ const AF_UNIX: u32 = 1;
 /// about `memfd_create`. The census in `verify::carrier_confinement` closes
 /// that gap and grades what it finds.
 const DENIED: &[u32] = &[
-    101, // ptrace
-    434, // pidfd_open
-    438, // pidfd_getfd
-    310, // process_vm_readv
-    311, // process_vm_writev
-    62,  // kill
-    424, // pidfd_send_signal
-    234, // tgkill
-    272, // unshare
-    308, // setns
-    165, // mount
-    166, // umount2
-    155, // pivot_root
-    161, // chroot
-    248, // add_key
-    250, // keyctl
-    321, // bpf
-    298, // perf_event_open
-    139, // sysfs
-    175, // init_module
-    313, // finit_module
-    176, // delete_module
+    libc::SYS_ptrace as u32,
+    libc::SYS_pidfd_open as u32,
+    libc::SYS_pidfd_getfd as u32,
+    libc::SYS_process_vm_readv as u32,
+    libc::SYS_process_vm_writev as u32,
+    libc::SYS_kill as u32,
+    libc::SYS_pidfd_send_signal as u32,
+    libc::SYS_tgkill as u32,
+    libc::SYS_unshare as u32,
+    libc::SYS_setns as u32,
+    libc::SYS_mount as u32,
+    libc::SYS_umount2 as u32,
+    libc::SYS_pivot_root as u32,
+    libc::SYS_chroot as u32,
+    libc::SYS_add_key as u32,
+    libc::SYS_keyctl as u32,
+    libc::SYS_bpf as u32,
+    libc::SYS_perf_event_open as u32,
+    // (Parenthesised where a `cfg` sits on it: an attribute may not stand
+    // on a bare `as` cast.)
+    #[cfg(target_arch = "x86_64")]
+    (libc::SYS_sysfs as u32),
+    libc::SYS_init_module as u32,
+    libc::SYS_finit_module as u32,
+    libc::SYS_delete_module as u32,
     // --- process creation ------------------------------------------------
     //
     // **Added after measuring, not after reasoning.** The worry was the Rust
@@ -773,10 +831,12 @@ const DENIED: &[u32] = &[
     // floor, not a general Carrier policy. A Motor running a language runtime
     // with a thread pool will need its own list, and inheriting this one by
     // default is how that gets discovered at the worst possible moment.
-    56,  // clone
-    57,  // fork
-    58,  // vfork
-    435, // clone3
+    libc::SYS_clone as u32,
+    #[cfg(target_arch = "x86_64")]
+    (libc::SYS_fork as u32),
+    #[cfg(target_arch = "x86_64")]
+    (libc::SYS_vfork as u32),
+    libc::SYS_clone3 as u32,
     // --- anonymous execution ---------------------------------------------
     //
     // `memfd_create` makes a file with no name on any filesystem; `execveat`
@@ -786,8 +846,8 @@ const DENIED: &[u32] = &[
     // whatever to say about this route. Closed in seccomp instead: the same
     // substitution the UDP clause makes, for the same reason, and reported as
     // a substitution rather than as Landlock coverage.
-    319, // memfd_create
-    322, // execveat
+    libc::SYS_memfd_create as u32,
+    libc::SYS_execveat as u32,
 ];
 
 /// Does the filter refuse this syscall number?
@@ -799,6 +859,7 @@ const DENIED: &[u32] = &[
 /// everywhere else. The two disagreeing would mean a syscall was refused by
 /// something that is not this filter, which is exactly the confusion
 /// `SUPER_DENY_ERRNO` exists to make visible.
+#[cfg(target_arch = "x86_64")]
 pub fn denies(nr: u32) -> bool {
     // **Two clauses, because `build_filter` has two**, and this function's
     // only job is to answer the same question the filter answers. It exists
@@ -813,6 +874,13 @@ pub fn denies(nr: u32) -> bool {
     // a syscall was added to `DENIED`, and would say nothing at all about
     // the 2³⁰ numbers that are not on either list.
     nr >= X32_SYSCALL_BIT || DENIED.contains(&nr)
+}
+
+/// [`denies`] where there is one numbering space: the list alone, because the
+/// filter there has the list alone.
+#[cfg(not(target_arch = "x86_64"))]
+pub fn denies(nr: u32) -> bool {
+    DENIED.contains(&nr)
 }
 
 fn stmt(code: u16, k: u32) -> SockFilter {
@@ -837,7 +905,7 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
     let deny = SECCOMP_RET_ERRNO | (SUPER_DENY_ERRNO & SECCOMP_RET_DATA);
     let mut f = vec![
         stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARCH),
-        jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
+        jump(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH, 1, 0),
         stmt(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS),
         stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR),
         // **The architecture check above is not an ABI check, and every
@@ -873,7 +941,12 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
         // nobody has thought of. Nothing legitimate reaches here — the
         // fixture is a static-pie x86-64 binary and glibc/musl never emit an
         // x32 call from a 64-bit process.
+        //
+        // x86-64 only (T27): no other architecture has x32's second
+        // numbering space, so elsewhere these two instructions do not exist.
+        #[cfg(target_arch = "x86_64")]
         jump(BPF_JMP | BPF_JGE | BPF_K, X32_SYSCALL_BIT, 0, 1),
+        #[cfg(target_arch = "x86_64")]
         stmt(BPF_RET | BPF_K, deny),
     ];
     for nr in DENIED {
@@ -897,9 +970,9 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
     // `PR_GET_PDEATHSIG` (2) stays allowed on purpose: a Carrier that can
     // read its binding but not change it is strictly better for anything
     // that wants to check, and reading changes nothing.
-    f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 157 /* prctl */, 0, 3));
+    f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_prctl as u32, 0, 3));
     f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARG0));
-    f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 1 /* PR_SET_PDEATHSIG */, 0, 1));
+    f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, PR_SET_PDEATHSIG as u32, 0, 1));
     f.push(stmt(BPF_RET | BPF_K, deny));
     f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
 
@@ -962,7 +1035,7 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
     // AF_UNIX is permitted, everything else refused. This is coarser than a
     // port rule and is reported as a substitution, not as UDP restriction.
     if !allow_network {
-        f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, 41 /* socket */, 0, 3));
+        f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, libc::SYS_socket as u32, 0, 3));
         f.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARG0));
         f.push(jump(BPF_JMP | BPF_JEQ | BPF_K, AF_UNIX, 1, 0));
         f.push(stmt(BPF_RET | BPF_K, deny));
@@ -972,4 +1045,107 @@ fn build_filter(allow_network: bool) -> Vec<SockFilter> {
 
     f.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
     f
+}
+
+// ------------------------------------------------------------------ T27 laws
+#[cfg(test)]
+mod t27 {
+    use super::*;
+
+    fn program_bytes(f: &[SockFilter]) -> Vec<u8> {
+        // Exactly the bytes `install` hands the kernel: `SockFprog.filter`
+        // points at this memory, `len` instructions of eight bytes each.
+        let n = std::mem::size_of_val(f);
+        unsafe { std::slice::from_raw_parts(f.as_ptr() as *const u8, n) }.to_vec()
+    }
+
+    /// **L1** — on x86-64 the two programs this host builds are T26's, byte
+    /// for byte. The digests were computed from `1069cdc`'s own `confine.rs`
+    /// in a separate crate (`superlane/t27/golden`), before any T27 code, so
+    /// nothing in this file could have produced them.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn t27_l1_seccomp_programs_are_t26s_on_x86_64() {
+        for (allow_network, insns, golden) in [
+            (false, 80usize, "451c03da6d2692efae0c4b96c98b4bdc6809287f4ca31618324933f408c139de"),
+            (true, 75usize, "87d2248b3679f5eb680991c7d8f459e15b3d673f8b72c0fadb97eb9fde2893e6"),
+        ] {
+            let f = build_filter(allow_network);
+            let b = program_bytes(&f);
+            assert_eq!(f.len(), insns, "allow_network={allow_network}: instruction count");
+            assert_eq!(b.len(), insns * std::mem::size_of::<SockFilter>());
+            assert_eq!(
+                crate::sha256::digest(&b),
+                format!("sha256:{golden}"),
+                "allow_network={allow_network}: the seccomp program is not T26's"
+            );
+        }
+    }
+
+    /// **L3c** — `install` arms what it armed in T26, through libc: inside
+    /// `pre_exec`, after a real `prepare`d floor is installed, the parent-death
+    /// signal is SIGKILL and `no_new_privs` is set, and the payload's `execve`
+    /// is then refused `EACCES` by Landlock — the dynamically linked payload's
+    /// loader was never granted (the module header's second fact), which can
+    /// only be Landlock's answer if `landlock_restrict_self` ran. The pipe
+    /// byte says the checks after `install` passed; without it an `EACCES`
+    /// from `install` itself would read the same.
+    #[test]
+    fn t27_l3c_install_arms_pdeathsig_nnp_landlock_and_seccomp() {
+        use std::os::unix::process::CommandExt;
+        let payload = ["/usr/bin/true", "/bin/true"]
+            .into_iter()
+            .find(|p| Path::new(p).is_file())
+            .expect("a true(1) to exec");
+        let dir = std::env::temp_dir().join(format!("t27-l3c-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let prepared = prepare(&Policy::minimal(dir.to_str().unwrap(), payload)).expect("prepare");
+
+        let mut p = [0 as libc::c_int; 2];
+        assert_eq!(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        let (r, w) = (p[0], p[1]);
+        let parent = std::process::id() as i32;
+        let spawned = unsafe {
+            std::process::Command::new(payload)
+                .pre_exec(move || {
+                    prepared.install(parent)?;
+                    let mut sig: libc::c_int = 0;
+                    let got = libc::prctl(
+                        libc::PR_GET_PDEATHSIG,
+                        &mut sig as *mut libc::c_int as libc::c_ulong,
+                        0 as libc::c_ulong,
+                        0 as libc::c_ulong,
+                        0 as libc::c_ulong,
+                    );
+                    if got != 0 || sig != libc::SIGKILL {
+                        return Err(io::Error::from_raw_os_error(libc::ENOTRECOVERABLE));
+                    }
+                    if prctl(PR_GET_NO_NEW_PRIVS, 0, 0, 0, 0) != 1 {
+                        return Err(io::Error::from_raw_os_error(libc::ENOTRECOVERABLE));
+                    }
+                    libc::write(w, b"k".as_ptr().cast(), 1);
+                    Ok(())
+                })
+                .spawn()
+        };
+        unsafe { close(w) };
+        let mut byte = [0u8; 1];
+        let n = unsafe { libc::read(r, byte.as_mut_ptr().cast(), 1) };
+        unsafe { close(r) };
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(
+            (n, byte[0]),
+            (1, b'k'),
+            "the checks after install did not pass in the child: {:?}",
+            spawned.as_ref().err()
+        );
+        match spawned {
+            Ok(mut c) => {
+                let _ = c.wait();
+                panic!("the payload ran: Landlock did not refuse its loader");
+            }
+            Err(e) => assert_eq!(e.raw_os_error(), Some(libc::EACCES), "{e}"),
+        }
+    }
 }

@@ -458,6 +458,12 @@ probe "the host's lowercase exactness guard is load-bearing on its own" \
 # no_new_privs all still enforce — and removes exactly one number from
 # the deny list. If the census were reading a general property rather
 # than issuing the syscall, all three would stay green.
+#
+# T27 re-aimed the three patterns at the same entries, now named
+# (`libc::SYS_<name> as u32`) where they were x86-64 numbers. `fork`'s
+# entry is x86-64 only and sits under a `cfg`; commenting out its line
+# leaves that attribute on `vfork`'s, which carries the same `cfg`, so
+# exactly one number still leaves the list.
 
 # 18 · The anonymous file. `memfd_create` produces a file with no name on
 #      any filesystem, so Landlock — whose entire vocabulary is pathnames
@@ -466,7 +472,7 @@ probe "the host's lowercase exactness guard is load-bearing on its own" \
 probe "memfd_create left reachable is noticed" \
   "memfd_create is refused inside a Carrier" \
   host/src/confine.rs \
-  's|^    319, // memfd_create$|    // 319, // memfd_create|'
+  's|^    libc::SYS_memfd_create as u32,$|    // libc::SYS_memfd_create as u32,|'
 
 # 19 · The other half of the same escape. `execve` is deliberately
 #      permitted and bounded by Landlock's FS_EXECUTE grant; `execveat`
@@ -475,7 +481,7 @@ probe "memfd_create left reachable is noticed" \
 probe "execveat left reachable is noticed" \
   "execveat_other_binary is refused inside a Carrier" \
   host/src/confine.rs \
-  's|^    322, // execveat$|    // 322, // execveat|'
+  's|^    libc::SYS_execveat as u32,$|    // libc::SYS_execveat as u32,|'
 
 # 20 · Process creation. The fixture needs none of it and the probe no
 #      longer forks, so this is pure policy — and it is the row whose
@@ -484,7 +490,7 @@ probe "execveat left reachable is noticed" \
 probe "fork left reachable is noticed" \
   "fork is refused inside a Carrier" \
   host/src/confine.rs \
-  's|^    57,  // fork$|    // 57,  // fork|'
+  's|^    (libc::SYS_fork as u32),$|    // (libc::SYS_fork as u32),|'
 
 # 20 · The Carrier's control endpoint, leaked instead of dropped. This is the
 #      exact residue of the handshake bug source review found: the channel

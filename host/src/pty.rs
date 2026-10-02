@@ -47,37 +47,33 @@
 
 use std::os::fd::RawFd;
 
-extern "C" {
-    fn syscall(num: i64, ...) -> i64;
-    // Signatures match `fdpass.rs` and `confine.rs` exactly. Two `extern`
-    // blocks describing one symbol differently is a warning today and a
-    // calling-convention bug the day one of them changes.
-    fn open(path: *const u8, flags: i32, mode: i32) -> i32;
-    fn close(fd: i32) -> i32;
-    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
-    fn __errno_location() -> *mut i32;
-}
+// Through the `libc` crate since T27 (R122): its declarations and this
+// target's numbers. The ioctls go through `libc::ioctl`, which on Linux is the
+// syscall and nothing else; until T27 they were `syscall(16, …)`, x86-64's
+// number for it.
+use libc::{close, fcntl, __errno_location};
 
-const SYS_IOCTL: i64 = 16;
+const O_RDWR: i32 = libc::O_RDWR;
+const O_NOCTTY: i32 = libc::O_NOCTTY;
+const O_CLOEXEC: i32 = libc::O_CLOEXEC;
 
-const O_RDWR: i32 = 0o2;
-const O_NOCTTY: i32 = 0o400;
-const O_CLOEXEC: i32 = 0o2000000;
-
-// **Every one of these is `u64` and written as hex, and that is not style.**
-// `TIOCGPTN` and `TIOCGPTLCK` have bit 31 set — it is `_IOC_READ`, the
-// direction field — so through an `i32` they are negative numbers that
-// sign-extend to `0xFFFFFFFF80045430` when widened for the syscall. The
-// request would then match nothing and the call would fail for a reason no
-// amount of reading the ioctl list would explain.
-pub const TIOCSPTLCK: u64 = 0x4004_5431;
-pub const TIOCGPTN: u64 = 0x8004_5430;
-pub const TIOCGPTPEER: u64 = 0x0000_5441;
-pub const TIOCSCTTY: u64 = 0x0000_540e;
-pub const TIOCGPGRP: u64 = 0x0000_540f;
-pub const TIOCGSID: u64 = 0x0000_5429;
-pub const TIOCGWINSZ: u64 = 0x0000_5413;
-pub const TIOCSWINSZ: u64 = 0x0000_5414;
+// **Every one of these is libc's `Ioctl`, the type `libc::ioctl` takes, and
+// that is not style.** `TIOCGPTN` and `TIOCGPTLCK` have bit 31 set — it is
+// `_IOC_READ`, the direction field — so through an `i32` they are negative
+// numbers that sign-extend to `0xFFFFFFFF80045430` when widened for the
+// syscall. The request would then match nothing and the call would fail for a
+// reason no amount of reading the ioctl list would explain. Until T27 they
+// were `u64` hex literals for the same reason; now no widening happens at all,
+// and the numbers are the target's (generic Linux, which x86-64 and aarch64
+// share, has these values; powerpc, mips and sparc do not).
+pub const TIOCSPTLCK: libc::Ioctl = libc::TIOCSPTLCK;
+pub const TIOCGPTN: libc::Ioctl = libc::TIOCGPTN;
+pub const TIOCGPTPEER: libc::Ioctl = libc::TIOCGPTPEER;
+pub const TIOCSCTTY: libc::Ioctl = libc::TIOCSCTTY;
+pub const TIOCGPGRP: libc::Ioctl = libc::TIOCGPGRP;
+pub const TIOCGSID: libc::Ioctl = libc::TIOCGSID;
+pub const TIOCGWINSZ: libc::Ioctl = libc::TIOCGWINSZ;
+pub const TIOCSWINSZ: libc::Ioctl = libc::TIOCSWINSZ;
 
 #[repr(C)]
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
@@ -151,31 +147,32 @@ impl Pty {
     /// `/dev/ptmx` and not `/dev/pts/ptmx`: this mount is `ptmxmode=000`, so
     /// the in-directory node exists and cannot be opened by anyone.
     pub fn open() -> Result<Pty, String> {
-        let m = unsafe { open(b"/dev/ptmx\0".as_ptr(), O_RDWR | O_NOCTTY | O_CLOEXEC, 0) };
+        let m = unsafe {
+            libc::open(c"/dev/ptmx".as_ptr(), O_RDWR | O_NOCTTY | O_CLOEXEC, 0 as libc::c_int)
+        };
         if m < 0 {
             return Err(format!("pty: opening /dev/ptmx: errno {}", errno()));
         }
 
         let unlock: i32 = 0;
-        if unsafe { syscall(SYS_IOCTL, m as i64, TIOCSPTLCK, &unlock as *const i32) } < 0 {
+        if unsafe { libc::ioctl(m, TIOCSPTLCK, &unlock as *const i32) } < 0 {
             let e = errno();
             unsafe { close(m) };
             return Err(format!("pty: unlocking the pty: errno {e}"));
         }
 
         let mut n: u32 = 0;
-        if unsafe { syscall(SYS_IOCTL, m as i64, TIOCGPTN, &mut n as *mut u32) } < 0 {
+        if unsafe { libc::ioctl(m, TIOCGPTN, &mut n as *mut u32) } < 0 {
             let e = errno();
             unsafe { close(m) };
             return Err(format!("pty: reading the pty index: errno {e}"));
         }
 
         let s = unsafe {
-            syscall(
-                SYS_IOCTL,
-                m as i64,
+            libc::ioctl(
+                m,
                 TIOCGPTPEER,
-                (O_RDWR | O_NOCTTY | O_CLOEXEC) as i64,
+                (O_RDWR | O_NOCTTY | O_CLOEXEC) as libc::c_long,
             )
         };
         if s < 0 {
@@ -243,7 +240,7 @@ impl Pty {
         // would be a master descriptor in a process that was never given
         // one. Declared beside its use, as `set_nonblocking` declares
         // `F_GETFL`.
-        const F_DUPFD_CLOEXEC: i32 = 1030;
+        const F_DUPFD_CLOEXEC: i32 = libc::F_DUPFD_CLOEXEC;
         let d = unsafe { fcntl(self.master, F_DUPFD_CLOEXEC, 0) };
         if d < 0 {
             return Err(format!("pty: duplicating the master: errno {}", errno()));
@@ -272,7 +269,7 @@ impl Pty {
     /// host also holds answers `ENOTTY` forever.
     pub fn session(&self) -> Option<i32> {
         let mut sid: i32 = 0;
-        let r = unsafe { syscall(SYS_IOCTL, self.master as i64, TIOCGSID, &mut sid as *mut i32) };
+        let r = unsafe { libc::ioctl(self.master, TIOCGSID, &mut sid as *mut i32) };
         if r < 0 {
             None
         } else {
@@ -283,7 +280,7 @@ impl Pty {
     /// The foreground process group of this terminal, asked of the master.
     pub fn foreground_pgrp(&self) -> Option<i32> {
         let mut pg: i32 = 0;
-        let r = unsafe { syscall(SYS_IOCTL, self.master as i64, TIOCGPGRP, &mut pg as *mut i32) };
+        let r = unsafe { libc::ioctl(self.master, TIOCGPGRP, &mut pg as *mut i32) };
         if r < 0 {
             None
         } else {
@@ -296,7 +293,7 @@ impl Pty {
     /// and never by it. The typed operation that will drive this from the
     /// runtime belongs to c·2; this is the mechanism it will use.
     pub fn set_winsize(&self, ws: WinSize) -> Result<(), String> {
-        let r = unsafe { syscall(SYS_IOCTL, self.master as i64, TIOCSWINSZ, &ws as *const WinSize) };
+        let r = unsafe { libc::ioctl(self.master, TIOCSWINSZ, &ws as *const WinSize) };
         if r < 0 {
             Err(format!("pty: setting the window size: errno {}", errno()))
         } else {
@@ -316,9 +313,9 @@ impl Pty {
     /// to. A blocking read whose terminating condition is the thing under
     /// test is not a measurement.
     pub fn set_nonblocking(&self) -> Result<(), String> {
-        const F_GETFL: i32 = 3;
-        const F_SETFL: i32 = 4;
-        const O_NONBLOCK: i32 = 0o4000;
+        const F_GETFL: i32 = libc::F_GETFL;
+        const F_SETFL: i32 = libc::F_SETFL;
+        const O_NONBLOCK: i32 = libc::O_NONBLOCK;
         let fl = unsafe { fcntl(self.master, F_GETFL, 0) };
         if fl < 0 || unsafe { fcntl(self.master, F_SETFL, fl | O_NONBLOCK) } < 0 {
             return Err(format!("pty: setting O_NONBLOCK: errno {}", errno()));
@@ -328,8 +325,7 @@ impl Pty {
 
     pub fn winsize(&self) -> Option<WinSize> {
         let mut ws = WinSize::default();
-        let r =
-            unsafe { syscall(SYS_IOCTL, self.master as i64, TIOCGWINSZ, &mut ws as *mut WinSize) };
+        let r = unsafe { libc::ioctl(self.master, TIOCGWINSZ, &mut ws as *mut WinSize) };
         if r < 0 {
             None
         } else {
@@ -358,37 +354,35 @@ impl Drop for Pty {
 /// number and close it on drop — the exact defect D.1.3b·2a spent a session
 /// finding in the control-channel handshake.
 pub fn fstat_rdev(fd: RawFd) -> Option<u64> {
-    const SYS_FSTAT: i64 = 5;
-    let mut buf = [0u64; 18];
-    let r = unsafe { syscall(SYS_FSTAT, fd as i64, buf.as_mut_ptr()) };
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let r = unsafe { libc::fstat(fd, st.as_mut_ptr()) };
     if r < 0 {
         return None;
     }
-    Some(buf[ST_RDEV_WORD])
+    Some(st_rdev(unsafe { &st.assume_init() }))
 }
 
-/// `st_rdev`'s index in `struct stat` read as `u64` words, on x86-64:
+/// `st_rdev`, by its name in this target's `struct stat`.
 ///
-/// ```text
-///   0   st_dev            byte  0
-///   1   st_ino                  8
-///   2   st_nlink               16
-///   3   st_mode | st_uid       24   ← four bytes each, packed into one word
-///   4   st_gid  | __pad0       32
-///   5   st_rdev                40
-/// ```
+/// **Until T27 this was an index**, `ST_RDEV_WORD = 5`: `struct stat` read as
+/// raw `u64` words in x86-64's layout, where `st_rdev` sits at byte 40.
+/// aarch64's `struct stat` puts it at byte 32 (word 4), and aarch64 has no
+/// `stat` syscall at all, so the index and the syscall numbers beside it were
+/// x86-64's alone. `libc::stat` names the field for every target.
 ///
-/// **This was `3` and both sides of the provenance check read it**, so the
-/// comparison was between `st_uid | st_mode` — `0x3e8_00002180`, uid 1000 and
-/// mode `0600 | S_IFCHR` — which is byte-identical for *any* two
-/// pseudoterminals on this machine. The check passed, and it passed for a
-/// reason that had nothing to do with the terminals being the same one.
-///
-/// The decoy master is what found it: the Carrier's fd 0 "matched" the decoy
-/// too, which is impossible and therefore a defect in the predicate rather
-/// than in the thing under test. A falsifier with no way to be wrong had
-/// silently become one.
-const ST_RDEV_WORD: usize = 5;
+/// **One function, because of the index's own history.** It was `3` once and
+/// both sides of the provenance check read it, so the comparison was between
+/// `st_uid | st_mode` — `0x3e8_00002180`, uid 1000 and mode `0600 | S_IFCHR` —
+/// which is byte-identical for *any* two pseudoterminals on this machine. The
+/// check passed, and it passed for a reason that had nothing to do with the
+/// terminals being the same one. The decoy master is what found it: the
+/// Carrier's fd 0 "matched" the decoy too, which is impossible and therefore a
+/// defect in the predicate rather than in the thing under test. A falsifier
+/// with no way to be wrong had silently become one. Both sides of that check
+/// still read through here.
+fn st_rdev(st: &libc::stat) -> u64 {
+    st.st_rdev as u64
+}
 
 /// Decode `/proc/<pid>/stat` field 7 (`tty_nr`) into `(major, minor)`.
 ///
@@ -498,14 +492,57 @@ pub fn makedev(major: u32, minor: u32) -> u64 {
 /// slice says nobody may do by name, and doing it inside the falsifier would
 /// be the measurement granting itself the authority it is checking for.
 pub fn fstat_rdev_of_path(path: &str) -> Option<u64> {
-    const SYS_STAT: i64 = 4;
     let mut c = path.as_bytes().to_vec();
     c.push(0);
-    let mut buf = [0u64; 18];
-    let r = unsafe { syscall(SYS_STAT, c.as_ptr(), buf.as_mut_ptr()) };
+    let mut st = std::mem::MaybeUninit::<libc::stat>::uninit();
+    let r = unsafe { libc::stat(c.as_ptr().cast(), st.as_mut_ptr()) };
     if r < 0 {
         None
     } else {
-        Some(buf[ST_RDEV_WORD])
+        Some(st_rdev(unsafe { &st.assume_init() }))
+    }
+}
+
+// ------------------------------------------------------------------ T27 laws
+#[cfg(test)]
+mod t27 {
+    use super::*;
+
+    /// **L3a** — the slave is minted from the master by `TIOCGPTPEER`,
+    /// through `libc::ioctl` now, and it is still that master's own peer:
+    /// close-on-exec (the flags the request carries), its device the devpts
+    /// index `TIOCGPTN` reported, read the same way by descriptor and by
+    /// `/proc` path (`libc::stat`'s `st_rdev`, where T26 read x86-64's word
+    /// 5), and bytes written on the master arrive on it. An unclaimed master
+    /// answers `TIOCGSID` with nothing; the window size round-trips.
+    #[test]
+    fn t27_l3a_the_slave_is_the_masters_own_peer() {
+        let mut p = Pty::open().expect("a pty pair, by possession");
+        let s = p.slave().expect("the host holds the slave until close_slave");
+
+        let fl = unsafe { fcntl(s, libc::F_GETFD, 0) };
+        assert!(fl >= 0 && fl & libc::FD_CLOEXEC != 0, "the slave is inheritable: F_GETFD = {fl}");
+
+        let want = makedev(136, p.ptn());
+        assert_eq!(p.slave_rdev(), want, "slave st_rdev vs makedev(136, TIOCGPTN index)");
+        assert_eq!(fstat_rdev(s), Some(want), "fstat_rdev(slave)");
+        assert_eq!(fstat_rdev_of_path(&format!("/proc/self/fd/{s}")), Some(want), "stat by path");
+        assert_ne!(fstat_rdev(p.master()), Some(want), "the master is not the slave");
+
+        let msg = b"t27-l3a\n";
+        let put = unsafe { libc::write(p.master(), msg.as_ptr().cast(), msg.len()) };
+        assert_eq!(put, msg.len() as isize);
+        let mut pfd = libc::pollfd { fd: s, events: libc::POLLIN, revents: 0 };
+        assert_eq!(unsafe { libc::poll(&mut pfd, 1, 3_000) }, 1, "nothing arrived on the slave");
+        let mut buf = [0u8; 64];
+        let n = unsafe { libc::read(s, buf.as_mut_ptr().cast(), buf.len()) };
+        assert!(n > 0, "read on the slave: {n}");
+        assert_eq!(&buf[..n as usize], msg, "the slave is not this master's peer");
+
+        assert_eq!(p.session(), None, "an unclaimed master answers TIOCGSID");
+        let ws = WinSize { rows: 24, cols: 80, xpixel: 0, ypixel: 0 };
+        p.set_winsize(ws).expect("TIOCSWINSZ");
+        assert_eq!(p.winsize(), Some(ws), "TIOCGWINSZ");
+        p.close_slave();
     }
 }

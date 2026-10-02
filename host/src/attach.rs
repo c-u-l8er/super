@@ -80,15 +80,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::thread::JoinHandle;
 
-extern "C" {
-    fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
-    fn write(fd: i32, buf: *const u8, count: usize) -> isize;
-    fn close(fd: i32) -> i32;
-    fn shutdown(fd: i32, how: i32) -> i32;
-    fn fcntl(fd: i32, cmd: i32, arg: i32) -> i32;
-    fn poll(fds: *mut PollFd, nfds: u64, timeout: i32) -> i32;
-    fn __errno_location() -> *mut i32;
-}
+// The libc crate's declarations since T27 (R122); this was an `extern` block.
+use libc::{__errno_location, close, fcntl, poll, read, shutdown, write};
 
 fn errno() -> i32 {
     unsafe { *__errno_location() }
@@ -108,26 +101,22 @@ const BUF: usize = 64 * 1024;
 /// the thing under test does not terminate.
 const POLL_MS: i32 = 250;
 
-const POLLIN: i16 = 0x001;
-const POLLOUT: i16 = 0x004;
-const POLLERR: i16 = 0x008;
-const POLLHUP: i16 = 0x010;
-const POLLNVAL: i16 = 0x020;
+const POLLIN: i16 = libc::POLLIN;
+const POLLOUT: i16 = libc::POLLOUT;
+const POLLERR: i16 = libc::POLLERR;
+const POLLHUP: i16 = libc::POLLHUP;
+const POLLNVAL: i16 = libc::POLLNVAL;
 
-const SHUT_WR: i32 = 1;
-const SHUT_RDWR: i32 = 2;
+const SHUT_WR: i32 = libc::SHUT_WR;
+const SHUT_RDWR: i32 = libc::SHUT_RDWR;
 
-const EAGAIN: i32 = 11;
-const EINTR: i32 = 4;
-const EIO: i32 = 5;
+const EAGAIN: i32 = libc::EAGAIN;
+const EINTR: i32 = libc::EINTR;
+const EIO: i32 = libc::EIO;
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct PollFd {
-    fd: i32,
-    events: i16,
-    revents: i16,
-}
+/// `struct pollfd`, as this target lays it out (it was a hand-written
+/// `PollFd {fd, events, revents}` until T27: the same three fields).
+type PollFd = libc::pollfd;
 
 /// What the pump did, readable while it is still running.
 ///
@@ -349,9 +338,9 @@ impl Drop for Attachment {
 }
 
 fn set_nonblocking(fd: RawFd) -> Result<(), String> {
-    const F_GETFL: i32 = 3;
-    const F_SETFL: i32 = 4;
-    const O_NONBLOCK: i32 = 0o4000;
+    const F_GETFL: i32 = libc::F_GETFL;
+    const F_SETFL: i32 = libc::F_SETFL;
+    const O_NONBLOCK: i32 = libc::O_NONBLOCK;
     let fl = unsafe { fcntl(fd, F_GETFL, 0) };
     if fl < 0 || unsafe { fcntl(fd, F_SETFL, fl | O_NONBLOCK) } < 0 {
         return Err(format!("attachment: setting O_NONBLOCK: errno {}", errno()));
@@ -460,7 +449,7 @@ fn pump(master: RawFd, stream: RawFd, stop: Arc<AtomicBool>, stats: Arc<Stats>) 
             PollFd { fd: stream, events: s_ev, revents: 0 },
         ];
 
-        let n = unsafe { poll(fds.as_mut_ptr(), 2, POLL_MS) };
+        let n = unsafe { poll(fds.as_mut_ptr(), 2 as libc::nfds_t, POLL_MS) };
         if n < 0 {
             if errno() == EINTR {
                 continue;
@@ -485,7 +474,7 @@ fn pump(master: RawFd, stream: RawFd, stop: Arc<AtomicBool>, stats: Arc<Stats>) 
             out.clear();
             out_at = 0;
             out.resize(BUF, 0);
-            let got = unsafe { read(master, out.as_mut_ptr(), BUF) };
+            let got = unsafe { read(master, out.as_mut_ptr().cast(), BUF) };
             if got > 0 {
                 out.truncate(got as usize);
                 stats.to_stream.fetch_add(got as u64, Ordering::Relaxed);
@@ -510,7 +499,7 @@ fn pump(master: RawFd, stream: RawFd, stop: Arc<AtomicBool>, stats: Arc<Stats>) 
         }
 
         if (sr & POLLOUT) != 0 && out.len() > out_at {
-            let put = unsafe { write(stream, out[out_at..].as_ptr(), out.len() - out_at) };
+            let put = unsafe { write(stream, out[out_at..].as_ptr().cast(), out.len() - out_at) };
             if put > 0 {
                 out_at += put as usize;
             } else {
@@ -528,7 +517,7 @@ fn pump(master: RawFd, stream: RawFd, stop: Arc<AtomicBool>, stats: Arc<Stats>) 
             inb.clear();
             in_at = 0;
             inb.resize(BUF, 0);
-            let got = unsafe { read(stream, inb.as_mut_ptr(), BUF) };
+            let got = unsafe { read(stream, inb.as_mut_ptr().cast(), BUF) };
             if got > 0 {
                 inb.truncate(got as usize);
                 stats.to_master.fetch_add(got as u64, Ordering::Relaxed);
@@ -546,7 +535,7 @@ fn pump(master: RawFd, stream: RawFd, stop: Arc<AtomicBool>, stats: Arc<Stats>) 
         }
 
         if (mr & POLLOUT) != 0 && inb.len() > in_at {
-            let put = unsafe { write(master, inb[in_at..].as_ptr(), inb.len() - in_at) };
+            let put = unsafe { write(master, inb[in_at..].as_ptr().cast(), inb.len() - in_at) };
             if put > 0 {
                 in_at += put as usize;
             } else {
