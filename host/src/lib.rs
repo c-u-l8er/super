@@ -28,13 +28,59 @@
 //! forge a message on a channel it did not create, and nothing else can
 //! obtain one at all.
 
-pub mod effect;
+// ------------------------------------------------------- the platform gate
+//
+// **One platform layer exists, Linux's, and a build for anything else stops
+// here** (T27, L5). Until T27 this crate declared its own `syscall(2)` with
+// x86-64 Linux numbers, so it also *compiled* for macOS (measured on the Mac
+// at `1069cdc`, 2026-10-02) — and would have run there making the wrong
+// calls: macOS's syscall 16 is `chown`, not `ioctl`. The numbers are libc's
+// now, which fixes them for every Linux architecture, but no number makes
+// Landlock, seccomp, `PR_SET_PDEATHSIG`, `TIOCGPTPEER`, `close_range`,
+// `SOCK_SEQPACKET` descriptor passing or `/proc` mean anything on macOS. So
+// those pieces are compiled for Linux only, and anything else is refused by
+// name rather than compiled into a host that only looks like one. T28 (the
+// portable bridge) and T29 (cockpit portability) are where a second layer
+// comes from.
+#[cfg(not(target_os = "linux"))]
+compile_error!(
+    "super-host has one platform layer, Linux's, and none for this target. Its descriptor bridge \
+     (SOCK_SEQPACKET, MSG_CMSG_CLOEXEC, close_range), its Carrier floor (Landlock, seccomp, \
+     no_new_privs, PR_SET_PDEATHSIG), its terminals (TIOCGPTPEER) and its /proc readings have no \
+     meaning here yet: the portable bridge is T28 and cockpit portability T29 \
+     (superlane/NATIVE-PROGRAM.md). It refuses to compile rather than compile Linux semantics (T27)."
+);
+
+/// Portable: pure Rust over `std::io`, no platform call. The one module that
+/// is not behind the gate.
 pub mod sha256;
+#[cfg(target_os = "linux")]
+pub mod effect;
+#[cfg(target_os = "linux")]
 pub mod fdpass;
+#[cfg(target_os = "linux")]
 pub mod confine;
+#[cfg(target_os = "linux")]
 pub mod pty;
+#[cfg(target_os = "linux")]
 pub mod attach;
+#[cfg(target_os = "linux")]
 pub mod carrier;
+
+#[cfg(target_os = "linux")]
+pub use linux_layer::*;
+
+/// The rest of the crate root — the runtime, the bridge's framing, the
+/// cockpit loop, the channels, the CLI — is the Linux layer, held in one
+/// module so the gate is one attribute rather than one per item. Its paths are
+/// unchanged: `pub use linux_layer::*` above puts every item back at the root
+/// (`super_host::Runtime`, `crate::new_epoch`), and `use super::*` gives the
+/// body the crate's modules as the root did. **The body is deliberately not
+/// re-indented**, so every line keeps the exact text it had, which
+/// `tools/sabotage-host.sh` anchors on.
+#[cfg(target_os = "linux")]
+mod linux_layer {
+use super::*;
 
 use std::collections::HashMap;
 use std::io;
@@ -2732,4 +2778,7 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
     0
 }
 
+} // mod linux_layer
+
+#[cfg(target_os = "linux")]
 pub mod verify;
