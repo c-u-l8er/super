@@ -53,12 +53,6 @@ const FD_CLOEXEC: i32 = libc::FD_CLOEXEC;
 /// does not close it.** That distinction is the whole of `seal_inheritance`.
 const CLOSE_RANGE_CLOEXEC: u32 = libc::CLOSE_RANGE_CLOEXEC;
 
-/// The control-message header, as this target lays it out. It was a
-/// hand-written `CmsgHdr {len: usize, level: i32, ty: i32}` until T27, which
-/// is glibc's layout on every 64-bit Linux; `libc::cmsghdr` is that and
-/// stays right elsewhere.
-type CmsgHdr = libc::cmsghdr;
-
 /// A `msghdr` for one buffer and an optional control buffer.
 ///
 /// Built from zero and then field by field, because `libc::msghdr` is the
@@ -81,9 +75,24 @@ fn iovec(buf: &mut [u8]) -> libc::iovec {
     }
 }
 
-const CMSG_ALIGN_TO: usize = std::mem::size_of::<usize>();
-const fn cmsg_align(n: usize) -> usize {
-    (n + CMSG_ALIGN_TO - 1) & !(CMSG_ALIGN_TO - 1)
+/// `CMSG_SPACE` for `n` descriptors: the control buffer.
+///
+/// **libc's arithmetic, not this file's, since T27.** Until then the header
+/// (`CmsgHdr {len: usize, level: i32, ty: i32}`) and its alignment
+/// (`cmsg_align`, to `size_of::<usize>()`) were written here. That is glibc's
+/// layout on every 64-bit Linux, and wrong on macOS, whose kernel aligns
+/// control messages to four bytes (T28's design study): a hand-rolled offset
+/// there makes `sendmsg` fail `EINVAL`. `libc::CMSG_*` are each target's own;
+/// on 64-bit Linux they give exactly T26's numbers (L3e holds them).
+fn rights_space(n: usize) -> usize {
+    unsafe { libc::CMSG_SPACE((n * std::mem::size_of::<RawFd>()) as libc::c_uint) as usize }
+}
+
+/// `CMSG_LEN` for `n` descriptors: the header's own `cmsg_len`. Not the same
+/// number as [`rights_space`] (it has no tail padding), and using one for the
+/// other is how a receiver ends up reading a descriptor that was never sent.
+fn rights_len(n: usize) -> usize {
+    unsafe { libc::CMSG_LEN((n * std::mem::size_of::<RawFd>()) as libc::c_uint) as usize }
 }
 
 /// A connected pair. `Pair.0` is ours; `Pair.1` is the one we give away.
@@ -357,26 +366,26 @@ pub fn send_with_fds(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<()>
     let mut buf = bytes.to_vec();
     let mut iov = iovec(&mut buf);
 
-    let hdr_len = std::mem::size_of::<CmsgHdr>();
-    let payload = std::mem::size_of::<i32>() * fds.len();
-    // `CMSG_SPACE` for the buffer, `CMSG_LEN` for the header's own length.
-    // They differ by the tail padding, and using one for the other is how
-    // a receiver ends up reading a descriptor that was never sent.
-    let space = cmsg_align(hdr_len) + cmsg_align(payload);
+    // `CMSG_SPACE` for the buffer, `CMSG_LEN` for the header's own length;
+    // see `rights_len`.
+    let space = rights_space(fds.len());
     let mut control = vec![0u8; space];
 
+    let msg = msghdr(&mut iov, control.as_mut_ptr(), space);
+
     unsafe {
-        let cmsg = control.as_mut_ptr() as *mut CmsgHdr;
-        (*cmsg).cmsg_len = (hdr_len + payload) as _;
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null() {
+            return Err(io::Error::other("a control buffer too small for its own header"));
+        }
+        (*cmsg).cmsg_len = rights_len(fds.len()) as _;
         (*cmsg).cmsg_level = SOL_SOCKET;
         (*cmsg).cmsg_type = SCM_RIGHTS;
-        let data = control.as_mut_ptr().add(cmsg_align(hdr_len)) as *mut i32;
+        let data = libc::CMSG_DATA(cmsg) as *mut i32;
         for (i, fd) in fds.iter().enumerate() {
             *data.add(i) = *fd;
         }
     }
-
-    let msg = msghdr(&mut iov, control.as_mut_ptr(), space);
 
     let n = unsafe { sendmsg(sock, &msg, 0) };
     if n < 0 {
@@ -452,7 +461,7 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
     let mut buf = vec![0u8; max];
     let mut iov = iovec(&mut buf);
 
-    let space = cmsg_align(std::mem::size_of::<CmsgHdr>()) + cmsg_align(max_fds * 4);
+    let space = rights_space(max_fds);
     let mut ctrl = vec![0u8; space];
 
     let mut msg = msghdr(&mut iov, ctrl.as_mut_ptr(), ctrl.len());
@@ -464,19 +473,20 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
     buf.truncate(n as usize);
 
     let mut fds: Vec<RawFd> = Vec::new();
-    if msg.msg_controllen as usize >= std::mem::size_of::<CmsgHdr>() {
+    // `CMSG_FIRSTHDR` is null unless the kernel wrote at least one header
+    // (`msg_controllen` ≥ the header), which is the test this made by hand.
+    let first = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    if !first.is_null() {
         // One control message is all this protocol ever sends. Walking a
         // chain would be a generality with no second case to keep it honest.
-        let h = unsafe { &*(ctrl.as_ptr() as *const CmsgHdr) };
+        let h = unsafe { &*first };
+        let head = rights_len(0);
         if h.cmsg_level == SOL_SOCKET
             && h.cmsg_type == SCM_RIGHTS
-            && h.cmsg_len as usize >= std::mem::size_of::<CmsgHdr>()
+            && h.cmsg_len as usize >= head
         {
-            let payload = h.cmsg_len as usize - std::mem::size_of::<CmsgHdr>();
-            let base = unsafe {
-                ctrl.as_ptr()
-                    .add(cmsg_align(std::mem::size_of::<CmsgHdr>()))
-            };
+            let payload = h.cmsg_len as usize - head;
+            let base = unsafe { libc::CMSG_DATA(first) } as *const u8;
             for i in 0..(payload / 4) {
                 let mut raw = [0u8; 4];
                 unsafe { std::ptr::copy_nonoverlapping(base.add(i * 4), raw.as_mut_ptr(), 4) };
@@ -556,6 +566,30 @@ mod t27 {
             .map(|v| v.parse().unwrap())
             .collect();
         assert_eq!(seen, vec![below], "inherited across exec (below={below} first={first} far={far})");
+    }
+
+    /// **L3e** — the control-message arithmetic is libc's (`CMSG_SPACE`,
+    /// `CMSG_LEN`, `CMSG_FIRSTHDR`, `CMSG_DATA`), and on 64-bit Linux it is
+    /// T26's byte for byte: T26 sized the buffer `align8(16) + align8(4n)`,
+    /// wrote `cmsg_len = 16 + 4n`, and put the descriptors 16 bytes in, for
+    /// every count the kernel accepts (`SCM_MAX_FD` = 253).
+    #[cfg(all(target_os = "linux", target_pointer_width = "64"))]
+    #[test]
+    fn t27_l3e_cmsg_arithmetic_is_libcs_and_t26s_on_64_bit_linux() {
+        let align8 = |n: usize| (n + 7) & !7;
+        for n in 0..=253usize {
+            assert_eq!(rights_space(n), align8(16) + align8(4 * n), "the control buffer for {n} rights");
+            assert_eq!(rights_len(n), 16 + 4 * n, "cmsg_len for {n} rights");
+        }
+        let mut control = vec![0u8; rights_space(2)];
+        let mut one = [0u8; 1];
+        let mut iov = iovec(&mut one);
+        let msg = msghdr(&mut iov, control.as_mut_ptr(), control.len());
+        let h = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+        assert_eq!(h as usize, control.as_ptr() as usize, "the first header is the buffer's start");
+        assert_eq!(unsafe { libc::CMSG_DATA(h) } as usize - h as usize, 16, "the rights start 16 bytes in");
+        let short = msghdr(&mut iov, control.as_mut_ptr(), 15);
+        assert!(unsafe { libc::CMSG_FIRSTHDR(&short) }.is_null(), "no header fits in 15 bytes");
     }
 
     /// **L3d** — rights still cross by `SCM_RIGHTS` in libc's `msghdr` and

@@ -14,7 +14,10 @@
 //!   4. a BPF comparison against a numeric literal (`BPF_K, <digit>`);
 //!   5. `denies(<digit>`;
 //!   6. a numeric entry in `confine.rs`'s `DENIED` or `verify.rs`'s `CENSUS`,
-//!      both of which must be found (a renamed table must not switch this off).
+//!      both of which must be found (a renamed table must not switch this off);
+//!   7. hand-rolled control-message arithmetic: a `fn` or `const` of its own
+//!      whose name begins `cmsg`/`CMSG` (T28's design study: macOS aligns control messages to
+//!      four bytes, so only `libc::CMSG_*` is right everywhere).
 //!
 //! It lives in `host/tests`, outside `host/src`, so its own patterns are not
 //! scanned.
@@ -210,6 +213,21 @@ fn t27_l2_no_numeric_syscall_literal_and_no_raw_extern_in_host_src() {
                     }
                 }
                 from = at;
+            }
+            // 7 · hand-rolled cmsg arithmetic: a fn or const of this crate's own named for it
+            for kw in ["fn ", "const fn ", "const "] {
+                let rest = t
+                    .strip_prefix("pub ")
+                    .or_else(|| t.strip_prefix("pub(crate) "))
+                    .unwrap_or(t)
+                    .strip_prefix(kw);
+                if let Some(rest) = rest {
+                    let id: String = rest.chars().take_while(|c| c.is_alphanumeric() || *c == '_').collect();
+                    // `cmsg_align`, `CMSG_SPACE`, `__cmsg_len`…; not `MSG_CMSG_CLOEXEC` (a flag)
+                    if id.to_ascii_lowercase().trim_start_matches('_').starts_with("cmsg") {
+                        bad.push(format!("{name}:{} hand-rolled control-message arithmetic `{id}`", i + 1));
+                    }
+                }
             }
             // 5 · denies(<digit>
             if let Some(k) = l.find("denies(") {
