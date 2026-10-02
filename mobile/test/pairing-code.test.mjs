@@ -79,3 +79,34 @@ test('T31 L1 · the form keeps one-time-code, and its help text puts paste first
   assert.ok(typing<0||help.search(/\bpaste\b/i)<typing,'paste comes before typing');
   assert.match(help,/dash/i);
 });
+
+/* T31 L11 (N1, found in the Simulator): Return and then a tap on Connect sent two pair requests, and the browser's
+ * "Fetch is aborted" reached the notice. */
+test('T31 L11 · Return then Connect sends one pair request; Connect waits while it is in flight',async t=>{
+  const phone=await openPhone(t),form=phone.$('#pair-form'),connect=phone.$('#pair-form button');
+  phone.$('#code').value=CODE;
+  form.requestSubmit();
+  assert.equal(connect.disabled,true,'Connect is disabled while the request is in flight');
+  form.requestSubmit();
+  await phone.idle();
+  await phone.until(()=>!phone.$('#app').hidden,'paired');
+  assert.deepEqual(phone.requests.filter(r=>r==='POST /api/pair'),['POST /api/pair'],'exactly one pair request');
+  assert.equal(phone.text('#notice'),'');
+  assert.equal(connect.disabled,false);
+});
+
+test('T31 L11 · a pair request lost without an answer is said plainly, never "Fetch is aborted", and Connect comes back',async t=>{
+  const phone=await openPhone(t),connect=phone.$('#pair-form button');
+  for(const lost of [new DOMException('Fetch is aborted','AbortError'),new DOMException('The operation timed out.','TimeoutError'),new TypeError('Load failed')]){
+    phone.$('#notice').textContent='';
+    phone.failNext('/api/pair',lost);
+    await phone.pair(CODE);
+    await phone.until(()=>phone.text('#notice'),`the notice after ${lost.name}`);
+    assert.equal(phone.text('#notice'),'Could not reach desktop Super. Check the connection, then connect again.',lost.name);
+    assert.doesNotMatch(phone.text('#notice'),/abort|timed out|load failed/i);
+    assert.equal(connect.disabled,false,`Connect is usable again after ${lost.name}`);
+    assert.equal(phone.$('#app').hidden,true);
+  }
+  await phone.pair(CODE);
+  await phone.until(()=>!phone.$('#app').hidden,'pairing on the retry');
+});

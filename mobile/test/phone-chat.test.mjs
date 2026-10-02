@@ -20,3 +20,26 @@ test('T31 L4 · the draft-conflict note stays hidden until a loaded conversation
   assert.deepEqual(shown(),[true,true,true]);
   assert.match(conflict.textContent,/desktop words/);
 });
+
+/* T31 L12 (N2, found in the Simulator): an empty thread was a blank panel. */
+test('T31 L12 · the thread says it is loading, then that it has no messages; a lost connection says so; never blank',async t=>{
+  let visible=false,mode='empty';
+  const answer=()=>{if(mode==='down')throw Error('Conversation connection unavailable.');return chatView({entries:mode==='empty'?[]:undefined});};
+  const chat=await openChat(t,{visible:()=>visible,answer});
+  const thread=chat.root.querySelector('.chat-thread'),empty=thread.querySelector('.chat-empty'),live=thread.children.find(e=>e.localName==='pre');
+  assert.equal(empty.hidden,false);assert.equal(empty.textContent,'Loading messages…');
+  assert.equal(live.hidden,true,'no empty live box while loading');
+  visible=true;
+  await chat.tick(1000);
+  await chat.until(()=>empty.textContent==='No messages yet.','the empty state');
+  assert.equal(empty.hidden,false);
+  mode='messages';
+  await chat.tick(1000);
+  await chat.until(()=>thread.querySelectorAll('article').length===2,'the messages');
+  assert.equal(empty.hidden,true,'messages replace the empty state');
+  mode='down';
+  await chat.tick(1000);
+  await chat.until(()=>!live.hidden,'the reconnect line');
+  assert.equal(live.textContent,'Reconnect to read shared messages.');
+  assert.equal(empty.hidden,true);
+});

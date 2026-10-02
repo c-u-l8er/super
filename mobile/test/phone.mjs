@@ -113,6 +113,8 @@ export class FakeElement extends FakeNode{
   showModal(){this.open=true;}
   close(){if(this.open){this.open=false;this.dispatchEvent(new FakeEvent('close',{bubbles:false}));}}
   requestSubmit(){this.dispatchEvent(new FakeEvent('submit'));}
+  /** No layout here: the call and its options are recorded on the document (`intoView`) for a test to read. */
+  scrollIntoView(options){(this.ownerDocument.intoView??=[]).push({element:this,options});}
 }
 class FakeDocument extends FakeElement{
   constructor(){super(null,'#document');this.ownerDocument=this;this.nodeType=9;this.activeElement=null;}
@@ -181,6 +183,9 @@ class Page{
     try{
       if(this.fetchOverride){const value=await this.fetchOverride(String(path),{method,body});return new Response(JSON.stringify(value),{status:200,headers:{'content-type':'application/json'}});}
       const tab=this.tab,url=new URL(path,ORIGIN);
+      tab.requests.push(`${method} ${url.pathname}`);
+      // A request the network loses (`phone.failNext`): it rejects as the browser's fetch would, and never reaches the gateway.
+      const lost=tab.failures.get(url.pathname);if(lost){tab.failures.delete(url.pathname);await delay(1);throw lost;}
       const res=await new Promise((resolve,reject)=>{
         const req=http.request({host:'127.0.0.1',port:tab.port,path:url.pathname+url.search,method,headers:{Host:'127.0.0.1:4318',...(method==='GET'?{}:{Origin:ORIGIN}),...(tab.cookie?{Cookie:tab.cookie}:{}),...headers}},
           r=>{let text='';r.setEncoding('utf8');r.on('data',c=>text+=c);r.on('end',()=>resolve({status:r.statusCode,headers:r.headers,text}));});
@@ -203,7 +208,7 @@ class Page{
 /** A browser tab on a fresh gateway. `world` is the snapshot the desktop publishes; change it to redraw. */
 export async function openPhone(t,{code=CODE,world=fixtureWorld(),url=ORIGIN+'/',conversations,conversation}={}){
   hook();
-  const tab={entries:[{state:null,url}],index:0,cookie:null,storage:new Storage(),leftPage:false,world,gatewayNow:0,page:null,
+  const tab={entries:[{state:null,url}],index:0,cookie:null,storage:new Storage(),leftPage:false,world,gatewayNow:0,page:null,requests:[],failures:new Map(),
     get url(){return this.entries[this.index].url;},resolve(u){return new URL(u,this.url).href;}};
   tab.location={get href(){return tab.url;},get hash(){return new URL(tab.url).hash;},get pathname(){return new URL(tab.url).pathname;},get origin(){return ORIGIN;}};
   const gateway=createGateway({origin:ORIGIN,pairingCode:code,now:()=>tab.gatewayNow,snapshot:async()=>structuredClone(tab.world),
@@ -215,6 +220,9 @@ export async function openPhone(t,{code=CODE,world=fixtureWorld(),url=ORIGIN+'/'
     get page(){return tab.page;},get window(){return tab.page.window;},get history(){return tab.page.history;},get document(){return tab.page.document;},
     get world(){return tab.world;},set world(v){tab.world=v;},
     get hash(){return tab.location.hash;},
+    /** Every request the page made, as "METHOD /path", and a way to lose the next one to a path. */
+    requests:tab.requests,
+    failNext(path,error){tab.failures.set(path,error);},
     $:selector=>tab.page.document.querySelector(selector),
     $$:selector=>tab.page.document.querySelectorAll(selector),
     text:selector=>tab.page.document.querySelector(selector)?.textContent??null,
@@ -256,9 +264,9 @@ export async function openChat(t,{visible=()=>true,answer}){
 }
 
 /** A desktop's conversation view, as the gateway relays it. */
-export function chatView({revision=3,draft=''}={}){
+export function chatView({revision=3,draft='',entries=[{role:'user',text:'hello'},{role:'assistant',text:'hi'}]}={}){
   return {available:true,receipts:[],view:{
-    active:{id:'c1',botId:'bt_0001',provider:'claude',revision,model:'',efforts:[''],effort:'',busy:false,generating:false,data:{draft,entries:[{role:'user',text:'hello'},{role:'assistant',text:'hi'}],taskLinks:[]}},
+    active:{id:'c1',botId:'bt_0001',provider:'claude',revision,model:'',efforts:[''],effort:'',busy:false,generating:false,data:{draft,entries,taskLinks:[]}},
     conversations:[{id:'c1',botId:'bt_0001',provider:'claude',title:'Pinned talk',pinned:true,updated:'2026-10-02T10:00:00Z',revision,messageCount:2},
       {id:'c2',botId:'bt_0002',provider:'codex',title:'Other talk',pinned:false,updated:'2026-10-02T09:00:00Z',revision:1,messageCount:1}],
     bots:[{id:'bt_0001',name:'Builder',provider:'claude'},{id:'bt_0002',name:'Reviewer',provider:'codex'}],turn:null}};

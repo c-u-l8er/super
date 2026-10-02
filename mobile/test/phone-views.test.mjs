@@ -99,3 +99,27 @@ test('T31 L8 · Bots never shows an actor id, and a tap opens that bot’s plans
   await phone.until(()=>phone.cards().length===5,'every bot again');
   assert.equal(phone.hash,'#/tasks');
 });
+
+/* T31 L13 (N3, found in the Simulator): the question opened at the foot of the page, its buttons under the tab bar. */
+test('T31 L13 · the Disconnect question is brought into view as it opens, clear of the tab bar; a redraw leaves the page alone',async t=>{
+  const phone=await paired(t,'stack');
+  phone.document.intoView=[];
+  phone.tap(phone.button('Disconnect this device'));
+  await phone.until(()=>phone.$('#content .confirm'),'the question');
+  const card=phone.$('#content .confirm'),moves=phone.document.intoView;
+  assert.equal(moves.length,1,'scrolled into view once, as it opens');
+  assert.equal(moves[0].element,card,'the card holding both buttons');
+  assert.deepEqual(moves[0].options,{block:'nearest'});
+  assert.deepEqual(card.querySelectorAll('button').map(b=>b.textContent),['Disconnect','Cancel']);
+  const rule=/\.confirm\{([^}]*)\}/.exec(css)?.[1]??'';
+  const bottom=/scroll-margin-bottom:calc\((\d+)px \+ env\(safe-area-inset-bottom\)\)/.exec(rule);
+  const nav=/(?:^|\})nav\{[^}]*padding:(\d+)px \d+px max\((\d+)px,env\(safe-area-inset-bottom\)\)/.exec(css),control=/(?:^|\})button\{min-height:(\d+)px/.exec(css);
+  assert.ok(bottom&&nav&&control,'the card, the tab bar and its buttons have the rules this law reads');
+  assert.ok(Number(bottom[1])>=Number(nav[1])+Number(control[1])+Number(nav[2]),`a bottom scroll margin of ${bottom[1]}px + the inset clears the tab bar (${nav[1]} + ${control[1]} + max(${nav[2]}, inset))`);
+  assert.match(rule,/scroll-margin-top:calc\(\d+px \+ env\(safe-area-inset-top\)\)/,'and the status bar');
+  phone.world=fixtureWorld({workspaces:2});
+  await phone.tick(2000);
+  await phone.until(()=>phone.$$('#content dd')[0]?.textContent==='2','the two-second redraw');
+  assert.ok(phone.$('#content .confirm'),'still asking');
+  assert.equal(moves.length,1,'a redraw does not move the page');
+});
