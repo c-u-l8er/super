@@ -14,13 +14,12 @@ import {profilePlan,suiteScript,transcriptComplete,transcriptKeeper,profileCeili
 const RUST='super-rust-review@1',ELIXIR='super-elixir-review@1';
 const CARGO_DONE='^test result: (ok|FAILED)[.] [0-9]+ passed; [0-9]+ failed;';
 
-test('L1 · the Rust profile runs native review, host and cockpit, each offline and locked',()=>{
+test('L1 · the Rust profile runs the host and cockpit suites, each offline and locked',()=>{
   const plan=profilePlan(RUST);
   assert.deepEqual(plan.suites,[
-    {name:'native-review',command:'cargo test --offline --locked --manifest-path tools/native-review/Cargo.toml --lib -- --test-threads=1',done:CARGO_DONE},
     {name:'host',command:'cargo test --offline --locked --manifest-path host/Cargo.toml',done:CARGO_DONE},
     {name:'cockpit',command:'cargo test --offline --locked --manifest-path cockpit/Cargo.toml',done:CARGO_DONE}]);
-  assert.deepEqual(plan.requiredFiles,['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs','host/Cargo.toml','host/Cargo.lock','cockpit/Cargo.toml','cockpit/Cargo.lock']);
+  assert.deepEqual(plan.requiredFiles,['host/Cargo.toml','host/Cargo.lock','cockpit/Cargo.toml','cockpit/Cargo.lock']);
   const script=suiteScript(RUST);let at=-1;
   for(const s of plan.suites){const i=script.indexOf("'"+s.command+"'");assert.ok(i>at,s.name+' runs, in order');at=i;}
   assert.match(script,/echo "# suites complete"\nexit \$status$/);
@@ -42,13 +41,15 @@ test('L3 · the Elixir sandbox receives exactly the declared environment, with a
   assert.deepEqual(profilePlan(RUST).env,{CARGO_HOME:'/tmp/cargo',CARGO_TARGET_DIR:'/tmp/target',CARGO_BUILD_JOBS:'2',RUSTUP_TOOLCHAIN:'stable'});
 });
 
-test('L4 · RRABBIT is captured beside the repository, bound read-only, and part of the toolchain identity',async t=>{
+test('L4 · RRABBIT is captured beside the repository, bound read-only, built from a private copy, and part of the toolchain identity',async t=>{
   const work=await mkdtemp(join(tmpdir(),'t36-sibling-'));t.after(()=>rm(work,{recursive:true,force:true}));
   const repo=join(work,'super'),rr=join(work,'RRABBIT');await mkdir(repo);await mkdir(join(rr,'tier1-proof'),{recursive:true});
   await writeFile(join(rr,'tier1-proof/lib.rs'),'pub const VALUE: u32 = 7;\n');
   const git=args=>execFileSync('/usr/bin/git',['-C',rr,...args],{encoding:'utf8'}).trim();git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','sibling']);
   const first=await pinSibling(repo,join(work,'run-1'));
-  assert.deepEqual(first.binds,['--ro-bind',join(work,'run-1','sibling'),'/tmp/RRABBIT']);
+  assert.deepEqual(first.binds,['--ro-bind',join(work,'run-1','sibling'),'/rrabbit']);
+  assert.match(suiteScript(RUST),/^mkdir -p \/tmp\/cargo && cp -a \/registry \/tmp\/cargo\/registry && cp -a \/snapshot \/tmp\/source && cp -a \/rrabbit \/tmp\/RRABBIT \|\| exit 1\n/);
+  assert.doesNotMatch(suiteScript(ELIXIR),/rrabbit/);
   assert.equal(first.identity.path,'../RRABBIT');assert.equal(first.identity.head,git(['rev-parse','HEAD']));assert.equal(first.identity.files,1);
   await writeFile(join(rr,'tier1-proof/lib.rs'),'pub const VALUE: u32 = 8;\n');
   const second=await pinSibling(repo,join(work,'run-2'));
@@ -59,7 +60,7 @@ test('L4 · RRABBIT is captured beside the repository, bound read-only, and part
 });
 
 test('L5 · a run is complete only when every suite reported its summary and the script reached its end',()=>{
-  const run=(...cockpit)=>['# suite native-review exit 0','test result: ok. 2 passed; 0 failed; 0 ignored;','# suite host exit 0',...cockpit,'# suites complete'];
+  const run=(...cockpit)=>['test result: ok. 2 passed; 0 failed; 0 ignored;','# suite host exit 0',...cockpit,'# suites complete'];
   assert.equal(transcriptComplete(RUST,run('test result: FAILED. 1 passed; 1 failed; 0 ignored;','# suite cockpit exit 101')),true,'a failing suite still completes');
   assert.equal(transcriptComplete(RUST,run()),false,'the cockpit suite never reported');
   assert.equal(transcriptComplete(RUST,run('# suite cockpit did-not-complete exit 101')),false,'it did not compile');
@@ -95,9 +96,9 @@ test('L7 · each profile has its own ceiling, and the CLI uses the table',async(
 
 test('L8 · the review panel says what each profile runs',()=>{
   const panel=readFileSync(new URL('../cockpit/ui/review-test-panel.js',import.meta.url),'utf8');
-  assert.ok(panel.includes("'super-rust-review@1':'Rust: host, cockpit and native review suites'"));
+  assert.ok(panel.includes("'super-rust-review@1':'Rust: host and cockpit suites'"));
   assert.ok(panel.includes("'super-elixir-review@1':'Elixir: the whole ampd suite'"));
-  for(const stale of ['Focused native test target','Rust review and reply tests','Elixir plan and review tests','Rust tests cover review recovery'])assert.ok(!panel.includes(stale),stale);
+  for(const stale of ['Focused native test target','Rust review and reply tests','Elixir plan and review tests','Rust tests cover review recovery','native review suites'])assert.ok(!panel.includes(stale),stale);
 });
 
 test('L9 · asdf is found from the cockpit\'s own environment, in a closed order',()=>{

@@ -108,31 +108,31 @@ async function rustFixture(f,{host,sibling=true}={}){
  const cockpit=join(f.repository,'cockpit');await mkdir(join(cockpit,'src'),{recursive:true});
  await writeFile(join(cockpit,'Cargo.toml'),'[package]\nname = "cockpit_fixture"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\ntier1-proof = { path = "../../RRABBIT/tier1-proof" }\n');
  await writeFile(join(cockpit,'Cargo.lock'),'version = 4\n\n[[package]]\nname = "cockpit_fixture"\nversion = "0.1.0"\ndependencies = [\n "tier1-proof",\n]\n\n[[package]]\nname = "tier1-proof"\nversion = "0.1.0"\n');
- await writeFile(join(cockpit,'src/lib.rs'),'#[test] fn reaches_the_sibling() {assert_eq!(tier1_proof::VALUE, 7);}\n#[test] fn sibling_is_read_only() {assert!(std::fs::write("/tmp/RRABBIT/tier1-proof/src/lib.rs", "changed").is_err());}\n');
+ await writeFile(join(cockpit,'src/lib.rs'),'#[test] fn reaches_the_sibling() {assert_eq!(tier1_proof::VALUE, 7);}\n#[test] fn the_capture_is_read_only() {assert!(std::fs::write("/rrabbit/tier1-proof/src/lib.rs", "changed").is_err());}\n');
  if(!sibling)return;
+ // Like RRABBIT's real tier1-proof/build.rs, the fixture's build script writes into its own tree (amendment 2).
  const rr=join(f.repository,'..','RRABBIT');await mkdir(join(rr,'tier1-proof/src'),{recursive:true});
  await writeFile(join(rr,'tier1-proof/Cargo.toml'),'[package]\nname = "tier1-proof"\nversion = "0.1.0"\nedition = "2021"\n');
+ await writeFile(join(rr,'tier1-proof/build.rs'),'fn main() {std::fs::write("packaged.txt", "copied by the build").expect("the build writes into its own tree");}\n');
  await writeFile(join(rr,'tier1-proof/src/lib.rs'),'pub const VALUE: u32 = 7;\n');
  const git=args=>execFileSync('/usr/bin/git',['-C',rr,...args],{encoding:'utf8'}).trim();git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','sibling']);
 }
-test('Rust runs the native review, host and cockpit suites, with RRABBIT read-only beside them',async t=>{
- const f=await fixture(t);await rustFixture(f);const target=join(f.repository,'tools/native-review');await mkdir(join(target,'src'),{recursive:true});
- await writeFile(join(target,'Cargo.toml'),'[package]\nname = "review_fixture"\nversion = "0.1.0"\nedition = "2021"\n');
- await writeFile(join(target,'Cargo.lock'),'version = 4\n[[package]]\nname = "review_fixture"\nversion = "0.1.0"\n');
- await writeFile(join(target,'src/lib.rs'),`#[test] fn proposal() {assert_eq!(std::fs::read_to_string("../../value.mjs").unwrap(), "export const value=2;\\n");}
-#[test] fn isolated() {assert!(!std::path::Path::new("/home/travis/.profile").exists());assert!(std::fs::write("/snapshot/value.mjs", "changed").is_err());}`);
- const run=()=>runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:120000});
- const passed=await run();assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 passed; 0 failed/);for(const s of ['native-review','host','cockpit'])assert.match(passed.record.output,new RegExp('# suite '+s+' exit 0\\n'));assert.equal(passed.record.tests.length,7);assert.match(passed.record.sibling.head,/^[a-f0-9]{40}$/);assert.equal(passed.record.sibling.path,'../RRABBIT');assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);
+const HOST_PROPOSAL='#[test] fn proposal() {assert_eq!(std::fs::read_to_string("../value.mjs").unwrap(), "export const value=2;\\n");}\n#[test] fn isolated() {assert!(!std::path::Path::new("/home/travis/.profile").exists());assert!(std::fs::write("/snapshot/value.mjs", "changed").is_err());}';
+test('Rust runs the host and cockpit suites offline against reviewed bytes, builds RRABBIT from a private copy, and separates assertion failures from build failures',async t=>{
+ const f=await fixture(t);await rustFixture(f,{host:HOST_PROPOSAL});
+ const run=()=>runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});
+ const passed=await run();assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 passed; 0 failed/);assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);
+ for(const s of ['host','cockpit'])assert.match(passed.record.output,new RegExp('# suite '+s+' exit 0\\n'));assert.equal(passed.record.tests.length,4);assert.match(passed.record.sibling.head,/^[a-f0-9]{40}$/);assert.equal(passed.record.sibling.path,'../RRABBIT');
+ await assert.rejects(readFile(join(f.repository,'..','RRABBIT','tier1-proof','packaged.txt')),/ENOENT/);
  f.attempt.proposed_text='export const value=3;\n';f.attempt.source.result_sha256=hash(f.attempt.proposed_text);f.attempt.source.result_bytes=Buffer.byteLength(f.attempt.proposed_text);
  const failed=await run();assert.equal(failed.record.verdict,'fail',failed.record.output);assert.match(failed.record.output,/1 passed; 1 failed/);assert.notEqual(failed.record.snapshot_sha256,passed.record.snapshot_sha256);
- await writeFile(join(target,'src/lib.rs'),'this is not valid Rust');const broken=await run();assert.equal(broken.record.state,'failed');assert.equal(broken.record.verdict,undefined);assert.equal(broken.record.reason,'runner-did-not-complete');
+ await writeFile(join(f.repository,'host/src/lib.rs'),'this is not valid Rust');const broken=await run();assert.equal(broken.record.state,'failed');assert.equal(broken.record.verdict,undefined);assert.equal(broken.record.reason,'runner-did-not-complete');
 });
 
 test('a failing host test fails the Rust profile, and a repository without RRABBIT is refused before anything runs',async t=>{
- const f=await fixture(t);await rustFixture(f,{host:'#[test] fn planted() {assert_eq!(1 + 1, 3);}'});const target=join(f.repository,'tools/native-review');await mkdir(join(target,'src'),{recursive:true});
- await writeFile(join(target,'Cargo.toml'),'[package]\nname = "review_fixture"\nversion = "0.1.0"\nedition = "2021"\n');await writeFile(join(target,'Cargo.lock'),'version = 4\n[[package]]\nname = "review_fixture"\nversion = "0.1.0"\n');await writeFile(join(target,'src/lib.rs'),'#[test] fn ok() {}\n');
+ const f=await fixture(t);await rustFixture(f,{host:'#[test] fn planted() {assert_eq!(1 + 1, 3);}'});
  const failed=await runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});assert.equal(failed.record.state,'completed',failed.record.output);assert.equal(failed.record.verdict,'fail');assert.match(failed.record.output,/# suite host exit 101\n/);assert.match(failed.record.output,/# suite cockpit exit 0\n/);
- const g=await fixture(t);await rustFixture(g,{sibling:false});const nt=join(g.repository,'tools/native-review');await mkdir(join(nt,'src'),{recursive:true});await writeFile(join(nt,'Cargo.toml'),'[package]\nname = "review_fixture"\nversion = "0.1.0"\nedition = "2021"\n');await writeFile(join(nt,'Cargo.lock'),'version = 4\n[[package]]\nname = "review_fixture"\nversion = "0.1.0"\n');await writeFile(join(nt,'src/lib.rs'),'#[test] fn ok() {}\n');
+ const g=await fixture(t);await rustFixture(g,{sibling:false});
  await assert.rejects(runProposalTests({...g,profile:'super-rust-review@1',timeoutMs:600000}),/needs RRABBIT beside the repository/);
 });
 

@@ -124,15 +124,16 @@ const checkerUrl=new URL('./document-review-check.mjs',import.meta.url);
 const ceilings={'super-javascript-behavior@1':30000,'super-elixir-review@1':900000,'super-rust-review@1':600000,'repository-document-review@1':30000,'repository-python-gate@1':120000};
 export const profileCeiling=profile=>{assert(profiles.includes(profile),'Unsupported test profile.');return ceilings[profile];};
 // **T36 (A-13): Super's two compiled profiles run the suites they are named for.** Until T36 the Rust profile ran only
-// tools/native-review and the Elixir profile two of ampd's 67 test files, so neither could be a required check for
+// tools/native-review (which no longer compiled) and the Elixir profile two of ampd's 67 test files, so neither could be a required check for
 // Super's own host, cockpit or runtime code (DISCIPLINE.md §3). Closed, like the gates: a suite is a fixed command whose
 // own summary line proves it ran to its end; the script marks each suite's end, and a run is complete only when every
 // suite reported its summary and the script reached its last line. A suite that never reaches its summary (a proposal
 // that does not compile) leaves the run without a verdict, as one suite always did.
 const DONE_CARGO_TEST='^test result: (ok|FAILED)[.] [0-9]+ passed; [0-9]+ failed;';
 const suites={
+  // Amendment 2: tools/native-review is not run. It has not compiled since 2026-09-15 (9a930f9: review_tests.rs reaches
+  // crate::screenshots and crate::worker, which it lacks), and the cockpit suite compiles and tests every module it did.
   'super-rust-review@1':[
-    {name:'native-review',command:'cargo test --offline --locked --manifest-path tools/native-review/Cargo.toml --lib -- --test-threads=1',done:DONE_CARGO_TEST},
     {name:'host',command:'cargo test --offline --locked --manifest-path host/Cargo.toml',done:DONE_CARGO_TEST},
     {name:'cockpit',command:'cargo test --offline --locked --manifest-path cockpit/Cargo.toml',done:DONE_CARGO_TEST}],
   // ampd finds super-host at host/target/release (Ampd.Worktree.Effector), so it is built there first; the suite runs
@@ -143,7 +144,7 @@ const suites={
 // The files a profile requires in the snapshot, which is also the count the runtime records (1–64).
 const requiredFiles={
   'super-elixir-review@1':['ampd/mix.exs','ampd/test/test_helper.exs','host/Cargo.toml','host/Cargo.lock'],
-  'super-rust-review@1':['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs','host/Cargo.toml','host/Cargo.lock','cockpit/Cargo.toml','cockpit/Cargo.lock']};
+  'super-rust-review@1':['host/Cargo.toml','host/Cargo.lock','cockpit/Cargo.toml','cockpit/Cargo.lock']};
 // The environment each compiled profile's sandbox receives, beyond the base HOME and LANG and the PATH its toolchains
 // set: nothing else of the host's. The ampd suite's terminal tests commit to Git repositories they create, and the
 // sandbox's HOME has no identity, so the identity is fixed here (without it 39 tests fail: superlane/t36/measure/).
@@ -157,7 +158,10 @@ export function profilePlan(profile){
 const quote=v=>{assert(!v.includes("'"),'A profile command cannot contain a single quote.');return "'"+v+"'";};
 export function suiteScript(profile){
   const list=suites[profile];assert(list,'This profile has no suite list.');
-  const lines=['mkdir -p /tmp/cargo && cp -a /registry /tmp/cargo/registry && cp -a /snapshot /tmp/source || exit 1','status=0; previous=0',
+  // Amendment 2: RRABBIT's own build script writes into its tree (tier1-proof/build.rs packages ui/road-geometry.js), so
+  // the build works on a private copy of the read-only capture; the capture and its identity are never written.
+  const sibling=profile===profiles[2]?' && cp -a /rrabbit /tmp/RRABBIT':'';
+  const lines=['mkdir -p /tmp/cargo && cp -a /registry /tmp/cargo/registry && cp -a /snapshot /tmp/source'+sibling+' || exit 1','status=0; previous=0',
     `suite(){ name=$1; pattern=$2; shift 2; (cd /tmp/source && eval "$*") > /tmp/suite.log 2>&1; code=$?; cat /tmp/suite.log; if grep -Eq "$pattern" /tmp/suite.log; then echo "# suite $name exit $code"; previous=$code; else echo "# suite $name did-not-complete exit $code"; previous=1; fi; [ "$code" = 0 ] || status=1; }`];
   for(const s of list)lines.push(s.needsPrevious?`if [ "$previous" = 0 ]; then suite ${quote(s.name)} ${quote(s.done)} ${quote(s.command)}; else echo "# suite ${s.name} did-not-complete exit -"; status=1; fi`:`suite ${quote(s.name)} ${quote(s.done)} ${quote(s.command)}`);
   lines.push('echo "# suites complete"','exit $status');
@@ -185,14 +189,15 @@ export function findAsdf({env=process.env,isExecutable=executableFile}={}){
   throw Error('Elixir and Erlang must be installed with asdf; no asdf executable was found on PATH, in $ASDF_DIR/bin or in ~/.asdf/bin.');
 }
 // T36: the cockpit builds `../../RRABBIT/tier1-proof` from cockpit/, which is the repository's sibling RRABBIT and not
-// part of its snapshot. It is captured the way the snapshot is (Git-listed, bounded, hashed), copied into the run, and
-// bound read-only where cockpit/../../RRABBIT resolves from /tmp/source/cockpit.
+// part of its snapshot. It is captured the way the snapshot is (Git-listed, bounded, hashed), copied into the run and
+// bound read-only at /rrabbit; the sandbox copies it to /tmp/RRABBIT, where cockpit/../../RRABBIT resolves from
+// /tmp/source/cockpit (amendment 2).
 export async function pinSibling(root,run){
   let real;try{real=await realpath(join(dirname(root),'RRABBIT'));assert(git(real,['rev-parse','--show-toplevel']).trim()===real,'');}
   catch{throw Error('The Rust profile needs RRABBIT beside the repository (../RRABBIT, a Git repository root): the cockpit builds its path dependency from there.');}
   const head=git(real,['rev-parse','--verify','HEAD^{commit}']).trim(),files=await capture(real),copy=join(run,'sibling');
   for(const [path,f] of files){const target=join(copy,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}
-  return {binds:['--ro-bind',copy,'/tmp/RRABBIT'],identity:{path:'../RRABBIT',head,sha256:digest(files),files:files.size,bytes:[...files.values()].reduce((n,f)=>n+f.data.length,0)}};
+  return {binds:['--ro-bind',copy,'/rrabbit'],identity:{path:'../RRABBIT',head,sha256:digest(files),files:files.size,bytes:[...files.values()].reduce((n,f)=>n+f.data.length,0)}};
 }
 // A repository that is not Super has its own gate, and running it is the only way
 // Super can check its code. The CLOSED part is this table: the runner picks the

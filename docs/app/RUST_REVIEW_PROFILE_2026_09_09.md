@@ -1,8 +1,10 @@
 # Rust review and reply test profile — 9 September 2026
 
-> **Superseded in part, 2026-10-03 (T36, A-13).** `super-rust-review@1` now runs three suites: native review (as
-> below), `host/` and `cockpit/`. Each is `cargo test --offline --locked`. RRABBIT, the cockpit's path dependency, is
-> captured beside the repository and bound read-only. The ceiling is 600 seconds. Completion is read per suite from the
+> **Superseded, 2026-10-03 (T36, A-13).** `super-rust-review@1` now runs the `host/` and `cockpit/` suites, each
+> `cargo test --offline --locked`. The native review target below is no longer run: it has not compiled since
+> 2026-09-15, and the cockpit suite compiles and tests every module it did. RRABBIT, the cockpit's path dependency, is
+> captured beside the repository, bound read-only, and copied into the sandbox, because its own build script writes
+> into its tree. The ceiling is 600 seconds. Completion is read per suite from the
 > stream, and the record keeps the first and the last 64 KiB. See `tools/lib/proposal-test-runner.mjs` (the closed
 > `suites` table) and `superlane/t36/`. The rest of this note is the record of 9 September.
 
