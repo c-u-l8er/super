@@ -3039,6 +3039,19 @@ mod t27b_stream {
         n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
     }
 
+    /// The frame `write_frame_with_fd` writes for `v` when nothing cuts the send short: the same writer, read to its
+    /// end (round 3). B6 compares against this, so it holds the send's completeness and leaves the bytes' form to B8.
+    fn unshortened(v: &Value) -> Vec<u8> {
+        let fdpass::Pair(c, d) = fdpass::pair_stream().unwrap();
+        let spare = fdpass::spare_fd().unwrap();
+        write_frame_with_fd(c, v, Some(spare)).unwrap();
+        fdpass::close_fd(spare);
+        fdpass::close_fd(c);
+        let (got, _) = read_all(d, 1 << 20);
+        fdpass::close_fd(d);
+        got
+    }
+
     #[test]
     fn b6_a_short_send_on_the_stream_is_finished_and_the_peer_reads_the_frame_once() {
         let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
@@ -3049,7 +3062,7 @@ mod t27b_stream {
         fdpass::SHORT_SEND.with(|c| c.set(None));
         fdpass::close_fd(spare);
         r.expect("a short send on the stream is finished, not reported");
-        let want = framed(&v);
+        let want = unshortened(&v);
         let (got, rights) = read_all(b, want.len());
         assert_eq!(got, want, "the peer did not read the whole frame");
         assert_eq!(rights, 1, "the descriptor travels once, with the first byte");
@@ -3397,14 +3410,13 @@ mod t27b_runtime {
     #[test]
     fn b9_a_successful_hand_over_returns_a_live_endpoint_its_owner_closes() {
         let (rt, peer) = fake_runtime();
-        // The peer keeps the first descriptor of each command, sinks the rest, and answers ok.
+        // The peer keeps everything each command carried and answers ok. Which received descriptor is the endpoint is
+        // found by use, not by position: the order of a hand-over's rights is B8's law, not this one's.
         let t = std::thread::spawn(move || {
             let mut kept = Vec::new();
             for _ in 0..2 {
                 let (_, fds) = fdpass::recv_msg_with_fds(peer, 65536, 8).unwrap();
-                let mut fds = fds.into_iter();
-                kept.push(fds.next().expect("a hand-over carries its endpoint"));
-                fds.for_each(fdpass::close_fd);
+                kept.push(fds);
                 fdpass::send_plain(peer, br#"{"schema":"bridge-reply@1","ok":true}"#).unwrap();
             }
             (peer, kept)
@@ -3413,22 +3425,87 @@ mod t27b_runtime {
         let chan = rt.agent_channel_with_surplus("t27b", 2).expect("an ok reply hands the channel over");
         let (peer, kept) = t.join().unwrap();
         fdpass::close_fd(peer);
-        for (mine, theirs) in [(fd, kept[0]), (chan.fd(), kept[1])] {
-            timeo(theirs, libc::SO_RCVTIMEO, 2000);
+        let mut ends = Vec::new();
+        for (mine, got) in [(fd, &kept[0]), (chan.fd(), &kept[1])] {
             let wrote = unsafe { libc::write(mine, b"ping".as_ptr().cast(), 4) };
-            let mut b = [0u8; 4];
-            let read = unsafe { libc::read(theirs, b.as_mut_ptr().cast(), 4) };
-            assert!(wrote == 4 && read == 4 && &b == b"ping", "endpoint {mine}: wrote {wrote}, the runtime's end read {read}");
+            let mut found = None;
+            for &theirs in got {
+                timeo(theirs, libc::SO_RCVTIMEO, 300);
+                let mut b = [0u8; 4];
+                if unsafe { libc::read(theirs, b.as_mut_ptr().cast(), 4) } == 4 && &b == b"ping" {
+                    found = Some(theirs);
+                }
+            }
+            assert!(wrote == 4 && found.is_some(), "endpoint {mine}: wrote {wrote}; none of the runtime's {} descriptors read it", got.len());
+            ends.push(found.unwrap());
         }
         // Their owners close them, and the runtime's ends then read end of file.
         fdpass::close_fd(fd);
         drop(chan);
-        for theirs in kept {
+        for theirs in &ends {
+            timeo(*theirs, libc::SO_RCVTIMEO, 2000);
             let mut b = [0u8; 1];
-            let read = unsafe { libc::read(theirs, b.as_mut_ptr().cast(), 1) };
-            fdpass::close_fd(theirs);
+            let read = unsafe { libc::read(*theirs, b.as_mut_ptr().cast(), 1) };
             assert_eq!(read, 0, "an endpoint was not closed by its owner");
         }
+        kept.into_iter().flatten().for_each(fdpass::close_fd);
+    }
+
+    /// T27b round 3 (Codex review 2, finding 4): every hand-over carries exactly its endpoint and then its spares, in
+    /// that order, and a command that hands nothing over carries nothing. Probed by the peer while the host still waits
+    /// for the reply, when the host's own end of each pair is open: the endpoint's peer is that end, so a write to it
+    /// succeeds; a spare's peer was closed when the spare was made, so a write to it fails (EPIPE). The replies are
+    /// refusals, so no successful hand-over (B9's) is involved.
+    #[test]
+    fn b8_every_hand_over_carries_exactly_its_endpoint_then_its_spares_in_order() {
+        let (rt, peer) = fake_runtime();
+        let t = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            loop {
+                let Ok((b, fds)) = fdpass::recv_msg_with_fds(peer, 65536, 8) else { break };
+                if b.is_empty() && fds.is_empty() {
+                    break;
+                }
+                let live: Vec<bool> = fds
+                    .iter()
+                    .map(|&f| unsafe { libc::send(f, b"p".as_ptr().cast(), 1, libc::MSG_NOSIGNAL | libc::MSG_DONTWAIT) } == 1)
+                    .collect();
+                for f in fds {
+                    fdpass::close_fd(f);
+                }
+                let v: Value = serde_json::from_slice(&b).unwrap_or(Value::Null);
+                seen.push(json!([v["command"], live]));
+                let refusal = br#"{"schema":"bridge-reply@1","ok":false,"refusal":{"code":"t27b-identity-probe"}}"#;
+                if fdpass::send_plain(peer, refusal).is_err() {
+                    break;
+                }
+            }
+            fdpass::close_fd(peer);
+            seen
+        });
+        let _ = rt.bridge_call(&cmd("list_channels"));
+        let _ = rt.bridge_call_with_rights(br#"{"schema":"bridge-command@1","command":"t27b-rights"}"#, 3);
+        let _ = rt.agent_channel_with_surplus("t27b", 2);
+        let _ = rt.bind_channel("bind_agent_channel", Some("t27b"));
+        let _ = rt.control_channel();
+        let _ = rt.effect_channel();
+        let _ = rt.terminal_endpoint();
+        let _ = rt.carrier_channel();
+        let _ = rt.agent_fd("t27b");
+        drop(rt);
+        let seen = t.join().unwrap();
+        let want = json!([
+            ["list_channels", []],
+            ["t27b-rights", [false, false, false]],
+            ["bind_agent_channel", [true, false, false]],
+            ["bind_agent_channel", [true]],
+            ["bind_control_channel", [true]],
+            ["bind_effect_channel", [true]],
+            ["bind_terminal_endpoint", [true]],
+            ["bind_carrier_channel", [true]],
+            ["bind_agent_channel", [true]]
+        ]);
+        assert_eq!(json!(seen), want, "a hand-over did not carry exactly its endpoint, then its spares");
     }
 
     /// The runtime directories this test process has made under `$XDG_RUNTIME_DIR`.
@@ -3553,6 +3630,67 @@ mod t27b_runtime {
         assert_eq!(got, want, "a bridge command differs from the base capture");
     }
 
+}
+
+#[cfg(test)]
+mod t27b_carrier_golden {
+    //! T27b B8 on the Carrier stream (round 3, Codex review 2, finding 4): normal Carrier frames are, byte for byte, the
+    //! base's. This same module is inserted into a clone of the base by `superlane/t27b/golden-base-r3.sh`, which runs
+    //! it with `T27B_CARRIER_GOLDEN_OUT` set to capture; here it compares against `tests/data/t27b-carrier-goldens.json`.
+    use super::*;
+    use crate::fdpass;
+    use serde_json::{json, Value};
+
+    /// Each value written by `write_frame_with_fd`, without and with a descriptor beside it, as the peer reads it.
+    fn frames() -> Vec<Value> {
+        let values = [
+            json!({"schema": "carrier-attach@1", "attach": true, "rows": 24, "cols": 80}),
+            json!({"t27b": "x".repeat(5000), "n": [1, 2, 3], "nested": {"a": null, "b": false}}),
+            json!("utf-8: \u{fc} \u{2713} \u{1F600}"),
+            json!([]),
+        ];
+        let mut out = Vec::new();
+        for (i, v) in values.iter().enumerate() {
+            for pass in [false, true] {
+                let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
+                let spare = if pass { Some(fdpass::spare_fd().unwrap()) } else { None };
+                write_frame_with_fd(a, v, spare).unwrap();
+                if let Some(s) = spare {
+                    fdpass::close_fd(s);
+                }
+                fdpass::close_fd(a);
+                let mut bytes = Vec::new();
+                let mut rights = 0;
+                loop {
+                    let (chunk, fds) = fdpass::recv_msg_with_fds(b, 1 << 16, 4).unwrap();
+                    rights += fds.len();
+                    for f in fds {
+                        fdpass::close_fd(f);
+                    }
+                    if chunk.is_empty() {
+                        break;
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                fdpass::close_fd(b);
+                let hex: String = bytes.iter().map(|x| format!("{x:02x}")).collect();
+                out.push(json!({"value": i, "pass": pass, "rights": rights, "hex": hex}));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn b8_a_normal_carrier_frame_is_byte_for_byte_the_base_s() {
+        let got = frames();
+        if let Ok(p) = std::env::var("T27B_CARRIER_GOLDEN_OUT") {
+            std::fs::write(p, serde_json::to_vec_pretty(&got).unwrap()).unwrap();
+            return;
+        }
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/data/t27b-carrier-goldens.json");
+        let want: Vec<Value> = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(got, want, "a Carrier frame differs from the base capture");
+    }
 }
 
 } // mod linux_layer
