@@ -25,7 +25,18 @@ defmodule Ampd.T27bHostBridgeTest do
     {:ok, bridge} = HostBridge.start(runtime)
 
     on_exit(fn ->
-      HostBridge.stop(bridge)
+      # Killed, not asked (T27b round 3f): HostBridge.stop sends :normal, which a running loop that does not trap
+      # exits ignores. A build whose loop never ends on the host's close (B1's plant) must not leave a live loop beside
+      # the sockets being closed; a law run hung there.
+      ref = Process.monitor(bridge)
+      Process.exit(bridge, :kill)
+
+      receive do
+        {:DOWN, ^ref, :process, _, _} -> :ok
+      after
+        2_000 -> :ok
+      end
+
       :socket.close(host)
       :socket.close(runtime)
     end)
