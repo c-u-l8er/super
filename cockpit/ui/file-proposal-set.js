@@ -12,7 +12,7 @@ export function checkProposalSet(items,current){
     paths.add(p?.path);
     const state=current(r);
     const text=checkFileProposal(r,p,state);
-    if(state.file.original!==r.original)throw Error('A file was saved or reloaded after sharing. Share the files again.');
+    if(state.file.original!==r.original)throw Error(`This proposal is outdated: ${p.path} has changed since these edits were proposed against it. Applying them would replace newer work. Nothing has been written and the newer content is kept. Share the files again for a fresh proposal.`);
     return {path:p.path,text};
   });
 }

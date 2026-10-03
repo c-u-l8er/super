@@ -1471,6 +1471,65 @@ mod tests {
         );
     }
     #[test]
+    fn save_against_an_outdated_original_writes_nothing() {
+        // dt_0138: Save's compare-and-write is the last guard against an outdated bot proposal.
+        // The Editor sends the version a draft was made against as `original`. Once the file has
+        // changed, been deleted or been created on disk, nothing may be written: not the target,
+        // not a temporary file, not any other file.
+        let (s, w, g) = setup();
+        std::fs::write(s.0.join("other.txt"), "unrelated").unwrap();
+        let save = |original: Option<&str>| {
+            w.request(Request::Save {
+                generation: g,
+                path: "target.txt".into(),
+                original: original.map(str::to_owned),
+                content: "proposal".into(),
+            })
+        };
+        // Every top-level name with its text; a directory (.git) reads as None.
+        let tree = || {
+            let mut entries: Vec<(String, Option<String>)> = std::fs::read_dir(&s.0)
+                .unwrap()
+                .map(|e| {
+                    let e = e.unwrap();
+                    let text = std::fs::read_to_string(e.path()).ok();
+                    (e.file_name().into_string().unwrap(), text)
+                })
+                .collect();
+            entries.sort();
+            entries
+        };
+        // Changed on disk after the proposal was made against "v1".
+        std::fs::write(s.0.join("target.txt"), "newer work").unwrap();
+        let before = tree();
+        assert!(save(Some("v1")).unwrap_err().contains("changed on disk"));
+        assert_eq!(tree(), before);
+        // Deleted on disk: the proposal must not bring the file back.
+        std::fs::remove_file(s.0.join("target.txt")).unwrap();
+        let before = tree();
+        assert!(save(Some("v1")).is_err());
+        assert_eq!(tree(), before);
+        // Created on disk after a proposal for a new file: the created file is kept.
+        std::fs::write(s.0.join("target.txt"), "created meanwhile").unwrap();
+        let before = tree();
+        assert!(save(None).unwrap_err().contains("changed on disk"));
+        assert_eq!(tree(), before);
+        // Unchanged since the proposal: exactly the proposed bytes are written, nothing else.
+        std::fs::write(s.0.join("target.txt"), "v1").unwrap();
+        let expected: Vec<_> = tree()
+            .into_iter()
+            .map(|(name, text)| {
+                if name == "target.txt" {
+                    (name, Some("proposal".to_owned()))
+                } else {
+                    (name, text)
+                }
+            })
+            .collect();
+        save(Some("v1")).unwrap();
+        assert_eq!(tree(), expected);
+    }
+    #[test]
     fn command_uses_checkout_and_reports_real_exit() {
         let (s, w, g) = setup();
         w.request(Request::Run {

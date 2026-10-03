@@ -1,5 +1,5 @@
 import {REVIEW_FILE_BYTES,bytesOf} from './review-limits.js';
-import {checkRecoveredBasis,rebindTaskWorld} from './proposal-recovery.js';
+import {checkRecoveredBasis,rebindTaskWorld,proposalBasisProblem} from './proposal-recovery.js';
 import {stageContent,readContent,sha256Text} from './review-content.js';
 import {savedReviewSet,savedReviewFile,savedReviewBodies,savedReviewItems} from './saved-review.js';
 import {reviewProposalSet} from './file-proposal-set-review.js';
@@ -107,8 +107,8 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
   function selectFile(f){if(busy)return;review.hide();if(file)file.state=editor.current();file=f;editor.show(f.state);editor.readonly(!!f.pendingDeletion);paintFiles();}
   function addFile(path,content){if(files.has(path)){selectFile(files.get(path));return;}if(files.size>=16)throw new Error('Close a file tab before opening another.');const f={path,original:content,draft:content??'',state:editor.state(path,content??'')};files.set(path,f);selectFile(f);}
   async function openFile(path){if(busy)return;if(files.has(path))return selectFile(files.get(path));busy=true;try{const data=await request('read',{path});busy=false;addFile(data.path,data.content);}catch(e){report('editor',e);}finally{busy=false;sync();}}
-  async function reloadFile(){if(!file||busy||(tabDirty(file.original,file.draft)&&!confirm('Discard your draft and reload '+file.path+'?')))return;const f=file;busy=true;try{const data=await request('read',{path:f.path});f.changed=false;f.original=f.draft=data.content;f.state=editor.state(f.path,f.draft);editor.show(f.state);paintFiles();}catch(e){report('editor',e);}finally{busy=false;sync();}}
-  async function saveFile(){if(file?.pendingDeletion){report('editor','Use Apply staged change set to apply the reviewed deletion.');return;}if(review.open||!file||busy||!tabDirty(file.original,file.draft))return;const f=file;busy=true;editor.readonly(true);sync();try{const data=await request('save',{path:f.path,original:f.original,content:f.draft});f.changed=false;f.original=data.content;paintFiles();await list(folder);}catch(e){report('editor',e);}finally{busy=false;editor.readonly(false);sync();}}
+  async function reloadFile(){if(!file||busy||(tabDirty(file.original,file.draft)&&!confirm('Discard your draft and reload '+file.path+'?')))return;const f=file;busy=true;try{const data=await request('read',{path:f.path});f.changed=false;delete f.proposalBasis;f.original=f.draft=data.content;f.state=editor.state(f.path,f.draft);editor.show(f.state);paintFiles();}catch(e){report('editor',e);}finally{busy=false;sync();}}
+  async function saveFile(){if(file?.pendingDeletion){report('editor','Use Apply staged change set to apply the reviewed deletion.');return;}if(review.open||!file||busy||!tabDirty(file.original,file.draft))return;const f=file;busy=true;editor.readonly(true);sync();try{if(f.proposalBasis)await checkDiskBasis({key:f.path,original:f.original});const data=await request('save',{path:f.path,original:f.original,content:f.draft});f.changed=false;f.original=data.content;delete f.proposalBasis;paintFiles();await list(folder);}catch(e){report('editor',e);}finally{busy=false;editor.readonly(false);sync();}}
   async function list(path){if(!root)return;try{const data=await request('list',{path});folder=data.path;entries.replaceChildren(el('div',folder||'/','development-folder'));for(const entry of data.entries){const path=[folder,entry.name].filter(Boolean).join('/');const b=button((entry.directory?'▸ ':'')+entry.name,'',()=>entry.directory?list(path):openFile(path));b.dataset.filePath=path;b.dataset.directory=String(entry.directory);b.title=path;entries.append(b);}if(data.truncated)entries.append(el('p','First 1,000 entries'));}catch(e){report('editor',e);}}
   // Leaving a repository: recovery copies are flushed first, and open drafts ask.
   function leaveDrafts(){persistRecovery();return ![...files.values()].some(f=>tabDirty(f.original,f.draft))||confirm('Switch repository and close these drafts? The latest successful recovery copy will remain on this device.');}
@@ -133,15 +133,44 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
   function layout(){cancelAnimationFrame(layoutFrame);layoutFrame=requestAnimationFrame(()=>{const covered=document.body.classList.contains('schematics-active')||document.querySelector('dialog[open],.desktop-menu:not([hidden])');const signature=JSON.stringify([active,!!covered,browser?.id,browser?.url,worker?.id,active in bodies?rect(active):null]);if(signature===lastSurface)return;lastSurface=signature;if(active==='browser'&&!covered&&browser?.url){if(browser.restored){browser.restored=false;browserAction('open');}else browserAction('layout');}else browserAction('hide_all');if(active==='terminal'&&worker&&!covered)browserAction('worker_layout');else browserAction('worker_hide');fit();});}
   for(const id of ['terminal','browser']){const toolbar=pages[id].querySelector('.workbench-toolbar');toolbar.append(button('Link to bot',id+'-link-bot',async()=>{const botId=toolbar.querySelector('.surface-bot').value;try{if(id==='terminal'&&(!shell||worker))throw Error('Choose a local shell tab. Runtime worker ownership is shown under Assigned work.');if(id==='browser'&&!browser?.url)throw Error('Open a browser tab first.');await surfaceTail;await links.link({kind:id,id:id==='terminal'?shell.id:browser.id,generation},botId);report(id,'Linked to '+(createBotRoster(localStorage).get(botId)?.name||botId)+' · Open its Work tab to return here.');}catch(e){report(id,e);}}));}
   document.addEventListener('open-linked-session',async e=>{try{const row=await links.resolve(e.detail.id,e.detail.botId);if(row.kind==='terminal'){const state=await request('status');if(state.generation!==row.generation)throw Error('This session belongs to a different repository.');for(const s of state.shells??[])registerShell(s);const target=shells.get(row.id);if(!target)throw Error('The shell has closed.');navigate('terminal');selectShell(target);}else{const state=await invoke('browser_surface',{action:'status'}),target=state.tabs.find(b=>b.id===row.id);if(!target)throw Error('The browser tab has closed.');if(!browsers.has(target.id))browsers.set(target.id,{...target,token:crypto.randomUUID()});browser=browsers.get(target.id);browser.url=target.url;url.value=target.url;navigate('browser');paintBrowsers();layout();}}catch(error){alert(String(error));}});
+  /* dt_0138 · a bot proposal is made against one version of its file. Before it becomes an Editor draft, the open tab
+     and the file on disk must still hold that version (proposalBasisProblem in proposal-recovery.js), and a tab holding
+     a staged proposal re-reads the disk before Save. These checks only read. The host's compare-and-write in Save stays
+     the last guard; what they add is refusing earlier and saying that the proposal is outdated. */
+  function checkTabBasis(reference){
+    const tab=files.get(reference.key)??null,problem=proposalBasisProblem(reference,{tab});
+    if(problem)throw Error(problem);
+    return tab;
+  }
+  async function checkDiskBasis(basis){
+    let disk=null,unreadable;
+    try{disk=(await request('read',{path:basis.key})).content??null;}
+    catch(error){unreadable=String(error?.message||error);}
+    const problem=proposalBasisProblem(basis,{disk,unreadable});
+    if(problem)throw Error(problem);
+  }
+  /* A share without a plan also asks the host for the file basis (the host needs a committed HEAD), so a proposal made
+     against it survives a restart and is checked like a plan-linked one. If the host cannot give one, the share goes
+     ahead exactly as before and the proposal is not recoverable. */
+  async function unplannedBasis(ref){
+    try{return await request('file_basis',{generation:ref.generation,path:ref.key,original:ref.original,draft:ref.draft,proposed:null});}
+    catch{return null;}
+  }
   async function verifyPlan(reference,proposed){
-    if(!reference.task)return;
-    const match=await request('match_plan',{generation:reference.generation,task_ref:reference.task.id,revision:reference.task.revision,world:JSON.parse(reference.task.world)});
-    if(!match.matched||match.task_ref!==reference.task.id||match.revision!==reference.task.revision||JSON.stringify(match.world)!==reference.task.world)throw Error('The repository match is no longer current. Reopen the plan and file.');
+    if(!reference.task&&!reference.source)return;
+    let match=null;
+    if(reference.task){
+      match=await request('match_plan',{generation:reference.generation,task_ref:reference.task.id,revision:reference.task.revision,world:JSON.parse(reference.task.world)});
+      if(!match.matched||match.task_ref!==reference.task.id||match.revision!==reference.task.revision||JSON.stringify(match.world)!==reference.task.world)throw Error('The repository match is no longer current. Reopen the plan and file.');
+    }
     if(reference.source){
+      await checkDiskBasis(reference);
       const basis=await request(proposed===null?'delete_basis':'file_basis',{generation:reference.generation,path:reference.key,original:reference.original,draft:reference.draft,...(proposed===null?{}:{proposed:proposed??null})});
-      if(reference.recordedSource){if(basis.path!==reference.key||(basis.disk_sha256??null)!==(reference.recordedSource.disk_sha256??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Nothing has been written.');}
+      // Without a plan only the file is pinned, not the commit: a commit that did not touch the file changes nothing.
+      const pinned=reference.recordedSource??(match?null:reference.source);
+      if(pinned){if(basis.path!==reference.key||(basis.disk_sha256??null)!==(pinned.disk_sha256??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Nothing has been written.');}
       else if(basis.basis_id!==reference.source.basis_id)throw Error('The source commit or file changed. Share a fresh snapshot before using this proposal.');
-      return {...basis,task_ref:match.task_ref,task_revision:match.revision,repository_ref:match.repository_ref,world:match.world};
+      return match?{...basis,task_ref:match.task_ref,task_revision:match.revision,repository_ref:match.repository_ref,world:match.world}:basis;
     }
     return match;
   }
@@ -153,7 +182,7 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
     for(const f of files.values()){const label=el('label',undefined,'connection-row'),input=el('input');input.type='checkbox';input.value=f.path;input.checked=f===file;input.dataset.relatedFile=f.path;label.append(input,el('span',f.path+' · '+new TextEncoder().encode(f.draft).length+' bytes'+(tabDirty(f.original,f.draft)?' · Unsaved draft':'')));choices.append(label);}
     const submit=el('button','Attach selected files','primary');submit.type='submit';submit.id='related-files-attach';const cancel=button('Cancel','related-files-cancel',()=>dialog.close());form.append(choices,notice,submit,cancel);dialog.append(form);document.body.append(dialog);dialog.addEventListener('close',()=>dialog.remove());dialog.showModal();
     form.onsubmit=async event=>{
-      event.preventDefault();if(busy)return;let task,capturedTask=activeTask,capturedGeneration=generation,selection;
+      event.preventDefault();if(busy)return;let task,capturedTask=activeTask,capturedGeneration=generation,capturedRoot=root,selection;
       try{
         selection=relatedFileSelection([...choices.querySelectorAll('input:checked')].map(input=>files.get(input.value)));
         task=selectedTask();if(task){const b=heldProjection(current)?.bots?.[task.bot_ref];if(!b)throw Error('The assigned bot is unavailable.');botId=b.client_ref;}
@@ -161,7 +190,7 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
         const items=[];
         for(const selected of selection){
           const ref={kind:'editor',key:selected.path,generation:capturedGeneration,title:selected.path,original:selected.original,draft:selected.draft,session:surfaceSession};let content=selected.path+'\n\n'+selected.draft;
-          if(task){ref.task={id:task.id,revision:task.revision,world:capturedTask.world};const match=await verifyPlan(ref);ref.source=await request('file_basis',{generation:capturedGeneration,path:ref.key,original:ref.original,draft:ref.draft,proposed:null});content=taskFileAttachment(task,ref.key,ref.draft,match,ref.source);}
+          if(task){ref.task={id:task.id,revision:task.revision,world:capturedTask.world};const match=await verifyPlan(ref);ref.source=await request('file_basis',{generation:capturedGeneration,path:ref.key,original:ref.original,draft:ref.draft,proposed:null});content=taskFileAttachment(task,ref.key,ref.draft,match,ref.source);}else{const source=await unplannedBasis(ref);if(source){ref.source=source;ref.root=capturedRoot;}}
           items.push({reference:ref,attachment:{name:ref.title.slice(0,120),content}});
         }
         if(!dialog.open)throw Error('File selection was closed. No files were attached.');
@@ -170,7 +199,7 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       }catch(error){notice.textContent=String(error.message||error);}finally{busy=false;if(dialog.open){submit.disabled=false;cancel.disabled=false;for(const input of choices.querySelectorAll('input'))input.disabled=false;}sync();}
     };
   }
-  async function discuss(id,botId){let task;try{task=id==='editor'?selectedTask():null;if(task){const b=heldProjection(current)?.bots?.[task.bot_ref];if(!b)throw Error('The assigned bot is unavailable.');botId=b.client_ref;}}catch(e){return report(id,e.message||e);}let ref,content;if(id==='editor'&&file){ref={kind:id,key:file.path,generation,title:file.path,original:file.original,...(bytesOf(file.draft)<=REVIEW_FILE_BYTES?{draft:file.draft}:{})};content=file.path+'\n\n'+new TextDecoder().decode(new TextEncoder().encode(file.draft).slice(0,REVIEW_FILE_BYTES));}else if(id==='terminal'&&(worker||shell)){ref={kind:id,key:worker?'worker:'+worker.id:shell.id,generation,world:workerWorld,title:worker?'Worker '+worker.id:'Shell '+shell.id};const buffer=shell&&!worker?shell.term.buffer.active:null;const lines=[];if(buffer)for(let i=Math.max(0,buffer.length-200);i<buffer.length;i++)lines.push(buffer.getLine(i)?.translateToString(true)??'');content=ref.title+'\nRepository: '+root+'\n'+new TextDecoder().decode(new TextEncoder().encode(lines.join('\n')).slice(-16000));}else if(id==='browser'&&browser?.url){ref={kind:id,key:browser.id,token:browser.token,title:browser.url};content='Browser tab: '+browser.url;}else{return report(id,'Open a '+id+' tab first.');}if(task){if(typeof ref.draft!=='string')return report(id,'This file is too large for a complete plan-linked proposal. Choose a smaller file.');ref.task={id:task.id,revision:task.revision,world:activeTask.world};try{const capturedFile=file,capturedTask=activeTask;const match=await verifyPlan(ref);ref.source=await request('file_basis',{generation:ref.generation,path:ref.key,original:ref.original,draft:ref.draft,proposed:null});if(file!==capturedFile||file.draft!==ref.draft||file.original!==ref.original||generation!==ref.generation||activeTask!==capturedTask||selectedTask()?.revision!==task.revision)throw Error('The plan or file changed while checking its repository. Share it again.');content=taskFileAttachment(task,file.path,ref.draft,match,ref.source);}catch(e){return report(id,e.message||e);}}ref.session=surfaceSession;navigate('bot:'+botId);const event=new CustomEvent('bot-surface-context',{cancelable:true,detail:{botId,reference:ref,attachment:{name:ref.title.slice(0,120),content}}});if(!document.dispatchEvent(event))report(id,'Could not attach this context. Finish the current bot operation first.');}
+  async function discuss(id,botId){let task;try{task=id==='editor'?selectedTask():null;if(task){const b=heldProjection(current)?.bots?.[task.bot_ref];if(!b)throw Error('The assigned bot is unavailable.');botId=b.client_ref;}}catch(e){return report(id,e.message||e);}let ref,content;if(id==='editor'&&file){ref={kind:id,key:file.path,generation,title:file.path,original:file.original,...(bytesOf(file.draft)<=REVIEW_FILE_BYTES?{draft:file.draft}:{})};content=file.path+'\n\n'+new TextDecoder().decode(new TextEncoder().encode(file.draft).slice(0,REVIEW_FILE_BYTES));}else if(id==='terminal'&&(worker||shell)){ref={kind:id,key:worker?'worker:'+worker.id:shell.id,generation,world:workerWorld,title:worker?'Worker '+worker.id:'Shell '+shell.id};const buffer=shell&&!worker?shell.term.buffer.active:null;const lines=[];if(buffer)for(let i=Math.max(0,buffer.length-200);i<buffer.length;i++)lines.push(buffer.getLine(i)?.translateToString(true)??'');content=ref.title+'\nRepository: '+root+'\n'+new TextDecoder().decode(new TextEncoder().encode(lines.join('\n')).slice(-16000));}else if(id==='browser'&&browser?.url){ref={kind:id,key:browser.id,token:browser.token,title:browser.url};content='Browser tab: '+browser.url;}else{return report(id,'Open a '+id+' tab first.');}if(task){if(typeof ref.draft!=='string')return report(id,'This file is too large for a complete plan-linked proposal. Choose a smaller file.');ref.task={id:task.id,revision:task.revision,world:activeTask.world};try{const capturedFile=file,capturedTask=activeTask;const match=await verifyPlan(ref);ref.source=await request('file_basis',{generation:ref.generation,path:ref.key,original:ref.original,draft:ref.draft,proposed:null});if(file!==capturedFile||file.draft!==ref.draft||file.original!==ref.original||generation!==ref.generation||activeTask!==capturedTask||selectedTask()?.revision!==task.revision)throw Error('The plan or file changed while checking its repository. Share it again.');content=taskFileAttachment(task,file.path,ref.draft,match,ref.source);}catch(e){return report(id,e.message||e);}}else if(id==='editor'&&typeof ref.draft==='string'){const at=root,source=await unplannedBasis(ref);if(source&&generation===ref.generation&&root===at){ref.source=source;ref.root=at;}}ref.session=surfaceSession;navigate('bot:'+botId);const event=new CustomEvent('bot-surface-context',{cancelable:true,detail:{botId,reference:ref,attachment:{name:ref.title.slice(0,120),content}}});if(!document.dispatchEvent(event))report(id,'Could not attach this context. Finish the current bot operation first.');}
   // The combined-review dialog over `items`, wired to this Editor. `saved` names
   // a review already on the plan, staged again from its recorded bytes: it is
   // shown as such and offers no second save.
@@ -194,7 +223,7 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       // Allocate every Editor state before changing any open file.
       const prepared=drafts.map(d=>{const target=files.get(d.path),draft=d.text===null?target.draft:d.text;return {target,draft,deletion:d.text===null,state:editor.state(d.path,draft)};});
       review.hide();
-      for(const p of prepared){p.target.draft=p.draft;p.target.state=p.state;p.target.pendingDeletion=p.deletion;}
+      for(const p of prepared){p.target.draft=p.draft;p.target.state=p.state;p.target.pendingDeletion=p.deletion;delete p.target.proposalBasis;}
       stagedSet={items:prepared.map((p,i)=>({path:p.target.path,original:p.target.original,content:p.deletion?null:p.draft,reference:items[i].reference}))};
       file=prepared[0].target;editor.show(file.state);editor.readonly(!!file.pendingDeletion);paintFiles();paintSet();
       report('editor',prepared.length+' bot drafts staged together · Use Apply staged change set to save the complete set');
@@ -295,7 +324,7 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       busy=false;sync();
       const reference=item.reference,target=files.get(reference.key);
       say('Recorded content read and checked against its digests and the repository. Use as editor draft in the Editor; Save is the step that writes.');
-      reviewFileProposal({reference,proposal:item.proposal,verify:()=>verifyPlan(reference,item.proposal.content),onIdentity:null,recordAttempt:null,current:()=>({session:surfaceSession,generation,file:files.get(reference.key),task:heldProjection(current)?.development_tasks?.[reference.task.id],world:runtimeWorld(current)}),stage:text=>{if(busy)throw Error('The editor is busy. Try again.');review.hide();selectFile(target);editor.replace(text);report('editor',target.path+' · Saved review '+attempt.id+' staged as unsaved draft · Review, then Save');},navigate,el,button});
+      reviewFileProposal({reference,proposal:item.proposal,verify:()=>verifyPlan(reference,item.proposal.content),onIdentity:null,recordAttempt:null,current:()=>({session:surfaceSession,generation,file:files.get(reference.key),task:heldProjection(current)?.development_tasks?.[reference.task.id],world:runtimeWorld(current)}),stage:text=>{if(busy)throw Error('The editor is busy. Try again.');review.hide();selectFile(target);editor.replace(text);target.proposalBasis=true;report('editor',target.path+' · Saved review '+attempt.id+' staged as unsaved draft · Review, then Save');},navigate,el,button});
     }catch(error){busy=false;sync();say(String(error.message||error));report('editor',String(error.message||error));}
   }
   document.addEventListener('review-file-proposal',e=>{try{if(busy)throw Error('Finish the current file operation first.');const reference=e.detail.reference;
@@ -306,14 +335,14 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
        reference bound to this page session and handed to the same review dialog a live proposal uses. */
     if(reference?.recovered){
       if(!reference.source)throw Error('This saved proposal has no original basis and cannot be applied. Ask the assistant for a fresh proposal.');
-      if(!root)throw Error('Open the repository this proposal targets, then review it.');
+      if(!root)throw Error('Open the repository this proposal targets, then review it.');if(!reference.task&&reference.root!==root)throw Error('This proposal was made for '+reference.key+' in '+(reference.root||'a repository that was not recorded')+'. Open that repository in Editor, then review it. Nothing has been written.');
       e.detail.pending=(async()=>{
         if(!files.has(reference.key))await openFile(reference.key);
         const f=files.get(reference.key);
         if(!f)throw Error('The file could not be opened in this repository: '+reference.key);
         if(tabDirty(f.original,f.draft))throw Error('This file has unsaved edits in the Editor. Save or discard them, then review the recovered proposal.');
         if((f.original??null)!==(reference.original??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Applying it would replace newer work. Nothing has been written.');
-        const basis=await request('file_basis',{generation,path:reference.key,original:reference.original,draft:f.draft,proposed:e.detail.proposal.content??null});
+        await checkDiskBasis(reference);const basis=await request('file_basis',{generation,path:reference.key,original:reference.original,draft:f.draft,proposed:e.detail.proposal.content??null});
         checkRecoveredBasis({...reference,schema:'proposal-recovery@1',path:reference.key,content:e.detail.proposal.content,source:reference.recordedSource},basis);
         /* The plan link: same plan (id, revision), same world (incarnation, generation); the epoch is
            this process's and is rebound. A missing or different plan refuses like a live review would. */
@@ -324,7 +353,7 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       })();
       return;
     }
-    const target=files.get(reference?.key);reviewFileProposal({reference,proposal:e.detail.proposal,verify:()=>verifyPlan(reference,e.detail.proposal.content),onIdentity:e.detail.onIdentity,recordAttempt:reference?.task&&recordAttempt?async source=>{
+    reviewFileProposal({reference,proposal:e.detail.proposal,verify:async()=>{checkTabBasis(reference);if(!reference.source)await checkDiskBasis(reference);return verifyPlan(reference,e.detail.proposal.content);},onIdentity:e.detail.onIdentity,recordAttempt:reference?.task&&recordAttempt?async source=>{
       const origin=runtimeWorld(current);
       if(origin!==reference.task.world)throw Error('The runtime changed. Reopen the review.');
       reference.attemptRequests??={};
@@ -340,7 +369,7 @@ export function initDevelopment({invoke,apply,recordAttempt,recordSet,stageConte
       if(!await recordAttempt(args))throw Error('The runtime did not confirm the review record. Check Activity; retrying keeps the same request identity.');
       let saved;await waitForBot(current,origin,p=>{saved=Object.values(p.development_attempts??{}).find(a=>a.client_ref===client_ref);return !!saved;});
       return saved.id;
-    }:null,current:()=>({session:surfaceSession,generation,file:files.get(reference?.key),task:heldProjection(current)?.development_tasks?.[reference?.task?.id],world:runtimeWorld(current)}),stage:text=>{if(busy)throw Error('The editor is busy. Try again.');review.hide();selectFile(target);editor.replace(text);report('editor',target.path+' · Bot proposal staged as unsaved draft · Review, then Save');},navigate,el,button});}catch(error){e.detail.error=String(error);e.preventDefault();}});
+    }:null,current:()=>({session:surfaceSession,generation,file:files.get(reference?.key),task:heldProjection(current)?.development_tasks?.[reference?.task?.id],world:runtimeWorld(current)}),stage:text=>{if(busy)throw Error('The editor is busy. Try again.');const f=checkTabBasis(reference);review.hide();selectFile(f);editor.replace(text);f.proposalBasis=true;report('editor',f.path+' · Bot proposal staged as unsaved draft · Review, then Save');},navigate,el,button});}catch(error){e.detail.error=String(error);e.preventDefault();}});
   document.addEventListener('watch-runtime-worker',e=>{const r=e.detail,w=heldProjection(current)?.workers?.[r.id];if(r.world!==runtimeWorld(current)||!w||(w.generation??1)!==r.generation||w.status!=='open'||w.terminal!=='PRESENT')return;navigate('terminal');workerPicker.value=w.id;watchWorker(w.id);});
   document.addEventListener('open-development-surface',e=>{const r=e.detail;const ok=r.session===surfaceSession&&(r.kind==='browser'?browsers.get(r.key)?.token===r.token:r.generation===generation);if(!ok){alert('This surface has closed or its repository changed.');return;}if(r.kind==='changes'){navigate('editor');review.showPath(r.key);return;}if(r.kind==='editor'){const f=files.get(r.key);if(!f){alert('That file tab is closed.');return;}navigate('editor');selectFile(f);}else if(r.kind==='terminal'){if(typeof r.key==='string'){if(!worker||r.world!==workerWorld||r.key!=='worker:'+worker.id){alert('That worker is no longer being watched.');return;}navigate('terminal');layout();}else{const s=shells.get(r.key);if(!s){alert('That shell is closed.');return;}navigate('terminal');selectShell(s);}}else{browser=browsers.get(r.key);url.value=browser.url;navigate('browser');paintBrowsers();layout();}});
   async function poll(){if(polling||busy)return;polling=true;try{if(active==='terminal'&&shell&&!worker)await readShell(shell);const now=performance.now();if(now-lastInventoryPoll<2000)return;lastInventoryPoll=now;const s=await request('status');if(s.root&&!root){root=s.root;generation=s.generation;busy=true;try{await list('');await restoreProject();}finally{busy=false;}}if(s.shells?.length)shellReady=true;for(const data of s.shells??[])registerShell(data);paintShells();paintWorkers();paintRepositories();if(active==='browser'&&now-lastBrowserPoll>=2000){lastBrowserPoll=now;const state=await invoke('browser_surface',{action:'status'});for(const b of state.tabs??[]){if(b.url){browserReady=true;if(!browsers.has(b.id)){browsers.set(b.id,{...b,token:crypto.randomUUID()});paintBrowsers();}else{browsers.get(b.id).url=b.url;browsers.get(b.id).restored=false;}}}paintBrowsers();if(browser&&document.activeElement!==url&&url.value!==browser.url)url.value=browser.url;}sync();}catch(e){report('terminal',e);}finally{polling=false;}}
