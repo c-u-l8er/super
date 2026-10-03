@@ -48,11 +48,17 @@ test('T34 L2: a repository is admitted by a gate\'s exact path; a same-named fil
   assert.deepEqual(gatesIn(trvm).map(g=>g.path),['compiled/laws_gate.py']);
   assert.deepEqual(gatesIn(['other/r09_evidence_gate.py','lab/r09_evidence_gate.py','README.md']),[]);
 });
-test('T34 L3: computedriven\'s scope is the union of both gates\' declared scopes plus the reviewed paths',()=>{
-  const scope=snapshotScope('repository-python-gate@1',members(['tools/r09_evidence_gate.py']),cd);
-  assert.deepEqual([...scope].sort(),cd.filter(p=>!['receipts/lab-other.md','web/x','README.md'].includes(p)).sort());
+test('T34 L3: computedriven\'s scope is the union of both gates\' declared scopes plus the reviewed paths, and the r09 row\'s own scope is exactly its roots',()=>{
+  // (a) the union, with one reviewed path outside every scope: it is captured, other outside paths are not
+  const scope=snapshotScope('repository-python-gate@1',members(['tools/r09_evidence_gate.py','web/x']),cd);
+  assert.deepEqual([...scope].sort(),cd.filter(p=>!['receipts/lab-other.md','README.md'].includes(p)).sort());
+  assert.ok(scope.has('web/x'),'a reviewed path outside every gate scope is in the snapshot');
   for(const p of ['receipts/r09-evidence/BATTERY.json','lab/r09close/evidence-gate-reference.json','receipts/R0.9-OPEN.md','cd-rendezvous/src/lib.rs','docs/r09-evidence-gate-brief.md'])
     assert.ok(scope.has(p),p);
+  // (b) the r09 row alone (no succession gate to mask it): exactly the row's roots, plus the reviewed path
+  const r09only=cd.filter(p=>p!=='tools/succession_laws_gate.py');
+  const own=snapshotScope('repository-python-gate@1',members(['tools/r09_evidence_gate.py']),r09only);
+  assert.deepEqual([...own].sort(),r09only.filter(p=>!['laws/succession.json','receipts/SUCCESSION-LAWS.md','receipts/lab-other.md','web/x','README.md'].includes(p)).sort());
 });
 test('T34 L4: a repository with none of the three gates is refused, and the refusal names all three',()=>{
   assert.throws(()=>snapshotScope('repository-python-gate@1',members(['a.py']),['a.py','README.md']),
