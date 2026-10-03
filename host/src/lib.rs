@@ -2796,11 +2796,6 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
     0
 }
 
-} // mod linux_layer
-
-#[cfg(target_os = "linux")]
-pub mod verify;
-
 #[cfg(test)]
 mod t27b_stream {
     //! T27b B6 and B8 on the Carrier stream (`write_frame_with_fd`, SOCK_STREAM): a short send is finished, the peer
@@ -2809,6 +2804,7 @@ mod t27b_stream {
     use serde_json::{json, Value};
     use std::io;
     use std::os::unix::io::RawFd;
+    use crate::fdpass;
 
     fn read_all(fd: RawFd, want: usize) -> (Vec<u8>, usize) {
         // Bounded: a frame cut short must FAIL the test (a receive that times out), never hang it.
@@ -2881,3 +2877,8 @@ mod t27b_stream {
         fdpass::close_fd(b);
     }
 }
+
+} // mod linux_layer
+
+#[cfg(target_os = "linux")]
+pub mod verify;
