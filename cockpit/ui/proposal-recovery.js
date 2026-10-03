@@ -20,6 +20,9 @@ export function validateRecovery(r){
   if(out.path.startsWith('/')||out.path.split('/').some(s=>!s||s==='.'||s==='..'))throw Error('Invalid recovery path.');
   if(out.source.path!==out.path)throw Error('Recovery basis names a different file.');
   if(r.task!==null&&r.task!==undefined){const t=r.task;if(typeof t.id!=='string'||!Number.isSafeInteger(t.revision)||t.revision<1||typeof t.world!=='string')throw Error('Invalid recovery plan link.');out.task={id:text(t.id,100,'plan id'),revision:t.revision,world:text(t.world,500,'plan world')};}
+  /* dt_0138: a proposal shared without a plan records the repository root it was shared from, so after a restart it
+     is offered only in that repository. A plan-linked proposal is bound by its plan instead. */
+  if(r.root!==null&&r.root!==undefined)out.root=text(r.root,4096,'repository');
   /* T22b: a proposal that arrived as a patch keeps the patch exactly as sent. The record is then
      self-verifying: the patch applied to the recorded draft must give the recorded content, or the
      record is refused whole. A record without a patch keeps T22a's shape exactly. */
@@ -42,6 +45,7 @@ export function validateRecoveryShape(r){
   if(out.path.startsWith('/')||out.path.split('/').some(s=>!s||s==='.'||s==='..'))throw Error('Invalid recovery path.');
   if(out.source.path!==out.path)throw Error('Recovery basis names a different file.');
   if(r.task!==null&&r.task!==undefined){const t=r.task;if(typeof t.id!=='string'||!Number.isSafeInteger(t.revision)||t.revision<1||typeof t.world!=='string')throw Error('Invalid recovery plan link.');out.task={id:text(t.id,100,'plan id'),revision:t.revision,world:text(t.world,500,'plan world')};}
+  if(r.root!==null&&r.root!==undefined)out.root=text(r.root,4096,'repository');
   if(r.patch!==null&&r.patch!==undefined){out.patch=validatePatchRecord(r.patch);if(out.content===null)throw Error('Recovery patch does not reproduce its recorded content.');}
   return out;
 }
@@ -51,7 +55,7 @@ export function validateRecoveryShape(r){
 export function recoveryRecord(reference,proposal,patch=null){
   if(!reference||reference.kind!=='editor'||typeof reference.draft!=='string'||!reference.source)return null;
   if(!proposal||proposal.path!==reference.key)return null;
-  try{return validateRecovery({schema:RECOVERY_SCHEMA,path:reference.key,content:proposal.content,draft:reference.draft,original:reference.original??null,source:reference.source,task:reference.task??null,...(patch?{patch}:{})});}
+  try{return validateRecovery({schema:RECOVERY_SCHEMA,path:reference.key,content:proposal.content,draft:reference.draft,original:reference.original??null,source:reference.source,task:reference.task??null,...(typeof reference.root==='string'?{root:reference.root}:{}),...(patch?{patch}:{})});}
   catch{return null;}
 }
 /* Why a saved proposal cannot be applied — the explanation a card shows instead of a Review button. */
@@ -64,7 +68,7 @@ export function unavailableReason(saved){
    Editor binds it after the host re-verifies the file on disk against the recorded basis. */
 export function recoveredReference(record){
   const r=validateRecovery(record);
-  return {kind:'editor',key:r.path,title:r.path,original:r.original,draft:r.draft,source:r.source,task:r.task,recovered:true,recordedSource:r.source};
+  return {kind:'editor',key:r.path,title:r.path,original:r.original,draft:r.draft,source:r.source,task:r.task,root:r.root??null,recovered:true,recordedSource:r.source};
 }
 /* The one check that keeps a recovered proposal honest: the file on disk today must be the file the
    proposal was made against. `head` and `basis_id` move with any commit and are not compared; the
@@ -75,6 +79,28 @@ export function checkRecoveredBasis(record,basis){
   if(basis.path!==r.path)throw Error('The repository returned a basis for a different file. Nothing was applied.');
   if((basis.disk_sha256??null)!==(r.source.disk_sha256??null))throw Error('This proposal is outdated: the file on disk no longer matches the version it was proposed against. Applying it would replace newer work. Nothing has been written.');
   return basis;
+}
+/* dt_0138 · a proposal is made against ONE version of its file: `original`, the file as the Editor last read or saved
+   it (null when it did not exist), and, when the share carried it, `draft`, the exact text the assistant was shown.
+   Before a proposal becomes an Editor draft, and again before Save writes it, the open tab and the file on disk must
+   still hold that version. Returns null, or the explanation a person is shown. Pure: the caller reads the tab and the
+   disk. A side passed as undefined was not read and is not judged; `unreadable` is why the disk could not be read. */
+export function proposalBasisProblem(basis,{tab,disk,unreadable}={}){
+  const path=basis?.key??basis?.path??'The file',original=basis?.original??null,draft=typeof basis?.draft==='string'?basis.draft:undefined;
+  const outdated=`This proposal is outdated: ${path} no longer matches the version it was proposed against. Applying it would replace newer work. Nothing has been written and the newer content is kept. Ask the assistant for a fresh proposal.`;
+  if(tab!==undefined){
+    if(!tab)return `${path} is not open in the Editor. Open it, then review this proposal again. Nothing has been written.`;
+    if((tab.original??null)!==original){
+      /* The shared unsaved draft was saved exactly as shared: the text the assistant saw is on disk, but the proposal
+         is pinned to the version before that save. Refused with that reason; it is not called outdated. */
+      if(draft!==undefined&&draft!==original&&tab.original===draft)return `${path} was saved after it was shared: the unsaved draft the assistant saw is now on disk. This proposal is tied to the version before that save, so it cannot be applied. Nothing has been written. Share the file again for a fresh proposal.`;
+      return outdated;
+    }
+    if(draft!==undefined&&tab.draft!==draft)return outdated;
+  }
+  if(typeof unreadable==='string'&&original!==null)return `This proposal is outdated: ${path} can no longer be read as the text it was proposed against (${unreadable}). It may have been deleted, moved or replaced. Nothing has been written and the file is left as it is. Ask the assistant for a fresh proposal.`;
+  if(disk!==undefined&&(disk??null)!==original)return outdated;
+  return null;
 }
 /* A plan link records the world as [incarnation, generation, projection_epoch]; the epoch is a
    per-process value, so no recorded link can equal the world after a restart. Recovery rebinds the
