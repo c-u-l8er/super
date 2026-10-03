@@ -2811,6 +2811,13 @@ mod t27b_stream {
     use std::os::unix::io::RawFd;
 
     fn read_all(fd: RawFd, want: usize) -> (Vec<u8>, usize) {
+        // Bounded: a frame cut short must FAIL the test (a receive that times out), never hang it.
+        let tv = libc::timeval { tv_sec: 2, tv_usec: 0 };
+        let set = unsafe {
+            libc::setsockopt(fd, libc::SOL_SOCKET, libc::SO_RCVTIMEO, (&tv as *const libc::timeval).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t)
+        };
+        assert_eq!(set, 0, "SO_RCVTIMEO");
         let mut got = Vec::new();
         let mut rights = 0;
         while got.len() < want {
