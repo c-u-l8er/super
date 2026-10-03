@@ -1725,10 +1725,12 @@ pub struct Runtime {
     /// each other's replies. Channel creation is rare; a lock is the right
     /// size of answer.
     bridge_lock: Mutex<()>,
-    /// T27b R (Codex review 1, finding 3): a bounded exchange that gave up waiting still owes its reply. SEQPACKET keeps
-    /// order, so that reply arrives first; [`Runtime::bridge_recv`] reads and discards it, so it is never taken for a
-    /// later command's reply.
+    /// T27b R, round 3 (Codex review 1, finding 3; review 2, finding 1): set by every command that went out, cleared
+    /// only when its reply's packet is consumed. Every send drains an owed reply first, so no exchange can read
+    /// another's reply. SEQPACKET keeps order and one command is in flight, so at most one reply is ever owed.
     bridge_owed: std::sync::atomic::AtomicBool,
+    /// T27b round 3: a zero-byte read is the runtime's close. Once seen, every call refuses at once.
+    bridge_closed: std::sync::atomic::AtomicBool,
     /// Every channel descriptor this host has created, so descriptor
     /// confinement is something the battery can check rather than trust.
     channels: Mutex<Vec<RawFd>>,
@@ -1899,10 +1901,14 @@ impl Runtime {
 
         // Before anything opens a store. Two hosts on one world is a
         // corruption path DETS would not report.
-        let world_lock = fdpass::lock_world(&world_path.join("world.lock"))?;
+        let world_lock = Owned::new(fdpass::lock_world(&world_path.join("world.lock"))?);
 
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_seqpacket().map_err(|e| format!("bridge socketpair: {e}"))?;
+        // T27b round 3 (Codex review 2, finding 7): the lock and both ends are owned until the Runtime holds them, so a
+        // pair or a spawn that fails closes them instead of leaking them; a leaked lock would keep the world shut.
+        let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
+        let theirs_fd = theirs.fd();
 
         let child = unsafe {
             Command::new("mix")
@@ -1925,30 +1931,34 @@ impl Runtime {
                     // handing the bridge a number the runtime will later
                     // treat as a standard stream.
                     fdpass::ensure_std_fds()?;
-                    fdpass::dup_onto(theirs, 3)
+                    fdpass::dup_onto(theirs_fd, 3)
                 })
                 .spawn()
-        }
-        .map_err(|e| format!("spawning ampd: {e}"))?;
+        };
+        let child = match child {
+            Ok(c) => c,
+            Err(e) => return Err(format!("spawning ampd: {e}")),
+        };
 
         // Read before closing: the child inherited this same open file
         // description as fd 3, so this inode is the one its adopted bridge
         // will show. The bridge is a Super channel and must be in the set.
-        let bridge_inode = fd_inode(theirs);
+        let bridge_inode = fd_inode(theirs.fd());
 
         // Our copy of the child's end is dead weight the moment it is
         // inherited; holding it would keep the channel alive after the
         // child died, which is a channel with nobody on it.
-        fdpass::close_fd(theirs);
+        drop(theirs);
 
         let rt = Runtime {
             dir,
             world,
-            world_lock,
+            world_lock: world_lock.keep(),
             child,
-            bridge: ours,
+            bridge: ours.keep(),
             bridge_lock: Mutex::new(()),
             bridge_owed: std::sync::atomic::AtomicBool::new(false),
+            bridge_closed: std::sync::atomic::AtomicBool::new(false),
             channels: Mutex::new(Vec::new()),
             channel_inodes: Mutex::new(bridge_inode.into_iter().collect()),
             released: false,
@@ -1981,40 +1991,148 @@ impl Runtime {
     pub fn bridge_call(&self, v: &Value) -> Result<Value, String> {
         let _b = self.bridge_lock.lock().unwrap();
         let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
-        fdpass::send_bridge_plain(self.bridge, &bytes).map_err(|e| format!("bridge send: {e}"))?;
+        self.bridge_send_plain(&bytes, None).map_err(|e| format!("bridge send: {e}"))?;
         let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
     }
 
-    /// One bridge reply. If a bounded exchange gave up waiting, its reply is still owed and arrives first: it is read
-    /// and discarded here, so it is never taken for this command's reply (T27b R, Codex review 1, finding 3).
-    fn bridge_recv(&self) -> io::Result<Vec<u8>> {
-        if self.bridge_owed.load(std::sync::atomic::Ordering::SeqCst) {
-            let owed = fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX);
-            // Consumed either way: a reply-too-large is a whole message read and refused.
-            self.bridge_owed.store(false, std::sync::atomic::Ordering::SeqCst);
-            owed?;
+    // T27b round 3 (Codex review 2, finding 1): the reply accounting. A command that went out owes exactly one reply;
+    // `bridge_owed` is set by the send and cleared only when that reply's packet is consumed. The two senders below are
+    // the only senders on the bridge (`tests/t27b_bridge_sends.rs`), and each drains an owed reply BEFORE it sends, so
+    // no exchange can read another's reply, whatever an earlier exchange gave up on.
+
+    /// Send one command that carries no descriptor, after draining any reply still owed. With a `deadline` the drain,
+    /// the wait for room and the send are all bounded by it (Codex review 2, finding 2); without one they block.
+    fn bridge_send_plain(&self, bytes: &[u8], deadline: Option<Instant>) -> io::Result<()> {
+        self.bridge_drain(deadline)?;
+        match deadline {
+            None => fdpass::send_bridge_plain(self.bridge, bytes)?,
+            Some(d) => loop {
+                match fdpass::send_bridge_plain_nowait(self.bridge, bytes) {
+                    Ok(()) => break,
+                    Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
+                        if !self.bridge_ready_by(libc::POLLOUT, d)? {
+                            return Err(io::Error::new(io::ErrorKind::TimedOut, "the runtime is not reading the bridge"));
+                        }
+                    }
+                    Err(e) => return Err(e),
+                }
+            },
         }
-        fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX)
+        self.bridge_owed.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
-    /// [`Runtime::bridge_call`], waiting at most `within` for the reply (T27b R, Codex review 1, finding 3: the
-    /// teardown check's bound must cover the exchange, not only the gaps between exchanges). On a timeout the reply is
-    /// still owed: no further bounded call is sent until [`Runtime::bridge_recv`] has discarded it.
-    pub fn bridge_call_within(&self, v: &Value, within: Duration) -> Result<Value, String> {
-        let _b = self.bridge_lock.lock().unwrap();
-        if self.bridge_owed.load(std::sync::atomic::Ordering::SeqCst) {
-            return Err("bridge: an earlier reply is still owed".to_string());
+    /// Send one command with `fds` in the same message, after draining any reply still owed.
+    fn bridge_send_with_fds(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
+        self.bridge_drain(None)?;
+        fdpass::send_bridge_with_fds(self.bridge, bytes, fds)?;
+        self.bridge_owed.store(true, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Read and discard a reply an earlier exchange gave up on, waiting no later than `deadline` if one is given. A
+    /// read that consumes nothing leaves it owed, and the drain refuses: nothing may be sent behind it.
+    fn bridge_drain(&self, deadline: Option<Instant>) -> io::Result<()> {
+        if self.bridge_closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the runtime closed the bridge"));
         }
+        while self.bridge_owed.load(std::sync::atomic::Ordering::SeqCst) {
+            if let Some(d) = deadline {
+                if !self.bridge_ready_by(libc::POLLIN, d)? {
+                    return Err(io::Error::new(io::ErrorKind::TimedOut, "an earlier reply is still owed"));
+                }
+            }
+            if let Err(e) = self.bridge_recv() {
+                // A reply-too-large was consumed, so the loop ends; anything else leaves the reply owed or the bridge
+                // closed, and nothing is sent.
+                if self.bridge_owed.load(std::sync::atomic::Ordering::SeqCst)
+                    || self.bridge_closed.load(std::sync::atomic::Ordering::SeqCst)
+                {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The one reply owed, read here and nowhere else. An interrupted read is retried and the reply stays owed; a read
+    /// that fails without consuming a packet leaves it owed for the next send to drain; a reply-too-large was read
+    /// whole and refused, so it is no longer owed; a zero-byte read is the runtime's close, for good.
+    fn bridge_recv(&self) -> io::Result<Vec<u8>> {
+        if self.bridge_closed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err(io::Error::new(io::ErrorKind::BrokenPipe, "the runtime closed the bridge"));
+        }
+        loop {
+            match fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX) {
+                Ok(b) if b.is_empty() => {
+                    self.bridge_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "the runtime closed the bridge"));
+                }
+                Ok(b) => {
+                    self.bridge_owed.store(false, std::sync::atomic::Ordering::SeqCst);
+                    return Ok(b);
+                }
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => {
+                    if fdpass::is_reply_too_large(&e) {
+                        self.bridge_owed.store(false, std::sync::atomic::Ordering::SeqCst);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+    }
+
+    /// Wait until the bridge is ready for `events` (`POLLIN` or `POLLOUT`), no later than `deadline`. False when it
+    /// passes first. Rounded up to the millisecond, so a wait never ends before its deadline.
+    fn bridge_ready_by(&self, events: i16, deadline: Instant) -> io::Result<bool> {
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let ms = left.as_micros().div_ceil(1000).min(i32::MAX as u128) as i32;
+            let mut p = libc::pollfd { fd: self.bridge, events, revents: 0 };
+            match unsafe { libc::poll(&mut p, 1, ms) } {
+                0 => return Ok(false),
+                n if n > 0 => return Ok(true),
+                _ => {
+                    let e = io::Error::last_os_error();
+                    if e.kind() != io::ErrorKind::Interrupted {
+                        return Err(e);
+                    }
+                }
+            }
+        }
+    }
+
+    /// The bridge lock, waited for no later than `deadline` (Codex review 2, finding 2).
+    fn lock_bridge_by(&self, deadline: Instant) -> Result<std::sync::MutexGuard<'_, ()>, String> {
+        loop {
+            match self.bridge_lock.try_lock() {
+                Ok(g) => return Ok(g),
+                Err(std::sync::TryLockError::Poisoned(p)) => panic!("the bridge lock is poisoned: {p}"),
+                Err(std::sync::TryLockError::WouldBlock) => {
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    if left.is_zero() {
+                        return Err("bridge: busy past the deadline".to_string());
+                    }
+                    std::thread::sleep(left.min(Duration::from_millis(2)));
+                }
+            }
+        }
+    }
+
+    /// [`Runtime::bridge_call`], all of it within `within`: the lock, the drain of an owed reply, the send and the
+    /// reply (T27b R; Codex review 1, finding 3; review 2, finding 2). On a timeout after the send, the reply is owed,
+    /// and the next send drains it first.
+    pub fn bridge_call_within(&self, v: &Value, within: Duration) -> Result<Value, String> {
+        let deadline = Instant::now() + within;
+        let _b = self.lock_bridge_by(deadline)?;
         let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
-        fdpass::send_bridge_plain(self.bridge, &bytes).map_err(|e| format!("bridge send: {e}"))?;
-        let mut p = libc::pollfd { fd: self.bridge, events: libc::POLLIN, revents: 0 };
-        let ms = within.as_millis().min(i32::MAX as u128) as i32;
-        if unsafe { libc::poll(&mut p, 1, ms) } <= 0 {
-            self.bridge_owed.store(true, std::sync::atomic::Ordering::SeqCst);
+        self.bridge_send_plain(&bytes, Some(deadline)).map_err(|e| format!("bridge send: {e}"))?;
+        if !self.bridge_ready_by(libc::POLLIN, deadline).map_err(|e| format!("bridge recv: {e}"))? {
             return Err(format!("bridge recv: no reply within {within:?}"));
         }
-        let reply = fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX).map_err(|e| format!("bridge recv: {e}"))?;
+        let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
     }
 
@@ -2027,15 +2145,15 @@ impl Runtime {
     /// Whether they are still there afterwards is the measurement.
     pub fn bridge_call_with_rights(&self, raw: &[u8], n: usize) -> Result<Value, String> {
         let _b = self.bridge_lock.lock().unwrap();
+        // T27b round 3 (Codex review 2, finding 7): owned, so a spare that cannot be made leaks none made before it.
         let mut spares = Vec::new();
         for _ in 0..n {
-            spares.push(fdpass::spare_fd().map_err(|e| format!("spare fd: {e}"))?);
+            let spare = fdpass::spare_fd().map_err(|e| format!("spare fd: {e}"))?;
+            spares.push(Owned::new(spare));
         }
 
-        let sent = fdpass::send_bridge_with_fds(self.bridge, raw, &spares);
-        for fd in &spares {
-            fdpass::close_fd(*fd);
-        }
+        let sent = self.bridge_send_with_fds(raw, &spares.iter().map(Owned::fd).collect::<Vec<_>>());
+        drop(spares);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
         let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
@@ -2062,7 +2180,7 @@ impl Runtime {
 
         let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &all.iter().map(Owned::fd).collect::<Vec<_>>());
+        let sent = self.bridge_send_with_fds(&bytes, &all.iter().map(Owned::fd).collect::<Vec<_>>());
         drop(all);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
@@ -2096,7 +2214,7 @@ impl Runtime {
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         // Read before the send, because `theirs` is closed straight after.
         let given = fd_inode(theirs.fd());
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        let sent = self.bridge_send_with_fds(&bytes, &[theirs.fd()]);
         drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
@@ -2173,7 +2291,7 @@ impl Runtime {
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         let given = fd_inode(theirs.fd());
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        let sent = self.bridge_send_with_fds(&bytes, &[theirs.fd()]);
         drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
@@ -2227,7 +2345,7 @@ impl Runtime {
         });
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        let sent = self.bridge_send_with_fds(&bytes, &[theirs.fd()]);
         drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
@@ -2327,7 +2445,7 @@ impl Runtime {
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         let given = fd_inode(theirs.fd());
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        let sent = self.bridge_send_with_fds(&bytes, &[theirs.fd()]);
         drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
@@ -2365,7 +2483,7 @@ impl Runtime {
         let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         let given = fd_inode(theirs.fd());
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        let sent = self.bridge_send_with_fds(&bytes, &[theirs.fd()]);
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
         drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
@@ -2982,6 +3100,7 @@ mod t27b_runtime {
             bridge: ours,
             bridge_lock: Mutex::new(()),
             bridge_owed: std::sync::atomic::AtomicBool::new(false),
+            bridge_closed: std::sync::atomic::AtomicBool::new(false),
             channels: Mutex::new(Vec::new()),
             channel_inodes: Mutex::new(Vec::new()),
             released: false,
@@ -3095,6 +3214,279 @@ mod t27b_runtime {
         let v = rt.bridge_call(&json!({"schema": "bridge-command@1", "command": "registered_repository"})).unwrap();
         assert_eq!(v["answer"], "second", "the owed reply was taken for this command's reply: {v}");
         fdpass::close_fd(peer_t.join().unwrap());
+    }
+
+    // ---- T27b round 3 (Codex review 2): the reply accounting (B7), the whole exchange inside its deadline (B7), a
+    // successful hand-over (B9), and what a failed start or a failed spare leaves behind (B9).
+
+    /// A receive or send timeout on `fd`, in milliseconds (0: none).
+    fn timeo(fd: RawFd, opt: libc::c_int, ms: i64) {
+        let tv = libc::timeval { tv_sec: (ms / 1000) as _, tv_usec: ((ms % 1000) * 1000) as _ };
+        let set = unsafe {
+            libc::setsockopt(
+                fd,
+                libc::SOL_SOCKET,
+                opt,
+                (&tv as *const libc::timeval).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0, "setsockopt {opt}");
+    }
+
+    fn cmd(name: &str) -> Value {
+        json!({"schema": "bridge-command@1", "command": name})
+    }
+
+    /// The peer reads one command per entry of `replies`, sinks its rights and answers with that entry; it stops at
+    /// the host's close. Returns the peer and the commands it read.
+    fn replying(peer: RawFd, replies: Vec<Vec<u8>>) -> std::thread::JoinHandle<(RawFd, Vec<String>)> {
+        std::thread::spawn(move || {
+            let mut got = Vec::new();
+            for r in replies {
+                let Ok((b, fds)) = fdpass::recv_msg_with_fds(peer, 65536, 8) else { break };
+                for f in fds {
+                    fdpass::close_fd(f);
+                }
+                if b.is_empty() {
+                    break;
+                }
+                got.push(String::from_utf8_lossy(&b).to_string());
+                if fdpass::send_plain(peer, &r).is_err() {
+                    break;
+                }
+            }
+            (peer, got)
+        })
+    }
+
+    fn answer(r: &Result<Value, String>) -> Option<Value> {
+        r.as_ref().ok().map(|v| v["answer"].clone())
+    }
+
+    #[test]
+    fn b7_a_truncated_owed_reply_is_consumed_and_the_next_calls_read_their_own() {
+        let (rt, peer) = fake_runtime();
+        assert!(rt.bridge_call_within(&cmd("list_channels"), Duration::from_millis(100)).is_err());
+        let big = format!(r#"{{"ok":true,"pad":"{}"}}"#, "x".repeat(fdpass::BRIDGE_REPLY_MAX)).into_bytes();
+        let t = replying(peer, vec![big, br#"{"ok":true,"answer":"B"}"#.to_vec(), br#"{"ok":true,"answer":"C"}"#.to_vec()]);
+        let b = rt.bridge_call(&json!({"schema": "bridge-command@1", "command": "runtime_status", "t27b": "B"}));
+        let c = rt.bridge_call(&json!({"schema": "bridge-command@1", "command": "runtime_status", "t27b": "C"}));
+        drop(rt);
+        let (peer, got) = t.join().unwrap();
+        fdpass::close_fd(peer);
+        assert_eq!((answer(&b), answer(&c)), (Some(json!("B")), Some(json!("C"))), "{b:?} {c:?} after {got:?}");
+        assert!(
+            got.len() == 3 && got[0].contains("list_channels") && got[1].contains(r#""B""#) && got[2].contains(r#""C""#),
+            "{got:?}"
+        );
+    }
+
+    #[test]
+    fn b7_a_receive_that_reads_nothing_keeps_its_reply_owed() {
+        let (rt, peer) = fake_runtime();
+        timeo(rt.bridge, libc::SO_RCVTIMEO, 200);
+        assert!(rt.bridge_call(&cmd("list_channels")).is_err(), "no reply came, so the call fails");
+        timeo(rt.bridge, libc::SO_RCVTIMEO, 0);
+        let t = replying(peer, vec![br#"{"ok":true,"answer":"late"}"#.to_vec(), br#"{"ok":true,"answer":"mine"}"#.to_vec()]);
+        let v = rt.bridge_call(&cmd("runtime_status"));
+        drop(rt);
+        let (peer, got) = t.join().unwrap();
+        fdpass::close_fd(peer);
+        assert_eq!(answer(&v), Some(json!("mine")), "the late reply was taken for this one: {v:?} after {got:?}");
+    }
+
+    extern "C" fn t27b_on_usr2(_: libc::c_int) {}
+
+    #[test]
+    fn b7_an_interrupted_receive_is_retried_and_reads_its_own_reply() {
+        unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = t27b_on_usr2 as *const () as usize;
+            sa.sa_flags = 0; // no SA_RESTART: a blocked recvmsg returns EINTR
+            libc::sigemptyset(&mut sa.sa_mask);
+            assert_eq!(libc::sigaction(libc::SIGUSR2, &sa, std::ptr::null_mut()), 0);
+        }
+        let (rt, peer) = fake_runtime();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let v = std::thread::scope(|s| {
+            let rt = &rt;
+            let caller = s.spawn(move || {
+                tx.send(unsafe { libc::pthread_self() }).unwrap();
+                rt.bridge_call(&cmd("runtime_status"))
+            });
+            let tid = rx.recv().unwrap();
+            let (first, _) = fdpass::recv_msg_with_fds(peer, 65536, 4).unwrap();
+            assert!(String::from_utf8_lossy(&first).contains("runtime_status"));
+            for _ in 0..3 {
+                std::thread::sleep(Duration::from_millis(30));
+                unsafe { libc::pthread_kill(tid, libc::SIGUSR2) };
+            }
+            fdpass::send_plain(peer, br#"{"ok":true,"answer":"after-eintr"}"#).unwrap();
+            caller.join().unwrap()
+        });
+        fdpass::close_fd(peer);
+        assert_eq!(answer(&v), Some(json!("after-eintr")), "{v:?}");
+    }
+
+    #[test]
+    fn b7_a_bounded_call_is_bounded_while_another_call_holds_the_bridge() {
+        let (rt, peer) = fake_runtime();
+        let (took, r, held) = std::thread::scope(|s| {
+            let rt = &rt;
+            let holder = s.spawn(move || rt.bridge_call(&cmd("runtime_status")));
+            let (first, _) = fdpass::recv_msg_with_fds(peer, 65536, 4).unwrap();
+            assert!(String::from_utf8_lossy(&first).contains("runtime_status"));
+            // The holder's reply comes after 2 s whatever the bounded call does, so no build of this law can hang.
+            let release = s.spawn(move || {
+                std::thread::sleep(Duration::from_secs(2));
+                fdpass::send_plain(peer, br#"{"ok":true,"answer":"holder"}"#).unwrap();
+            });
+            let t0 = Instant::now();
+            let r = rt.bridge_call_within(&cmd("list_channels"), Duration::from_millis(300));
+            let took = t0.elapsed();
+            release.join().unwrap();
+            (took, r, holder.join().unwrap())
+        });
+        fdpass::close_fd(peer);
+        assert!(r.is_err() && took >= Duration::from_millis(290) && took < Duration::from_millis(800), "{r:?} after {took:?}");
+        assert_eq!(answer(&held), Some(json!("holder")), "{held:?}");
+    }
+
+    #[test]
+    fn b7_a_bounded_call_is_bounded_when_the_runtime_is_not_reading() {
+        let (rt, peer) = fake_runtime();
+        // Fill the bridge until a send would wait: this peer never reads.
+        let filler = br#"{"schema":"bridge-command@1","command":"t27b-filler"}"#;
+        let mut n = 0;
+        while unsafe { libc::send(rt.bridge, filler.as_ptr().cast(), filler.len(), libc::MSG_DONTWAIT) } > 0 {
+            n += 1;
+            assert!(n < 1_000_000, "the bridge never filled");
+        }
+        // A build whose bounded send blocks fails after 3 s instead of hanging.
+        timeo(rt.bridge, libc::SO_SNDTIMEO, 3000);
+        let t0 = Instant::now();
+        let r = rt.bridge_call_within(&cmd("list_channels"), Duration::from_millis(300));
+        let took = t0.elapsed();
+        fdpass::close_fd(peer);
+        assert!(
+            r.is_err() && took >= Duration::from_millis(290) && took < Duration::from_millis(800),
+            "{n} queued; {r:?} after {took:?}"
+        );
+    }
+
+    #[test]
+    fn b7_the_runtime_s_close_closes_the_bridge_for_good() {
+        let (rt, peer) = fake_runtime();
+        let t = std::thread::spawn(move || {
+            let _ = fdpass::recv_msg_with_fds(peer, 65536, 4);
+            fdpass::close_fd(peer);
+        });
+        let r = rt.bridge_call(&cmd("runtime_status"));
+        t.join().unwrap();
+        let t0 = Instant::now();
+        let again = rt.bridge_call_within(&cmd("list_channels"), Duration::from_millis(300));
+        let took = t0.elapsed();
+        assert!(matches!(&r, Err(e) if e.contains("closed the bridge")), "{r:?}");
+        assert!(
+            matches!(&again, Err(e) if e.contains("closed the bridge")) && took < Duration::from_millis(100),
+            "{again:?} after {took:?}"
+        );
+    }
+
+    #[test]
+    fn b9_a_successful_hand_over_returns_a_live_endpoint_its_owner_closes() {
+        let (rt, peer) = fake_runtime();
+        // The peer keeps the first descriptor of each command, sinks the rest, and answers ok.
+        let t = std::thread::spawn(move || {
+            let mut kept = Vec::new();
+            for _ in 0..2 {
+                let (_, fds) = fdpass::recv_msg_with_fds(peer, 65536, 8).unwrap();
+                let mut fds = fds.into_iter();
+                kept.push(fds.next().expect("a hand-over carries its endpoint"));
+                fds.for_each(fdpass::close_fd);
+                fdpass::send_plain(peer, br#"{"schema":"bridge-reply@1","ok":true}"#).unwrap();
+            }
+            (peer, kept)
+        });
+        let fd = rt.agent_fd("t27b").expect("an ok reply hands the endpoint over");
+        let chan = rt.agent_channel_with_surplus("t27b", 2).expect("an ok reply hands the channel over");
+        let (peer, kept) = t.join().unwrap();
+        fdpass::close_fd(peer);
+        for (mine, theirs) in [(fd, kept[0]), (chan.fd(), kept[1])] {
+            timeo(theirs, libc::SO_RCVTIMEO, 2000);
+            let wrote = unsafe { libc::write(mine, b"ping".as_ptr().cast(), 4) };
+            let mut b = [0u8; 4];
+            let read = unsafe { libc::read(theirs, b.as_mut_ptr().cast(), 4) };
+            assert!(wrote == 4 && read == 4 && &b == b"ping", "endpoint {mine}: wrote {wrote}, the runtime's end read {read}");
+        }
+        // Their owners close them, and the runtime's ends then read end of file.
+        fdpass::close_fd(fd);
+        drop(chan);
+        for theirs in kept {
+            let mut b = [0u8; 1];
+            let read = unsafe { libc::read(theirs, b.as_mut_ptr().cast(), 1) };
+            fdpass::close_fd(theirs);
+            assert_eq!(read, 0, "an endpoint was not closed by its owner");
+        }
+    }
+
+    /// The runtime directories this test process has made under `$XDG_RUNTIME_DIR`.
+    fn own_runtime_dirs() -> Vec<std::path::PathBuf> {
+        let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+        let prefix = format!("ampd-{}-", std::process::id());
+        std::fs::read_dir(&base)
+            .map(|d| {
+                d.filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| p.file_name().is_some_and(|n| n.to_string_lossy().starts_with(&prefix)))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn b9_a_start_that_fails_leaks_no_descriptor_and_releases_the_world() {
+        let world = std::env::temp_dir().join(format!("t27b-start-{}", std::process::id()));
+        let dirs = own_runtime_dirs();
+        let before = open_fds();
+        for i in 0..50 {
+            // Even rounds: the spawn fails (no such ampd directory). Odd rounds: the bridge pair cannot be made.
+            if i % 2 == 1 {
+                fdpass::FAIL_PAIRS_AFTER.with(|c| c.set(Some(0)));
+            }
+            let r = Runtime::start(std::path::Path::new("/nonexistent/t27b-ampd"), WorldDir::Ephemeral(world.clone()));
+            fdpass::FAIL_PAIRS_AFTER.with(|c| c.set(None));
+            assert!(r.is_err(), "a start that cannot spawn or pair fails");
+        }
+        let after = open_fds();
+        for d in own_runtime_dirs() {
+            if !dirs.contains(&d) {
+                let _ = std::fs::remove_dir_all(d);
+            }
+        }
+        // The world is free again: a later host can lock it.
+        let lock = fdpass::lock_world(&world.join("world.lock"));
+        let _ = std::fs::remove_dir_all(&world);
+        assert!(lock.is_ok(), "a failed start kept the world locked: {lock:?}");
+        fdpass::close_fd(lock.unwrap());
+        assert!(after <= before + 20, "50 failed starts left {} descriptors open", after.saturating_sub(before));
+    }
+
+    #[test]
+    fn b9_spares_that_cannot_all_be_made_leak_none_of_those_that_were() {
+        let (rt, peer) = fake_runtime();
+        let before = open_fds();
+        for _ in 0..50 {
+            fdpass::FAIL_PAIRS_AFTER.with(|c| c.set(Some(3)));
+            let r = rt.bridge_call_with_rights(br#"{"schema":"bridge-command@1","command":"t27b"}"#, 5);
+            fdpass::FAIL_PAIRS_AFTER.with(|c| c.set(None));
+            assert!(matches!(&r, Err(e) if e.contains("spare fd")), "{r:?}");
+        }
+        let after = open_fds();
+        assert!(nothing_waiting(peer), "a command went out although its spares could not all be made");
+        fdpass::close_fd(peer);
+        assert!(after <= before + 20, "50 failed spare sets left {} descriptors open", after.saturating_sub(before));
     }
 
     /// A command's bytes with its run-to-run values (a fresh epoch, the host's identity, the Carrier basis) replaced by

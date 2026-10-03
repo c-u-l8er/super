@@ -110,6 +110,17 @@ pub fn pair_seqpacket() -> io::Result<Pair> {
 /// one descriptor an engine is meant to have is made inheritable
 /// deliberately, in `dup_onto`, after `fork` and before `exec`.
 fn make_pair(ty: i32) -> io::Result<Pair> {
+    #[cfg(test)]
+    if FAIL_PAIRS_AFTER.with(|c| match c.get() {
+        Some(0) => true,
+        Some(k) => {
+            c.set(Some(k - 1));
+            false
+        }
+        None => false,
+    }) {
+        return Err(io::Error::from_raw_os_error(libc::EMFILE));
+    }
     let mut sv = [0i32; 2];
     let rc = unsafe { socketpair(AF_UNIX, ty | SOCK_CLOEXEC, 0, sv.as_mut_ptr()) };
     if rc != 0 {
@@ -424,6 +435,14 @@ thread_local! {
     pub(crate) static SHORT_SEND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+// T27b round 3's seam (Codex review 2, finding 7): a test can make a socketpair fail as EMFILE does, after `k` more
+// succeed (`Some(k)`; `Some(0)` fails the next), to show what a constructor holds when a later allocation fails.
+// Absent from every non-test build.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static FAIL_PAIRS_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
 #[cfg(test)]
 fn short_send_cap(len: usize) -> usize {
     SHORT_SEND.with(|c| c.get().map_or(len, |cap| cap.min(len)))
@@ -476,6 +495,19 @@ pub fn send_bridge_with_fds(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Res
     send_with_fds(sock, bytes, fds)
 }
 
+/// [`send_bridge_plain`] that never waits: `WouldBlock` while the runtime is not reading (T27b round 3, Codex review 2,
+/// finding 2: a send a deadline bounds must not block past it). The bytes on the wire are [`send_bridge_plain`]'s.
+pub fn send_bridge_plain_nowait(sock: RawFd, bytes: &[u8]) -> io::Result<()> {
+    bridge_command_fits(bytes.len())?;
+    all_sent(send_plain_count_flags(sock, bytes, libc::MSG_DONTWAIT)?, bytes.len())
+}
+
+/// Whether `e` is [`recv_msg`]'s reply-too-large. That message was read whole and refused, so it is consumed: the
+/// reply it was is no longer owed (T27b round 3, Codex review 2, finding 1).
+pub fn is_reply_too_large(e: &io::Error) -> bool {
+    e.kind() == io::ErrorKind::InvalidData && e.to_string().starts_with("reply-too-large")
+}
+
 /// A descriptor worth nothing, to be handed over and forgotten.
 ///
 /// Both ends of a pair, one closed immediately: what is left is a real,
@@ -496,12 +528,17 @@ pub fn send_plain(sock: RawFd, bytes: &[u8]) -> io::Result<()> {
 
 /// [`send_plain`], reporting how many bytes `sendmsg` took (T27b F3).
 pub fn send_plain_count(sock: RawFd, bytes: &[u8]) -> io::Result<usize> {
+    send_plain_count_flags(sock, bytes, 0)
+}
+
+/// [`send_plain_count`] with `sendmsg` flags (T27b round 3: `MSG_DONTWAIT` for a send a deadline bounds).
+fn send_plain_count_flags(sock: RawFd, bytes: &[u8], flags: i32) -> io::Result<usize> {
     let mut buf = bytes[..short_send_cap(bytes.len())].to_vec();
     let mut iov = iovec(&mut buf);
 
     let msg = msghdr(&mut iov, std::ptr::null_mut(), 0);
 
-    let n = unsafe { sendmsg(sock, &msg, 0) };
+    let n = unsafe { sendmsg(sock, &msg, flags) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
