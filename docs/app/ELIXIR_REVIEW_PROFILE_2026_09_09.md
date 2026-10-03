@@ -1,10 +1,13 @@
 # Elixir plan and review test profile — 9 September 2026
 
-> **Superseded in part, 2026-10-03 (T36, A-13).** `super-elixir-review@1` now builds `super-host` and runs the WHOLE ampd
-> suite (`mix test --seed 0`, no file arguments), not the two `development_*` files below. It does so with a fixed git
-> identity and a 900-second ceiling, and it finds asdf without depending on PATH. Completion is read per suite from the
-> stream, and the record keeps the first and the last 64 KiB. See `tools/lib/proposal-test-runner.mjs` (the closed
-> `suites` table) and `superlane/t36/`. The rest of this note is the record of 9 September.
+> **Superseded in part, 2026-10-03 (T36, A-13).** `super-elixir-review@1` now runs the WHOLE ampd suite, not the two
+> `development_*` files below. It works in two stages, each in a sandbox of its own:
+> 1. it builds `super-host`;
+> 2. only that binary is handed, read-only, to `mix compile` and `mix test --seed 0`, run with a fixed git identity.
+>
+> Each stage is judged by the exit status the runner observes, never by what the tests print. The ceiling is 900
+> seconds, and asdf is found without depending on PATH. See `tools/lib/proposal-test-runner.mjs` (the closed `stages`
+> table) and `superlane/t36/`. The rest of this note is the record of 9 September.
 
 The saved-review test panel offers JavaScript behavior tests (the default) and Elixir plan and review tests. The optional CLI profile argument is `super-elixir-review@1`; the unchanged default is `super-javascript-behavior@1`.
 

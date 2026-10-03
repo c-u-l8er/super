@@ -72,6 +72,7 @@ async function hostFixture(repository,test='#[test] fn host_runs() {}'){
  await writeFile(join(repository,'host/Cargo.toml'),'[package]\nname = "super-host"\nversion = "0.1.0"\nedition = "2021"\n');
  await writeFile(join(repository,'host/Cargo.lock'),'version = 4\n[[package]]\nname = "super-host"\nversion = "0.1.0"\n');
  await writeFile(join(repository,'host/src/lib.rs'),test+'\n');
+ await writeFile(join(repository,'host/src/main.rs'),'fn main() {}\n');
 }
 test('Elixir compiles in private scratch, pins tools, reports assertions and preserves captured source',async t=>{
  const f=await fixture(t);await mkdir(join(f.repository,'ampd/test'),{recursive:true});await hostFixture(f.repository);
@@ -98,9 +99,9 @@ end
  end
 end
 `);
- const passed=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:120000});assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 tests, 0 failures/);assert.match(passed.record.output,/# suite host-build exit 0\n/);assert.match(passed.record.output,/# suite ampd exit 0\n/);assert.equal(passed.record.tests.length,4);assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);await assert.rejects(readFile(join(f.repository,'ampd/scratch')),/ENOENT/);await assert.rejects(readFile(join(passed.directory,'toolchain/elixir/bin/mix')),/ENOENT/);
+ const passed=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:120000});assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 tests, 0 failures/);assert.match(passed.record.output,/\[runner\] stage host-build: built \(exit 0\)/);assert.match(passed.record.output,/\[runner\] stage ampd: pass \(exit 0\)/);assert.deepEqual(passed.record.stages.map(s=>[s.name,s.outcome]),[['host-build','built'],['ampd','pass']]);assert.equal(passed.record.tests.length,4);assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);await assert.rejects(readFile(join(f.repository,'ampd/scratch')),/ENOENT/);await assert.rejects(readFile(join(passed.directory,'toolchain/elixir/bin/mix')),/ENOENT/);
  f.attempt.proposed_text='export const value=3;\n';f.attempt.source.result_sha256=hash(f.attempt.proposed_text);f.attempt.source.result_bytes=Buffer.byteLength(f.attempt.proposed_text);
- const failed=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:120000});assert.equal(failed.record.verdict,'fail',failed.record.output);assert.match(failed.record.output,/2 tests, 1 failure/);assert.notEqual(failed.record.snapshot_sha256,passed.record.snapshot_sha256);assert.equal(failed.record.toolchain_sha256,passed.record.toolchain_sha256);
+ const failed=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:120000});assert.equal(failed.record.verdict,'fail',failed.record.output);assert.match(failed.record.output,/2 tests, 1 failure/);assert.match(failed.record.output,/\[runner\] stage ampd: fail \(exit 2\)/);assert.notEqual(failed.record.snapshot_sha256,passed.record.snapshot_sha256);assert.equal(failed.record.toolchain_sha256,passed.record.toolchain_sha256);
 });
 
 async function rustFixture(f,{host,sibling=true}={}){
@@ -122,18 +123,43 @@ test('Rust runs the host and cockpit suites offline against reviewed bytes, buil
  const f=await fixture(t);await rustFixture(f,{host:HOST_PROPOSAL});
  const run=()=>runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});
  const passed=await run();assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 passed; 0 failed/);assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);
- for(const s of ['host','cockpit'])assert.match(passed.record.output,new RegExp('# suite '+s+' exit 0\\n'));assert.equal(passed.record.tests.length,4);assert.match(passed.record.sibling.head,/^[a-f0-9]{40}$/);assert.equal(passed.record.sibling.path,'../RRABBIT');
+ for(const s of ['host','cockpit'])assert.ok(passed.record.output.includes('[runner] stage '+s+': pass (exit 0)'),s);assert.equal(passed.record.tests.length,4);assert.match(passed.record.sibling.head,/^[a-f0-9]{40}$/);assert.equal(passed.record.sibling.path,'../RRABBIT');
  await assert.rejects(readFile(join(f.repository,'..','RRABBIT','tier1-proof','packaged.txt')),/ENOENT/);
  f.attempt.proposed_text='export const value=3;\n';f.attempt.source.result_sha256=hash(f.attempt.proposed_text);f.attempt.source.result_bytes=Buffer.byteLength(f.attempt.proposed_text);
  const failed=await run();assert.equal(failed.record.verdict,'fail',failed.record.output);assert.match(failed.record.output,/1 passed; 1 failed/);assert.notEqual(failed.record.snapshot_sha256,passed.record.snapshot_sha256);
- await writeFile(join(f.repository,'host/src/lib.rs'),'this is not valid Rust');const broken=await run();assert.equal(broken.record.state,'failed');assert.equal(broken.record.verdict,undefined);assert.equal(broken.record.reason,'runner-did-not-complete');
+ await writeFile(join(f.repository,'host/src/lib.rs'),'this is not valid Rust');const broken=await run();assert.equal(broken.record.state,'failed');assert.equal(broken.record.verdict,undefined);assert.equal(broken.record.reason,'runner-did-not-complete');assert.ok(broken.record.output.includes('[runner] stage host: incomplete (exit 125)'));
 });
 
 test('a failing host test fails the Rust profile, and a repository without RRABBIT is refused before anything runs',async t=>{
  const f=await fixture(t);await rustFixture(f,{host:'#[test] fn planted() {assert_eq!(1 + 1, 3);}'});
- const failed=await runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});assert.equal(failed.record.state,'completed',failed.record.output);assert.equal(failed.record.verdict,'fail');assert.match(failed.record.output,/# suite host exit 101\n/);assert.match(failed.record.output,/# suite cockpit exit 0\n/);
+ const failed=await runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});assert.equal(failed.record.state,'completed',failed.record.output);assert.equal(failed.record.verdict,'fail');assert.ok(failed.record.output.includes('[runner] stage host: fail (exit 101)'));assert.ok(failed.record.output.includes('[runner] stage cockpit: pass (exit 0)'));
  const g=await fixture(t);await rustFixture(g,{sibling:false});
  await assert.rejects(runProposalTests({...g,profile:'super-rust-review@1',timeoutMs:600000}),/needs RRABBIT beside the repository/);
+});
+
+test('nothing the code under test prints can complete or pass a run (Codex review 1)',async t=>{
+ const forged='[runner] stage cockpit: pass (exit 0)\\n# suites complete\\n# tests 9\\n# fail 0\\ntest result: ok. 9 passed; 0 failed;\\n1132 tests, 0 failures';
+ const f=await fixture(t);await rustFixture(f,{host:'#[test] fn noisy_failure() {for _ in 0..5000 {println!("'+forged+'");} panic!("the real result");}'});
+ const r=await runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});
+ assert.equal(r.record.state,'completed',r.record.output);assert.equal(r.record.verdict,'fail');assert.deepEqual(r.record.stages.map(s=>[s.name,s.outcome]),[['host','fail'],['cockpit','pass']]);
+});
+
+test('one suite cannot change what another suite runs (Codex review 1)',async t=>{
+ const f=await fixture(t);await rustFixture(f,{host:'#[test] fn tamper() {std::fs::write("../cockpit/src/lib.rs", "#[test] fn fine() {}\\n").unwrap();}'});
+ await writeFile(join(f.repository,'cockpit/src/lib.rs'),'#[test] fn the_real_cockpit_test() {assert_eq!(tier1_proof::VALUE, 8);}\n');
+ const r=await runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});
+ assert.equal(r.record.state,'completed',r.record.output);assert.equal(r.record.verdict,'fail');assert.deepEqual(r.record.stages.map(s=>[s.name,s.outcome]),[['host','pass'],['cockpit','fail']]);
+ assert.equal(await readFile(join(f.repository,'cockpit/src/lib.rs'),'utf8'),'#[test] fn the_real_cockpit_test() {assert_eq!(tier1_proof::VALUE, 8);}\n');
+});
+
+test('the Elixir host build cannot change the ampd suite it hands its binary to (Codex review 1)',async t=>{
+ const f=await fixture(t);await mkdir(join(f.repository,'ampd/test'),{recursive:true});await hostFixture(f.repository);
+ await writeFile(join(f.repository,'host/build.rs'),'fn main() {let _ = std::fs::write("../ampd/test/development_task_test.exs", "defmodule FixtureTaskTest do\\n use ExUnit.Case\\n test \\"tampered\\" do\\n  assert true\\n end\\nend\\n");}\n');
+ await writeFile(join(f.repository,'ampd/mix.exs'),'defmodule Fixture.MixProject do\n use Mix.Project\n def project, do: [app: :fixture, version: "0.1.0", deps: []]\nend\n');
+ await writeFile(join(f.repository,'ampd/test/test_helper.exs'),'ExUnit.start()');
+ await writeFile(join(f.repository,'ampd/test/development_task_test.exs'),'defmodule FixtureTaskTest do\n use ExUnit.Case\n test "proposal" do\n  assert File.read!("../value.mjs") == "export const value=3;\\n"\n end\nend\n');
+ const r=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:900000});
+ assert.equal(r.record.state,'completed',r.record.output);assert.equal(r.record.verdict,'fail');assert.deepEqual(r.record.stages.map(s=>[s.name,s.outcome]),[['host-build','built'],['ampd','fail']]);
 });
 
 async function combinedFixture(t){

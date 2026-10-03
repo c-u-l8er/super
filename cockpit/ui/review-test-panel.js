@@ -1,12 +1,12 @@
 import {reviewTestCoverage} from './review-test-coverage.js';
 import {node} from './app-shell.js';
 import {runtimeWorld,heldProjection} from './runtime-bots.js';
-const profileLabelFor=value=>({'super-elixir-review@1':'Elixir: the whole ampd suite','super-rust-review@1':'Rust: host and cockpit suites','repository-document-review@1':'Repository document checks','repository-python-gate@1':'Repository gate checks'}[value]??'JavaScript behavior tests');
+import {PROFILE_LABELS,profileLabelFor,recordDescription} from './review-profile-labels.js';
 export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=false}){
   const panel=node('section',undefined,'attempt-checks');panel.id='attempt-tests-'+attempt.id;
   panel.append(node('h4','Local test runs'),node('p','Runs the captured source with every file in this review applied together. Ignored files and installed dependencies are excluded. Elixir builds super-host and runs the runtime’s whole test suite; it requires Elixir and Erlang installed with asdf and can take several minutes. Rust runs the host and cockpit suites; it requires rustup, cached Cargo dependencies and RRABBIT beside the repository, can take minutes, and runs offline. The runtime records the start and outcome; full output stays on this device. Tests do not accept the plan.','directory-note'));
   const controls=node('div',undefined,'connection-row'),start=node('button','Run JavaScript tests','subtle');start.type='button';start.id='attempt-run-'+attempt.id;
-  const profile=node('select');profile.id='attempt-test-profile-'+attempt.id;profile.setAttribute('aria-label','Test profile');for(const [value,label] of [['super-javascript-behavior@1','JavaScript behavior tests'],['super-elixir-review@1','Elixir: the whole ampd suite'],['super-rust-review@1','Rust: host and cockpit suites'],['repository-document-review@1','Repository document checks'],['repository-python-gate@1','Repository gate checks']]){const option=node('option',label);option.value=value;profile.append(option);}start.textContent='Run selected tests';
+  const profile=node('select');profile.id='attempt-test-profile-'+attempt.id;profile.setAttribute('aria-label','Test profile');for(const [value,label] of Object.entries(PROFILE_LABELS)){const option=node('option',label);option.value=value;profile.append(option);}start.textContent='Run selected tests';
   const comparison=node('label',undefined,'field'),compare=node('input');compare.type='checkbox';compare.checked=true;compare.setAttribute('aria-label','Capture baseline and benchmark comparison');comparison.append(compare,node('span','Also run the starting source and compare benchmarks when configured'));
   const profileLabel=node('label','Test profile','field');profileLabel.append(profile);
   const notice=node('p','','availability-note');notice.setAttribute('role','status');notice.hidden=true;new MutationObserver(()=>{notice.hidden=!notice.textContent;}).observe(notice,{childList:true});const history=node('div');history.id='attempt-test-history-'+attempt.id;
@@ -50,10 +50,11 @@ export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=fa
         if(interrupted)row.append(node('p','Super restarted before this run finished reporting. No passing result is recorded. Run tests again when ready.','availability-note'));
         if(run.message&&!interrupted)row.append(node('p',run.message,'availability-note'));
         if(result){
-          row.append(node('p',`${profileLabelFor(result.profile)} · Saved proposal only · ${result.profile==='super-rust-review@1'?'Host and cockpit suites':result.profile==='super-elixir-review@1'?'super-host build and the whole ampd suite':result.profile==='repository-document-review@1'?result.tests.length+' reviewed document'+(result.tests.length===1?'':'s'):result.profile==='repository-python-gate@1'?result.tests.length+' repository gate'+(result.tests.length===1?'':'s'):result.tests.length+' test '+(result.tests.length===1?'file':'files')} · ${result.finished_at??result.started_at}`,'directory-note'));
+          const described=recordDescription(result);
+          row.append(node('p',`${described.label} · Saved proposal only · ${described.detail} · ${result.finished_at??result.started_at}`,'directory-note'));
           if(result.reason)row.append(node('p','Run outcome: '+result.reason,'availability-note'));
           const output=node('details');output.dataset.runOutput=run.run_id;output.open=opened.has(run.run_id);
-          if(result.toolchain_sha256)output.append(node('p',(result.profile==='super-rust-review@1'?'Rust toolchain, cached dependencies and RRABBIT: ':'Elixir, Erlang and Rust toolchains: ')+result.toolchain_sha256,'directory-note'));
+          if(result.toolchain_sha256)output.append(node('p',(described.toolchain??'Toolchain: ')+result.toolchain_sha256,'directory-note'));
           output.append(node('summary','Test output and exact snapshot'),node('p','Snapshot: '+result.snapshot_sha256,'directory-note'),node('p','Reviewed result: '+result.result_sha256,'directory-note'),node('pre',result.output||'No test output was captured.','attempt-text'));
           if(result.result_paths)output.append(node('p','Applied files: '+result.result_paths.join(', '),'directory-note'));
           if(result.omitted_bytes)output.append(node('p',`${result.omitted_bytes} output bytes omitted.`,'availability-note'));row.append(output);
