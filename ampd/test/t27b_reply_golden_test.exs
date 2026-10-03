@@ -8,7 +8,8 @@ defmodule Ampd.T27bReplyGoldenTest do
   committed capture, `test/data/t27b-reply-goldens.json`.
 
   The commands are the existing request shapes a host sends, plus the malformed ones the loop answers, all within the
-  base's limits (T27b changes only commands over 8,192 bytes and replies over 65,536). Run-to-run values are replaced
+  base's limits (T27b changes only commands over 8,192 bytes and replies over 65,536). An empty command is left to B2,
+  whose law it is. Run-to-run values are replaced
   by placeholders IN THE RAW BYTES (`correlation_id`, `peer`, `opened_at`, `endpoint_ref`), so every other byte is
   compared as sent.
   """
@@ -58,8 +59,7 @@ defmodule Ampd.T27bReplyGoldenTest do
       {"unknown command", cmd(%{"command" => "t27b-unknown"}), 0},
       {"unknown command with rights", cmd(%{"command" => "t27b-unknown"}), 2},
       {"no schema", JSON.encode!(%{"command" => "list_channels"}), 0},
-      {"not JSON", "t27b: not json", 0},
-      {"empty, with a right", "", 1}
+      {"not JSON", "t27b: not json", 0}
     ]
   end
 
