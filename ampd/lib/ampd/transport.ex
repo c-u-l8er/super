@@ -581,6 +581,14 @@ defmodule Ampd.Transport do
     def stop(pid) when is_pid(pid), do: Process.exit(pid, :normal)
     def stop(_), do: :ok
 
+    # T27b F2 (R125: today's effective Linux limits, enforced by name). A
+    # command is read with OTP's default `recvmsg` buffer, 8,192 bytes; the
+    # host refuses to send a longer one (`frame-too-large`), and a longer one
+    # that arrives anyway is refused here, never run. A reply longer than the
+    # host's 65,536-byte read is never sent; a `reply-too-large` refusal is.
+    @command_max 8_192
+    @reply_max 65_536
+
     # **`cmsg_cloexec`, explicitly.** `recvmsg/1` is `recvmsg` with an empty
     # flag list, so a descriptor arriving over `SCM_RIGHTS` would land
     # inheritable — the mirror image of the `SOCK_CLOEXEC` defect the host
@@ -592,16 +600,72 @@ defmodule Ampd.Transport do
     # counterpart was — it is the same *rule*, applied where the runtime
     # controls it rather than relying on a property of the VM's spawn path
     # that nothing here asserts.
+    #
+    # **The host's close is an empty message with no rights (T27b F1).** On
+    # SEQPACKET, `recvmsg` on a socket whose peer has closed returns 0 bytes,
+    # and OTP hands that over as an empty message. Before this the loop
+    # answered it, ignored the failed send and read again: measured at about
+    # 340,000 answers a second, for ever (superlane/t27b/B1-BASE-MEASUREMENT.txt).
+    # The host never sends an empty command — every command is a JSON object —
+    # so an empty message WITHOUT rights is the peer's close, and the loop
+    # returns. An empty message WITH rights is a (bad) command: it is answered,
+    # and its descriptors are sunk as every refusal sinks them.
+    #
+    # **A command cut in transit is refused, never run (T27b F2).** The kernel
+    # marks a message longer than the read `:trunc` and drops its tail, and a
+    # prefix of a command can itself be a whole JSON object.
     defp loop(sock) do
       case :socket.recvmsg(sock, [:cmsg_cloexec]) do
         {:ok, msg} ->
-          reply = answer(iov(msg), rights(msg))
-          :socket.send(sock, JSON.encode!(reply))
-          loop(sock)
+          bytes = iov(msg)
+          fds = rights(msg)
+
+          cond do
+            bytes == "" and fds == [] ->
+              :ok
+
+            truncated?(msg) ->
+              Enum.each(fds, &close_fd/1)
+
+              refusal =
+                err("frame-too-large", %{
+                  "limit_bytes" => @command_max,
+                  "reason" => "the command arrived cut at #{@command_max} bytes; nothing was run"
+                })
+
+              :socket.send(sock, encode_reply(refusal))
+              loop(sock)
+
+            true ->
+              :socket.send(sock, encode_reply(answer(bytes, fds)))
+              loop(sock)
+          end
 
         {:error, _} ->
           :ok
       end
+    end
+
+    defp truncated?(%{flags: flags}) when is_list(flags), do: :trunc in flags
+    defp truncated?(_), do: false
+
+    @doc """
+    The bytes sent for `reply`: its JSON, or — when that is longer than the
+    host reads whole (#{@reply_max} bytes) — a `reply-too-large` refusal
+    instead, so the host is never handed a cut reply (T27b F2).
+    """
+    def encode_reply(reply) do
+      bytes = JSON.encode!(reply)
+
+      if byte_size(bytes) <= @reply_max,
+        do: bytes,
+        else:
+          JSON.encode!(
+            err("reply-too-large", %{
+              "limit_bytes" => @reply_max,
+              "reply_bytes" => byte_size(bytes)
+            })
+          )
     end
 
     defp iov(%{iov: parts}), do: IO.iodata_to_binary(parts)

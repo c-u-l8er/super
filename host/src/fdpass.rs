@@ -363,7 +363,18 @@ pub fn send_with_fd(sock: RawFd, bytes: &[u8], fd: RawFd) -> io::Result<()> {
 /// exactly where F.8.1's leak was still sitting after F.8.1 declared the
 /// leak bounded.
 pub fn send_with_fds(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
-    let mut buf = bytes.to_vec();
+    all_sent(send_with_fds_count(sock, bytes, fds)?, bytes.len())
+}
+
+/// [`send_with_fds`], reporting how many bytes `sendmsg` took.
+///
+/// T27b F3: on SEQPACKET a send is all or nothing, but on a `SOCK_STREAM`
+/// socket — the Carrier channel — a signal can cut one short, and until T27b
+/// `send_with_fds` returned `Ok` either way. [`send_with_fds`] now refuses a
+/// short send; a stream writer that can finish one uses this and sends the
+/// rest itself.
+pub fn send_with_fds_count(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<usize> {
+    let mut buf = bytes[..short_send_cap(bytes.len())].to_vec();
     let mut iov = iovec(&mut buf);
 
     // `CMSG_SPACE` for the buffer, `CMSG_LEN` for the header's own length;
@@ -391,7 +402,71 @@ pub fn send_with_fds(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<()>
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
+    Ok(n as usize)
+}
+
+/// `Ok` only if `sendmsg` took every byte (T27b F3).
+fn all_sent(n: usize, len: usize) -> io::Result<()> {
+    if n == len {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::WriteZero,
+            format!("short send: sendmsg took {n} of {len} bytes"),
+        ))
+    }
+}
+
+// T27b B6's seam: a test can make sends hand `sendmsg` at most this many bytes, which is a REAL short send. Absent from
+// every non-test build.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static SHORT_SEND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+#[cfg(test)]
+fn short_send_cap(len: usize) -> usize {
+    SHORT_SEND.with(|c| c.get().map_or(len, |cap| cap.min(len)))
+}
+
+#[cfg(not(test))]
+fn short_send_cap(len: usize) -> usize {
+    len
+}
+
+/// The longest command the runtime reads whole: OTP's default `recvmsg`
+/// buffer (T28 row 8). R125 keeps the limit; T27b enforces it by name.
+pub const BRIDGE_COMMAND_MAX: usize = 8_192;
+
+/// The longest reply the host reads whole: every bridge read is
+/// `recv_msg(bridge, 64 * 1024)`.
+pub const BRIDGE_REPLY_MAX: usize = 64 * 1024;
+
+fn bridge_command_fits(len: usize) -> io::Result<()> {
+    if len > BRIDGE_COMMAND_MAX {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("frame-too-large: a {len}-byte bridge command; the runtime reads {BRIDGE_COMMAND_MAX}"),
+        ));
+    }
     Ok(())
+}
+
+/// Send one bridge command that carries no descriptor (T27b F2). **With
+/// [`send_bridge_with_fds`], the only senders on the bridge**
+/// (`tests/t27b_bridge_sends.rs` holds every bridge send in `lib.rs` to
+/// them): a command longer than the runtime reads whole is refused here, by
+/// name, before anything is written, because the runtime would otherwise get
+/// a prefix of it.
+pub fn send_bridge_plain(sock: RawFd, bytes: &[u8]) -> io::Result<()> {
+    bridge_command_fits(bytes.len())?;
+    send_plain(sock, bytes)
+}
+
+/// [`send_bridge_plain`] for a command carrying `fds` in the same message.
+pub fn send_bridge_with_fds(sock: RawFd, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
+    bridge_command_fits(bytes.len())?;
+    send_with_fds(sock, bytes, fds)
 }
 
 /// A descriptor worth nothing, to be handed over and forgotten.
@@ -409,7 +484,12 @@ pub fn spare_fd() -> io::Result<RawFd> {
 
 /// Send `bytes` with no descriptor attached.
 pub fn send_plain(sock: RawFd, bytes: &[u8]) -> io::Result<()> {
-    let mut buf = bytes.to_vec();
+    all_sent(send_plain_count(sock, bytes)?, bytes.len())
+}
+
+/// [`send_plain`], reporting how many bytes `sendmsg` took (T27b F3).
+pub fn send_plain_count(sock: RawFd, bytes: &[u8]) -> io::Result<usize> {
+    let mut buf = bytes[..short_send_cap(bytes.len())].to_vec();
     let mut iov = iovec(&mut buf);
 
     let msg = msghdr(&mut iov, std::ptr::null_mut(), 0);
@@ -418,7 +498,7 @@ pub fn send_plain(sock: RawFd, bytes: &[u8]) -> io::Result<()> {
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
-    Ok(())
+    Ok(n as usize)
 }
 
 /// Receive one message. Returns its bytes.
@@ -434,6 +514,14 @@ pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
     let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC) };
     if n < 0 {
         return Err(io::Error::last_os_error());
+    }
+    // T27b F2: a message longer than `max` arrives cut, with MSG_TRUNC set.
+    // Until T27b the cut bytes were returned as though they were the reply.
+    if msg.msg_flags & libc::MSG_TRUNC != 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("reply-too-large: the message was longer than {max} bytes and arrived cut; refused, not read"),
+        ));
     }
     buf.truncate(n as usize);
     Ok(buf)
@@ -621,5 +709,85 @@ mod t27 {
         for fd in got.into_iter().chain([x, y, a, b]) {
             close_fd(fd);
         }
+    }
+}
+
+#[cfg(test)]
+mod t27b {
+    //! T27b's laws on the host's side of the bridge (`superlane/t27b/TASK.md`): B3 (the sender's 8,192-byte limit,
+    //! by name, nothing written), B5 (a cut reply is named, never read), B6 (a short `sendmsg` is never `Ok`) and B8 (a
+    //! normal bridge message arrives byte for byte, with exactly its rights).
+    use super::*;
+
+    /// Nothing is waiting on `fd` (a non-blocking read finds no message).
+    fn nothing_waiting(fd: RawFd) -> bool {
+        let mut b = [0u8; 16];
+        let n = unsafe { libc::recv(fd, b.as_mut_ptr().cast(), b.len(), libc::MSG_DONTWAIT) };
+        n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+    }
+
+    #[test]
+    fn b3_the_bridge_sender_takes_8192_bytes_and_refuses_8193_by_name_writing_nothing() {
+        let Pair(a, b) = pair_seqpacket().unwrap();
+        send_bridge_plain(a, &vec![b'x'; BRIDGE_COMMAND_MAX]).expect("8,192 bytes is a whole command");
+        assert_eq!(recv_msg(b, BRIDGE_REPLY_MAX).unwrap().len(), BRIDGE_COMMAND_MAX);
+        let e = send_bridge_plain(a, &vec![b'x'; BRIDGE_COMMAND_MAX + 1]).unwrap_err();
+        assert!(e.to_string().starts_with("frame-too-large"), "{e}");
+        let spare = spare_fd().unwrap();
+        let e = send_bridge_with_fds(a, &vec![b'x'; BRIDGE_COMMAND_MAX + 1], &[spare]).unwrap_err();
+        close_fd(spare);
+        assert!(e.to_string().starts_with("frame-too-large"), "{e}");
+        assert!(nothing_waiting(b), "a refused command reached the runtime");
+        close_fd(a);
+        close_fd(b);
+    }
+
+    #[test]
+    fn b5_a_reply_of_65536_bytes_arrives_whole_and_a_longer_one_is_named_never_read() {
+        let Pair(a, b) = pair_seqpacket().unwrap();
+        send_plain(a, &vec![b'y'; BRIDGE_REPLY_MAX]).unwrap();
+        assert_eq!(recv_msg(b, BRIDGE_REPLY_MAX).unwrap().len(), BRIDGE_REPLY_MAX);
+        send_plain(a, &vec![b'y'; BRIDGE_REPLY_MAX + 1]).unwrap();
+        let e = recv_msg(b, BRIDGE_REPLY_MAX).unwrap_err();
+        assert!(e.to_string().starts_with("reply-too-large"), "{e}");
+        close_fd(a);
+        close_fd(b);
+    }
+
+    #[test]
+    fn b6_a_short_sendmsg_is_never_ok() {
+        let Pair(a, b) = pair_seqpacket().unwrap();
+        let spare = spare_fd().unwrap();
+        SHORT_SEND.with(|c| c.set(Some(3)));
+        let with_fds = send_with_fds(a, b"hello", &[spare]);
+        let plain = send_plain(a, b"hello");
+        SHORT_SEND.with(|c| c.set(None));
+        close_fd(spare);
+        assert!(with_fds.is_err(), "a 3-of-5-byte sendmsg with rights returned Ok");
+        assert!(plain.is_err(), "a 3-of-5-byte sendmsg returned Ok");
+        close_fd(a);
+        close_fd(b);
+    }
+
+    #[test]
+    fn b8_a_normal_bridge_command_arrives_byte_for_byte_with_exactly_its_rights() {
+        let Pair(a, b) = pair_seqpacket().unwrap();
+        let cmd = br#"{"schema":"bridge-command@1","command":"list_channels"}"#;
+        send_bridge_plain(a, cmd).unwrap();
+        let (got, fds) = recv_msg_with_fds(b, BRIDGE_REPLY_MAX, 4).unwrap();
+        assert_eq!(&got[..], &cmd[..]);
+        assert!(fds.is_empty(), "a plain command carried rights");
+        let spare = spare_fd().unwrap();
+        let bind = br#"{"schema":"bridge-command@1","command":"bind_agent_channel","actor":"t27b"}"#;
+        send_bridge_with_fds(a, bind, &[spare]).unwrap();
+        close_fd(spare);
+        let (got, fds) = recv_msg_with_fds(b, BRIDGE_REPLY_MAX, 4).unwrap();
+        assert_eq!(&got[..], &bind[..]);
+        assert_eq!(fds.len(), 1, "a bind carries exactly its one descriptor");
+        for f in fds {
+            close_fd(f);
+        }
+        close_fd(a);
+        close_fd(b);
     }
 }

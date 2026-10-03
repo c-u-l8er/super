@@ -1169,10 +1169,20 @@ pub fn run(ampd_dir: &Path) -> i32 {
         // The channel is torn down *and* the descriptor is reclaimed. In
         // F.8.1 only the first half was true, and the check was named for
         // the half that was.
-        let listed = rt
-            .bridge_call(&json!({"schema":"bridge-command@1","command":"list_channels"}))
-            .map(|v| v["channels"].as_array().map(|a| a.len()).unwrap_or(0))
-            .unwrap_or(999);
+        //
+        // T27b R: ampd's channel `shutdown` closes the descriptor FIRST and
+        // detaches the registry entry after, so a correct teardown can be read
+        // between the two ("still lists N"). Poll until it lists at most one,
+        // bounded at 15 s like `settle_sockets`, and judge the last reading.
+        let listed = settle_listed(
+            || {
+                rt.bridge_call(&json!({"schema":"bridge-command@1","command":"list_channels"}))
+                    .map(|v| v["channels"].as_array().map(|a| a.len()).unwrap_or(0))
+                    .unwrap_or(999)
+            },
+            1,
+            Duration::from_secs(15),
+        );
 
         b.check(
             "a closed channel is torn down",
@@ -5507,4 +5517,36 @@ fn make_basis_fixture(target: &Path, sibling: &Path, commit: &mut String) -> boo
         return false;
     }
     std::fs::write(sibling.join("README"), b"not yours\n").is_ok()
+}
+
+/// Read `read` until it reports at most `limit`, or `within` has passed, and
+/// return the last reading either way (T27b R). One reading is not a
+/// teardown: see the `list_channels` check above.
+pub(crate) fn settle_listed(mut read: impl FnMut() -> usize, limit: usize, within: Duration) -> usize {
+    let until = std::time::Instant::now() + within;
+    loop {
+        let n = read();
+        if n <= limit || std::time::Instant::now() >= until {
+            return n;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[cfg(test)]
+mod t27b_settle {
+    //! T27b B7: the teardown check reads the registry until it settles, bounded, and still fails when a channel is
+    //! never removed.
+    use super::*;
+
+    #[test]
+    fn b7_a_late_detach_settles_and_a_channel_never_removed_still_fails() {
+        let mut seq = vec![3usize, 3, 2, 1].into_iter();
+        let n = settle_listed(|| seq.next().unwrap_or(1), 1, Duration::from_secs(5));
+        assert_eq!(n, 1, "a registry that detaches late must be read after it settles");
+        let started = std::time::Instant::now();
+        let n = settle_listed(|| 2, 1, Duration::from_millis(400));
+        assert_eq!(n, 2, "a channel never removed must still fail");
+        assert!(started.elapsed() >= Duration::from_millis(400), "it gave up before its bound");
+    }
 }

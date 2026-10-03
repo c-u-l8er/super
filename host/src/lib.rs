@@ -881,7 +881,25 @@ pub(crate) fn write_frame_with_fd(fd: RawFd, v: &Value, pass: Option<RawFd>) -> 
     let mut msg = Vec::with_capacity(4 + body.len());
     msg.extend_from_slice(&(body.len() as u32).to_be_bytes());
     msg.extend_from_slice(&body);
-    fdpass::send_with_fd(fd, &msg, p)
+
+    // T27b F3: the Carrier channel is SOCK_STREAM, where a signal can cut a
+    // send short. The rights travel with the first byte only, as before; the
+    // rest of a short send goes plain until the frame is whole or an error
+    // stops it. Until T27b a short send here returned Ok and the peer waited
+    // for bytes that never came.
+    let mut sent = fdpass::send_with_fds_count(fd, &msg, &[p])?;
+    if sent == 0 {
+        return Err(io::Error::new(io::ErrorKind::WriteZero, "the Carrier stream took no bytes"));
+    }
+    while sent < msg.len() {
+        match fdpass::send_plain_count(fd, &msg[sent..]) {
+            Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "the Carrier stream took no more bytes")),
+            Ok(n) => sent += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
 }
 
 // ========================================================= demultiplexer
@@ -1931,7 +1949,7 @@ impl Runtime {
     pub fn bridge_call(&self, v: &Value) -> Result<Value, String> {
         let _b = self.bridge_lock.lock().unwrap();
         let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
-        fdpass::send_plain(self.bridge, &bytes).map_err(|e| format!("bridge send: {e}"))?;
+        fdpass::send_bridge_plain(self.bridge, &bytes).map_err(|e| format!("bridge send: {e}"))?;
         let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
         serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
     }
@@ -1950,7 +1968,7 @@ impl Runtime {
             spares.push(fdpass::spare_fd().map_err(|e| format!("spare fd: {e}"))?);
         }
 
-        let sent = fdpass::send_with_fds(self.bridge, raw, &spares);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, raw, &spares);
         for fd in &spares {
             fdpass::close_fd(*fd);
         }
@@ -1977,7 +1995,7 @@ impl Runtime {
 
         let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let sent = fdpass::send_with_fds(self.bridge, &bytes, &all);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &all);
         for fd in &all {
             fdpass::close_fd(*fd);
         }
@@ -2010,7 +2028,7 @@ impl Runtime {
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         // Read before the send, because `theirs` is closed straight after.
         let given = fd_inode(theirs);
-        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
@@ -2084,7 +2102,7 @@ impl Runtime {
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         let given = fd_inode(theirs);
-        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
@@ -2135,7 +2153,7 @@ impl Runtime {
         });
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
@@ -2234,7 +2252,7 @@ impl Runtime {
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         let given = fd_inode(theirs);
-        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
@@ -2269,7 +2287,7 @@ impl Runtime {
         let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         let given = fd_inode(theirs);
-        let sent = fdpass::send_with_fd(self.bridge, &bytes, theirs);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
         fdpass::close_fd(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
@@ -2782,3 +2800,77 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
 
 #[cfg(target_os = "linux")]
 pub mod verify;
+
+#[cfg(test)]
+mod t27b_stream {
+    //! T27b B6 and B8 on the Carrier stream (`write_frame_with_fd`, SOCK_STREAM): a short send is finished, the peer
+    //! reads the whole frame once with its one descriptor, and a normal frame is the length prefix and the body.
+    use super::*;
+    use serde_json::{json, Value};
+    use std::io;
+    use std::os::unix::io::RawFd;
+
+    fn read_all(fd: RawFd, want: usize) -> (Vec<u8>, usize) {
+        let mut got = Vec::new();
+        let mut rights = 0;
+        while got.len() < want {
+            let (b, fds) = fdpass::recv_msg_with_fds(fd, want - got.len(), 4).unwrap();
+            if b.is_empty() {
+                break;
+            }
+            rights += fds.len();
+            for f in fds {
+                fdpass::close_fd(f);
+            }
+            got.extend_from_slice(&b);
+        }
+        (got, rights)
+    }
+
+    fn framed(v: &Value) -> Vec<u8> {
+        let body = serde_json::to_vec(v).unwrap();
+        let mut m = (body.len() as u32).to_be_bytes().to_vec();
+        m.extend_from_slice(&body);
+        m
+    }
+
+    fn nothing_waiting(fd: RawFd) -> bool {
+        let mut b = [0u8; 16];
+        let n = unsafe { libc::recv(fd, b.as_mut_ptr().cast(), b.len(), libc::MSG_DONTWAIT) };
+        n < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+    }
+
+    #[test]
+    fn b6_a_short_send_on_the_stream_is_finished_and_the_peer_reads_the_frame_once() {
+        let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
+        let v = json!({"schema": "t27b-b6", "pad": "z".repeat(300)});
+        let spare = fdpass::spare_fd().unwrap();
+        fdpass::SHORT_SEND.with(|c| c.set(Some(7)));
+        let r = write_frame_with_fd(a, &v, Some(spare));
+        fdpass::SHORT_SEND.with(|c| c.set(None));
+        fdpass::close_fd(spare);
+        r.expect("a short send on the stream is finished, not reported");
+        let want = framed(&v);
+        let (got, rights) = read_all(b, want.len());
+        assert_eq!(got, want, "the peer did not read the whole frame");
+        assert_eq!(rights, 1, "the descriptor travels once, with the first byte");
+        assert!(nothing_waiting(b), "bytes beyond the frame");
+        fdpass::close_fd(a);
+        fdpass::close_fd(b);
+    }
+
+    #[test]
+    fn b8_a_normal_carrier_frame_is_the_length_prefix_and_the_body() {
+        let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
+        let v = json!({"schema": "t27b-b8", "attach": true});
+        let spare = fdpass::spare_fd().unwrap();
+        write_frame_with_fd(a, &v, Some(spare)).unwrap();
+        fdpass::close_fd(spare);
+        let want = framed(&v);
+        let (got, rights) = read_all(b, want.len());
+        assert_eq!(got, want);
+        assert_eq!(rights, 1);
+        fdpass::close_fd(a);
+        fdpass::close_fd(b);
+    }
+}
