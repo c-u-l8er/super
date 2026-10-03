@@ -3174,7 +3174,12 @@ mod t27b_runtime {
         assert_eq!(set, 0, "SO_RCVTIMEO on the fake bridge");
         let big = "a".repeat(fdpass::BRIDGE_COMMAND_MAX);
         let before = open_fds();
-        for _ in 0..100 {
+        for i in 0..100 {
+            if i % 10 == 9 {
+                // Checked as it goes (round 3e): a leaking build fails here, before it exhausts the process for the tests after it.
+                let now = open_fds();
+                assert!(now <= before + 20, "{} refused binds left {} descriptors open", 3 * i, now.saturating_sub(before));
+            }
             for e in [
                 rt.bind_channel("bind_agent_channel", Some(&big)).err(),
                 rt.agent_fd(&big).err(),
@@ -3196,7 +3201,12 @@ mod t27b_runtime {
         let (rt, peer) = fake_runtime();
         let t = answering(peer, b"not json");
         let before = open_fds();
-        for _ in 0..50 {
+        for i in 0..50 {
+            if i % 5 == 4 {
+                // Checked as it goes (round 3e): a leaking build fails here, before it exhausts the process for the tests after it.
+                let now = open_fds();
+                assert!(now <= before + 20, "{} undecodable replies left {} descriptors open", 3 * i, now.saturating_sub(before));
+            }
             assert!(rt.agent_fd("t27b").is_err());
             assert!(rt.effect_channel().is_err());
             assert!(rt.terminal_endpoint().is_err());
@@ -3542,6 +3552,11 @@ mod t27b_runtime {
         let dirs = own_runtime_dirs();
         let before = open_fds();
         for i in 0..50 {
+            if i % 5 == 4 {
+                // Checked as it goes (round 3e): a leaking build fails here, before it exhausts the process for the tests after it.
+                let now = open_fds();
+                assert!(now <= before + 20, "{i} failed starts left {} descriptors open", now.saturating_sub(before));
+            }
             // Even rounds: the spawn fails (no such ampd directory). Odd rounds: the bridge pair cannot be made.
             if i % 2 == 1 {
                 fdpass::FAIL_PAIRS_AFTER.with(|c| c.set(Some(0)));
@@ -3569,7 +3584,12 @@ mod t27b_runtime {
         let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         let before = open_fds();
-        for _ in 0..50 {
+        for i in 0..50 {
+            if i % 5 == 4 {
+                // Checked as it goes (round 3e): a leaking build fails here, before it exhausts the process for the tests after it.
+                let now = open_fds();
+                assert!(now <= before + 20, "{i} failed spare sets left {} descriptors open", now.saturating_sub(before));
+            }
             fdpass::FAIL_PAIRS_AFTER.with(|c| c.set(Some(3)));
             let r = rt.bridge_call_with_rights(br#"{"schema":"bridge-command@1","command":"t27b"}"#, 5);
             fdpass::FAIL_PAIRS_AFTER.with(|c| c.set(None));
