@@ -100,6 +100,10 @@ const checkerUrl=new URL('./document-review-check.mjs',import.meta.url);
 const gates=[
   {path:'tools/succession_laws_gate.py',args:['--check'],scope:['tools/','laws/','cd-core/','receipts/SUCCESSION-LAWS.md']},
   {path:'compiled/laws_gate.py',args:['--check'],scope:['compiled/','forge/','runtime/python/']},
+  // R130 (2)(iii), T34: Edge R0.9's evidence gate, written by Super's bot from computedriven's brief. Its scope is
+  // what the brief reads: the gate and its three static gates, the pinned reference, the tracked battery copy, the
+  // frozen crates, R0.9-OPEN, the lab scripts and docs.
+  {path:'tools/r09_evidence_gate.py',args:['--check'],scope:['tools/','lab/r09close/','lab/scripts/','receipts/r09-evidence/','receipts/R0.9-OPEN.md','cd-core/','cd-wire/','cd-node/','cd-micro/','cd-connect/','cd-rendezvous/','docs/']},
 ];
 export const gatePaths=()=>gates.map(g=>g.path);
 const inScope=(path,scope)=>scope.some(s=>s.endsWith('/')?path.startsWith(s):path===s);
