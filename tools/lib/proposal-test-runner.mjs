@@ -4,7 +4,7 @@ import {hostname,arch,platform,cpus} from 'node:os';
 import {spawn,execFileSync} from 'node:child_process';
 import {constants as F,statSync,accessSync} from 'node:fs';
 import {StringDecoder} from 'node:string_decoder';
-import {mkdir,mkdtemp,readFile,writeFile,rename,rm,realpath,open,lstat,cp,readdir,readlink} from 'node:fs/promises';
+import {mkdir,mkdtemp,readFile,writeFile,rename,rm,realpath,open,lstat,cp,readdir,readlink,chmod} from 'node:fs/promises';
 import {resolve,dirname,join,relative,sep} from 'node:path';
 
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -88,28 +88,29 @@ const SIGNAL=/^(?:# gates? |# tests \d|# fail \d)/,maxSignals=4096,maxLine=4096;
 const wholeHead=b=>{let e=b.length;for(let i=b.length-1,n=0;i>=0&&n<4;i--,n++){const c=b[i];if((c&0xc0)===0x80)continue;const need=c>=0xf0?4:c>=0xe0?3:c>=0xc0?2:1;e=i+need<=b.length?b.length:i;break;}return b.subarray(0,e);};
 const wholeTail=b=>{let s=0;while(s<b.length&&s<4&&(b[s]&0xc0)===0x80)s++;return b.subarray(s);};
 export function transcriptKeeper(limit=maxOutput){
-  const half=Math.floor(limit/2),head=[],tail=[],signals=[],scanners=new Map();
-  let headBytes=0,tailBytes=0,total=0,overflowed=false;
-  const line=l=>{l=l.replace(/\r$/,'');if(!SIGNAL.test(l))return;if(signals.length<maxSignals)signals.push(l.slice(0,maxLine));else overflowed=true;};
-  const scanner=stream=>{
-    if(!scanners.has(stream)){const decoder=new StringDecoder('utf8');let carry='',discarding=false;
-      const take=text=>{const parts=(carry+text).split('\n');carry=parts.pop();for(const l of parts){if(discarding){discarding=false;continue;}line(l);}if(carry.length>maxLine){carry='';discarding=true;}};
-      scanners.set(stream,{take,end(){take(decoder.end());if(!discarding&&carry)line(carry);carry='';},write:b=>take(decoder.write(b))});}
-    return scanners.get(stream);
+  const half=Math.floor(limit/2),head=[],tail=[],signals=[],streams=new Map();
+  let headBytes=0,tailBytes=0,total=0,headClosed=false,overflowed=false;
+  const line=l=>{l=l.replace(/\r$/,'');if(l.length>maxLine||!SIGNAL.test(l))return;if(signals.length<maxSignals)signals.push(l);else overflowed=true;};
+  // What is kept is decoded per stream first, so every kept piece is whole characters of one stream: no character is
+  // split between stdout and stderr, nor at a cut, and the omitted count is exactly what was not kept.
+  const keep=text=>{
+    if(!text)return;const b=Buffer.from(text,'utf8');total+=b.length;let rest=b;
+    if(!headClosed){const piece=wholeHead(b.subarray(0,Math.min(half-headBytes,b.length)));if(piece.length){head.push(piece);headBytes+=piece.length;}rest=b.subarray(piece.length);if(rest.length)headClosed=true;}
+    if(rest.length){tail.push(rest);tailBytes+=rest.length;while(tail.length>1&&tailBytes-tail[0].length>=half){tailBytes-=tail[0].length;tail.shift();}}
+  };
+  const stream=name=>{
+    if(!streams.has(name)){const decoder=new StringDecoder('utf8');let carry='',discarding=false;
+      const scan=text=>{const parts=(carry+text).split('\n');carry=parts.pop();for(const l of parts){if(discarding){discarding=false;continue;}line(l);}if(carry.length>maxLine){carry='';discarding=true;}};
+      streams.set(name,{take(b){const text=decoder.write(b);keep(text);scan(text);},end(){const text=decoder.end();keep(text);scan(text);if(!discarding&&carry)line(carry);carry='';}});}
+    return streams.get(name);
   };
   return {
-    push(b,stream='stdout'){
-      total+=b.length;const toHead=Math.max(0,Math.min(b.length,half-headBytes));
-      if(toHead){head.push(b.subarray(0,toHead));headBytes+=toHead;}
-      if(toHead<b.length){const rest=b.subarray(toHead);tail.push(rest);tailBytes+=rest.length;while(tail.length&&tailBytes-tail[0].length>=half){tailBytes-=tail[0].length;tail.shift();}}
-      scanner(stream).write(b);
-    },
+    push(b,name='stdout'){stream(name).take(b);},
     finish(){
-      for(const s of scanners.values())s.end();
-      let kept=Buffer.concat(tail);if(kept.length>half)kept=kept.subarray(kept.length-half);
-      const omitted=total-headBytes-kept.length;
-      const output=omitted?wholeHead(Buffer.concat(head)).toString('utf8')+`\n[… ${omitted} bytes omitted …]\n`+wholeTail(kept).toString('utf8'):Buffer.concat([...head,kept]).toString('utf8');
-      return {output,omitted_bytes:omitted,signals,signals_overflowed:overflowed};
+      for(const s of streams.values())s.end();
+      const keptHead=Buffer.concat(head);let keptTail=Buffer.concat(tail);if(keptTail.length>half)keptTail=wholeTail(keptTail.subarray(keptTail.length-half));
+      const omitted=total-keptHead.length-keptTail.length;
+      return {output:keptHead.toString('utf8')+(omitted?`\n[… ${omitted} bytes omitted …]\n`:'')+keptTail.toString('utf8'),omitted_bytes:omitted,signals,signals_overflowed:overflowed};
     }
   };
 }
@@ -191,6 +192,18 @@ export function compiledStageCommand(profile,named,{toolBinds,path,sibling=null,
   return ['--symlink','usr/bin','/bin',...toolBinds,...(stage.sibling?sibling.binds:[]),...(stage.exports?['--bind',out,'/out']:[]),...(stage.needs?['--ro-bind',built,'/built']:[]),
     '--setenv','PATH',path,...Object.entries(sandboxEnv[profile]).flatMap(([k,v])=>['--setenv',k,v]),'--','/bin/sh','-c',stageScript(profile,stage)];
 }
+// Round 2: what a stage hands on is a COPY the runner makes of the one validated file, never the build-controlled
+// directory it was written to; the copy is read-only.
+export async function handOff(out,to,name){
+  const from=join(out,name),st=await lstat(from);
+  assert(st.isFile()&&st.size>0&&st.size<=256*1024*1024,'The handed-on '+name+' must be one bounded regular file.');
+  const bytes=await readFile(from);assert(bytes.length===st.size,'The handed-on file changed while it was read.');
+  await mkdir(to,{mode:0o700});await writeFile(join(to,name),bytes,{flag:'wx',mode:0o555});
+  return {dir:to,sha256:hash(bytes),bytes:bytes.length};
+}
+// Removing what a build wrote must not fail a run that already recorded its outcome, whatever permissions it left.
+async function unlockTree(path){const st=await lstat(path);if(st.isSymbolicLink()||!st.isDirectory())return;await chmod(path,0o700);for(const name of await readdir(path))await unlockTree(join(path,name));}
+async function removeTree(path){try{await rm(path,{recursive:true,force:true});}catch{try{await unlockTree(path);await rm(path,{recursive:true,force:true});}catch{}}}
 // A stage's outcome, from what the runner itself observed.
 export function stageOutcome(stage,{code,signal,timedOut,launchError}){
   if(timedOut||launchError||signal||!Number.isInteger(code))return 'incomplete';
@@ -376,12 +389,13 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
       for(const stage of stages[profile]){
         if(stage.needs&&results.find(r=>r.name===stage.needs)?.outcome!=='built'){results.push({name:stage.name,outcome:'not-run'});continue;}
         let out=null;if(stage.exports){out=join(run,label+'-'+stage.name);await mkdir(out,{mode:0o700});}
+        // No stage starts after the run's deadline.
+        const left=deadline-Date.now();if(left<=0){results.push({name:stage.name,outcome:'incomplete',timed_out:true});continue;}
         const command=[...common(snap),...compiledStageCommand(profile,stage,{toolBinds,path:toolPath,sibling,out,built})];
-        const r=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:'cancelled',output:'',omitted_bytes:0}:await execute(command,Math.max(100,deadline-Date.now()),signal,Math.floor(maxOutput/stages[profile].length));
-        let outcome=stageOutcome(stage,r);
-        // What a stage hands on must be one bounded regular file.
-        if(stage.exports&&outcome==='built'){try{const st=await lstat(join(out,stage.exports));if(st.isFile()&&st.size>0&&st.size<=256*1024*1024)built=out;else outcome='incomplete';}catch{outcome='incomplete';}}
-        results.push({name:stage.name,outcome,exit_code:r.code,signal:r.signal,timed_out:r.timedOut,launch_error:r.launchError,output:r.output,omitted_bytes:r.omitted_bytes});
+        const r=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:'cancelled',output:'',omitted_bytes:0}:await execute(command,left,signal,Math.floor(maxOutput/stages[profile].length));
+        let outcome=stageOutcome(stage,r),handed=null;
+        if(stage.exports&&outcome==='built'){try{handed=await handOff(out,join(run,label+'-'+stage.name+'-handoff'),stage.exports);built=handed.dir;}catch{outcome='incomplete';}}
+        results.push({name:stage.name,outcome,exit_code:r.code,signal:r.signal,timed_out:r.timedOut,launch_error:r.launchError,output:r.output,omitted_bytes:r.omitted_bytes,...(handed?{handed_on:{name:stage.exports,sha256:handed.sha256,bytes:handed.bytes}}:{})});
       }
       const judged=compiledVerdict(results.map(r=>r.outcome)),failing=results.find(r=>Number.isInteger(r.exit_code)&&r.exit_code!==0);
       return {...judged,stages:results.map(({output,...rest})=>rest),code:failing?failing.exit_code:results.every(r=>r.exit_code===0)?0:null,
@@ -429,7 +443,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     if(signal?.aborted){record.state='failed';record.reason='cancelled';delete record.verdict;}
     await atomic(join(run,'outcome.json'),record);return {directory:run,record};
   }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await atomic(join(run,'outcome.json'),record);throw e;}
-  finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});await rm(join(run,'sibling'),{recursive:true,force:true});for(const label of ['candidate','baseline'])for(const s of stages[profile]??[])if(s.exports)await rm(join(run,label+'-'+s.name),{recursive:true,force:true});}
+  finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});await rm(join(run,'sibling'),{recursive:true,force:true});for(const label of ['candidate','baseline'])for(const s of stages[profile]??[])if(s.exports){await removeTree(join(run,label+'-'+s.name));await removeTree(join(run,label+'-'+s.name+'-handoff'));}}
 }
 
 // Read-only acceptance preflight. It executes no repository code and does not

@@ -162,6 +162,17 @@ test('the Elixir host build cannot change the ampd suite it hands its binary to 
  assert.equal(r.record.state,'completed',r.record.output);assert.equal(r.record.verdict,'fail');assert.deepEqual(r.record.stages.map(s=>[s.name,s.outcome]),[['host-build','built'],['ampd','fail']]);
 });
 
+test('only super-host passes from the Elixir host build to the ampd suite, whatever else the build writes (Codex review 2)',async t=>{
+ const f=await fixture(t);await mkdir(join(f.repository,'ampd/test'),{recursive:true});await hostFixture(f.repository);
+ await writeFile(join(f.repository,'host/build.rs'),'fn main() {let _ = std::fs::write("/out/extra.txt", "smuggled"); let _ = std::fs::create_dir_all("/out/sub");}\n');
+ await writeFile(join(f.repository,'ampd/mix.exs'),'defmodule Fixture.MixProject do\n use Mix.Project\n def project, do: [app: :fixture, version: "0.1.0", deps: []]\nend\n');
+ await writeFile(join(f.repository,'ampd/test/test_helper.exs'),'ExUnit.start()');
+ await writeFile(join(f.repository,'ampd/test/development_task_test.exs'),'defmodule FixtureTaskTest do\n use ExUnit.Case\n test "only the binary was handed on" do\n  assert File.ls!("/built") == ["super-host"]\n  assert File.regular?("../host/target/release/super-host")\n end\nend\n');
+ const r=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:900000});
+ assert.equal(r.record.verdict,'pass',r.record.output);assert.deepEqual(r.record.stages.map(s=>[s.name,s.outcome]),[['host-build','built'],['ampd','pass']]);
+ assert.match(r.record.stages[0].handed_on.sha256,/^[a-f0-9]{64}$/);
+});
+
 async function combinedFixture(t){
  const oldTest="import test from 'node:test';import assert from 'node:assert/strict';import {value} from '../value.mjs';test('old contract',()=>assert.equal(value,1));\n";
  const newTest=oldTest.replace('old contract','new contract').replace('value,1','value,2');

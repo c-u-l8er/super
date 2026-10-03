@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
-import {mkdtemp,mkdir,writeFile,rm,chmod} from 'node:fs/promises';
+import {mkdtemp,mkdir,writeFile,readFile,readdir,lstat,symlink,rm,chmod} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {execFileSync} from 'node:child_process';
-import {profilePlan,stageScript,compiledStageCommand,stageOutcome,compiledVerdict,transcriptComplete,transcriptKeeper,profileCeiling,findAsdf,pinSibling,compiledToolchainSha256,runProposalTests} from './lib/proposal-test-runner.mjs';
+import {profilePlan,stageScript,compiledStageCommand,stageOutcome,compiledVerdict,transcriptComplete,transcriptKeeper,profileCeiling,findAsdf,pinSibling,compiledToolchainSha256,handOff,runProposalTests} from './lib/proposal-test-runner.mjs';
 import {recordDescription} from '../cockpit/ui/review-profile-labels.js';
 
 // T36 (A-13): Super's two compiled review profiles run the suites they are named for, each stage in a sandbox of its
@@ -94,6 +94,14 @@ test('L6 · a transcript keeps its start and end, joins no lines across streams,
   assert.deepEqual(streams.finish().signals,['# fail 0'],'stdout and stderr fragments never join');
   const long=transcriptKeeper();long.push(Buffer.from('y'.repeat(5000)));long.push(Buffer.from('# gates complete\n'));
   assert.deepEqual(long.finish().signals,[],'no part of an overlong line poses as a line');
+  const complete=transcriptKeeper();complete.push(Buffer.from('# tests 1'+' '.repeat(5000)+'\n'));
+  assert.deepEqual(complete.finish().signals,[],'an overlong line that arrives whole is not a signal either');
+  const split=transcriptKeeper();split.push(Buffer.from([0xe2]),'stdout');split.push(Buffer.from('X'),'stderr');split.push(Buffer.from([0x82,0xac]),'stdout');
+  const joined=split.finish();assert.equal(joined.output,'X€','a character is never split between the streams');assert.equal(joined.omitted_bytes,0);
+  const cut=transcriptKeeper(16);cut.push(Buffer.from('a'.repeat(8)));cut.push(Buffer.from('€'.repeat(10)));
+  const trimmed=cut.finish(),[h,t]=trimmed.output.split(/\n\[… \d+ bytes omitted …\]\n/);
+  assert.equal(h,'aaaaaaaa');assert.equal(t,'€€','a cut never starts inside a character');
+  assert.equal(trimmed.omitted_bytes,38-Buffer.byteLength(h)-Buffer.byteLength(t),'the omitted count is exactly what was not kept');
   const flood=transcriptKeeper();flood.push(Buffer.from('# tests 1\n# fail 0\n'));for(let i=0;i<5000;i++)flood.push(Buffer.from('# gate x ok\n'));flood.push(Buffer.from('# tests 3\n# fail 3\n'));
   const flooded=flood.finish();assert.equal(flooded.signals_overflowed,true);assert.equal(transcriptComplete('super-javascript-behavior@1',flooded.signals,flooded.signals_overflowed),false);
 });
@@ -133,7 +141,7 @@ test('L9 · asdf is found from the cockpit\'s own environment, in a closed order
   assert.equal(findAsdf({env:{PATH:join(work,'path'),HOME:join(work,'home')}}),join(work,'home/.asdf/bin/asdf'),'a file that is not executable is passed over');
 });
 
-test('L10 · each stage runs from a fresh copy, and only super-host\'s binary passes on, read-only',()=>{
+test('L10 · each stage runs from a fresh copy, and only super-host\'s binary passes on, as a read-only copy the runner made',async t=>{
   for(const profile of [RUST,ELIXIR])for(const s of profilePlan(profile).stages){
     assert.match(stageScript(profile,s),/cp -a \/snapshot \/tmp\/source/,s.name+' copies the snapshot afresh');
     const writable=binds(compiledStageCommand(profile,s,ctx)).filter(b=>b[0]==='--bind').map(b=>b[2]);
@@ -142,4 +150,14 @@ test('L10 · each stage runs from a fresh copy, and only super-host\'s binary pa
   const ampd=binds(compiledStageCommand(ELIXIR,stage(ELIXIR,'ampd'),ctx));
   assert.deepEqual(ampd.filter(b=>b[2]==='/built'),[['--ro-bind',ctx.built,'/built']]);
   assert.throws(()=>compiledStageCommand(ELIXIR,stage(ELIXIR,'ampd'),{...ctx,built:null}),/what the stage before it built/);
+  const work=await mkdtemp(join(tmpdir(),'t36-handoff-'));t.after(()=>rm(work,{recursive:true,force:true}));
+  const out=join(work,'out');await mkdir(join(out,'sub'),{recursive:true});
+  await writeFile(join(out,'super-host'),'the binary');await writeFile(join(out,'extra.txt'),'smuggled');await writeFile(join(out,'sub/more'),'smuggled');
+  const handed=await handOff(out,join(work,'handoff'),'super-host');
+  assert.deepEqual(await readdir(handed.dir),['super-host'],'nothing else the build wrote passes on');
+  assert.equal(await readFile(join(handed.dir,'super-host'),'utf8'),'the binary');assert.equal((await lstat(join(handed.dir,'super-host'))).mode&0o777,0o555);
+  const linked=join(work,'linked');await mkdir(linked);await symlink(join(out,'extra.txt'),join(linked,'super-host'));
+  await assert.rejects(handOff(linked,join(work,'h2'),'super-host'),/one bounded regular file/);
+  const empty=join(work,'empty');await mkdir(empty);await writeFile(join(empty,'super-host'),'');
+  await assert.rejects(handOff(empty,join(work,'h3'),'super-host'),/one bounded regular file/);
 });
