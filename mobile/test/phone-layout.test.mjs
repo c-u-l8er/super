@@ -84,6 +84,12 @@ test('T31 L10 · ← Back and the badge stack in a column, and the criteria keep
   assert.equal(computed('.criteria','white-space'),'pre-wrap');
 });
 
+/* T31 L14 (N4, found in the Simulator): a quick double tap on Connect zoomed the page. */
+test('T31 L14 · buttons, links and the other controls take a double tap as two taps (touch-action: manipulation)',()=>{
+  for(const control of ['button','a','input','select','textarea','summary','label'])
+    assert.equal(computed(control,'touch-action'),'manipulation',control);
+});
+
 test('T31 harness · the phone loads exactly what the gateway serves',async t=>{
   const phone=await openPhone(t);
   const imports=['app.js','conversations.js'].flatMap(f=>[...readFileSync(served(f),'utf8').matchAll(/from\s*'(\/[\w.-]+\.js)'/g)].map(m=>m[1]));

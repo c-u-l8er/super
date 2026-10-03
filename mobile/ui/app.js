@@ -9,7 +9,7 @@ let current=null,view='attention',selected=null,busy=false,paired=false,lastSucc
  * plan to its list and a reload or pull-to-refresh comes back to the same place
  * (F3). `shown` is the place last drawn: a redraw of the same place keeps the
  * scroll, a new place starts at the top or where history left it (F2). */
-let show='open',botFilter=null,shown=null,restore=null,asking=false;
+let show='open',botFilter=null,shown=null,restore=null,asking=false,askRoom=0;
 const VIEWS=['attention','tasks','chat','bots','stack'],SHOWS=['open','done','all'];
 const place=()=>({view,plan:selected,show,bot:botFilter});
 const placeHash=s=>{const q=[s.show!=='open'?'show='+s.show:'',s.bot?'bot='+s.bot:''].filter(Boolean).join('&');return '#/'+s.view+(s.plan?'/'+s.plan:'')+(q?'?'+q:'');};
@@ -111,11 +111,21 @@ function draw(){
     const card=node('section',undefined,'card');card.append(node('h2','Host inventory'));const dl=node('dl');for(const [name,label]of [['workspaces','Workspaces'],['goals','Goals'],['lanes','Lanes'],['workers','Worker records']])dl.append(node('dt',label),node('dd',String(Object.keys(p[name]??{}).length)));card.append(dl,node('p','Worker records do not certify process liveness.','muted'));content.append(card);
     content.append(node('p','Closing this page does not stop the host. This alpha needs desktop Super to remain open.','muted'));
     // F9: one tap asks; only Disconnect ends the session. The question outlives the 2 s redraw.
-    // N3: it opens at the foot of the page, so it is brought into view once, as it opens (never on a redraw);
-    // style.css's scroll margins keep its buttons clear of the tab bar and the status bar.
-    if(!asking)content.append(button('Disconnect this device',()=>{asking=true;render();content.querySelector('.confirm')?.scrollIntoView({block:'nearest'});},'danger'));
-    else{const ask=node('section',undefined,'card confirm');ask.append(node('h2','Disconnect this phone?'),node('p','To connect again you will need a new pairing code from desktop Super.','muted'),button('Disconnect',disconnect,'danger'),button('Cancel',()=>{asking=false;render();}));content.append(ask);}
+    // N3: it opens at the foot of the page, so reveal() brings it clear of the tab bar as it opens (never on a redraw).
+    if(!asking)content.append(button('Disconnect this device',()=>{asking=true;askRoom=0;render();reveal();requestAnimationFrame(reveal);},'danger'));
+    else{const ask=node('section',undefined,'card confirm');if(askRoom)ask.style.marginBottom=askRoom+'px';ask.append(node('h2','Disconnect this phone?'),node('p','To connect again you will need a new pairing code from desktop Super.','muted'),button('Disconnect',disconnect,'danger'),button('Cancel',()=>{asking=false;render();}));content.append(ask);}
   }
+}
+/* T31 N3 (second fix): the question must end above the tab bar, and the bar is MEASURED as drawn. On an iPhone, Safari's
+ * own bottom chrome can push it up (about 130 pt, measured in the Simulator), so no constant margin holds. If the page
+ * is too short to scroll that far, the card is given the room it lacks (askRoom), and that room is kept across redraws so
+ * the browser does not clamp the page back. Run as the question opens and once more on the next frame; never on a redraw. */
+function reveal(){
+  const card=content.querySelector('.confirm'),nav=document.querySelector('nav');if(!card||!nav)return;
+  const over=card.getBoundingClientRect().bottom-(nav.getBoundingClientRect().top-12);if(over<=0)return;
+  const spare=document.documentElement.scrollHeight-window.innerHeight-window.scrollY;
+  if(spare<over){askRoom+=Math.ceil(over-spare);card.style.marginBottom=askRoom+'px';}
+  window.scrollBy(0,over);
 }
 async function disconnect(){serial++;try{await api('logout',{});asking=false;paired=false;current=null;selected=null;lastWorld=null;content.replaceChildren();$('#app').hidden=true;$('#pair').hidden=false;notice.textContent='Device disconnected. In desktop Super, open Mobile device and choose New pairing code to connect again.';}catch{asking=false;withdraw('Disconnect not confirmed');notice.textContent='Could not confirm disconnection. Restore the connection and try again, or restart the desktop observer to end all device sessions.';}}
 async function refresh(){if(busy)return;busy=true;const request=serial;try{const next=await api('snapshot');if(request!==serial||document.hidden)return;paired=true;$('#pair').hidden=true;$('#app').hidden=false;const identity=w=>JSON.stringify([w?.world_incarnation,w?.world_generation,w?.projection_epoch]);const nextWorld=next.available?identity(next.world):null;const changed=lastWorld&&nextWorld&&lastWorld!==nextWorld;if(nextWorld)lastWorld=nextWorld;const redraw=JSON.stringify(current)!==JSON.stringify(next);current=next;setReferenceFrame(next.available?next:null);lastSuccess=Date.now();$('#status').textContent=next.available?'● Connected':'Host reconnecting';if(next.available)notice.textContent='';if(changed&&selected){selected=null;settle();}if(redraw)render();}catch(e){if(request!==serial)return;if(e.status===401){if(paired)notice.textContent='This session ended. Ask desktop Super for a new pairing code.';paired=false;$('#app').hidden=true;$('#pair').hidden=false;current=null;selected=null;settle();lastWorld=null;content.replaceChildren();}else{withdraw('Disconnected');if(paired)notice.textContent='The connection was interrupted. We’ll retry while this page is open.';}}finally{busy=false;}}

@@ -100,26 +100,31 @@ test('T31 L8 · Bots never shows an actor id, and a tap opens that bot’s plans
   assert.equal(phone.hash,'#/tasks');
 });
 
-/* T31 L13 (N3, found in the Simulator): the question opened at the foot of the page, its buttons under the tab bar. */
-test('T31 L13 · the Disconnect question is brought into view as it opens, clear of the tab bar; a redraw leaves the page alone',async t=>{
-  const phone=await paired(t,'stack');
-  phone.document.intoView=[];
+/* T31 L13 (N3, found in the Simulator; tightened after the recheck): the question opened under the tab bar. The first fix
+ * (scrollIntoView with a constant 88 px + inset margin) stopped about 30 pt short on an iPhone 17, where the bar and Safari's
+ * own chrome cover about 130 pt. The law now measures: a layout model of Stack's foot, at an 874 pt viewport with a 130 pt
+ * bar, where the page is too short to scroll the card clear without the room the fix adds. */
+test('T31 L13 · the Disconnect question ends above the tab bar as measured (874 pt viewport, 130 pt bar), and a redraw keeps it there without scrolling',async t=>{
+  const phone=await paired(t,'stack'),doc=phone.document,win=phone.window;
+  const VIEW=874,BAR=130,ABOVE=1200,BUTTON=44,CARD=200,BELOW=110;          // BELOW: main's bottom padding
+  const card=()=>phone.$('#content .confirm');
+  const height=()=>ABOVE+(card()?CARD+(parseFloat(card().style.marginBottom)||0):BUTTON)+BELOW;
+  win.innerHeight=VIEW;win.clamp=()=>Math.max(0,height()-VIEW);
+  Object.defineProperty(doc.documentElement,'scrollHeight',{configurable:true,get:height});
+  doc.layout=el=>el.localName==='nav'?{top:VIEW-BAR,bottom:VIEW,height:BAR}:el.classList.contains('confirm')?{top:ABOVE-win.scrollY,bottom:ABOVE+CARD-win.scrollY,height:CARD}:null;
+  win.scrollTo(0,height()-VIEW);                                            // at the foot of Stack, by the button
   phone.tap(phone.button('Disconnect this device'));
-  await phone.until(()=>phone.$('#content .confirm'),'the question');
-  const card=phone.$('#content .confirm'),moves=phone.document.intoView;
-  assert.equal(moves.length,1,'scrolled into view once, as it opens');
-  assert.equal(moves[0].element,card,'the card holding both buttons');
-  assert.deepEqual(moves[0].options,{block:'nearest'});
-  assert.deepEqual(card.querySelectorAll('button').map(b=>b.textContent),['Disconnect','Cancel']);
-  const rule=/\.confirm\{([^}]*)\}/.exec(css)?.[1]??'';
-  const bottom=/scroll-margin-bottom:calc\((\d+)px \+ env\(safe-area-inset-bottom\)\)/.exec(rule);
-  const nav=/(?:^|\})nav\{[^}]*padding:(\d+)px \d+px max\((\d+)px,env\(safe-area-inset-bottom\)\)/.exec(css),control=/(?:^|\})button\{min-height:(\d+)px/.exec(css);
-  assert.ok(bottom&&nav&&control,'the card, the tab bar and its buttons have the rules this law reads');
-  assert.ok(Number(bottom[1])>=Number(nav[1])+Number(control[1])+Number(nav[2]),`a bottom scroll margin of ${bottom[1]}px + the inset clears the tab bar (${nav[1]} + ${control[1]} + max(${nav[2]}, inset))`);
-  assert.match(rule,/scroll-margin-top:calc\(\d+px \+ env\(safe-area-inset-top\)\)/,'and the status bar');
+  await phone.until(()=>card(),'the question');
+  await phone.idle();
+  const gap=()=>phone.$('nav').getBoundingClientRect().top-card().getBoundingClientRect().bottom;
+  assert.ok(gap()>=0,`the card's bottom is above the bar's top (gap ${gap()} pt)`);
+  assert.deepEqual(card().querySelectorAll('button').map(b=>b.textContent),['Disconnect','Cancel']);
+  const at=win.scrollY;
   phone.world=fixtureWorld({workspaces:2});
   await phone.tick(2000);
   await phone.until(()=>phone.$$('#content dd')[0]?.textContent==='2','the two-second redraw');
-  assert.ok(phone.$('#content .confirm'),'still asking');
-  assert.equal(moves.length,1,'a redraw does not move the page');
+  win.scrollTo(0,win.scrollY);                                              // the browser re-clamps to the redrawn page
+  assert.ok(card(),'still asking');
+  assert.equal(win.scrollY,at,'a redraw does not move the page');
+  assert.ok(gap()>=0,`and the question is still above the bar (gap ${gap()} pt)`);
 });

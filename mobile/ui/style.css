@@ -32,6 +32,7 @@ body{padding-top:env(safe-area-inset-top)}body::before{content:"";position:fixed
 .criteria{white-space:pre-wrap}
 .card{position:relative}.card .open::after{content:"";position:absolute;inset:0;border-radius:14px}
 .danger{border-color:#9b5a48;color:#f2c0b0}.confirm button{margin:8px 8px 0 0}
-/* T31 N2 · an empty thread says so. N3 · the Disconnect question is scrolled into view clear of the tab bar (12 + 44 + 16 px and the home indicator's inset) and of the status bar. */
+/* T31 N2 · an empty thread says so. (N3's question is placed by app.js's reveal(), which measures the tab bar.) */
 #conversations .chat-empty{color:#a2ae98;text-align:center;margin:48px 16px;font-size:15px}
-.confirm{scroll-margin-top:calc(16px + env(safe-area-inset-top));scroll-margin-bottom:calc(88px + env(safe-area-inset-bottom))}
+/* T31 N4 · a quick double tap on a control is two taps, never Safari's double-tap zoom; pinch zoom stays. */
+button,a,input,select,textarea,summary,label{touch-action:manipulation}

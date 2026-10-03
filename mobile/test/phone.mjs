@@ -75,7 +75,7 @@ class FakeText extends FakeNode{constructor(doc,data){super(doc,3);this.data=Str
 const optionValue=o=>o.value!==undefined?String(o.value):o.textContent;
 export class FakeElement extends FakeNode{
   constructor(doc,tag){
-    super(doc,1);this.localName=String(tag).toLowerCase();this.attrs=new Map();this.listeners=new Map();this.disabled=false;this.scrollTop=0;this.scrollHeight=0;this.clientHeight=0;
+    super(doc,1);this.localName=String(tag).toLowerCase();this.attrs=new Map();this.listeners=new Map();this.disabled=false;this.scrollTop=0;this.scrollHeight=0;this.clientHeight=0;this.style={};
     if(this.localName==='input'||this.localName==='textarea')this.value='';
     if(this.localName==='select')Object.defineProperty(this,'value',{configurable:true,get(){const options=this.querySelectorAll('option');if(this.chosen!==undefined&&options.some(o=>optionValue(o)===this.chosen))return this.chosen;return options[0]?optionValue(options[0]):'';},set(v){this.chosen=String(v);}});
     const el=this;
@@ -115,6 +115,8 @@ export class FakeElement extends FakeNode{
   requestSubmit(){this.dispatchEvent(new FakeEvent('submit'));}
   /** No layout here: the call and its options are recorded on the document (`intoView`) for a test to read. */
   scrollIntoView(options){(this.ownerDocument.intoView??=[]).push({element:this,options});}
+  /** No layout either: a test that needs boxes gives the document a `layout(element)` model; otherwise all zeros. */
+  getBoundingClientRect(){const box=this.ownerDocument.layout?.(this);return {top:0,bottom:0,left:0,right:0,width:0,height:0,...box};}
 }
 class FakeDocument extends FakeElement{
   constructor(){super(null,'#document');this.ownerDocument=this;this.nodeType=9;this.activeElement=null;}
@@ -137,11 +139,13 @@ export function documentFrom(html){
 
 /* ---- a window, history that survives a reload, the page's timers ---- */
 class FakeWindow{
-  constructor(){this.listeners=new Map();this.scrollY=0;this.innerWidth=390;}
+  constructor(){this.listeners=new Map();this.scrollY=0;this.innerWidth=390;this.innerHeight=844;this.clamp=null;}
   addEventListener(type,fn){if(!this.listeners.has(type))this.listeners.set(type,[]);this.listeners.get(type).push(fn);}
   removeEventListener(type,fn){const l=this.listeners.get(type),i=l?l.indexOf(fn):-1;if(i>=0)l.splice(i,1);}
   dispatchEvent(event){for(const f of [...(this.listeners.get(event.type)??[])])f.call(this,event);return true;}
-  scrollTo(x,y){if(x&&typeof x==='object')y=x.top??this.scrollY;this.scrollY=Number(y)||0;}
+  // With a layout model (`clamp()`: the page's maximum scroll), scrolling stops at the page's ends, as a browser's does.
+  scrollTo(x,y){if(x&&typeof x==='object')y=x.top??this.scrollY;y=Number(y)||0;if(this.clamp)y=Math.max(0,Math.min(y,this.clamp()));this.scrollY=y;}
+  scrollBy(x,y){if(x&&typeof x==='object')y=x.top??0;this.scrollTo(0,this.scrollY+(Number(y)||0));}
 }
 class FakeHistory{
   constructor(tab){this.tab=tab;this.scrollRestoration='auto';}
