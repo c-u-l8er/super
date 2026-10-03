@@ -2,7 +2,8 @@
 import {createHash} from 'node:crypto';
 import {hostname,arch,platform,cpus} from 'node:os';
 import {spawn,execFileSync} from 'node:child_process';
-import {constants as F} from 'node:fs';
+import {constants as F,statSync} from 'node:fs';
+import {StringDecoder} from 'node:string_decoder';
 import {mkdir,mkdtemp,readFile,writeFile,rename,rm,realpath,open,lstat,cp,readdir,readlink} from 'node:fs/promises';
 import {resolve,dirname,join,relative,sep} from 'node:path';
 
@@ -76,22 +77,123 @@ function checkAttempt(attempt){
   assert(source.result_sha256===hash(JSON.stringify(['selected-file-set-result@1',members.map(m=>[m.source.path,m.source.result_sha256])])),'Combined result identity mismatch.');
   return {source,members};
 }
+// T36: **a run's completion is read from the stream itself, not from what the record keeps.** Super's whole ampd suite
+// prints 15 MB, with its summary in the last 123 bytes, so a record that kept only the first 128 KiB lost the one line
+// that proves the suite ran to the end. The record now keeps the first and the last half of the bound, and the lines
+// that can prove completion (TAP totals, a gate's or a suite's marker, cargo's and ExUnit's summaries) are collected as
+// they pass, however long the transcript.
+const SIGNAL=/^(?:# suites? |# gates? |# tests \d|# fail \d|test result: |\d+ tests?, \d+ failures?)/,maxSignals=4096,maxLine=4096;
+export function transcriptKeeper(limit=maxOutput){
+  const half=Math.floor(limit/2),head=[],tail=[],signals=[],decoder=new StringDecoder('utf8');
+  let headBytes=0,tailBytes=0,total=0,carry='';
+  const line=l=>{l=l.replace(/\r$/,'');if(SIGNAL.test(l)&&signals.length<maxSignals)signals.push(l.slice(0,maxLine));};
+  return {
+    push(b){
+      total+=b.length;const toHead=Math.max(0,Math.min(b.length,half-headBytes));
+      if(toHead){head.push(b.subarray(0,toHead));headBytes+=toHead;}
+      if(toHead<b.length){const rest=b.subarray(toHead);tail.push(rest);tailBytes+=rest.length;while(tail.length&&tailBytes-tail[0].length>=half){tailBytes-=tail[0].length;tail.shift();}}
+      const parts=(carry+decoder.write(b)).split('\n');carry=parts.pop();if(carry.length>maxLine)carry='';for(const l of parts)line(l);
+    },
+    finish(){
+      line(carry+decoder.end());carry='';
+      let kept=Buffer.concat(tail);if(kept.length>half)kept=kept.subarray(kept.length-half);
+      const omitted=total-headBytes-kept.length;
+      return {output:Buffer.concat(head).toString('utf8')+(omitted?`\n[… ${omitted} bytes omitted …]\n`:'')+kept.toString('utf8'),omitted_bytes:omitted,signals};
+    }
+  };
+}
 async function execute(args,timeoutMs,signal){
   return new Promise(resolveResult=>{
-    let bytes=0,output=[],omitted=0,timedOut=false,launchError=null;
+    let timedOut=false,launchError=null;const keeper=transcriptKeeper();
     const child=spawn('/usr/bin/bwrap',args,{env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'},detached:true,stdio:['ignore','pipe','pipe']});
-    const append=b=>{const keep=Math.max(0,maxOutput-bytes);if(keep)output.push(b.subarray(0,keep));bytes+=Math.min(keep,b.length);omitted+=Math.max(0,b.length-keep);};
+    const append=b=>keeper.push(b);
     child.stdout.on('data',append);child.stderr.on('data',append);
     const cancel=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
     signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();
     const timer=setTimeout(()=>{timedOut=true;try{process.kill(-child.pid,'SIGKILL');}catch{}},timeoutMs);
     child.on('error',e=>{launchError=e.message;});
-    child.on('close',(code,exitSignal)=>{clearTimeout(timer);signal?.removeEventListener('abort',cancel);resolveResult({code,signal:exitSignal,timedOut,launchError,output:Buffer.concat(output).toString('utf8'),omitted_bytes:omitted});});
+    child.on('close',(code,exitSignal)=>{clearTimeout(timer);signal?.removeEventListener('abort',cancel);resolveResult({code,signal:exitSignal,timedOut,launchError,...keeper.finish()});});
   });
 }
 
 const profiles=['super-javascript-behavior@1','super-elixir-review@1','super-rust-review@1','repository-document-review@1','repository-python-gate@1'];
 const checkerUrl=new URL('./document-review-check.mjs',import.meta.url);
+// T36: each profile's ceiling, one table. The runner refuses a timeout above its profile's, and the CLI passes it. The
+// Rust and Elixir profiles run Super's whole suites, measured cold in this sandbox at about 125 s and 236 s
+// (superlane/t36/measure/), so theirs are about four times that.
+const ceilings={'super-javascript-behavior@1':30000,'super-elixir-review@1':900000,'super-rust-review@1':600000,'repository-document-review@1':30000,'repository-python-gate@1':120000};
+export const profileCeiling=profile=>{assert(profiles.includes(profile),'Unsupported test profile.');return ceilings[profile];};
+// **T36 (A-13): Super's two compiled profiles run the suites they are named for.** Until T36 the Rust profile ran only
+// tools/native-review and the Elixir profile two of ampd's 67 test files, so neither could be a required check for
+// Super's own host, cockpit or runtime code (DISCIPLINE.md §3). Closed, like the gates: a suite is a fixed command whose
+// own summary line proves it ran to its end; the script marks each suite's end, and a run is complete only when every
+// suite reported its summary and the script reached its last line. A suite that never reaches its summary (a proposal
+// that does not compile) leaves the run without a verdict, as one suite always did.
+const DONE_CARGO_TEST='^test result: (ok|FAILED)[.] [0-9]+ passed; [0-9]+ failed;';
+const suites={
+  'super-rust-review@1':[
+    {name:'native-review',command:'cargo test --offline --locked --manifest-path tools/native-review/Cargo.toml --lib -- --test-threads=1',done:DONE_CARGO_TEST},
+    {name:'host',command:'cargo test --offline --locked --manifest-path host/Cargo.toml',done:DONE_CARGO_TEST},
+    {name:'cockpit',command:'cargo test --offline --locked --manifest-path cockpit/Cargo.toml',done:DONE_CARGO_TEST}],
+  // ampd finds super-host at host/target/release (Ampd.Worktree.Effector), so it is built there first; the suite runs
+  // only if that build finished and succeeded.
+  'super-elixir-review@1':[
+    {name:'host-build',command:'cargo build --release --offline --locked --manifest-path host/Cargo.toml',done:'^ *Finished `release` profile'},
+    {name:'ampd',command:'cd ampd && mix test --seed 0',done:'^[0-9]+ tests?, [0-9]+ failures?',needsPrevious:true}]};
+// The files a profile requires in the snapshot, which is also the count the runtime records (1–64).
+const requiredFiles={
+  'super-elixir-review@1':['ampd/mix.exs','ampd/test/test_helper.exs','host/Cargo.toml','host/Cargo.lock'],
+  'super-rust-review@1':['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs','host/Cargo.toml','host/Cargo.lock','cockpit/Cargo.toml','cockpit/Cargo.lock']};
+// The environment each compiled profile's sandbox receives, beyond the base HOME and LANG and the PATH its toolchains
+// set: nothing else of the host's. The ampd suite's terminal tests commit to Git repositories they create, and the
+// sandbox's HOME has no identity, so the identity is fixed here (without it 39 tests fail: superlane/t36/measure/).
+const sandboxEnv={
+  'super-elixir-review@1':{MIX_ENV:'test',ERL_FLAGS:'+S 2:2',XDG_STATE_HOME:'/tmp/state',CARGO_HOME:'/tmp/cargo',CARGO_BUILD_JOBS:'2',RUSTUP_TOOLCHAIN:'stable',GIT_AUTHOR_NAME:'Super review',GIT_AUTHOR_EMAIL:'review@super.invalid',GIT_COMMITTER_NAME:'Super review',GIT_COMMITTER_EMAIL:'review@super.invalid'},
+  'super-rust-review@1':{CARGO_HOME:'/tmp/cargo',CARGO_TARGET_DIR:'/tmp/target',CARGO_BUILD_JOBS:'2',RUSTUP_TOOLCHAIN:'stable'}};
+export function profilePlan(profile){
+  assert(profiles.includes(profile),'Unsupported test profile.');
+  return structuredClone({suites:suites[profile]??null,requiredFiles:requiredFiles[profile]??null,env:sandboxEnv[profile]??null,ceiling:ceilings[profile]});
+}
+const quote=v=>{assert(!v.includes("'"),'A profile command cannot contain a single quote.');return "'"+v+"'";};
+export function suiteScript(profile){
+  const list=suites[profile];assert(list,'This profile has no suite list.');
+  const lines=['mkdir -p /tmp/cargo && cp -a /registry /tmp/cargo/registry && cp -a /snapshot /tmp/source || exit 1','status=0; previous=0',
+    `suite(){ name=$1; pattern=$2; shift 2; (cd /tmp/source && eval "$*") > /tmp/suite.log 2>&1; code=$?; cat /tmp/suite.log; if grep -Eq "$pattern" /tmp/suite.log; then echo "# suite $name exit $code"; previous=$code; else echo "# suite $name did-not-complete exit $code"; previous=1; fi; [ "$code" = 0 ] || status=1; }`];
+  for(const s of list)lines.push(s.needsPrevious?`if [ "$previous" = 0 ]; then suite ${quote(s.name)} ${quote(s.done)} ${quote(s.command)}; else echo "# suite ${s.name} did-not-complete exit -"; status=1; fi`:`suite ${quote(s.name)} ${quote(s.done)} ${quote(s.command)}`);
+  lines.push('echo "# suites complete"','exit $status');
+  return lines.join('\n');
+}
+// Did the run reach its end? Judged on the signal lines the stream carried (transcriptKeeper).
+export function transcriptComplete(profile,signals){
+  if(suites[profile]){
+    if(signals.at(-1)!=='# suites complete')return false;
+    return suites[profile].every(s=>{const marks=signals.filter(l=>l.startsWith('# suite '+s.name+' '));return marks.length>0&&!marks.some(m=>m.startsWith('# suite '+s.name+' did-not-complete'))&&/^# suite \S+ exit \d+$/.test(marks.at(-1));});
+  }
+  if(profile===profiles[4])return signals.includes('# gates complete');
+  return signals.some(l=>/^# tests \d+$/.test(l))&&signals.some(l=>/^# fail \d+$/.test(l));
+}
+// One toolchain_sha256 per run (the runtime records one): the Elixir profile's covers Erlang/Elixir and the Rust that
+// builds super-host; the Rust profile's covers Rust and the sibling RRABBIT, so one changed RRABBIT byte changes it.
+export const compiledToolchainSha256=({elixir,rust,sibling})=>hash(JSON.stringify(elixir?{elixir,rust}:{rust,sibling}));
+// T36 amendment 1: the cockpit hands the runner its own PATH, which carries asdf's shims and not the asdf command
+// (~/.asdf/bin/asdf), so `asdf where` failed with ENOENT from the cockpit (superlane/t36/finding-asdf/). The command is
+// found in a closed order instead.
+function executableFile(path){try{const s=statSync(path);return s.isFile()&&(s.mode&0o111)!==0;}catch{return false;}}
+export function findAsdf({env=process.env,isExecutable=executableFile}={}){
+  for(const dir of String(env.PATH??'').split(':').filter(Boolean)){const c=join(dir,'asdf');if(isExecutable(c))return c;}
+  for(const c of [env.ASDF_DIR&&join(env.ASDF_DIR,'bin','asdf'),env.HOME&&join(env.HOME,'.asdf','bin','asdf')])if(c&&isExecutable(c))return c;
+  throw Error('Elixir and Erlang must be installed with asdf; no asdf executable was found on PATH, in $ASDF_DIR/bin or in ~/.asdf/bin.');
+}
+// T36: the cockpit builds `../../RRABBIT/tier1-proof` from cockpit/, which is the repository's sibling RRABBIT and not
+// part of its snapshot. It is captured the way the snapshot is (Git-listed, bounded, hashed), copied into the run, and
+// bound read-only where cockpit/../../RRABBIT resolves from /tmp/source/cockpit.
+export async function pinSibling(root,run){
+  let real;try{real=await realpath(join(dirname(root),'RRABBIT'));assert(git(real,['rev-parse','--show-toplevel']).trim()===real,'');}
+  catch{throw Error('The Rust profile needs RRABBIT beside the repository (../RRABBIT, a Git repository root): the cockpit builds its path dependency from there.');}
+  const head=git(real,['rev-parse','--verify','HEAD^{commit}']).trim(),files=await capture(real),copy=join(run,'sibling');
+  for(const [path,f] of files){const target=join(copy,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}
+  return {binds:['--ro-bind',copy,'/tmp/RRABBIT'],identity:{path:'../RRABBIT',head,sha256:digest(files),files:files.size,bytes:[...files.values()].reduce((n,f)=>n+f.data.length,0)}};
+}
 // A repository that is not Super has its own gate, and running it is the only way
 // Super can check its code. The CLOSED part is this table: the runner picks the
 // gates by their own paths, with fixed arguments and a fixed scope. A caller names
@@ -125,7 +227,7 @@ function scopeOf(profile,members,listed){
 }
 const scopeName=profile=>profile===profiles[3]?'reviewed-documents-only':profile===profiles[4]?'gate-scope-and-reviewed-paths':'whole-repository';
 async function pinElixirTools(run){
-  const roots={elixir:execFileSync('asdf',['where','elixir'],{encoding:'utf8',timeout:10000}).trim(),erlang:execFileSync('asdf',['where','erlang'],{encoding:'utf8',timeout:10000}).trim()};
+  const asdf=findAsdf(),roots={elixir:execFileSync(asdf,['where','elixir'],{encoding:'utf8',timeout:10000}).trim(),erlang:execFileSync(asdf,['where','erlang'],{encoding:'utf8',timeout:10000}).trim()};
   async function inventory(root){
     const rows=[];let bytes=0;
     async function walk(path=''){
@@ -176,7 +278,7 @@ async function pinRustTools(run){
 export async function runProposalTests({repository,attempt,runRoot,nodePath=process.execPath,timeoutMs=30000,signal,profile=profiles[0],compare=false}){
   attempt=structuredClone(attempt);
   assert(profiles.includes(profile),'Unsupported test profile.');
-  assert(Number.isInteger(timeoutMs)&&timeoutMs>=100&&timeoutMs<=120000,'Test timeout must be 100–120000 ms.');
+  assert(Number.isInteger(timeoutMs)&&timeoutMs>=100&&timeoutMs<=ceilings[profile],'Test timeout must be 100–'+ceilings[profile]+' ms for '+profile+'.');
   const {source,members}=checkAttempt(attempt),root=await realpath(repository),base=await realpath(runRoot);
   assert(base!==root&&!base.startsWith(root+sep),'Run artifacts must be outside the source repository.');
   const rootIdentity=await lstat(root);assert(rootIdentity.isDirectory(),'Choose a repository directory.');
@@ -197,7 +299,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   const entries=manifest(files),snapshotDigest=digest(files);
   assert(entries.length<=maxFiles&&entries.reduce((n,f)=>n+f.bytes,0)<=maxBytes,'Proposed snapshot exceeds its bounds.');
   // Closed profiles: no caller-provided command or test path.
-  const tests=profile===profiles[0]?entries.map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):profile===profiles[1]?['ampd/test/development_task_test.exs','ampd/test/development_attempt_test.exs']:profile===profiles[2]?['tools/native-review/Cargo.toml','tools/native-review/Cargo.lock','tools/native-review/src/lib.rs']:profile===profiles[4]?gatesIn(listed).map(g=>g.path):members.filter(m=>m.proposed_text!==null).map(m=>m.source.path);
+  const tests=profile===profiles[0]?entries.map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):requiredFiles[profile]?requiredFiles[profile]:profile===profiles[4]?gatesIn(listed).map(g=>g.path):members.filter(m=>m.proposed_text!==null).map(m=>m.source.path);
   assert(tests.every(p=>files.has(p)),profile===profiles[3]?'A document review needs the documents it reviews.':profile===profiles[4]?'The snapshot is missing the gate it would run.':'The selected profile requires the Super files for that test profile.');
   assert(tests.length>0&&tests.length<=64,profile===profiles[3]?'A document review needs at least one document that is not a deletion.':profile===profiles[4]?'No gate this profile knows is in this repository.':'No supported JavaScript behavior suites found (tools/*-test.mjs, maximum 64).');
   if(profile===profiles[3]){const {isDocumentPath}=await import(checkerUrl.href);assert(tests.every(isDocumentPath),'The document profile reviews Markdown or text documents (.md, .markdown, .txt).');}
@@ -211,7 +313,11 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     if(compare){await mkdir(baselineSnapshot,{mode:0o700});for(const [path,f] of baselineFiles){const target=join(baselineSnapshot,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}await atomic(join(run,'baseline-manifest.json'),{sha256:before,files:manifest(baselineFiles)});}
     // Pin the executable bytes too; do not run a mutable installation path.
     const runtime=join(run,'node');await writeFile(runtime,node,{flag:'wx',mode:0o700});
-    const toolchain=profile===profiles[1]?await pinElixirTools(run):profile===profiles[2]?await pinRustTools(run):null;if(toolchain)record.toolchain_sha256=toolchain.sha256;
+    // T36: the Elixir profile builds super-host too, so it pins Rust beside Erlang and Elixir; the Rust profile pins the
+    // sibling RRABBIT. Every pinned identity goes into one toolchain_sha256 (the runtime records one).
+    const toolchain=profile===profiles[1]?await pinElixirTools(run):null,rust=profile===profiles[1]||profile===profiles[2]?await pinRustTools(run):null,sibling=profile===profiles[2]?await pinSibling(root,run):null;
+    if(profile===profiles[1])record.toolchain_sha256=compiledToolchainSha256({elixir:toolchain.sha256,rust:rust.sha256});
+    if(profile===profiles[2]){record.toolchain_sha256=compiledToolchainSha256({rust:rust.sha256,sibling:sibling.identity});record.sibling=sibling.identity;}
     // The document profile runs Super's own pinned check over the snapshot, never
     // anything from the repository under review; its bytes are hashed into the record.
     let checkPath=null,reviewPath=null;
@@ -224,11 +330,11 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     const args=['--unshare-all','--die-with-parent','--new-session','--cap-drop','ALL','--ro-bind','/usr','/usr','--symlink','usr/lib','/lib','--symlink','usr/lib','/lib64','--proc','/proc','--dev','/dev','--tmpfs','/tmp','--dir','/runtime','--ro-bind',runtime,'/runtime/node','--ro-bind',snapshot,'/snapshot','--chdir','/snapshot','--clearenv','--setenv','PATH','/usr/bin','--setenv','HOME','/tmp','--setenv','LANG','C.UTF-8','--','/runtime/node','--test','--test-reporter=tap',...tests];
     if(profile===profiles[1]){
       const command=args.indexOf('--');args.splice(command);
-      args.push('--symlink','usr/bin','/bin',...toolchain.binds,'--setenv','PATH',toolchain.roots.elixir+'/bin:'+toolchain.roots.erlang+'/bin:/usr/bin','--setenv','MIX_ENV','test','--setenv','ERL_FLAGS','+S 2:2','--setenv','XDG_STATE_HOME','/tmp/state','--','/bin/sh','-c','cp -a /snapshot /tmp/source && cd /tmp/source/ampd && exec mix test test/development_task_test.exs test/development_attempt_test.exs --seed 0');
+      args.push('--symlink','usr/bin','/bin',...toolchain.binds,...rust.binds,'--setenv','PATH',toolchain.roots.elixir+'/bin:'+toolchain.roots.erlang+'/bin:/rust/bin:/usr/bin',...Object.entries(sandboxEnv[profile]).flatMap(([k,v])=>['--setenv',k,v]),'--','/bin/sh','-c',suiteScript(profile));
     }
     if(profile===profiles[2]){
       args.splice(args.indexOf('--'));
-      args.push('--symlink','usr/bin','/bin',...toolchain.binds,'--setenv','PATH','/rust/bin:/usr/bin','--setenv','CARGO_HOME','/tmp/cargo','--setenv','CARGO_TARGET_DIR','/tmp/target','--setenv','CARGO_BUILD_JOBS','2','--setenv','RUSTUP_TOOLCHAIN','stable','--','/bin/sh','-c','mkdir -p /tmp/cargo && cp -a /registry /tmp/cargo/registry && cp -a /snapshot /tmp/source && cd /tmp/source && exec cargo test --offline --locked --manifest-path tools/native-review/Cargo.toml --lib -- --test-threads=1');
+      args.push('--symlink','usr/bin','/bin',...rust.binds,...sibling.binds,'--setenv','PATH','/rust/bin:/usr/bin',...Object.entries(sandboxEnv[profile]).flatMap(([k,v])=>['--setenv',k,v]),'--','/bin/sh','-c',suiteScript(profile));
     }
     if(profile===profiles[4]){
       // The repository's own gate, with the runner's arguments, in the same sandbox:
@@ -247,14 +353,14 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
       const baselineArgs=args.map(a=>a===snapshot?baselineSnapshot:a),baselineTests=profile===profiles[0]?manifest(baselineFiles).map(f=>f.path).filter(p=>/^tools\/[a-z0-9-]+-test\.mjs$/.test(p)):tests;
       if(profile===profiles[0])baselineArgs.splice(baselineArgs.indexOf('--test-reporter=tap')+1,tests.length,...baselineTests);
       const b=signal?.aborted?{code:null,output:'',omitted_bytes:0}:baselineTests.length?await execute(baselineArgs,timeoutMs,signal):{code:null,output:'No baseline test suites found.',omitted_bytes:0};
-      const complete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(b.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(b.output):profile===profiles[4]?/# gates complete\r?\n/.test(b.output):/# tests \d+\r?\n/.test(b.output)&&/# fail \d+\r?\n/.test(b.output);
+      const complete=transcriptComplete(profile,b.signals??[]);
       const completed=complete&&!signal?.aborted&&!b.timedOut&&!b.launchError&&!b.signal;
       record.baseline={snapshot_sha256:before,tests:baselineTests,same_suites:JSON.stringify(baselineTests)===JSON.stringify(tests),state:completed?'completed':'failed',verdict:completed?(b.code===0?'pass':'fail'):null,exit_code:b.code,output:b.output,omitted_bytes:b.omitted_bytes,finished_at:new Date().toISOString()};
       await atomic(join(run,'baseline-outcome.json'),record.baseline);
     }
     const result=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:null,output:'',omitted_bytes:0}:await execute(args,timeoutMs,signal);
     const unchanged=await Promise.all(entries.map(async e=>{const f=await exactFile(snapshot,e.path);return hash(f.data)===e.sha256&&f.mode===e.mode;})).then(xs=>xs.every(Boolean));
-    const tapComplete=profile===profiles[2]?/test result: (?:ok|FAILED)\. \d+ passed; \d+ failed;/.test(result.output):profile===profiles[1]?/\d+ tests?, \d+ failures?/.test(result.output):profile===profiles[4]?/# gates complete\r?\n/.test(result.output):/# tests \d+\r?\n/.test(result.output)&&/# fail \d+\r?\n/.test(result.output);
+    const tapComplete=transcriptComplete(profile,result.signals??[]);
     // A sandbox/loader error is not a failed application assertion.
     const state=signal?.aborted||!unchanged||result.timedOut||result.launchError||result.signal||!tapComplete?'failed':'completed';
     Object.assign(record,{state,finished_at:new Date().toISOString(),exit_code:result.code,signal:result.signal,output:result.output,omitted_bytes:result.omitted_bytes});
@@ -264,7 +370,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     if(signal?.aborted){record.state='failed';record.reason='cancelled';delete record.verdict;}
     await atomic(join(run,'outcome.json'),record);return {directory:run,record};
   }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await atomic(join(run,'outcome.json'),record);throw e;}
-  finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});}
+  finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});await rm(join(run,'sibling'),{recursive:true,force:true});}
 }
 
 // Read-only acceptance preflight. It executes no repository code and does not

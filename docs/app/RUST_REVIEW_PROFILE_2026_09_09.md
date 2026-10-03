@@ -1,5 +1,11 @@
 # Rust review and reply test profile — 9 September 2026
 
+> **Superseded in part, 2026-10-03 (T36, A-13).** `super-rust-review@1` now runs three suites: native review (as
+> below), `host/` and `cockpit/`. Each is `cargo test --offline --locked`. RRABBIT, the cockpit's path dependency, is
+> captured beside the repository and bound read-only. The ceiling is 600 seconds. Completion is read per suite from the
+> stream, and the record keeps the first and the last 64 KiB. See `tools/lib/proposal-test-runner.mjs` (the closed
+> `suites` table) and `superlane/t36/`. The rest of this note is the record of 9 September.
+
 Saved reviews now offer `super-rust-review@1`, labeled Rust review and reply tests. JavaScript remains the default. The optional fourth argument to the existing proposal-test-runner CLI selects this profile.
 
 The focused Cargo target at tools/native-review compiles the native app's actual review_tests.rs and codex_connection.rs, including their existing tests. It has its own checked-in lockfile. It does not compile Tauri, the repository/editor modules, or the full native app. Its passing outcome is deliberately limited to review recovery and reply controls.

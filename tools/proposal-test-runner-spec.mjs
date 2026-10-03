@@ -29,7 +29,11 @@ test('symlinks, stale source and inconsistent proposal identities refuse before 
  const f=await fixture(t);await writeFile(join(f.repository,'value.mjs'),'external edit');await assert.rejects(runProposalTests(f),/source file changed/);await writeFile(join(f.repository,'value.mjs'),f.attempt.shared_draft);await symlink('/etc/passwd',join(f.repository,'linked'));await assert.rejects(runProposalTests(f),/Symlinks/);await rm(join(f.repository,'linked'));f.attempt.proposed_text='mismatch';await assert.rejects(runProposalTests(f),/identity mismatch/);
 });
 test('output overflow is bounded and cannot manufacture a passing result',async t=>{
- const f=await fixture(t,"console.log('x'.repeat(200000));");const r=await runProposalTests(f);assert.ok(Buffer.byteLength(r.record.output)<=128*1024);assert.ok(r.record.omitted_bytes>0);assert.equal(r.record.state,'failed');assert.equal(r.record.verdict,undefined);
+ // T36: the record keeps the first and the last 64 KiB, and completion is read from the stream, so 200 KB of noise
+ // neither hides the real summary nor turns a failure into a pass.
+ const noisy=r=>"import test from 'node:test';import assert from 'node:assert/strict';console.log('x'.repeat(200000));test('real result',()=>assert.equal(1,"+r+"));";
+ const failing=await runProposalTests(await fixture(t,noisy(2)));assert.ok(Buffer.byteLength(failing.record.output)<=128*1024+64);assert.ok(failing.record.omitted_bytes>0);assert.equal(failing.record.state,'completed');assert.equal(failing.record.verdict,'fail');assert.match(failing.record.output,/# fail 1/);
+ const passing=await runProposalTests(await fixture(t,noisy(1)));assert.ok(passing.record.omitted_bytes>0);assert.equal(passing.record.state,'completed');assert.equal(passing.record.verdict,'pass');assert.match(passing.record.output,/# fail 0/);
 });
 test('run artifacts inside the source repository refuse',async t=>{
  const f=await fixture(t);await assert.rejects(runProposalTests({...f,runRoot:f.repository}),/outside/);
@@ -63,8 +67,14 @@ test('acceptance checks the saved result and all captured source without executi
 test('unsupported profiles and missing Elixir suites refuse before execution',async t=>{
  const f=await fixture(t);await assert.rejects(runProposalTests({...f,profile:'shell'}),/Unsupported test profile/);await assert.rejects(runProposalTests({...f,profile:'super-elixir-review@1'}),/requires the Super/);
 });
+async function hostFixture(repository,test='#[test] fn host_runs() {}'){
+ await mkdir(join(repository,'host/src'),{recursive:true});
+ await writeFile(join(repository,'host/Cargo.toml'),'[package]\nname = "super-host"\nversion = "0.1.0"\nedition = "2021"\n');
+ await writeFile(join(repository,'host/Cargo.lock'),'version = 4\n[[package]]\nname = "super-host"\nversion = "0.1.0"\n');
+ await writeFile(join(repository,'host/src/lib.rs'),test+'\n');
+}
 test('Elixir compiles in private scratch, pins tools, reports assertions and preserves captured source',async t=>{
- const f=await fixture(t);await mkdir(join(f.repository,'ampd/test'),{recursive:true});
+ const f=await fixture(t);await mkdir(join(f.repository,'ampd/test'),{recursive:true});await hostFixture(f.repository);
  await writeFile(join(f.repository,'ampd/mix.exs'),`defmodule Fixture.MixProject do
  use Mix.Project
  def project, do: [app: :fixture, version: "0.1.0", deps: []]
@@ -88,22 +98,42 @@ end
  end
 end
 `);
- const passed=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:120000});assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 tests, 0 failures/);assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);await assert.rejects(readFile(join(f.repository,'ampd/scratch')),/ENOENT/);await assert.rejects(readFile(join(passed.directory,'toolchain/elixir/bin/mix')),/ENOENT/);
+ const passed=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:120000});assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 tests, 0 failures/);assert.match(passed.record.output,/# suite host-build exit 0\n/);assert.match(passed.record.output,/# suite ampd exit 0\n/);assert.equal(passed.record.tests.length,4);assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);await assert.rejects(readFile(join(f.repository,'ampd/scratch')),/ENOENT/);await assert.rejects(readFile(join(passed.directory,'toolchain/elixir/bin/mix')),/ENOENT/);
  f.attempt.proposed_text='export const value=3;\n';f.attempt.source.result_sha256=hash(f.attempt.proposed_text);f.attempt.source.result_bytes=Buffer.byteLength(f.attempt.proposed_text);
  const failed=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:120000});assert.equal(failed.record.verdict,'fail',failed.record.output);assert.match(failed.record.output,/2 tests, 1 failure/);assert.notEqual(failed.record.snapshot_sha256,passed.record.snapshot_sha256);assert.equal(failed.record.toolchain_sha256,passed.record.toolchain_sha256);
 });
 
-test('Rust compiles offline against reviewed bytes and separates assertion failures from build failures',async t=>{
- const f=await fixture(t),target=join(f.repository,'tools/native-review');await mkdir(join(target,'src'),{recursive:true});
+async function rustFixture(f,{host,sibling=true}={}){
+ await hostFixture(f.repository,host);
+ const cockpit=join(f.repository,'cockpit');await mkdir(join(cockpit,'src'),{recursive:true});
+ await writeFile(join(cockpit,'Cargo.toml'),'[package]\nname = "cockpit_fixture"\nversion = "0.1.0"\nedition = "2021"\n[dependencies]\ntier1-proof = { path = "../../RRABBIT/tier1-proof" }\n');
+ await writeFile(join(cockpit,'Cargo.lock'),'version = 4\n\n[[package]]\nname = "cockpit_fixture"\nversion = "0.1.0"\ndependencies = [\n "tier1-proof",\n]\n\n[[package]]\nname = "tier1-proof"\nversion = "0.1.0"\n');
+ await writeFile(join(cockpit,'src/lib.rs'),'#[test] fn reaches_the_sibling() {assert_eq!(tier1_proof::VALUE, 7);}\n#[test] fn sibling_is_read_only() {assert!(std::fs::write("/tmp/RRABBIT/tier1-proof/src/lib.rs", "changed").is_err());}\n');
+ if(!sibling)return;
+ const rr=join(f.repository,'..','RRABBIT');await mkdir(join(rr,'tier1-proof/src'),{recursive:true});
+ await writeFile(join(rr,'tier1-proof/Cargo.toml'),'[package]\nname = "tier1-proof"\nversion = "0.1.0"\nedition = "2021"\n');
+ await writeFile(join(rr,'tier1-proof/src/lib.rs'),'pub const VALUE: u32 = 7;\n');
+ const git=args=>execFileSync('/usr/bin/git',['-C',rr,...args],{encoding:'utf8'}).trim();git(['init','-q']);git(['add','.']);git(['-c','user.name=Fixture','-c','user.email=fixture@example.invalid','commit','-qm','sibling']);
+}
+test('Rust runs the native review, host and cockpit suites, with RRABBIT read-only beside them',async t=>{
+ const f=await fixture(t);await rustFixture(f);const target=join(f.repository,'tools/native-review');await mkdir(join(target,'src'),{recursive:true});
  await writeFile(join(target,'Cargo.toml'),'[package]\nname = "review_fixture"\nversion = "0.1.0"\nedition = "2021"\n');
  await writeFile(join(target,'Cargo.lock'),'version = 4\n[[package]]\nname = "review_fixture"\nversion = "0.1.0"\n');
  await writeFile(join(target,'src/lib.rs'),`#[test] fn proposal() {assert_eq!(std::fs::read_to_string("../../value.mjs").unwrap(), "export const value=2;\\n");}
 #[test] fn isolated() {assert!(!std::path::Path::new("/home/travis/.profile").exists());assert!(std::fs::write("/snapshot/value.mjs", "changed").is_err());}`);
  const run=()=>runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:120000});
- const passed=await run();assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 passed; 0 failed/);assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);
+ const passed=await run();assert.equal(passed.record.verdict,'pass',passed.record.output);assert.match(passed.record.toolchain_sha256,/^[a-f0-9]{64}$/);assert.match(passed.record.output,/2 passed; 0 failed/);for(const s of ['native-review','host','cockpit'])assert.match(passed.record.output,new RegExp('# suite '+s+' exit 0\\n'));assert.equal(passed.record.tests.length,7);assert.match(passed.record.sibling.head,/^[a-f0-9]{40}$/);assert.equal(passed.record.sibling.path,'../RRABBIT');assert.equal(await readFile(join(f.repository,'value.mjs'),'utf8'),f.attempt.shared_draft);
  f.attempt.proposed_text='export const value=3;\n';f.attempt.source.result_sha256=hash(f.attempt.proposed_text);f.attempt.source.result_bytes=Buffer.byteLength(f.attempt.proposed_text);
  const failed=await run();assert.equal(failed.record.verdict,'fail',failed.record.output);assert.match(failed.record.output,/1 passed; 1 failed/);assert.notEqual(failed.record.snapshot_sha256,passed.record.snapshot_sha256);
  await writeFile(join(target,'src/lib.rs'),'this is not valid Rust');const broken=await run();assert.equal(broken.record.state,'failed');assert.equal(broken.record.verdict,undefined);assert.equal(broken.record.reason,'runner-did-not-complete');
+});
+
+test('a failing host test fails the Rust profile, and a repository without RRABBIT is refused before anything runs',async t=>{
+ const f=await fixture(t);await rustFixture(f,{host:'#[test] fn planted() {assert_eq!(1 + 1, 3);}'});const target=join(f.repository,'tools/native-review');await mkdir(join(target,'src'),{recursive:true});
+ await writeFile(join(target,'Cargo.toml'),'[package]\nname = "review_fixture"\nversion = "0.1.0"\nedition = "2021"\n');await writeFile(join(target,'Cargo.lock'),'version = 4\n[[package]]\nname = "review_fixture"\nversion = "0.1.0"\n');await writeFile(join(target,'src/lib.rs'),'#[test] fn ok() {}\n');
+ const failed=await runProposalTests({...f,profile:'super-rust-review@1',timeoutMs:600000});assert.equal(failed.record.state,'completed',failed.record.output);assert.equal(failed.record.verdict,'fail');assert.match(failed.record.output,/# suite host exit 101\n/);assert.match(failed.record.output,/# suite cockpit exit 0\n/);
+ const g=await fixture(t);await rustFixture(g,{sibling:false});const nt=join(g.repository,'tools/native-review');await mkdir(join(nt,'src'),{recursive:true});await writeFile(join(nt,'Cargo.toml'),'[package]\nname = "review_fixture"\nversion = "0.1.0"\nedition = "2021"\n');await writeFile(join(nt,'Cargo.lock'),'version = 4\n[[package]]\nname = "review_fixture"\nversion = "0.1.0"\n');await writeFile(join(nt,'src/lib.rs'),'#[test] fn ok() {}\n');
+ await assert.rejects(runProposalTests({...g,profile:'super-rust-review@1',timeoutMs:600000}),/needs RRABBIT beside the repository/);
 });
 
 async function combinedFixture(t){
