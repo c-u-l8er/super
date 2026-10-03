@@ -1,5 +1,14 @@
 # Elixir plan and review test profile — 9 September 2026
 
+> **Superseded in part, 2026-10-03 (T36, A-13).** `super-elixir-review@1` now runs the WHOLE ampd suite, not the two
+> `development_*` files below. It works in two stages, each in a sandbox of its own:
+> 1. it builds `super-host`;
+> 2. only that binary is handed, read-only, to `mix compile` and `mix test --seed 0`, run with a fixed git identity.
+>
+> Each stage is judged by the exit status the runner observes, never by what the tests print. The ceiling is 900
+> seconds, and asdf is found without depending on PATH. See `tools/lib/proposal-test-runner.mjs` (the closed `stages`
+> table) and `superlane/t36/`. The rest of this note is the record of 9 September.
+
 The saved-review test panel offers JavaScript behavior tests (the default) and Elixir plan and review tests. The optional CLI profile argument is `super-elixir-review@1`; the unchanged default is `super-javascript-behavior@1`.
 
 Elixir runs exactly `ampd/test/development_task_test.exs` and `ampd/test/development_attempt_test.exs` with seed 0. It compiles the captured Mix project in private writable scratch. It requires local Elixir and Erlang installations managed by asdf. Their copied bytes and link targets are hashed and checked before execution; temporary toolchain copies are removed afterward. The source snapshot remains retained and read-only. No network, host home, installed project dependencies or live app world is mounted. System compiler/libraries in `/usr` remain host supplied and are not independently pinned.
