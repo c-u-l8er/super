@@ -3024,6 +3024,19 @@ mod t27b_runtime {
     #[test]
     fn b9_a_locally_refused_constructor_leaks_no_descriptor_and_sends_nothing() {
         let (rt, peer) = fake_runtime();
+        // A regression that sends the oversized command would wait for a reply this peer never gives: fail it in
+        // 2 s instead of hanging (round 2's law run: the plant one-unchecked-bridge-send timed out here).
+        let tv = libc::timeval { tv_sec: 2, tv_usec: 0 };
+        let set = unsafe {
+            libc::setsockopt(
+                rt.bridge,
+                libc::SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                (&tv as *const libc::timeval).cast(),
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+        assert_eq!(set, 0, "SO_RCVTIMEO on the fake bridge");
         let big = "a".repeat(fdpass::BRIDGE_COMMAND_MAX);
         let before = open_fds();
         for _ in 0..100 {
