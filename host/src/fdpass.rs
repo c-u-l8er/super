@@ -443,6 +443,15 @@ thread_local! {
     pub(crate) static FAIL_PAIRS_AFTER: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+// T27b round 3d: the T27b tests that open descriptors run one at a time. They share one process, and a descriptor
+// count, or a closed number reused by another thread, is otherwise another test's noise (laws.py v3 at 90e9eab: three
+// plants also failed an unrelated law; the whole set failed 1 run in 15). Test builds only.
+#[cfg(test)]
+pub(crate) fn t27b_serial() -> std::sync::MutexGuard<'static, ()> {
+    static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    L.lock().unwrap_or_else(|p| p.into_inner())
+}
+
 #[cfg(test)]
 fn short_send_cap(len: usize) -> usize {
     SHORT_SEND.with(|c| c.get().map_or(len, |cap| cap.min(len)))
@@ -772,6 +781,7 @@ mod t27b {
 
     #[test]
     fn b3_the_bridge_sender_takes_8192_bytes_and_refuses_8193_by_name_writing_nothing() {
+        let _serial = super::t27b_serial();
         let Pair(a, b) = pair_seqpacket().unwrap();
         send_bridge_plain(a, &vec![b'x'; BRIDGE_COMMAND_MAX]).expect("8,192 bytes is a whole command");
         assert_eq!(recv_msg(b, BRIDGE_REPLY_MAX).unwrap().len(), BRIDGE_COMMAND_MAX);
@@ -790,6 +800,7 @@ mod t27b {
 
     #[test]
     fn b5_a_reply_of_65536_bytes_arrives_whole_and_a_longer_one_is_named_never_read() {
+        let _serial = super::t27b_serial();
         let Pair(a, b) = pair_seqpacket().unwrap();
         send_plain(a, &vec![b'y'; BRIDGE_REPLY_MAX]).unwrap();
         assert_eq!(recv_msg(b, BRIDGE_REPLY_MAX).unwrap().len(), BRIDGE_REPLY_MAX);
@@ -802,6 +813,7 @@ mod t27b {
 
     #[test]
     fn b6_a_short_sendmsg_is_never_ok() {
+        let _serial = super::t27b_serial();
         let Pair(a, b) = pair_seqpacket().unwrap();
         let spare = spare_fd().unwrap();
         SHORT_SEND.with(|c| c.set(Some(3)));
@@ -817,6 +829,7 @@ mod t27b {
 
     #[test]
     fn b8_a_normal_bridge_command_arrives_byte_for_byte_with_exactly_its_rights() {
+        let _serial = super::t27b_serial();
         let Pair(a, b) = pair_seqpacket().unwrap();
         let cmd = br#"{"schema":"bridge-command@1","command":"list_channels"}"#;
         send_bridge_plain(a, cmd).unwrap();

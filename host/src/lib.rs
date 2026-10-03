@@ -3054,6 +3054,7 @@ mod t27b_stream {
 
     #[test]
     fn b6_a_short_send_on_the_stream_is_finished_and_the_peer_reads_the_frame_once() {
+        let _serial = crate::fdpass::t27b_serial();
         let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
         let v = json!({"schema": "t27b-b6", "pad": "z".repeat(300)});
         let spare = fdpass::spare_fd().unwrap();
@@ -3073,6 +3074,7 @@ mod t27b_stream {
 
     #[test]
     fn b8_a_normal_carrier_frame_is_the_length_prefix_and_the_body() {
+        let _serial = crate::fdpass::t27b_serial();
         let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
         let v = json!({"schema": "t27b-b8", "attach": true});
         let spare = fdpass::spare_fd().unwrap();
@@ -3155,6 +3157,7 @@ mod t27b_runtime {
 
     #[test]
     fn b9_a_locally_refused_constructor_leaks_no_descriptor_and_sends_nothing() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         // A regression that sends the oversized command would wait for a reply this peer never gives: fail it in
         // 2 s instead of hanging (round 2's law run: the plant one-unchecked-bridge-send timed out here).
@@ -3189,6 +3192,7 @@ mod t27b_runtime {
 
     #[test]
     fn b9_a_reply_that_does_not_decode_leaks_nothing() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         let t = answering(peer, b"not json");
         let before = open_fds();
@@ -3206,6 +3210,7 @@ mod t27b_runtime {
 
     #[test]
     fn b7_an_exchange_that_times_out_owes_its_reply_and_the_next_call_reads_its_own() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         let t0 = Instant::now();
         let r = rt.bridge_call_within(&json!({"schema": "bridge-command@1", "command": "list_channels"}), Duration::from_millis(300));
@@ -3279,6 +3284,7 @@ mod t27b_runtime {
 
     #[test]
     fn b7_a_truncated_owed_reply_is_consumed_and_the_next_calls_read_their_own() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         assert!(rt.bridge_call_within(&cmd("list_channels"), Duration::from_millis(100)).is_err());
         let big = format!(r#"{{"ok":true,"pad":"{}"}}"#, "x".repeat(fdpass::BRIDGE_REPLY_MAX)).into_bytes();
@@ -3297,6 +3303,7 @@ mod t27b_runtime {
 
     #[test]
     fn b7_a_receive_that_reads_nothing_keeps_its_reply_owed() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         timeo(rt.bridge, libc::SO_RCVTIMEO, 200);
         assert!(rt.bridge_call(&cmd("list_channels")).is_err(), "no reply came, so the call fails");
@@ -3313,6 +3320,7 @@ mod t27b_runtime {
 
     #[test]
     fn b7_an_interrupted_receive_is_retried_and_reads_its_own_reply() {
+        let _serial = crate::fdpass::t27b_serial();
         unsafe {
             let mut sa: libc::sigaction = std::mem::zeroed();
             sa.sa_sigaction = t27b_on_usr2 as *const () as usize;
@@ -3344,6 +3352,7 @@ mod t27b_runtime {
 
     #[test]
     fn b7_a_bounded_call_is_bounded_while_another_call_holds_the_bridge() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         let (took, r, held) = std::thread::scope(|s| {
             let rt = &rt;
@@ -3368,6 +3377,7 @@ mod t27b_runtime {
 
     #[test]
     fn b7_a_bounded_call_is_bounded_when_the_runtime_is_not_reading() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         // Fill the bridge until a send would wait: this peer never reads.
         let filler = br#"{"schema":"bridge-command@1","command":"t27b-filler"}"#;
@@ -3390,6 +3400,7 @@ mod t27b_runtime {
 
     #[test]
     fn b7_the_runtime_s_close_closes_the_bridge_for_good() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         let t = std::thread::spawn(move || {
             let _ = fdpass::recv_msg_with_fds(peer, 65536, 4);
@@ -3409,6 +3420,7 @@ mod t27b_runtime {
 
     #[test]
     fn b9_a_successful_hand_over_returns_a_live_endpoint_its_owner_closes() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         // The peer keeps everything each command carried and answers ok. Which received descriptor is the endpoint is
         // found by use, not by position: the order of a hand-over's rights is B8's law, not this one's.
@@ -3458,6 +3470,7 @@ mod t27b_runtime {
     /// refusals, so no successful hand-over (B9's) is involved.
     #[test]
     fn b8_every_hand_over_carries_exactly_its_endpoint_then_its_spares_in_order() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         let t = std::thread::spawn(move || {
             let mut seen = Vec::new();
@@ -3524,6 +3537,7 @@ mod t27b_runtime {
 
     #[test]
     fn b9_a_start_that_fails_leaks_no_descriptor_and_releases_the_world() {
+        let _serial = crate::fdpass::t27b_serial();
         let world = std::env::temp_dir().join(format!("t27b-start-{}", std::process::id()));
         let dirs = own_runtime_dirs();
         let before = open_fds();
@@ -3552,6 +3566,7 @@ mod t27b_runtime {
 
     #[test]
     fn b9_spares_that_cannot_all_be_made_leak_none_of_those_that_were() {
+        let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
         let before = open_fds();
         for _ in 0..50 {
@@ -3622,6 +3637,7 @@ mod t27b_runtime {
 
     #[test]
     fn b8_every_bridge_command_is_byte_for_byte_the_base_s() {
+        let _serial = crate::fdpass::t27b_serial();
         let got = capture();
         if let Ok(p) = std::env::var("T27B_GOLDEN_OUT") {
             std::fs::write(p, serde_json::to_vec_pretty(&got).unwrap()).unwrap();
@@ -3682,6 +3698,7 @@ mod t27b_carrier_golden {
 
     #[test]
     fn b8_a_normal_carrier_frame_is_byte_for_byte_the_base_s() {
+        let _serial = crate::fdpass::t27b_serial();
         let got = frames();
         if let Ok(p) = std::env::var("T27B_CARRIER_GOLDEN_OUT") {
             std::fs::write(p, serde_json::to_vec_pretty(&got).unwrap()).unwrap();
