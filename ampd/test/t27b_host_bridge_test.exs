@@ -7,7 +7,10 @@ defmodule Ampd.T27bHostBridgeTest do
     * B3, the runtime's half — exactly 8,192 bytes is a whole command, and it runs;
     * B4 — a command cut in transit is refused as `frame-too-large` and never run, even when its prefix is a whole,
       valid command;
-    * B5, the runtime's half — a reply longer than the host reads whole is never sent; exactly 65,536 bytes is.
+    * B5, the runtime's half — a reply longer than the host reads whole is never sent; exactly 65,536 bytes is;
+      and every reply the loop sends goes through `encode_reply` (a source law: no bridge command can produce a
+      reply that long in a test, so the loop's path is held to the encoder by name).
+  B2 and B4 also count the runtime's descriptors over 50 sends: rights that arrive are sunk, never kept.
 
   On a SEQPACKET pair, as the host's bridge is (the other bridge tests use a stream pair).
   """
@@ -43,6 +46,8 @@ defmodule Ampd.T27bHostBridgeTest do
     [%{level: :socket, type: :rights, data: <<fd::native-32>>}]
   end
 
+  defp beam_fds, do: length(File.ls!("/proc/self/fd"))
+
   defp channels(host) do
     :ok = :socket.send(host, JSON.encode!(%{"schema" => "bridge-command@1", "command" => "list_channels"}))
     length(reply(host)["channels"])
@@ -64,6 +69,20 @@ defmodule Ampd.T27bHostBridgeTest do
     :socket.close(y)
   end
 
+  test "B2 · the rights of an empty command are sunk, never kept", ctx do
+    {x, y} = Ampd.Transport.socketpair(:stream)
+    before = beam_fds()
+
+    for _ <- 1..50 do
+      :ok = :socket.sendmsg(ctx.host, %{iov: [""], ctrl: rights(x)})
+      assert reply(ctx.host)["refusal"]["code"] == "unknown-bridge-command"
+    end
+
+    assert beam_fds() <= before + 20, "50 empty commands left #{beam_fds() - before} descriptors open"
+    :socket.close(x)
+    :socket.close(y)
+  end
+
   test "B3 · exactly 8,192 bytes is a whole command, and it runs", ctx do
     :ok = :socket.send(ctx.host, padded(%{"schema" => "bridge-command@1", "command" => "list_channels"}, 8_192))
     assert reply(ctx.host)["ok"] == true
@@ -81,6 +100,29 @@ defmodule Ampd.T27bHostBridgeTest do
     assert channels(ctx.host) == before, "the cut command bound a channel"
     :socket.close(x)
     :socket.close(y)
+  end
+
+  test "B4 · the rights of a cut command are sunk, never kept", ctx do
+    {x, y} = Ampd.Transport.socketpair(:stream)
+    cut = :binary.copy("x", 8_300)
+    before = beam_fds()
+
+    for _ <- 1..50 do
+      :ok = :socket.sendmsg(ctx.host, %{iov: [cut], ctrl: rights(y)})
+      assert reply(ctx.host)["refusal"]["code"] == "frame-too-large"
+    end
+
+    assert beam_fds() <= before + 20, "50 cut commands left #{beam_fds() - before} descriptors open"
+    :socket.close(x)
+    :socket.close(y)
+  end
+
+  test "B5 · every reply the loop sends goes through encode_reply" do
+    src = File.read!(Path.join(__DIR__, "../lib/ampd/transport.ex"))
+    [_, bridge] = String.split(src, "defmodule HostBridge do", parts: 2)
+    all = length(Regex.scan(~r/:socket\.send\(/, bridge))
+    via = length(Regex.scan(~r/:socket\.send\(sock, encode_reply\(/, bridge))
+    assert via >= 2 and all == via, "#{all - via} of #{all} bridge sends bypass encode_reply"
   end
 
   test "B5 · a reply longer than the host reads whole is never sent; exactly 65,536 bytes is" do

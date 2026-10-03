@@ -443,6 +443,13 @@ pub const BRIDGE_COMMAND_MAX: usize = 8_192;
 pub const BRIDGE_REPLY_MAX: usize = 64 * 1024;
 
 fn bridge_command_fits(len: usize) -> io::Result<()> {
+    // An empty message with no rights is how the runtime reads the host's close (T27b F1): never send one.
+    if len == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "empty-command: the runtime reads an empty bridge message as the host's close",
+        ));
+    }
     if len > BRIDGE_COMMAND_MAX {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -737,6 +744,8 @@ mod t27b {
         let e = send_bridge_with_fds(a, &vec![b'x'; BRIDGE_COMMAND_MAX + 1], &[spare]).unwrap_err();
         close_fd(spare);
         assert!(e.to_string().starts_with("frame-too-large"), "{e}");
+        let e = send_bridge_plain(a, b"").unwrap_err();
+        assert!(e.to_string().starts_with("empty-command"), "an empty command (the runtime's EOF) was sent: {e}");
         assert!(nothing_waiting(b), "a refused command reached the runtime");
         close_fd(a);
         close_fd(b);

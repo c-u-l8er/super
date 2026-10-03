@@ -1685,6 +1685,33 @@ impl WorldDir {
     }
 }
 
+/// A descriptor closed on every exit unless [`Owned::keep`] hands it on (T27b, Codex review 1, finding 1: the
+/// channel constructors leaked their end of a pair whenever a send was refused, a reply failed or a reply did not
+/// decode, and both ends on an error before the send).
+struct Owned(Option<RawFd>);
+
+impl Owned {
+    fn new(fd: RawFd) -> Owned {
+        Owned(Some(fd))
+    }
+
+    fn fd(&self) -> RawFd {
+        self.0.expect("an Owned descriptor is used only before it is kept")
+    }
+
+    fn keep(mut self) -> RawFd {
+        self.0.take().expect("an Owned descriptor is kept once")
+    }
+}
+
+impl Drop for Owned {
+    fn drop(&mut self) {
+        if let Some(fd) = self.0.take() {
+            fdpass::close_fd(fd);
+        }
+    }
+}
+
 pub struct Runtime {
     dir: PathBuf,
     world: WorldDir,
@@ -1698,6 +1725,10 @@ pub struct Runtime {
     /// each other's replies. Channel creation is rare; a lock is the right
     /// size of answer.
     bridge_lock: Mutex<()>,
+    /// T27b R (Codex review 1, finding 3): a bounded exchange that gave up waiting still owes its reply. SEQPACKET keeps
+    /// order, so that reply arrives first; [`Runtime::bridge_recv`] reads and discards it, so it is never taken for a
+    /// later command's reply.
+    bridge_owed: std::sync::atomic::AtomicBool,
     /// Every channel descriptor this host has created, so descriptor
     /// confinement is something the battery can check rather than trust.
     channels: Mutex<Vec<RawFd>>,
@@ -1917,6 +1948,7 @@ impl Runtime {
             child,
             bridge: ours,
             bridge_lock: Mutex::new(()),
+            bridge_owed: std::sync::atomic::AtomicBool::new(false),
             channels: Mutex::new(Vec::new()),
             channel_inodes: Mutex::new(bridge_inode.into_iter().collect()),
             released: false,
@@ -1950,7 +1982,39 @@ impl Runtime {
         let _b = self.bridge_lock.lock().unwrap();
         let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
         fdpass::send_bridge_plain(self.bridge, &bytes).map_err(|e| format!("bridge send: {e}"))?;
-        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
+        serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
+    }
+
+    /// One bridge reply. If a bounded exchange gave up waiting, its reply is still owed and arrives first: it is read
+    /// and discarded here, so it is never taken for this command's reply (T27b R, Codex review 1, finding 3).
+    fn bridge_recv(&self) -> io::Result<Vec<u8>> {
+        if self.bridge_owed.load(std::sync::atomic::Ordering::SeqCst) {
+            let owed = fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX);
+            // Consumed either way: a reply-too-large is a whole message read and refused.
+            self.bridge_owed.store(false, std::sync::atomic::Ordering::SeqCst);
+            owed?;
+        }
+        fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX)
+    }
+
+    /// [`Runtime::bridge_call`], waiting at most `within` for the reply (T27b R, Codex review 1, finding 3: the
+    /// teardown check's bound must cover the exchange, not only the gaps between exchanges). On a timeout the reply is
+    /// still owed: no further bounded call is sent until [`Runtime::bridge_recv`] has discarded it.
+    pub fn bridge_call_within(&self, v: &Value, within: Duration) -> Result<Value, String> {
+        let _b = self.bridge_lock.lock().unwrap();
+        if self.bridge_owed.load(std::sync::atomic::Ordering::SeqCst) {
+            return Err("bridge: an earlier reply is still owed".to_string());
+        }
+        let bytes = serde_json::to_vec(v).map_err(|e| e.to_string())?;
+        fdpass::send_bridge_plain(self.bridge, &bytes).map_err(|e| format!("bridge send: {e}"))?;
+        let mut p = libc::pollfd { fd: self.bridge, events: libc::POLLIN, revents: 0 };
+        let ms = within.as_millis().min(i32::MAX as u128) as i32;
+        if unsafe { libc::poll(&mut p, 1, ms) } <= 0 {
+            self.bridge_owed.store(true, std::sync::atomic::Ordering::SeqCst);
+            return Err(format!("bridge recv: no reply within {within:?}"));
+        }
+        let reply = fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX).map_err(|e| format!("bridge recv: {e}"))?;
         serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
     }
 
@@ -1974,7 +2038,7 @@ impl Runtime {
         }
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
-        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
     }
 
@@ -1988,27 +2052,28 @@ impl Runtime {
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
 
+        // T27b (Codex review 1, finding 1): both ends are owned until handed on; no exit leaks either.
+        let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
+
         let mut all = vec![theirs];
         for _ in 0..surplus {
-            all.push(fdpass::spare_fd().map_err(|e| format!("spare fd: {e}"))?);
+            all.push(Owned::new(fdpass::spare_fd().map_err(|e| format!("spare fd: {e}"))?));
         }
 
         let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &all);
-        for fd in &all {
-            fdpass::close_fd(*fd);
-        }
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &all.iter().map(Owned::fd).collect::<Vec<_>>());
+        drop(all);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
-        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
 
         if v["ok"] != true {
-            fdpass::close_fd(ours);
             return Err(format!("refused: {}", v["refusal"]["code"]));
         }
 
+        let ours = ours.keep();
         self.channels.lock().unwrap().push(ours);
         Ok(Chan::adopt(ours))
     }
@@ -2020,6 +2085,9 @@ impl Runtime {
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
 
+        // T27b (Codex review 1, finding 1): both ends are owned until handed on; no exit leaks either.
+        let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
+
         let mut cmd = json!({"schema": "bridge-command@1", "command": command});
         if let Some(a) = actor {
             cmd["actor"] = json!(a);
@@ -2027,16 +2095,15 @@ impl Runtime {
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
         // Read before the send, because `theirs` is closed straight after.
-        let given = fd_inode(theirs);
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
-        fdpass::close_fd(theirs);
+        let given = fd_inode(theirs.fd());
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
-        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
 
         if v["ok"] != true {
-            fdpass::close_fd(ours);
             return Err(format!(
                 "the runtime refused the channel: {}",
                 v["refusal"]["code"]
@@ -2045,6 +2112,7 @@ impl Runtime {
 
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
 
+        let ours = ours.keep();
         self.channels.lock().unwrap().push(ours);
         let chan = Chan::adopt(ours);
         let hello = read_hello(&chan)?;
@@ -2088,6 +2156,9 @@ impl Runtime {
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("effect socketpair: {e}"))?;
 
+        // T27b (Codex review 1, finding 1): both ends are owned until handed on; no exit leaks either.
+        let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
+
         let cmd = json!({
             "schema": "bridge-command@1",
             "command": "bind_effect_channel",
@@ -2101,24 +2172,24 @@ impl Runtime {
         });
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let given = fd_inode(theirs);
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
-        fdpass::close_fd(theirs);
+        let given = fd_inode(theirs.fd());
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
 
         let reply =
-            fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+            self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
 
         if v["ok"] != true {
-            fdpass::close_fd(ours);
             return Err(format!(
                 "the runtime refused the effect channel: {}",
                 v["refusal"]["code"]
             ));
         }
 
+        let ours = ours.keep();
         self.channels.lock().unwrap().push(ours);
         Ok(ours)
     }
@@ -2147,22 +2218,24 @@ impl Runtime {
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("terminal socketpair: {e}"))?;
 
+        // T27b (Codex review 1, finding 1): both ends are owned until handed on; no exit leaks either.
+        let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
+
         let cmd = json!({
             "schema": "bridge-command@1",
             "command": "bind_terminal_endpoint",
         });
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
-        fdpass::close_fd(theirs);
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
         let reply =
-            fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+            self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
 
         if v["ok"] != true {
-            fdpass::close_fd(ours);
             return Err(format!(
                 "the runtime refused the terminal endpoint: {}",
                 v["refusal"]["code"]
@@ -2174,13 +2247,12 @@ impl Runtime {
         // reply is flat — `v["result"]["endpoint_ref"]` reads `null` on a
         // perfectly good answer and closes a socket the runtime has adopted.
         match v["endpoint_ref"].as_str() {
-            Some(r) => Ok((ours, r.to_string())),
+            Some(r) => Ok((ours.keep(), r.to_string())),
             // **Closed here, and this branch is not defensive padding.** A
             // reply we cannot read is a socket the runtime has adopted and we
             // still hold — the one shape where both ends stay open forever
             // because each is waiting to be told what to do with it.
             None => {
-                fdpass::close_fd(ours);
                 Err("the runtime answered without an endpoint_ref".to_string())
             }
         }
@@ -2202,6 +2274,9 @@ impl Runtime {
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("carrier socketpair: {e}"))?;
+
+        // T27b (Codex review 1, finding 1): both ends are owned until handed on; no exit leaks either.
+        let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
 
         // **The Carrier execution basis rides the possessed channel.**
         //
@@ -2251,24 +2326,24 @@ impl Runtime {
         });
 
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let given = fd_inode(theirs);
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
-        fdpass::close_fd(theirs);
+        let given = fd_inode(theirs.fd());
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
+        drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
 
         let reply =
-            fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+            self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         let v: Value = serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))?;
 
         if v["ok"] != true {
-            fdpass::close_fd(ours);
             return Err(format!(
                 "the runtime refused the carrier channel: {}",
                 v["refusal"]["code"]
             ));
         }
 
+        let ours = ours.keep();
         self.channels.lock().unwrap().push(ours);
         Ok(ours)
     }
@@ -2284,21 +2359,24 @@ impl Runtime {
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
 
+        // T27b (Codex review 1, finding 1): both ends are owned until handed on; no exit leaks either.
+        let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
+
         let cmd = json!({"schema":"bridge-command@1","command":"bind_agent_channel","actor":actor});
         let bytes = serde_json::to_vec(&cmd).map_err(|e| e.to_string())?;
-        let given = fd_inode(theirs);
-        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs]);
+        let given = fd_inode(theirs.fd());
+        let sent = fdpass::send_bridge_with_fds(self.bridge, &bytes, &[theirs.fd()]);
         if let Some(i) = given { self.channel_inodes.lock().unwrap().push(i); }
-        fdpass::close_fd(theirs);
+        drop(theirs);
         sent.map_err(|e| format!("bridge sendmsg: {e}"))?;
 
-        let reply = fdpass::recv_msg(self.bridge, 64 * 1024).map_err(|e| format!("bridge recv: {e}"))?;
+        let reply = self.bridge_recv().map_err(|e| format!("bridge recv: {e}"))?;
         let v: Value = serde_json::from_slice(&reply).map_err(|e| e.to_string())?;
 
         if v["ok"] != true {
-            fdpass::close_fd(ours);
             return Err(format!("refused: {}", v["refusal"]["code"]));
         }
+        let ours = ours.keep();
         self.channels.lock().unwrap().push(ours);
         Ok(ours)
     }
@@ -2876,6 +2954,200 @@ mod t27b_stream {
         fdpass::close_fd(a);
         fdpass::close_fd(b);
     }
+}
+
+#[cfg(test)]
+mod t27b_runtime {
+    //! T27b, Codex review 1, at the caller: a Runtime whose bridge is one end of a SEQPACKET pair this test holds (no
+    //! ampd), so refusals, undecodable replies and timeouts are driven exactly. B9 (no constructor leaks a descriptor),
+    //! B7 (an abandoned reply is owed, never misread) and B8 (every bridge command is byte for byte the base's).
+    use super::*;
+    use crate::fdpass;
+    use serde_json::{json, Value};
+    use std::os::unix::io::RawFd;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
+
+    fn fake_runtime() -> (Runtime, RawFd) {
+        let fdpass::Pair(ours, peer) = fdpass::pair_seqpacket().unwrap();
+        let dir = std::env::temp_dir().join(format!("t27b-fake-{}-{ours}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+        let rt = Runtime {
+            dir: dir.clone(),
+            world: WorldDir::Ephemeral(dir.join("world")),
+            world_lock: lock,
+            child,
+            bridge: ours,
+            bridge_lock: Mutex::new(()),
+            bridge_owed: std::sync::atomic::AtomicBool::new(false),
+            channels: Mutex::new(Vec::new()),
+            channel_inodes: Mutex::new(Vec::new()),
+            released: false,
+        };
+        (rt, peer)
+    }
+
+    fn open_fds() -> usize {
+        std::fs::read_dir("/proc/self/fd").unwrap().count()
+    }
+
+    fn nothing_waiting(fd: RawFd) -> bool {
+        let mut b = [0u8; 16];
+        let n = unsafe { libc::recv(fd, b.as_mut_ptr().cast(), b.len(), libc::MSG_DONTWAIT) };
+        n < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::WouldBlock
+    }
+
+    /// The peer answers every command with `reply`, sinking its rights, until the host closes the bridge.
+    fn answering(peer: RawFd, reply: &'static [u8]) -> std::thread::JoinHandle<Vec<(Vec<u8>, Vec<u64>)>> {
+        std::thread::spawn(move || {
+            let mut got = Vec::new();
+            while let Ok((b, fds)) = fdpass::recv_msg_with_fds(peer, 65536, 8) {
+                if b.is_empty() && fds.is_empty() {
+                    break;
+                }
+                let inodes = fds.iter().map(|f| fd_inode(*f).unwrap_or(0)).collect();
+                for f in fds {
+                    fdpass::close_fd(f);
+                }
+                got.push((b, inodes));
+                if fdpass::send_plain(peer, reply).is_err() {
+                    break;
+                }
+            }
+            fdpass::close_fd(peer);
+            got
+        })
+    }
+
+    #[test]
+    fn b9_a_locally_refused_constructor_leaks_no_descriptor_and_sends_nothing() {
+        let (rt, peer) = fake_runtime();
+        let big = "a".repeat(fdpass::BRIDGE_COMMAND_MAX);
+        let before = open_fds();
+        for _ in 0..100 {
+            for e in [
+                rt.bind_channel("bind_agent_channel", Some(&big)).err(),
+                rt.agent_fd(&big).err(),
+                rt.agent_channel_with_surplus(&big, 2).err(),
+            ] {
+                let e = e.expect("an oversized bind is refused");
+                assert!(e.contains("frame-too-large"), "{e}");
+            }
+        }
+        let after = open_fds();
+        assert!(after <= before + 20, "300 refused binds left {} descriptors open", after.saturating_sub(before));
+        assert!(nothing_waiting(peer), "a refused command reached the runtime");
+        fdpass::close_fd(peer);
+    }
+
+    #[test]
+    fn b9_a_reply_that_does_not_decode_leaks_nothing() {
+        let (rt, peer) = fake_runtime();
+        let t = answering(peer, b"not json");
+        let before = open_fds();
+        for _ in 0..50 {
+            assert!(rt.agent_fd("t27b").is_err());
+            assert!(rt.effect_channel().is_err());
+            assert!(rt.terminal_endpoint().is_err());
+        }
+        let after = open_fds();
+        drop(rt);
+        let got = t.join().unwrap();
+        assert_eq!(got.len(), 150, "every command reached the peer");
+        assert!(after <= before + 20, "150 undecodable replies left {} descriptors open", after.saturating_sub(before));
+    }
+
+    #[test]
+    fn b7_an_exchange_that_times_out_owes_its_reply_and_the_next_call_reads_its_own() {
+        let (rt, peer) = fake_runtime();
+        let t0 = Instant::now();
+        let r = rt.bridge_call_within(&json!({"schema": "bridge-command@1", "command": "list_channels"}), Duration::from_millis(300));
+        let took = t0.elapsed();
+        assert!(r.is_err() && took >= Duration::from_millis(290) && took < Duration::from_millis(800), "{r:?} after {took:?}");
+        assert!(
+            rt.bridge_call_within(&json!({"schema": "bridge-command@1", "command": "runtime_status"}), Duration::from_millis(50)).is_err(),
+            "a bounded call was sent while a reply was owed"
+        );
+        let peer_t = std::thread::spawn(move || {
+            let (first, _) = fdpass::recv_msg_with_fds(peer, 65536, 4).unwrap();
+            assert!(String::from_utf8_lossy(&first).contains("list_channels"));
+            fdpass::send_plain(peer, br#"{"ok":true,"channels":[1,2,3],"late":true}"#).unwrap();
+            let (second, _) = fdpass::recv_msg_with_fds(peer, 65536, 4).unwrap();
+            assert!(String::from_utf8_lossy(&second).contains("registered_repository"));
+            fdpass::send_plain(peer, br#"{"ok":true,"answer":"second"}"#).unwrap();
+            peer
+        });
+        let v = rt.bridge_call(&json!({"schema": "bridge-command@1", "command": "registered_repository"})).unwrap();
+        assert_eq!(v["answer"], "second", "the owed reply was taken for this command's reply: {v}");
+        fdpass::close_fd(peer_t.join().unwrap());
+    }
+
+    /// A command's bytes with its run-to-run values (a fresh epoch, the host's identity, the Carrier basis) replaced by
+    /// placeholders IN THE RAW BYTES, so every other byte is compared as sent.
+    fn normalized(b: &[u8]) -> String {
+        let mut out = String::from_utf8_lossy(b).to_string();
+        if let Ok(v) = serde_json::from_slice::<Value>(b) {
+            for k in ["channel_epoch", "host_identity", "carrier_basis"] {
+                let x = &v["incarnation"][k];
+                if !x.is_null() {
+                    out = out.replacen(&serde_json::to_string(x).unwrap(), &format!("\"<{k}>\""), 1);
+                }
+            }
+        }
+        out
+    }
+
+    /// Every bridge command the host sends, as the runtime receives it: the normalized bytes, how many rights came
+    /// with it, and whether each one is a descriptor the host recorded as handed over.
+    fn capture() -> Vec<Value> {
+        let (rt, peer) = fake_runtime();
+        let t = answering(peer, br#"{"schema":"bridge-reply@1","ok":false,"refusal":{"code":"t27b-golden-capture"}}"#);
+        let mut names = Vec::new();
+        let mut known = Vec::new();
+        let mut call = |name: &str, f: &dyn Fn(&Runtime)| {
+            names.push(name.to_string());
+            f(&rt);
+            known.push(rt.adopted_channel_inodes());
+        };
+        call("bridge_call", &|rt| { let _ = rt.bridge_call(&json!({"schema": "bridge-command@1", "command": "list_channels"})); });
+        call("bridge_call_with_rights", &|rt| { let _ = rt.bridge_call_with_rights(br#"{"schema":"bridge-command@1","command":"t27b"}"#, 2); });
+        call("agent_channel_with_surplus", &|rt| { let _ = rt.agent_channel_with_surplus("t27b-golden", 1); });
+        call("bind_channel", &|rt| { let _ = rt.bind_channel("bind_agent_channel", Some("t27b-golden")); });
+        call("control_channel", &|rt| { let _ = rt.control_channel(); });
+        call("effect_channel", &|rt| { let _ = rt.effect_channel(); });
+        call("terminal_endpoint", &|rt| { let _ = rt.terminal_endpoint(); });
+        call("carrier_channel", &|rt| { let _ = rt.carrier_channel(); });
+        call("agent_fd", &|rt| { let _ = rt.agent_fd("t27b-golden"); });
+        drop(call);
+        drop(rt);
+        let got = t.join().unwrap();
+        assert_eq!(got.len(), names.len(), "a constructor sent no command (or more than one)");
+        got.into_iter()
+            .zip(names)
+            .zip(known)
+            .map(|(((b, inodes), name), known)| {
+                json!({
+                    "call": name,
+                    "bytes": normalized(&b),
+                    "rights": inodes.len(),
+                    "rights_recorded_by_host": inodes.iter().map(|i| known.contains(i)).collect::<Vec<_>>(),
+                })
+            })
+            .collect()
+    }
+
+    #[test]
+    fn b8_every_bridge_command_is_byte_for_byte_the_base_s() {
+        let got = capture();
+        if let Ok(p) = std::env::var("T27B_GOLDEN_OUT") {
+            std::fs::write(p, serde_json::to_vec_pretty(&got).unwrap()).unwrap();
+        }
+        let want: Vec<Value> = serde_json::from_str(include_str!("../tests/data/t27b-bridge-goldens.json")).unwrap();
+        assert_eq!(got, want, "a bridge command differs from the base capture");
+    }
+
 }
 
 } // mod linux_layer

@@ -615,7 +615,9 @@ defmodule Ampd.Transport do
     # marks a message longer than the read `:trunc` and drops its tail, and a
     # prefix of a command can itself be a whole JSON object.
     defp loop(sock) do
-      case :socket.recvmsg(sock, [:cmsg_cloexec]) do
+      # An explicit buffer of exactly @command_max bytes (T27b, Codex review 1): the limit is this module's, not
+      # whatever OTP's default `recvmsg` buffer happens to be. CtrlSz 0 is OTP's default control buffer.
+      case :socket.recvmsg(sock, @command_max, 0, [:cmsg_cloexec], :infinity) do
         {:ok, msg} ->
           bytes = iov(msg)
           fds = rights(msg)

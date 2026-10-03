@@ -1175,11 +1175,7 @@ pub fn run(ampd_dir: &Path) -> i32 {
         // between the two ("still lists N"). Poll until it lists at most one,
         // bounded at 15 s like `settle_sockets`, and judge the last reading.
         let listed = settle_listed(
-            || {
-                rt.bridge_call(&json!({"schema":"bridge-command@1","command":"list_channels"}))
-                    .map(|v| v["channels"].as_array().map(|a| a.len()).unwrap_or(0))
-                    .unwrap_or(999)
-            },
+            |left| listed_reply(rt.bridge_call_within(&json!({"schema":"bridge-command@1","command":"list_channels"}), left)),
             1,
             Duration::from_secs(15),
         );
@@ -5519,34 +5515,74 @@ fn make_basis_fixture(target: &Path, sibling: &Path, commit: &mut String) -> boo
     std::fs::write(sibling.join("README"), b"not yours\n").is_ok()
 }
 
-/// Read `read` until it reports at most `limit`, or `within` has passed, and
-/// return the last reading either way (T27b R). One reading is not a
-/// teardown: see the `list_channels` check above.
-pub(crate) fn settle_listed(mut read: impl FnMut() -> usize, limit: usize, within: Duration) -> usize {
+/// Read `read` until it reports at most `limit`, or `within` has passed, and return the last reading either way
+/// (T27b R). One reading is not a teardown: see the `list_channels` check above. `read` is given the time left, and
+/// nothing reads or sleeps past the deadline (Codex review 1, finding 3).
+pub(crate) fn settle_listed(mut read: impl FnMut(Duration) -> usize, limit: usize, within: Duration) -> usize {
     let until = std::time::Instant::now() + within;
+    let mut left = within;
     loop {
-        let n = read();
-        if n <= limit || std::time::Instant::now() >= until {
+        let n = read(left);
+        if n <= limit {
             return n;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return n;
+        }
+        std::thread::sleep(left.min(Duration::from_millis(100)));
+        left = until.saturating_duration_since(std::time::Instant::now());
+        if left.is_zero() {
+            return n;
+        }
+    }
+}
+
+/// The channel count in a `list_channels` reply, counted only from a successful, well-formed reply: a refusal (such
+/// as `reply-too-large`), a malformed reply or a failed exchange is 999, which fails the check (Codex review 1,
+/// finding 2: a refusal used to read as zero channels).
+pub(crate) fn listed_reply(r: Result<serde_json::Value, String>) -> usize {
+    match r {
+        Ok(v) if v["ok"] == true => v["channels"].as_array().map(|a| a.len()).unwrap_or(999),
+        _ => 999,
     }
 }
 
 #[cfg(test)]
 mod t27b_settle {
-    //! T27b B7: the teardown check reads the registry until it settles, bounded, and still fails when a channel is
-    //! never removed.
+    //! T27b B7: the teardown check reads the registry until it settles, bounded — the bound covers each reading and
+    //! nothing reads or sleeps past it — and it counts only a successful, well-formed reply (Codex review 1, 2 and 3).
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn b7_a_late_detach_settles_and_a_channel_never_removed_still_fails() {
         let mut seq = vec![3usize, 3, 2, 1].into_iter();
-        let n = settle_listed(|| seq.next().unwrap_or(1), 1, Duration::from_secs(5));
+        let n = settle_listed(|_| seq.next().unwrap_or(1), 1, Duration::from_secs(5));
         assert_eq!(n, 1, "a registry that detaches late must be read after it settles");
-        let started = std::time::Instant::now();
-        let n = settle_listed(|| 2, 1, Duration::from_millis(400));
+        let started = Instant::now();
+        let n = settle_listed(|_| 2, 1, Duration::from_millis(400));
+        let took = started.elapsed();
         assert_eq!(n, 2, "a channel never removed must still fail");
-        assert!(started.elapsed() >= Duration::from_millis(400), "it gave up before its bound");
+        assert!(took >= Duration::from_millis(390) && took < Duration::from_millis(600), "{took:?}");
+    }
+
+    #[test]
+    fn b7_a_slow_peer_is_bounded_by_the_time_left() {
+        // Each reading takes 250 ms, or the time it is given if that is less (as a bounded exchange does).
+        let started = Instant::now();
+        let n = settle_listed(|left| { std::thread::sleep(left.min(Duration::from_millis(250))); 2 }, 1, Duration::from_millis(400));
+        let took = started.elapsed();
+        assert_eq!(n, 2);
+        assert!(took < Duration::from_millis(520), "the bound was overrun: {took:?}");
+    }
+
+    #[test]
+    fn b7_only_a_successful_well_formed_reply_is_counted() {
+        assert_eq!(listed_reply(Ok(serde_json::json!({"ok": true, "channels": [1]}))), 1);
+        assert_eq!(listed_reply(Ok(serde_json::json!({"ok": false, "refusal": {"code": "reply-too-large"}}))), 999);
+        assert_eq!(listed_reply(Ok(serde_json::json!({"ok": true}))), 999);
+        assert_eq!(listed_reply(Ok(serde_json::json!("garbage"))), 999);
+        assert_eq!(listed_reply(Err("bridge recv: no reply".into())), 999);
     }
 }
