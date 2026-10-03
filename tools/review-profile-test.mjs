@@ -32,7 +32,7 @@ test('L2 · the Elixir profile builds super-host, hands on only its binary, then
     {name:'host-build',cargo:true,exports:'super-host',script:'cargo build --release --offline --locked --manifest-path host/Cargo.toml && cp host/target/release/super-host /out/super-host',outcomes:{0:'built'}},
     {name:'ampd',needs:'host-build',script:'cd ampd && { mix compile || exit 125; } && exec mix test --seed 0',outcomes:{0:'pass',2:'fail'}}]);
   assert.deepEqual(plan.requiredFiles,['ampd/mix.exs','ampd/test/test_helper.exs','host/Cargo.toml','host/Cargo.lock']);
-  assert.ok(stageScript(ELIXIR,stage(ELIXIR,'ampd')).includes('mkdir -p /tmp/source/host/target/release && cp /built/super-host /tmp/source/host/target/release/super-host && cd /tmp/source'));
+  assert.ok(stageScript(ELIXIR,stage(ELIXIR,'ampd')).includes('mkdir -p /tmp/source/host/target/release && cp /built/super-host /tmp/source/host/target/release/super-host && chmod 755 /tmp/source/host/target/release/super-host && cd /tmp/source'));
 });
 
 test('L3 · every stage receives exactly its profile\'s environment, with a fixed git identity for Elixir',()=>{
@@ -141,9 +141,10 @@ test('L9 · asdf is found from the cockpit\'s own environment, in a closed order
   assert.equal(findAsdf({env:{PATH:join(work,'path'),HOME:join(work,'home')}}),join(work,'home/.asdf/bin/asdf'),'a file that is not executable is passed over');
 });
 
-test('L10 · each stage runs from a fresh copy, and only super-host\'s binary passes on, as a read-only copy the runner made',async t=>{
+test('L10 · each stage runs from a fresh copy into a transcript file of its own, and only super-host\'s binary passes on, as a read-only copy the runner made',async t=>{
   for(const profile of [RUST,ELIXIR])for(const s of profilePlan(profile).stages){
     assert.match(stageScript(profile,s),/cp -a \/snapshot \/tmp\/source/,s.name+' copies the snapshot afresh');
+    assert.ok(stageScript(profile,s).endsWith('\n('+s.script+') > /tmp/stage.log 2>&1\ncode=$?\ncat /tmp/stage.log\nexit $code'),s.name+' writes to a file of its own sandbox, never to the runner\'s pipe');
     const writable=binds(compiledStageCommand(profile,s,ctx)).filter(b=>b[0]==='--bind').map(b=>b[2]);
     assert.deepEqual(writable,s.exports?['/out']:[],s.name+' writes nothing outside its own sandbox but its export');
   }

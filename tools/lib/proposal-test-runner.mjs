@@ -180,8 +180,12 @@ export function profilePlan(profile){
 const stageOf=(profile,stage)=>{const s=stages[profile]?.find(x=>x.name===(typeof stage==='string'?stage:stage?.name));assert(s,'Not a stage of this profile.');return s;};
 export function stageScript(profile,named){
   const stage=stageOf(profile,named);
-  const prepare=[...(stage.cargo?['mkdir -p /tmp/cargo','cp -a /registry /tmp/cargo/registry']:[]),'cp -a /snapshot /tmp/source',...(stage.sibling?['cp -a /rrabbit /tmp/RRABBIT']:[]),...(stage.needs?['mkdir -p /tmp/source/host/target/release','cp /built/super-host /tmp/source/host/target/release/super-host']:[]),'cd /tmp/source'];
-  return `${prepare.join(' && ')} || exit ${NOT_PREPARED}\n${stage.script}`;
+  const prepare=[...(stage.cargo?['mkdir -p /tmp/cargo','cp -a /registry /tmp/cargo/registry']:[]),'cp -a /snapshot /tmp/source',...(stage.sibling?['cp -a /rrabbit /tmp/RRABBIT']:[]),...(stage.needs?['mkdir -p /tmp/source/host/target/release','cp /built/super-host /tmp/source/host/target/release/super-host','chmod 755 /tmp/source/host/target/release/super-host']:[]),'cd /tmp/source'];
+  // Round 3: the code under test writes to a file of its own sandbox, never to the runner's pipe, and the file is
+  // printed when the stage ends. Measured: the whole ampd suite run straight into the pipe failed 3 of 3 times (1, 1 and
+  // 908 failures; superlane/t36/pipe-test.out), and 7 of 7 through a file passed. The subshell keeps the stage's exit
+  // status, its reserved 125 included.
+  return `${prepare.join(' && ')} || exit ${NOT_PREPARED}\n(${stage.script}) > /tmp/stage.log 2>&1\ncode=$?\ncat /tmp/stage.log\nexit $code`;
 }
 // The rest of a stage's bwrap arguments after the common sandbox: its toolchains, its private RRABBIT capture, its hand-
 // over directory (writable /out for the stage that exports, read-only /built for the stage that needs it), its fixed
@@ -193,7 +197,8 @@ export function compiledStageCommand(profile,named,{toolBinds,path,sibling=null,
     '--setenv','PATH',path,...Object.entries(sandboxEnv[profile]).flatMap(([k,v])=>['--setenv',k,v]),'--','/bin/sh','-c',stageScript(profile,stage)];
 }
 // Round 2: what a stage hands on is a COPY the runner makes of the one validated file, never the build-controlled
-// directory it was written to; the copy is read-only.
+// directory it was written to; the copy is read-only. The stage that needs it takes its own writable copy, as a fresh
+// build output would be (ampd's F19a copies the binary and writes to the copy).
 export async function handOff(out,to,name){
   const from=join(out,name),st=await lstat(from);
   assert(st.isFile()&&st.size>0&&st.size<=256*1024*1024,'The handed-on '+name+' must be one bounded regular file.');
