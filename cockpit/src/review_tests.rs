@@ -1128,6 +1128,30 @@ mod outcome_preview_tests {
         assert_eq!(before["output"], "ok", "a record from before T43 has no index and keeps its head");
         assert_eq!(before["output_omitted"], true);
     }
+    // T43 round 2 (Codex review 1, fix 1), law F7's cockpit half: a runner record at the runner's bound (OUTCOME_MAX,
+    // 240 KiB, tools/lib/proposal-test-runner.mjs) is read, and the run record the cockpit saves around it reads back;
+    // one byte past the reader's 256 KiB is refused, which is why the runner fits its records.
+    #[test]
+    fn f7_a_runner_record_at_its_bound_is_read_and_its_run_record_reads_back() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("t43-f7-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let outcome_max = 240 * 1024;
+        let mut result = json!({"state":"completed","verdict":"fail","output":"","omitted_bytes":1,"failures":[{"stage":"ampd","line":"  1) test x (M)"}],"tests":["ampd/mix.exs","ampd/test/test_helper.exs","host/Cargo.toml","host/Cargo.lock"]});
+        let base = serde_json::to_vec_pretty(&result).unwrap().len() + 1;
+        result["output"] = json!("\u{fffd}".repeat((outcome_max - base) / 3));
+        let pretty = [serde_json::to_vec_pretty(&result).unwrap().as_slice(), b"\n"].concat();
+        assert!(pretty.len() <= outcome_max && pretty.len() > outcome_max - 3, "{}", pretty.len());
+        fs::write(dir.join("outcome.json"), &pretty).unwrap();
+        let read_back = read(&dir.join("outcome.json")).expect("a record at the runner's bound is read");
+        let mut finished = json!({"run_id":"t43-f7","attempt_ref":"da_0000","state":"completed","profile":"super-elixir-review@1","world":["w-0000000000000000",1,"e"],"started_at":"2026-10-04T00:00:00Z"});
+        finished["result"] = read_back;
+        save(&dir.join("run.json"), &finished).unwrap();
+        assert!(read(&dir.join("run.json")).is_ok(), "the run record around it reads back");
+        fs::write(dir.join("over.json"), vec![b' '; 256 * 1024 + 1]).unwrap();
+        assert!(read(&dir.join("over.json")).is_err(), "past 256 KiB the reader refuses");
+        fs::remove_dir_all(&dir).ok();
+    }
 }
 
 #[cfg(test)]

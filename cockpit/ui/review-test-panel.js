@@ -10,7 +10,7 @@ export function runFailures(result){
   const more=failures.length-3;
   return {lines:failures.slice(0,3).map(f=>`${typeof f.stage==='string'?f.stage:'run'}: ${f.line}`),
     more:more>0?`and ${more} more${result.failures_overflowed?' (the record keeps 16; the run printed further failures)':''}`:null,
-    note:'These lines name what failed. Whether the run passed comes from its exit status alone.'};
+    note:'These lines were printed as failures. Whether the run passed comes from its exit status alone.'};
 }
 export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=false}){
   const panel=node('section',undefined,'attempt-checks');panel.id='attempt-tests-'+attempt.id;

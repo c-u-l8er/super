@@ -2,13 +2,18 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {StringDecoder} from 'node:string_decoder';
-import {transcriptKeeper,failureIndex,judgeRun,stageOutcome,compiledVerdict,profilePlan} from './lib/proposal-test-runner.mjs';
+import {spawn} from 'node:child_process';
+import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {transcriptKeeper,failureIndex,judgeRun,stageOutcome,compiledVerdict,profilePlan,composeParts,fitOutcome,OUTCOME_MAX,stageWrapper} from './lib/proposal-test-runner.mjs';
 import {runFailures} from '../cockpit/ui/review-test-panel.js';
 
 // T43 (A-32; superlane/t43/TASK.md): a review run's record names its first failures, keeps a timed-out stage's
 // transcript, and counts omitted bytes as they arrived. One law per change, each with a planted bug that only it catches
 // (superlane/t43/plants.py). F3 is a Rust test in cockpit/src/review_tests.rs; F4 runs in the real sandbox
-// (tools/proposal-test-runner-spec.mjs), as T36's sandbox laws did.
+// (tools/proposal-test-runner-spec.mjs), as T36's sandbox laws did. Round 2 (Codex review 1): F7, the record always fits
+// what the cockpit reads (its cockpit half is a Rust test too), and F8, a stage's transcript is printed once.
 
 const JS='super-javascript-behavior@1',RUST='super-rust-review@1',ELIXIR='super-elixir-review@1';
 
@@ -128,4 +133,62 @@ test('F6 · the panel shows up to 3 failures, how many more, and that the verdic
   const at=panel.indexOf('const failed=runFailures(result);'),details=panel.indexOf("const output=node('details')");
   assert.ok(at>0&&at<details,'the panel reads the index before it shows the transcript');
   for(const use of ['for(const line of failed.lines)box.append(','if(failed.more)box.append(','box.append(node(\'p\',failed.note,'])assert.ok(panel.slice(at,details).includes(use),use);
+});
+
+const recordBytes=r=>Buffer.byteLength(JSON.stringify(r,null,2)+'\n');
+test('F7 · the outcome record always fits what the cockpit reads, with exact counts; within the bound it is written as before',()=>{
+  const rs=readFileSync(new URL('../cockpit/src/review_tests.rs',import.meta.url),'utf8');
+  assert.match(rs,/\.len\(\) > 256 \* 1024/,'the cockpit reads at most 256 KiB');
+  assert.ok(OUTCOME_MAX+16*1024<=256*1024,'the runner\'s bound leaves room for the run record the cockpit saves around it');
+  // Two stages of 256 KiB of ff bytes and 17 failure lines of control characters each, for a candidate and its baseline.
+  const lines=Array.from({length:17},(_,i)=>'not ok '+(i+1)+' - '+'\x01'.repeat(600)+'\n').join('');
+  const stage=name=>{const k=transcriptKeeper(64*1024,name);for(let i=0;i<64;i++)k.push(Buffer.alloc(4096,0xff));k.push(Buffer.from(lines));return k.finish();};
+  const run=()=>{const s=[stage('host-build'),stage('ampd')];return {parts:s.map((r,i)=>({prefix:`[runner] stage ${i}\n`,kept:r.kept})),...failureIndex(s)};};
+  const c=run(),b=run();
+  for(const f of c.failures)assert.ok(Buffer.byteLength(JSON.stringify(f.line))-2<=1024&&f.line.startsWith('not ok'),'a failure line is at most 1,024 bytes as JSON');
+  const record={schema:'local-proposal-test@1',state:'completed',verdict:'fail',...composeParts(c.parts),failures:c.failures,failures_overflowed:c.failures_overflowed,stages:[{name:'host-build'},{name:'ampd'}],
+    baseline:{state:'completed',verdict:'pass',...composeParts(b.parts)}};
+  assert.ok(recordBytes(record)>OUTCOME_MAX,'as kept, the record would be refused: '+recordBytes(record));
+  const counts=out=>out.split(/\n?\[runner\] stage \d\n/).slice(1).map(text=>{const m=text.match(/\n\[… (\d+) bytes omitted …\]\n/);return {omitted:m?Number(m[1]):0,kept:Array.from(text.replace(/\n\[… \d+ bytes omitted …\]\n/,'')).length};});
+  const beforeC=counts(record.output),beforeB=counts(record.baseline.output);
+  const index=JSON.stringify([record.failures,record.failures_overflowed]);
+  fitOutcome(record,[{target:record.baseline,parts:b.parts},{target:record,parts:c.parts}]);
+  assert.ok(recordBytes(record)<=OUTCOME_MAX,'fitted: '+recordBytes(record));
+  assert.equal(record.transcripts_fitted,true);assert.deepEqual([record.state,record.verdict,record.baseline.verdict],['completed','fail','pass']);
+  assert.equal(JSON.stringify([record.failures,record.failures_overflowed]),index,'the index never changes');
+  // Fitting moves bytes from kept to omitted, exactly: per part, kept + omitted is what it was before fitting (each ff
+  // decodes to one U+FFFD, every other character here is one byte). That it is what was delivered is F5's law.
+  for(const [t,before] of [[record,beforeC],[record.baseline,beforeB]]){
+    const now=counts(t.output);assert.deepEqual(now.map(x=>x.kept+x.omitted),before.map(x=>x.kept+x.omitted),'kept + omitted unchanged by fitting');
+    assert.ok(now.every((x,i)=>x.kept<=before[i].kept));assert.equal(t.omitted_bytes,now.reduce((n,x)=>n+x.omitted,0));
+  }
+  assert.ok(record.baseline.output.length<record.output.length,'the baseline is fitted first');
+  const k=transcriptKeeper();k.push(Buffer.from('ok\n'));const small={state:'completed',verdict:'pass',...composeParts([{prefix:'',kept:k.finish().kept}]),failures:[]},as=JSON.stringify(small);
+  fitOutcome(small,[{target:small,parts:[{prefix:'',kept:null}]}]);assert.equal(JSON.stringify(small),as,'a record within the bound is untouched');
+});
+
+// F8 runs the wrapper's own text (stageWrapper, as stageScript builds it) under /usr/bin/sh with paths of its own and a
+// 50 ms poll. When the wrapper's shell ends, its process group is killed, as the sandbox's PID namespace is torn down.
+async function wrapped(t,body,{stopAt=null,lockHeld=false}={}){
+  const d=await mkdtemp(join(tmpdir(),'t43-f8-'));t.after(()=>rm(d,{recursive:true,force:true}));
+  if(lockHeld)await mkdir(join(d,'lock'));
+  const script=stageWrapper({prepare:'true',script:body,log:join(d,'log'),stop:join(d,'stop'),lock:join(d,'lock'),poll:0.05});
+  return new Promise(done=>{
+    const started=Date.now(),child=spawn('/usr/bin/sh',['-c',script],{detached:true,stdio:['ignore','pipe','pipe'],env:{PATH:'/usr/bin:/bin'}});let out='';
+    child.stdout.on('data',b=>out+=b);child.stderr.on('data',b=>out+=b);
+    const timer=stopAt===null?null:setTimeout(()=>writeFile(join(d,'stop'),''),stopAt);
+    child.on('exit',()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}});
+    child.on('close',(code,signal)=>{clearTimeout(timer);done({code,signal,out,ms:Date.now()-started});});
+  });
+}
+test('F8 · a stage\'s transcript is printed once, whichever of the stop request and the normal end comes first',async t=>{
+  const stopped=await wrapped(t,'echo one; echo two; sleep 5',{stopAt:300});
+  assert.equal(stopped.out,'one\ntwo\n','a stop while the stage runs: the watcher prints it once');assert.equal(stopped.signal,'SIGKILL');assert.ok(stopped.ms<2500,stopped.ms+' ms');
+  const ended=await wrapped(t,'echo one; exit 3');
+  assert.equal(ended.out,'one\n','a normal end prints it once');assert.equal(ended.code,3,'and keeps the stage\'s exit status');
+  const mainLoses=await wrapped(t,'echo one; exit 3',{stopAt:300,lockHeld:true});
+  assert.equal(mainLoses.out,'','a normal end that finds the lock taken prints nothing');
+  const watcherLoses=await wrapped(t,'echo one; sleep 0.6',{stopAt:100,lockHeld:true});
+  assert.equal(watcherLoses.out,'','a watcher that finds the lock taken prints nothing');
+  for(const ms of [40,80,120,160,200,240]){const r=await wrapped(t,'echo one; sleep 0.15',{stopAt:ms});assert.equal(r.out,'one\n',`stop at ${ms} ms near the end: printed once`);}
 });

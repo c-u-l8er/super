@@ -144,7 +144,7 @@ test('L9 · asdf is found from the cockpit\'s own environment, in a closed order
 test('L10 · each stage runs from a fresh copy into a transcript file of its own, and only super-host\'s binary passes on, as a read-only copy the runner made',async t=>{
   for(const profile of [RUST,ELIXIR])for(const s of profilePlan(profile).stages){
     assert.match(stageScript(profile,s),/cp -a \/snapshot \/tmp\/source/,s.name+' copies the snapshot afresh');
-    assert.ok(stageScript(profile,s).endsWith('\n('+s.script+') > /tmp/stage.log 2>&1\ncode=$?\ncat /tmp/stage.log\nexit $code'),s.name+' writes to a file of its own sandbox, never to the runner\'s pipe');
+    assert.ok(stageScript(profile,s).includes('\n('+s.script+') > /tmp/stage.log 2>&1\ncode=$?\n')&&stageScript(profile,s).endsWith('\ncat /tmp/stage.log\nexit $code'),s.name+' writes to a file of its own sandbox, never to the runner\'s pipe, prints it and keeps its exit status (T43 adds the print-once lock between)');
     const writable=binds(compiledStageCommand(profile,s,ctx)).filter(b=>b[0]==='--bind').map(b=>b[2]);
     assert.deepEqual(writable,s.exports?['/out']:[],s.name+' writes nothing outside its own sandbox but its export');
   }
