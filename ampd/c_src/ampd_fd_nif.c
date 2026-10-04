@@ -107,11 +107,14 @@ static ERL_NIF_TERM nif_state(ErlNifEnv *env, int argc, const ERL_NIF_TERM argv[
  * raw descriptor: `dup`, `socketpair`, `open`. The runtime has exactly one
  * source of unowned descriptors — the host, over SCM_RIGHTS — and adding a
  * second one here to make the tests easier to write would widen the thing
- * this round exists to narrow. */
+ * this round exists to narrow.
+ *
+ * The fourth field is `flags`; 0 is an ordinary NIF on a normal scheduler,
+ * spelled out so `-Wextra` has nothing to say. */
 static ErlNifFunc funcs[] = {
-    {"close_received", 1, nif_close_received},
-    {"set_cloexec", 1, nif_set_cloexec},
-    {"state", 1, nif_state},
+    {"close_received", 1, nif_close_received, 0},
+    {"set_cloexec", 1, nif_set_cloexec, 0},
+    {"state", 1, nif_state, 0},
 };
 
 ERL_NIF_INIT(Elixir.Ampd.NativeFd, funcs, NULL, NULL, NULL, NULL)
