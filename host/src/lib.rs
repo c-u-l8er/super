@@ -1695,20 +1695,26 @@ fn past(deadline: Instant, before: &str) -> io::Result<()> {
     Ok(())
 }
 
-// T27b round 4 (test only): a pause at a named stage of `bridge_call_within`, so a law can let the deadline pass
-// between two stages.
+// T27b round 4 (test only): a hook at a named stage of `bridge_call_within`, so a law can let the deadline pass
+// between two stages. Round 5 (Codex review 4, finding 3): the hook is a closure, so a law can also wait there for a
+// condition (the peer's reply queued) before the next stage resumes.
+#[cfg(test)]
+type T27bHook = Option<(&'static str, Box<dyn FnMut()>)>;
+
 #[cfg(test)]
 thread_local! {
-    static T27B_PAUSE: std::cell::Cell<Option<(&'static str, Duration)>> = const { std::cell::Cell::new(None) };
+    static T27B_PAUSE: std::cell::RefCell<T27bHook> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
 fn t27b_pause(stage: &'static str) {
-    if let Some((s, d)) = T27B_PAUSE.with(|c| c.get()) {
-        if s == stage {
-            std::thread::sleep(d);
+    T27B_PAUSE.with(|p| {
+        if let Some((s, f)) = p.borrow_mut().as_mut() {
+            if *s == stage {
+                f();
+            }
         }
-    }
+    });
 }
 
 /// A descriptor closed on every exit unless [`Owned::keep`] hands it on (T27b, Codex review 1, finding 1: the
@@ -3466,9 +3472,9 @@ mod t27b_runtime {
     fn b7_a_deadline_that_passes_before_the_send_sends_nothing() {
         let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
-        T27B_PAUSE.with(|c| c.set(Some(("after-lock", Duration::from_millis(300)))));
+        T27B_PAUSE.with(|c| *c.borrow_mut() = Some(("after-lock", Box::new(|| std::thread::sleep(Duration::from_millis(300))))));
         let r = rt.bridge_call_within(&cmd("list_channels"), Duration::from_millis(100));
-        T27B_PAUSE.with(|c| c.set(None));
+        T27B_PAUSE.with(|c| *c.borrow_mut() = None);
         let silent = nothing_waiting(peer);
         fdpass::close_fd(peer);
         assert!(matches!(&r, Err(e) if e.contains("deadline passed")), "{r:?}");
@@ -3479,10 +3485,36 @@ mod t27b_runtime {
     fn b7_a_deadline_that_passes_before_the_receive_leaves_the_reply_owed() {
         let _serial = crate::fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
-        let t = replying(peer, vec![br#"{"ok":true,"answer":"late"}"#.to_vec(), br#"{"ok":true,"answer":"mine"}"#.to_vec()]);
-        T27B_PAUSE.with(|c| c.set(Some(("after-send", Duration::from_millis(300)))));
+        // Round 5 (Codex review 4, finding 3): the peer says when its first reply is QUEUED, and the expired receive
+        // stage resumes only after that and after the deadline. So the reply is there to be read, and only the stage's
+        // deadline check can refuse it.
+        let (queued_tx, queued_rx) = std::sync::mpsc::channel::<()>();
+        let t = std::thread::spawn(move || {
+            let mut got = Vec::new();
+            for (k, reply) in [&br#"{"ok":true,"answer":"late"}"#[..], &br#"{"ok":true,"answer":"mine"}"#[..]].into_iter().enumerate() {
+                let Ok((b, fds)) = fdpass::recv_msg_with_fds(peer, 65536, 8) else { break };
+                for f in fds {
+                    fdpass::close_fd(f);
+                }
+                got.push(String::from_utf8_lossy(&b).to_string());
+                fdpass::send_plain(peer, reply).unwrap();
+                if k == 0 {
+                    queued_tx.send(()).unwrap();
+                }
+            }
+            (peer, got)
+        });
+        T27B_PAUSE.with(|c| {
+            *c.borrow_mut() = Some((
+                "after-send",
+                Box::new(move || {
+                    queued_rx.recv_timeout(Duration::from_secs(5)).expect("the peer queued its reply");
+                    std::thread::sleep(Duration::from_millis(150)); // the 100 ms deadline has passed
+                }),
+            ))
+        });
         let r = rt.bridge_call_within(&cmd("list_channels"), Duration::from_millis(100));
-        T27B_PAUSE.with(|c| c.set(None));
+        T27B_PAUSE.with(|c| *c.borrow_mut() = None);
         let v = rt.bridge_call(&cmd("runtime_status"));
         drop(rt);
         let (peer, got) = t.join().unwrap();
