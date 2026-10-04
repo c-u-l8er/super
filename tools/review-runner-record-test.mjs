@@ -6,7 +6,7 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {transcriptKeeper,failureIndex,judgeRun,stageOutcome,compiledVerdict,profilePlan,composeParts,fitOutcome,OUTCOME_MAX,stageWrapper,writeOutcome,stopBound,execute} from './lib/proposal-test-runner.mjs';
+import {transcriptKeeper,failureIndex,judgeRun,stageOutcome,compiledVerdict,profilePlan,composeParts,fitOutcome,OUTCOME_MAX,stageWrapper,writeOutcome,stopBound,execute,benchmarkOutput} from './lib/proposal-test-runner.mjs';
 import {statSync} from 'node:fs';
 import {runFailures} from '../cockpit/ui/review-test-panel.js';
 
@@ -193,8 +193,14 @@ test('F7 · the outcome record always fits what the cockpit reads, with exact co
     await writeOutcome(dir2,emoji,[]);const text=readFileSync(join(dir2,'outcome.json'),'utf8'),e2=JSON.parse(text);
     assert.doesNotMatch(text,/\\u[dD][89abAB][0-9a-fA-F]{2}/,'no lone surrogate escape in the written record');
     assert.equal(e2.attempt_ref,'a'.repeat(127)+'\u{1F600}');assert.equal(e2.tests[0],'t'.repeat(127)+'\u{1F600}');assert.ok(e2.attempt_ref.isWellFormed()&&e2.tests[0].isWellFormed());
+    // Round 6 (Codex review 5): the benchmark's retained outputs too: an emoji across the 12,000th character stays whole,
+    // and the written record carries no lone surrogate.
+    const out=benchmarkOutput('b'.repeat(11999)+'\u{1F600}'+'tail');assert.equal(out,'b'.repeat(11999)+'\u{1F600}');assert.ok(out.isWellFormed());
+    const bench2={state:'completed',verdict:'pass',output:'ok',omitted_bytes:0,failures:[],benchmark:{state:'compared',outputs:{before:[out,out,out],after:[out,out,out]}}};
+    await writeOutcome(dir2,bench2,[]);assert.doesNotMatch(readFileSync(join(dir2,'outcome.json'),'utf8'),/\\u[dD][89abAB][0-9a-fA-F]{2}/);
   }finally{await rm(dir2,{recursive:true,force:true});}
   assert.match(runner,/attempt_ref:typeof attempt\.id==='string'&&attempt\.id\.length<=128\?attempt\.id:null,/,'the attempt reference is bounded where it is admitted');
+  assert.equal((runner.match(/String\([^()]*\)\.slice\(0,|\.output\.slice\(0,/g)??[]).length,0,'no string in the record is cut by code units (round 6)');
   assert.match(runner,/const result=signal\?\.aborted\?aborted:[^\n]*\n    candidateParts=/,'the candidate\'s parts are captured at once, before anything later can throw');
   const k=transcriptKeeper();k.push(Buffer.from('ok\n'));const small={state:'completed',verdict:'pass',...composeParts([{prefix:'',kept:k.finish().kept}]),failures:[]},as=JSON.stringify(small);
   fitOutcome(small,[{target:small,parts:[{prefix:'',kept:null}]}]);assert.equal(JSON.stringify(small),as,'a record within the bound is untouched');

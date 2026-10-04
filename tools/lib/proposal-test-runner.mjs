@@ -194,6 +194,8 @@ export async function writeOutcome(run,record,sets=[]){
 // Round 5 (Codex review 4): cut at whole characters, never inside a surrogate pair (the cockpit's serde_json refuses a
 // lone surrogate, and the outcome would be lost).
 const chars=(v,n)=>Array.from(String(v)).slice(0,n).join('');
+// Round 6 (Codex review 5): the benchmark's retained output, cut the same way (12,000 characters).
+export const benchmarkOutput=text=>chars(text,12000);
 const short=v=>typeof v==='string'?chars(v,128):Number.isFinite(v)||v===null||typeof v==='boolean'?v:null;
 export function minimalOutcome(r){
   const keep=['schema','provenance','profile','attempt_ref','source_basis_id','source_head','source_capture_sha256','result_sha256','snapshot_sha256','node_sha256','toolchain_sha256','timeout_ms','started_at','finished_at','state','verdict','reason','exit_code','signal','omitted_bytes','failures_overflowed'];
@@ -634,9 +636,9 @@ async function pairedBenchmark({files,baselineFiles,args,snapshot,baselineSnapsh
    assert(!signal?.aborted,'Benchmark cancelled.');const command=args.slice(0,args.indexOf('--')) .map(v=>v===snapshot?(side==='before'?baselineSnapshot:snapshot):v);command.push('--','/runtime/node',path);
    const run=await execute(command,5000,signal);assert(run.code===0&&!run.signal&&!run.timedOut&&!run.launchError&&!run.omitted_bytes,'Benchmark did not finish successfully.');
    const metrics=benchmarkMetrics(run.output),identity=JSON.stringify(metrics.map(m=>[m.name,m.unit,m.direction]));if(expected===null)expected=identity;assert(expected===identity,'Metric names, order, units or direction changed across samples.');
-   if(round>=0){result.samples[side].push(metrics);result.outputs[side].push(run.output.slice(0,12000));}
+   if(round>=0){result.samples[side].push(metrics);result.outputs[side].push(benchmarkOutput(run.output));}
   }
   result.metrics=result.samples.before[0].map((m,i)=>{const stats=side=>{const xs=result.samples[side].map(row=>row[i].value).sort((a,b)=>a-b);return {median:xs[1],min:xs[0],max:xs[2]};};const a=stats('before'),b=stats('after');return {name:m.name,unit:m.unit,direction:m.direction,before:a,after:b,change_percent:a.median===0?null:(b.median-a.median)/a.median*100};});result.state='completed';
- }catch(e){result.state=signal?.aborted?'cancelled':'failed';result.reason=String(e.message).slice(0,1000);}
+ }catch(e){result.state=signal?.aborted?'cancelled':'failed';result.reason=chars(e.message,1000);}
  return result;
 }
