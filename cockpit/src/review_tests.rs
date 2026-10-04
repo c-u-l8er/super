@@ -1144,7 +1144,11 @@ mod outcome_preview_tests {
         assert!(pretty.len() <= outcome_max && pretty.len() > outcome_max - 3, "{}", pretty.len());
         fs::write(dir.join("outcome.json"), &pretty).unwrap();
         let read_back = read(&dir.join("outcome.json")).expect("a record at the runner's bound is read");
-        let mut finished = json!({"run_id":"t43-f7","attempt_ref":"da_0000","state":"completed","profile":"super-elixir-review@1","world":["w-0000000000000000",1,"e"],"started_at":"2026-10-04T00:00:00Z"});
+        // The envelope carries what the completion path saves around the result (round 3, Codex review 2): the
+        // runtime's start record, and the save-error flag `finish` sets before the outcome is reported.
+        let mut finished = json!({"run_id":"t43-f7","attempt_ref":"da_0000","state":"completed","profile":"super-elixir-review@1","world":["w-0000000000000000",1,"e"],"started_at":"2026-10-04T00:00:00Z",
+            "runtime_record":{"run_id":"t43-f7","attempt_ref":"da_0000","revision":3,"state":"started","profile":"super-elixir-review@1","started_at":"2026-10-04T00:00:00Z","path":"/home/travis/ProjectAmp2/super"},
+            "runtime_save_error":true});
         finished["result"] = read_back;
         save(&dir.join("run.json"), &finished).unwrap();
         assert!(read(&dir.join("run.json")).is_ok(), "the run record around it reads back");

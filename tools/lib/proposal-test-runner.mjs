@@ -145,7 +145,7 @@ export function fitKept({head,tail,total},cap=Infinity){
 // a kept transcript (or none, for a stage that never ran), joined by newlines.
 export function composeParts(parts,caps=[]){
   const fitted=parts.map((p,i)=>p.kept?fitKept(p.kept,caps[i]??Infinity):{output:'',omitted_bytes:0});
-  return {output:parts.map((p,i)=>p.prefix+fitted[i].output).join('\n'),omitted_bytes:fitted.reduce((n,f)=>n+f.omitted_bytes,0)};
+  return {output:parts.map((p,i)=>p.prefix+fitted[i].output).join('\n'),omitted_bytes:fitted.reduce((n,f)=>n+f.omitted_bytes,0),part_omitted:fitted.map(f=>f.omitted_bytes)};
 }
 // T43 round 2 (fix 1): **the outcome record always fits what the cockpit reads.** The cockpit refuses a record over 256
 // KiB (cockpit/src/review_tests.rs, read()) and then reports an incomplete run instead of its outcome. A record that
@@ -159,12 +159,30 @@ export function fitOutcome(record,sets){
   for(const {target,parts} of sets){
     if(!target||!parts?.length)continue;
     const full=parts.map(p=>p.kept?jsonCost(fitKept(p.kept).output):0);
-    const apply=k=>{const c=composeParts(parts,full.map(x=>Math.floor(x*k/1000)));target.output=c.output;target.omitted_bytes=c.omitted_bytes;};
+    // Round 3 (Codex review 2): a stage's own omitted_bytes follows its part, so the per-stage counts stay exact too.
+    const apply=k=>{const c=composeParts(parts,full.map(x=>Math.floor(x*k/1000)));target.output=c.output;target.omitted_bytes=c.omitted_bytes;
+      if(Array.isArray(target.stages)&&target.stages.length===parts.length)parts.forEach((p,i)=>{if(p.kept)target.stages[i].omitted_bytes=c.part_omitted[i];});};
     record.transcripts_fitted=true;apply(0);if(recordBytes(record)>OUTCOME_MAX)continue;
     let lo=0,hi=1000;while(lo<hi){const mid=Math.ceil((lo+hi)/2);apply(mid);if(recordBytes(record)<=OUTCOME_MAX)lo=mid;else hi=mid-1;}
     apply(lo);return record;
   }
+  // Round 3: the benchmark's retained outputs (up to six of 12,000 characters) are the next thing that can grow; its
+  // samples and metrics are kept.
+  if(record.benchmark?.outputs){record.benchmark.outputs={before:[],after:[]};record.benchmark.outputs_withheld='record-budget';if(recordBytes(record)<=OUTCOME_MAX)return record;}
+  // Last resort, not expected: everything that grows with what the code printed is withheld; the record keeps its
+  // identity, state, verdict, reason, statuses and failure index, and says what it withheld.
+  if(record.benchmark)record.benchmark={state:record.benchmark.state??null,withheld:'record-budget'};
+  for(const t of [record,record.baseline])if(t){t.output='';if(Array.isArray(t.stages))for(const st of t.stages)delete st.output;}
+  if(record.error)record.error=String(record.error).slice(0,200);
+  record.record_withheld='transcripts and benchmark details: the record would not fit the cockpit\'s reader';
   return record;
+}
+// T43 round 3 (Codex review 2): **every outcome.json goes through this one writer,** the normal end and a runner error
+// alike, and what it writes is measured: within OUTCOME_MAX, or (never expected) an error says so in the runner's log.
+export async function writeOutcome(run,record,sets=[]){
+  fitOutcome(record,sets);await atomic(join(run,'outcome.json'),record);
+  const bytes=Buffer.byteLength(JSON.stringify(record,null,2)+'\n');if(bytes>OUTCOME_MAX)process.stderr.write(`outcome.json is ${bytes} B, over ${OUTCOME_MAX}\n`);
+  return bytes;
 }
 // T43: one run's index, from its stages' in stage order, still at most 16 entries.
 export function failureIndex(parts){
@@ -177,6 +195,10 @@ export function failureIndex(parts){
 // reach the wrapper through bwrap's PID namespace: superlane/t43/measure/MEASURE-stop.md); the wrapper's watcher prints
 // /tmp/stage.log and ends the wrapper. The group is SIGKILLed STOP_GRACE_MS after the request whatever happens.
 const STOP_GRACE_MS=10000;
+// T43 round 3 (Codex review 2): **the hard kill is the EARLIEST bound that applies:** a stop request's own time plus the
+// grace, and the stage's deadline plus the grace. A cancellation that reaches the runner after an overdue deadline, but
+// before that deadline's own callback ran, is still killed at the deadline plus the grace. The first reason is kept.
+export const stopBound=({now,deadline=null,grace=STOP_GRACE_MS})=>Math.min(now+grace,deadline===null?Infinity:deadline+grace);
 // `control` (a compiled stage's control directory) makes a deadline or a cancellation a stop request first; without it
 // the group is SIGKILLed at once, as before. `stage` names the failure index's entries. Round 2 (fix 3): `deadline` is
 // the stage's ABSOLUTE deadline (ms since the epoch); the timer is armed from it after the spawn, so no setup delay
@@ -185,10 +207,12 @@ const STOP_GRACE_MS=10000;
 async function execute(args,timeoutMs,signal,limit=maxOutput,{control=null,stage=null,deadline=null}={}){
   return new Promise(resolveResult=>{
     let timedOut=false,launchError=null,stopped=null,grace=null;const keeper=transcriptKeeper(limit,stage);
+    // Round 3: no stage starts past its deadline, checked here, with nothing awaited between this and the spawn.
+    if(deadline!==null&&Date.now()>=deadline)return resolveResult({code:null,signal:null,timedOut:true,launchError:null,stopped:null,ended:Date.now(),not_started:true,...keeper.finish()});
     const child=spawn('/usr/bin/bwrap',args,{env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'},detached:true,stdio:['ignore','pipe','pipe']});
     child.stdout.on('data',b=>keeper.push(b,'stdout'));child.stderr.on('data',b=>keeper.push(b,'stderr'));
     const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
-    const stop=reason=>{if(!control)return kill();if(stopped)return;stopped=reason;const until=reason==='deadline'&&deadline!==null?deadline+STOP_GRACE_MS:Date.now()+STOP_GRACE_MS;grace=setTimeout(kill,Math.max(0,until-Date.now()));try{writeFileSync(join(control,'stop'),'',{flag:'wx',mode:0o600});}catch{kill();}};
+    const stop=reason=>{if(!control)return kill();if(stopped)return;stopped=reason;const until=stopBound({now:Date.now(),deadline});grace=setTimeout(kill,Math.max(0,until-Date.now()));try{writeFileSync(join(control,'stop'),'',{flag:'wx',mode:0o600});}catch{kill();}};
     const cancel=()=>stop('cancellation');
     signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();
     const timer=setTimeout(()=>{timedOut=true;stop('deadline');},deadline!==null?Math.max(0,deadline-Date.now()):timeoutMs);
@@ -448,6 +472,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   assert(tests.length>0&&tests.length<=64,profile===profiles[3]?'A document review needs at least one document that is not a deletion.':profile===profiles[4]?'No gate this profile knows is in this repository.':'No supported JavaScript behavior suites found (tools/*-test.mjs, maximum 64).');
   if(profile===profiles[3]){const {isDocumentPath}=await import(checkerUrl.href);assert(tests.every(isDocumentPath),'The document profile reviews Markdown or text documents (.md, .markdown, .txt).');}
   const executable=await realpath(nodePath),nodeStat=await lstat(executable);assert(nodeStat.isFile()&&nodeStat.size<=128*1024*1024,'Node executable exceeds the runner limit.');const node=await readFile(executable);assert(node.length===nodeStat.size,'Node executable changed during capture.');
+  let baselineParts=null,candidateParts=null;   // T43: the transcripts' parts, for the one bounded writer (writeOutcome)
   const run=await mkdtemp(join(base,'proposal-tests-')),snapshot=join(run,'snapshot');await mkdir(snapshot,{mode:0o700});
   const record={schema:'local-proposal-test@1',provenance:'human-operated-local-runner',scope:members.length===1?'captured-git-listed-source-with-one-proposal':'captured-git-listed-source-with-proposal-set',snapshot_scope:scopeName(profile),listed_files:listed.length,profile,attempt_ref:attempt.id??null,source_basis_id:source.basis_id,source_head:source.head,source_capture_sha256:before,result_sha256:source.result_sha256,result_path:source.path??null,result_paths:members.map(m=>m.source.path),snapshot_sha256:snapshotDigest,node_sha256:hash(node),tests,timeout_ms:timeoutMs,started_at:new Date().toISOString(),state:'preparing'};
   await atomic(join(run,'manifest.json'),{schema:'proposal-test-snapshot@1',sha256:snapshotDigest,files:entries});
@@ -514,7 +539,6 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
       args.splice(args.indexOf('--'));
       args.push('--ro-bind',checkPath,'/runtime/check.mjs','--ro-bind',reviewPath,'/runtime/review.json','--setenv','SUPER_DOCUMENT_REVIEW','/runtime/review.json','--','/runtime/node','--test','--test-reporter=tap','/runtime/check.mjs');
     }
-    let baselineParts=null;   // T43 round 2: the baseline transcript's parts, for fitOutcome
     if(compare&&compiled){
       const b=signal?.aborted?null:await runStages(baselineSnapshot,'baseline',timeoutMs);baselineParts=b?.parts??null;
       record.baseline={snapshot_sha256:before,tests,same_suites:true,state:b?.state==='completed'?'completed':'failed',verdict:b?.state==='completed'?b.verdict:null,exit_code:b?.code??null,stages:b?.stages??[],output:b?.output??'',omitted_bytes:b?.omitted_bytes??0,finished_at:new Date().toISOString()};
@@ -541,9 +565,10 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     if(compare&&profile===profiles[0]&&!signal?.aborted)record.benchmark=await pairedBenchmark({files,baselineFiles,args,snapshot,baselineSnapshot,signal,before,after:snapshotDigest,nodeHash:record.node_sha256});
     if(signal?.aborted){record.state='failed';record.reason='cancelled';delete record.verdict;}
     // T43 round 2 (fix 1): the record the cockpit reads always fits it.
-    fitOutcome(record,[{target:record.baseline,parts:baselineParts},{target:record,parts:compiled?result.parts:result.kept?[{prefix:'',kept:result.kept}]:null}]);
-    await atomic(join(run,'outcome.json'),record);return {directory:run,record};
-  }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await atomic(join(run,'outcome.json'),record);throw e;}
+    candidateParts=compiled?result.parts:result.kept?[{prefix:'',kept:result.kept}]:null;
+    // T43 rounds 2-3: the record the cockpit reads always fits it (writeOutcome, the one bounded writer).
+    await writeOutcome(run,record,[{target:record.baseline,parts:baselineParts},{target:record,parts:candidateParts}]);return {directory:run,record};
+  }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await writeOutcome(run,record,[{target:record.baseline,parts:baselineParts},{target:record,parts:candidateParts}]);throw e;}
   finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});await rm(join(run,'sibling'),{recursive:true,force:true});for(const label of ['candidate','baseline'])for(const s of stages[profile]??[]){await removeTree(join(run,label+'-'+s.name+'-control'));if(s.exports){await removeTree(join(run,label+'-'+s.name));await removeTree(join(run,label+'-'+s.name+'-handoff'));}}}
 }
 

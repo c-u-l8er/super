@@ -6,7 +6,8 @@ import {spawn} from 'node:child_process';
 import {mkdtemp,mkdir,writeFile,rm} from 'node:fs/promises';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
-import {transcriptKeeper,failureIndex,judgeRun,stageOutcome,compiledVerdict,profilePlan,composeParts,fitOutcome,OUTCOME_MAX,stageWrapper} from './lib/proposal-test-runner.mjs';
+import {transcriptKeeper,failureIndex,judgeRun,stageOutcome,compiledVerdict,profilePlan,composeParts,fitOutcome,OUTCOME_MAX,stageWrapper,writeOutcome,stopBound,execute} from './lib/proposal-test-runner.mjs';
+import {statSync} from 'node:fs';
 import {runFailures} from '../cockpit/ui/review-test-panel.js';
 
 // T43 (A-32; superlane/t43/TASK.md): a review run's record names its first failures, keeps a timed-out stage's
@@ -136,7 +137,7 @@ test('F6 · the panel shows up to 3 failures, how many more, and that the verdic
 });
 
 const recordBytes=r=>Buffer.byteLength(JSON.stringify(r,null,2)+'\n');
-test('F7 · the outcome record always fits what the cockpit reads, with exact counts; within the bound it is written as before',()=>{
+test('F7 · the outcome record always fits what the cockpit reads, with exact counts; within the bound it is written as before',async()=>{
   const rs=readFileSync(new URL('../cockpit/src/review_tests.rs',import.meta.url),'utf8');
   assert.match(rs,/\.len\(\) > 256 \* 1024/,'the cockpit reads at most 256 KiB');
   assert.ok(OUTCOME_MAX+16*1024<=256*1024,'the runner\'s bound leaves room for the run record the cockpit saves around it');
@@ -146,8 +147,9 @@ test('F7 · the outcome record always fits what the cockpit reads, with exact co
   const run=()=>{const s=[stage('host-build'),stage('ampd')];return {parts:s.map((r,i)=>({prefix:`[runner] stage ${i}\n`,kept:r.kept})),...failureIndex(s)};};
   const c=run(),b=run();
   for(const f of c.failures)assert.ok(Buffer.byteLength(JSON.stringify(f.line))-2<=1024&&f.line.startsWith('not ok'),'a failure line is at most 1,024 bytes as JSON');
-  const record={schema:'local-proposal-test@1',state:'completed',verdict:'fail',...composeParts(c.parts),failures:c.failures,failures_overflowed:c.failures_overflowed,stages:[{name:'host-build'},{name:'ampd'}],
-    baseline:{state:'completed',verdict:'pass',...composeParts(b.parts)}};
+  const strip=({part_omitted,...rest})=>rest,cs=composeParts(c.parts),bs=composeParts(b.parts);
+  const record={schema:'local-proposal-test@1',state:'completed',verdict:'fail',...strip(cs),failures:c.failures,failures_overflowed:c.failures_overflowed,stages:[{name:'host-build',omitted_bytes:cs.part_omitted[0]},{name:'ampd',omitted_bytes:cs.part_omitted[1]}],
+    baseline:{state:'completed',verdict:'pass',...strip(bs),stages:[{name:'host-build',omitted_bytes:bs.part_omitted[0]},{name:'ampd',omitted_bytes:bs.part_omitted[1]}]}};
   assert.ok(recordBytes(record)>OUTCOME_MAX,'as kept, the record would be refused: '+recordBytes(record));
   const counts=out=>out.split(/\n?\[runner\] stage \d\n/).slice(1).map(text=>{const m=text.match(/\n\[… (\d+) bytes omitted …\]\n/);return {omitted:m?Number(m[1]):0,kept:Array.from(text.replace(/\n\[… \d+ bytes omitted …\]\n/,'')).length};});
   const beforeC=counts(record.output),beforeB=counts(record.baseline.output);
@@ -161,8 +163,22 @@ test('F7 · the outcome record always fits what the cockpit reads, with exact co
   for(const [t,before] of [[record,beforeC],[record.baseline,beforeB]]){
     const now=counts(t.output);assert.deepEqual(now.map(x=>x.kept+x.omitted),before.map(x=>x.kept+x.omitted),'kept + omitted unchanged by fitting');
     assert.ok(now.every((x,i)=>x.kept<=before[i].kept));assert.equal(t.omitted_bytes,now.reduce((n,x)=>n+x.omitted,0));
+    assert.deepEqual(t.stages.map(st=>st.omitted_bytes),now.map(x=>x.omitted),'each stage\'s own omitted_bytes follows the fitting (round 3)');
   }
   assert.ok(record.baseline.output.length<record.output.length,'the baseline is fitted first');
+  // Round 3: the benchmark's retained outputs fit too (its samples kept), and as the last resort the record withholds
+  // what grows with the code's output and says so.
+  const bench={state:'completed',verdict:'fail',output:'ok',omitted_bytes:0,failures:[],benchmark:{state:'compared',samples:{before:[[{name:'m',value:1}]],after:[[{name:'m',value:2}]]},outputs:{before:Array(3).fill('\x01'.repeat(12000)),after:Array(3).fill('\x01'.repeat(12000))}}};
+  assert.ok(recordBytes(bench)>OUTCOME_MAX);fitOutcome(bench,[]);
+  assert.ok(recordBytes(bench)<=OUTCOME_MAX);assert.equal(bench.benchmark.outputs_withheld,'record-budget');assert.deepEqual(bench.benchmark.samples.after,[[{name:'m',value:2}]],'the samples are kept');
+  const huge={state:'completed',verdict:'pass',output:'x',omitted_bytes:0,failures:[],benchmark:{state:'compared',samples:{before:Array(9000).fill([{name:'metric-with-a-long-name',value:1}])}}};
+  fitOutcome(huge,[]);assert.ok(recordBytes(huge)<=OUTCOME_MAX);assert.deepEqual([huge.verdict,huge.benchmark.withheld],['pass','record-budget']);assert.match(huge.record_withheld,/would not fit/);
+  // The one writer measures what it wrote, and the runner-error path goes through it too.
+  const dir=await mkdtemp(join(tmpdir(),'t43-f7-'));try{const big={...bench,benchmark:{...bench.benchmark,outputs:{before:Array(3).fill('\x01'.repeat(12000)),after:Array(3).fill('\x01'.repeat(12000))}}};
+    const bytes=await writeOutcome(dir,big,[]);assert.ok(bytes<=OUTCOME_MAX&&statSync(join(dir,'outcome.json')).size===bytes);}finally{await rm(dir,{recursive:true,force:true});}
+  const runner=readFileSync(new URL('./lib/proposal-test-runner.mjs',import.meta.url),'utf8');
+  assert.match(runner,/catch\(e\)\{record\.state='failed';record\.reason='runner-error';[^\n]*await writeOutcome\(run,record,/,'a runner error writes through the same bounded writer');
+  assert.equal((runner.match(/atomic\(join\(run,'outcome\.json'\)/g)??[]).length,1,'outcome.json is written in one place: the bounded writer');
   const k=transcriptKeeper();k.push(Buffer.from('ok\n'));const small={state:'completed',verdict:'pass',...composeParts([{prefix:'',kept:k.finish().kept}]),failures:[]},as=JSON.stringify(small);
   fitOutcome(small,[{target:small,parts:[{prefix:'',kept:null}]}]);assert.equal(JSON.stringify(small),as,'a record within the bound is untouched');
 });
@@ -191,4 +207,16 @@ test('F8 · a stage\'s transcript is printed once, whichever of the stop request
   const watcherLoses=await wrapped(t,'echo one; sleep 0.6',{stopAt:100,lockHeld:true});
   assert.equal(watcherLoses.out,'','a watcher that finds the lock taken prints nothing');
   for(const ms of [40,80,120,160,200,240]){const r=await wrapped(t,'echo one; sleep 0.15',{stopAt:ms});assert.equal(r.out,'one\n',`stop at ${ms} ms near the end: printed once`);}
+});
+
+// F9 (round 3, Codex review 2): no stage starts past its deadline, and the hard kill is the earliest bound that applies.
+test('F9 · an expired deadline starts nothing, and the hard kill is never later than the earliest of request + 10 s and deadline + 10 s',async t=>{
+  assert.equal(stopBound({now:5000,deadline:1000}),11000,'a cancellation after an overdue deadline: the deadline\'s bound');
+  assert.equal(stopBound({now:500,deadline:1000}),10500,'a cancellation before the deadline: its own bound');
+  assert.equal(stopBound({now:1000,deadline:1000}),11000,'the deadline itself');
+  assert.equal(stopBound({now:700}),10700,'no deadline: the request\'s bound');
+  const control=await mkdtemp(join(tmpdir(),'t43-f9-'));t.after(()=>rm(control,{recursive:true,force:true}));
+  const started=Date.now(),r=await execute(['--version'],1000,null,1024,{control,stage:'x',deadline:Date.now()-1});
+  assert.deepEqual([r.code,r.signal,r.launchError,r.timedOut,r.stopped,r.not_started],[null,null,null,true,null,true],'nothing was spawned');
+  assert.ok(Date.now()-started<200);
 });
