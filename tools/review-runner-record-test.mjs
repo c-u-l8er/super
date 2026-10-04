@@ -171,7 +171,7 @@ test('F7 · the outcome record always fits what the cockpit reads, with exact co
   const bench={state:'completed',verdict:'fail',output:'ok',omitted_bytes:0,failures:[],benchmark:{state:'compared',samples:{before:[[{name:'m',value:1}]],after:[[{name:'m',value:2}]]},outputs:{before:Array(3).fill('\x01'.repeat(12000)),after:Array(3).fill('\x01'.repeat(12000))}}};
   assert.ok(recordBytes(bench)>OUTCOME_MAX);fitOutcome(bench,[]);
   assert.ok(recordBytes(bench)<=OUTCOME_MAX);assert.equal(bench.benchmark.outputs_withheld,'record-budget');assert.deepEqual(bench.benchmark.samples.after,[[{name:'m',value:2}]],'the samples are kept');
-  const huge={state:'completed',verdict:'pass',output:'x',omitted_bytes:0,failures:[],benchmark:{state:'compared',samples:{before:Array(9000).fill([{name:'metric-with-a-long-name',value:1}])}}};
+  const huge={state:'completed',verdict:'pass',output:'[runner] stage ampd: pass (exit 0)',omitted_bytes:0,failures:[],benchmark:{state:'compared',samples:{before:Array(9000).fill([{name:'metric-with-a-long-name',value:1}])}}};
   fitOutcome(huge,[]);assert.ok(recordBytes(huge)<=OUTCOME_MAX);assert.deepEqual([huge.verdict,huge.benchmark.withheld],['pass','record-budget']);assert.match(huge.record_withheld,/would not fit/);
   // The one writer measures what it wrote, and the runner-error path goes through it too.
   const dir=await mkdtemp(join(tmpdir(),'t43-f7-'));try{const big={...bench,benchmark:{...bench.benchmark,outputs:{before:Array(3).fill('\x01'.repeat(12000)),after:Array(3).fill('\x01'.repeat(12000))}}};
@@ -179,6 +179,17 @@ test('F7 · the outcome record always fits what the cockpit reads, with exact co
   const runner=readFileSync(new URL('./lib/proposal-test-runner.mjs',import.meta.url),'utf8');
   assert.match(runner,/catch\(e\)\{record\.state='failed';record\.reason='runner-error';[^\n]*await writeOutcome\(run,record,/,'a runner error writes through the same bounded writer');
   assert.equal((runner.match(/atomic\(join\(run,'outcome\.json'\)/g)??[]).length,1,'outcome.json is written in one place: the bounded writer');
+  // Round 4 (Codex review 3): the size is enforced BEFORE the write. Metadata no fitting can shrink (a 300,000-character
+  // attempt reference) yields the minimal outcome, which keeps the state, verdict, reason and failure index.
+  const dir2=await mkdtemp(join(tmpdir(),'t43-f7m-'));try{
+    const meta={schema:'local-proposal-test@1',attempt_ref:'r'.repeat(300000),state:'completed',verdict:'fail',reason:undefined,exit_code:101,output:'ok',omitted_bytes:3,failures:[{stage:'host',line:'test t ... FAILED'}],failures_overflowed:false,tests:['host/Cargo.toml']};
+    const bytes=await writeOutcome(dir2,meta,[]);const back=JSON.parse(readFileSync(join(dir2,'outcome.json'),'utf8'));
+    assert.ok(bytes<=OUTCOME_MAX&&statSync(join(dir2,'outcome.json')).size===bytes,'written within the bound: '+bytes);
+    assert.deepEqual([back.state,back.verdict,back.exit_code,back.omitted_bytes,back.failures,back.tests],['completed','fail',101,3,[{stage:'host',line:'test t ... FAILED'}],['host/Cargo.toml']]);
+    assert.equal(back.attempt_ref.length,128);assert.match(back.record_withheld,/would not fit/);
+  }finally{await rm(dir2,{recursive:true,force:true});}
+  assert.match(runner,/attempt_ref:typeof attempt\.id==='string'&&attempt\.id\.length<=128\?attempt\.id:null,/,'the attempt reference is bounded where it is admitted');
+  assert.match(runner,/const result=signal\?\.aborted\?aborted:[^\n]*\n    candidateParts=/,'the candidate\'s parts are captured at once, before anything later can throw');
   const k=transcriptKeeper();k.push(Buffer.from('ok\n'));const small={state:'completed',verdict:'pass',...composeParts([{prefix:'',kept:k.finish().kept}]),failures:[]},as=JSON.stringify(small);
   fitOutcome(small,[{target:small,parts:[{prefix:'',kept:null}]}]);assert.equal(JSON.stringify(small),as,'a record within the bound is untouched');
 });
@@ -219,4 +230,8 @@ test('F9 · an expired deadline starts nothing, and the hard kill is never later
   const started=Date.now(),r=await execute(['--version'],1000,null,1024,{control,stage:'x',deadline:Date.now()-1});
   assert.deepEqual([r.code,r.signal,r.launchError,r.timedOut,r.stopped,r.not_started],[null,null,null,true,null,true],'nothing was spawned');
   assert.ok(Date.now()-started<200);
+  // Round 4 (Codex review 3): a stage not started is saved as such, from either check.
+  const runner=readFileSync(new URL('./lib/proposal-test-runner.mjs',import.meta.url),'utf8');
+  assert.match(runner,/outcome:'incomplete',timed_out:true,not_started:true\}\);continue;/,'the setup-time check saves not_started');
+  assert.match(runner,/\.\.\.\(r\.not_started\?\{not_started:true\}:\{\}\)/,'the launch-time check\'s not_started reaches the saved stage');
 });

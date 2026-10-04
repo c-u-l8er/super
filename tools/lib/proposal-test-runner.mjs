@@ -172,6 +172,8 @@ export function fitOutcome(record,sets){
   // Last resort, not expected: everything that grows with what the code printed is withheld; the record keeps its
   // identity, state, verdict, reason, statuses and failure index, and says what it withheld.
   if(record.benchmark)record.benchmark={state:record.benchmark.state??null,withheld:'record-budget'};
+  // Clearing an output here moves no delivered bytes: a transcript was already fitted from its parts above (to nothing
+  // but the runner's own prefixes and markers), and an output with no parts is the runner's own text.
   for(const t of [record,record.baseline])if(t){t.output='';if(Array.isArray(t.stages))for(const st of t.stages)delete st.output;}
   if(record.error)record.error=String(record.error).slice(0,200);
   record.record_withheld='transcripts and benchmark details: the record would not fit the cockpit\'s reader';
@@ -180,9 +182,23 @@ export function fitOutcome(record,sets){
 // T43 round 3 (Codex review 2): **every outcome.json goes through this one writer,** the normal end and a runner error
 // alike, and what it writes is measured: within OUTCOME_MAX, or (never expected) an error says so in the runner's log.
 export async function writeOutcome(run,record,sets=[]){
-  fitOutcome(record,sets);await atomic(join(run,'outcome.json'),record);
-  const bytes=Buffer.byteLength(JSON.stringify(record,null,2)+'\n');if(bytes>OUTCOME_MAX)process.stderr.write(`outcome.json is ${bytes} B, over ${OUTCOME_MAX}\n`);
-  return bytes;
+  fitOutcome(record,sets);
+  // Round 4 (Codex review 3): measured BEFORE the write. A record that still does not fit (only metadata could do it)
+  // is replaced by the minimal outcome: bounded by construction, it keeps what the cockpit's completion path reads.
+  if(recordBytes(record)>OUTCOME_MAX){const minimal=minimalOutcome(record);for(const k of Object.keys(record))delete record[k];Object.assign(record,minimal);}
+  const bytes=recordBytes(record);assert(bytes<=OUTCOME_MAX,'The outcome record cannot be bounded.');
+  await atomic(join(run,'outcome.json'),record);return bytes;
+}
+// The minimal outcome: the identities (each cut to 128 characters), the state, verdict, reason, exit status and signal,
+// the test count, and the failure index (16 lines of at most 1,024 B of JSON each). Everything else is withheld.
+const short=v=>typeof v==='string'?v.slice(0,128):Number.isFinite(v)||v===null||typeof v==='boolean'?v:null;
+export function minimalOutcome(r){
+  const keep=['schema','provenance','profile','attempt_ref','source_basis_id','source_head','source_capture_sha256','result_sha256','snapshot_sha256','node_sha256','toolchain_sha256','timeout_ms','started_at','finished_at','state','verdict','reason','exit_code','signal','omitted_bytes','failures_overflowed'];
+  const m=Object.fromEntries(keep.filter(k=>k in r).map(k=>[k,short(r[k])]));
+  m.tests=Array.isArray(r.tests)?r.tests.slice(0,64).map(t=>String(t).slice(0,128)):[];
+  m.failures=Array.isArray(r.failures)?r.failures.slice(0,maxFailures).map(f=>({stage:short(f?.stage),line:failureLine(String(f?.line??''))})):[];
+  m.output='';m.record_withheld='the record would not fit the cockpit\'s reader: only its outcome, identities and failure index are kept';
+  return m;
 }
 // T43: one run's index, from its stages' in stage order, still at most 16 entries.
 export function failureIndex(parts){
@@ -474,7 +490,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
   const executable=await realpath(nodePath),nodeStat=await lstat(executable);assert(nodeStat.isFile()&&nodeStat.size<=128*1024*1024,'Node executable exceeds the runner limit.');const node=await readFile(executable);assert(node.length===nodeStat.size,'Node executable changed during capture.');
   let baselineParts=null,candidateParts=null;   // T43: the transcripts' parts, for the one bounded writer (writeOutcome)
   const run=await mkdtemp(join(base,'proposal-tests-')),snapshot=join(run,'snapshot');await mkdir(snapshot,{mode:0o700});
-  const record={schema:'local-proposal-test@1',provenance:'human-operated-local-runner',scope:members.length===1?'captured-git-listed-source-with-one-proposal':'captured-git-listed-source-with-proposal-set',snapshot_scope:scopeName(profile),listed_files:listed.length,profile,attempt_ref:attempt.id??null,source_basis_id:source.basis_id,source_head:source.head,source_capture_sha256:before,result_sha256:source.result_sha256,result_path:source.path??null,result_paths:members.map(m=>m.source.path),snapshot_sha256:snapshotDigest,node_sha256:hash(node),tests,timeout_ms:timeoutMs,started_at:new Date().toISOString(),state:'preparing'};
+  const record={schema:'local-proposal-test@1',provenance:'human-operated-local-runner',scope:members.length===1?'captured-git-listed-source-with-one-proposal':'captured-git-listed-source-with-proposal-set',snapshot_scope:scopeName(profile),listed_files:listed.length,profile,attempt_ref:typeof attempt.id==='string'&&attempt.id.length<=128?attempt.id:null,source_basis_id:source.basis_id,source_head:source.head,source_capture_sha256:before,result_sha256:source.result_sha256,result_path:source.path??null,result_paths:members.map(m=>m.source.path),snapshot_sha256:snapshotDigest,node_sha256:hash(node),tests,timeout_ms:timeoutMs,started_at:new Date().toISOString(),state:'preparing'};
   await atomic(join(run,'manifest.json'),{schema:'proposal-test-snapshot@1',sha256:snapshotDigest,files:entries});
   try{
     for(const [path,f] of files){const target=join(snapshot,path);await mkdir(dirname(target),{recursive:true,mode:0o700});await writeFile(target,f.data,{flag:'wx',mode:f.mode});}
@@ -510,7 +526,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
         let out=null;if(stage.exports){out=join(run,label+'-'+stage.name);await mkdir(out,{mode:0o700});}
         const control=join(run,label+'-'+stage.name+'-control');await mkdir(control,{mode:0o700});
         // No stage starts after the run's deadline (round 2: checked after this stage's setup, which takes time too).
-        if(deadline-Date.now()<=0){results.push({name:stage.name,outcome:'incomplete',timed_out:true});continue;}
+        if(deadline-Date.now()<=0){results.push({name:stage.name,outcome:'incomplete',timed_out:true,not_started:true});continue;}
         const command=[...common(snap),...compiledStageCommand(profile,stage,{toolBinds,path:toolPath,sibling,out,built,control})];
         const r=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:'cancelled',output:'',omitted_bytes:0}:await execute(command,deadline-Date.now(),signal,Math.floor(maxOutput/stages[profile].length),{control,stage:stage.name,deadline});
         let outcome=stageOutcome(stage,r),handed=null;
@@ -518,7 +534,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
         // T43: a stage asked to stop (at its deadline or by a cancellation; the first reason is kept) keeps what it had
         // printed when the request reached it, and the record says when the deadline was and when the stage ended.
         const cut=r.stopped??null;
-        results.push({name:stage.name,outcome,exit_code:r.code,signal:r.signal,timed_out:r.timedOut,launch_error:r.launchError,output:r.output,omitted_bytes:r.omitted_bytes,kept:r.kept??null,failures:r.failures??[],failures_overflowed:r.failures_overflowed??false,...(cut?{cut_at:cut}:{}),...(r.ended?{deadline_at:new Date(deadline).toISOString(),ended_at:new Date(r.ended).toISOString()}:{}),...(handed?{handed_on:{name:stage.exports,sha256:handed.sha256,bytes:handed.bytes}}:{})});
+        results.push({name:stage.name,outcome,exit_code:r.code,signal:r.signal,timed_out:r.timedOut,launch_error:r.launchError,output:r.output,omitted_bytes:r.omitted_bytes,kept:r.kept??null,failures:r.failures??[],failures_overflowed:r.failures_overflowed??false,...(cut?{cut_at:cut}:{}),...(r.not_started?{not_started:true}:{}),...(r.ended?{deadline_at:new Date(deadline).toISOString(),ended_at:new Date(r.ended).toISOString()}:{}),...(handed?{handed_on:{name:stage.exports,sha256:handed.sha256,bytes:handed.bytes}}:{})});
       }
       const judged=compiledVerdict(results.map(r=>r.outcome)),failing=results.find(r=>Number.isInteger(r.exit_code)&&r.exit_code!==0);
       const parts=results.map(r=>({prefix:`[runner] stage ${r.name}: ${r.outcome}${Number.isInteger(r.exit_code)?' (exit '+r.exit_code+')':''}\n${r.cut_at?`[runner] stage ${r.name} was stopped at the ${r.cut_at}: what it had printed when the request reached it follows (a request, not an exact cut)\n`:''}`,kept:r.kept}));
@@ -555,6 +571,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     }
     const aborted={state:'failed',stages:[],code:null,signal:null,timedOut:false,launchError:null,output:'',omitted_bytes:0};
     const result=signal?.aborted?aborted:compiled?await runStages(snapshot,'candidate',timeoutMs):await execute(args,timeoutMs,signal,maxOutput,{stage:profile===profiles[4]?'gate':'node'});
+    candidateParts=compiled?result.parts:result.kept?[{prefix:'',kept:result.kept}]:null;   // round 4: at once, before anything later can throw
     const unchanged=await Promise.all(entries.map(async e=>{const f=await exactFile(snapshot,e.path);return hash(f.data)===e.sha256&&f.mode===e.mode;})).then(xs=>xs.every(Boolean));
     const judged=judgeRun(profile,result,{unchanged,aborted:signal?.aborted});
     // T43: the failure index sits beside the transcript; the verdict (judgeRun) never reads it.
@@ -565,7 +582,6 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     if(compare&&profile===profiles[0]&&!signal?.aborted)record.benchmark=await pairedBenchmark({files,baselineFiles,args,snapshot,baselineSnapshot,signal,before,after:snapshotDigest,nodeHash:record.node_sha256});
     if(signal?.aborted){record.state='failed';record.reason='cancelled';delete record.verdict;}
     // T43 round 2 (fix 1): the record the cockpit reads always fits it.
-    candidateParts=compiled?result.parts:result.kept?[{prefix:'',kept:result.kept}]:null;
     // T43 rounds 2-3: the record the cockpit reads always fits it (writeOutcome, the one bounded writer).
     await writeOutcome(run,record,[{target:record.baseline,parts:baselineParts},{target:record,parts:candidateParts}]);return {directory:run,record};
   }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await writeOutcome(run,record,[{target:record.baseline,parts:baselineParts},{target:record,parts:candidateParts}]);throw e;}
