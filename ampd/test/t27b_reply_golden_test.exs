@@ -4,7 +4,7 @@ defmodule Ampd.T27bReplyGoldenTest do
   byte, the base's.
 
   The same file runs in two trees. In a throwaway clone of the installed base, with `T27B_REPLY_GOLDEN_OUT` set, it
-  CAPTURES each reply's raw bytes into that file (`superlane/t27b/golden-base-r5.sh`). In T27b it COMPARES against the
+  CAPTURES each reply's raw bytes into that file (`superlane/t27b/golden-base-r6.sh`). In T27b it COMPARES against the
   committed capture, `test/data/t27b-reply-goldens.json`.
 
   The commands are every request shape the loop answers (round 4, Codex review 3, finding 2: each `run/3` clause), plus
@@ -22,6 +22,9 @@ defmodule Ampd.T27bReplyGoldenTest do
     this file resets and builds, as `development_attempt_test.exs` does, then every clause that can succeed.
   - **Each test declares only the fields measured to vary between runs** (finding 2). No type admits null, and every
     declared field must occur in that test's capture, so no rule is dormant.
+
+  Round 6 (Codex review 5): the fixture's repositories are directories this run alone owns, and every resource is
+  released on every exit (`release_all!/1`, called from `after`).
   """
   use ExUnit.Case, async: false
   alias Ampd.Transport.HostBridge
@@ -137,6 +140,8 @@ defmodule Ampd.T27bReplyGoldenTest do
 
   defp exchange(host, bytes, n) do
     pairs = for _ <- 1..n//1, do: Ampd.Transport.socketpair(:stream)
+    held!(Enum.flat_map(pairs, fn {mine, theirs} -> [mine, theirs] end))
+
     ctrl =
       for {mine, _} <- pairs do
         {:ok, fd} = :socket.getopt(mine, {:otp, :fd})
@@ -147,7 +152,42 @@ defmodule Ampd.T27bReplyGoldenTest do
     # Both ends stay open (round 3g): :socket.close makes a socket's open file description blocking, and the runtime's
     # adopted copy shares it, so closing `mine` here would leave the runtime's reader blocking a scheduler.
     {:ok, %{iov: iov}} = :socket.recvmsg(host, 65_536, 0, [], 5_000)
-    {IO.iodata_to_binary(iov), Enum.flat_map(pairs, fn {mine, theirs} -> [mine, theirs] end)}
+    reply = IO.iodata_to_binary(iov)
+    raw!(reply)
+    reply
+  end
+
+  # ---- Round 6 (Codex review 5, finding 2): what a test makes is recorded as it is made, in the test's own process,
+  # and released on every exit by `release_all!/1` in its `after`.
+  defp held!(ends), do: Process.put(:t27b_held, ends ++ Process.get(:t27b_held, []))
+  defp owned!(dir), do: Process.put(:t27b_owned, [dir | Process.get(:t27b_owned, [])])
+
+  # The round-3g order: the runtime releases what it adopted first, then the test's ends close; then the directories
+  # this run owns go; then, for a test that built a world, the world is reset.
+  defp release_all!(reset_world?) do
+    Ampd.Bridge.reset()
+    held = Process.delete(:t27b_held) || []
+    Enum.each(held, &:socket.close/1)
+    dirs = Process.delete(:t27b_owned) || []
+    Enum.each(dirs, &File.rm_rf!/1)
+    if reset_world?, do: Ampd.reset()
+
+    if log = System.get_env("T27B_GOLDEN_CLEANUP_LOG") do
+      left = Enum.filter(dirs, &File.exists?/1)
+      File.write!(log, "released #{length(held)} test ends; removed #{length(dirs)} owned dirs (#{length(left)} left: #{inspect(left)}); world reset #{reset_world?}\n", [:append])
+    end
+
+    :ok
+  end
+
+  # Evidence knobs, inert unless set (round 6).
+  defp raw!(reply), do: if(System.get_env("T27B_REPLY_RAW_OUT"), do: Process.put(:t27b_raw, Process.get(:t27b_raw, []) ++ [reply]))
+
+  defp fail_at!(name),
+    do: if(System.get_env("T27B_GOLDEN_FAIL_AT") == name, do: flunk("intentional failure after #{name} (T27B_GOLDEN_FAIL_AT)"))
+
+  defp write_raw!(test) do
+    if out = System.get_env("T27B_REPLY_RAW_OUT"), do: File.write!("#{out}.#{test}.json", JSON.encode!(Process.get(:t27b_raw, [])))
   end
 
   # Each run-to-run field's value, checked against its declared type, then replaced IN THE RAW BYTES at that field
@@ -218,19 +258,20 @@ defmodule Ampd.T27bReplyGoldenTest do
   end
 
   test "B8 · every normal reply the loop sends is byte for byte the base's", ctx do
-    {pairs, held} =
-      Enum.map_reduce(shapes(), [], fn {name, bytes, n}, held ->
-        {reply, ends} = exchange(ctx.host, bytes, n)
-        {{%{"shape" => name, "reply" => normalized(@refusal_volatile, name, reply)}, reply}, ends ++ held}
-      end)
+    pairs =
+      try do
+        for {name, bytes, n} <- shapes() do
+          reply = exchange(ctx.host, bytes, n)
+          fail_at!(name)
+          {%{"shape" => name, "reply" => normalized(@refusal_volatile, name, reply)}, reply}
+        end
+      after
+        write_raw!("refusals")
+        release_all!(false)
+      end
 
     got = Enum.map(pairs, &elem(&1, 0))
     assert_every_field_seen(@refusal_volatile, Enum.map(pairs, &elem(&1, 1)))
-
-    # The runtime releases what it adopted first; only then are the test's ends closed (round 3g).
-    Ampd.Bridge.reset()
-
-    Enum.each(held, &:socket.close/1)
 
     case System.get_env("T27B_REPLY_GOLDEN_OUT") do
       nil ->
@@ -255,13 +296,34 @@ defmodule Ampd.T27bReplyGoldenTest do
 
   defp hash(s), do: :crypto.hash(:sha256, s) |> Base.encode16(case: :lower)
 
-  # Fixed names, so the paths in the replies are the same in every tree that runs this (the base capture included).
+  # Round 6 (Codex review 5, finding 1): a directory this run alone owns. `File.mkdir` refuses one that already exists,
+  # so nothing anyone else made is ever deleted; the name is unique to this OS process and this call. It is recorded as
+  # owned before anything is put in it, so `release_all!/1` removes it on every exit.
   defp git_repo!(name) do
-    repo = Path.join(System.tmp_dir!(), "t27b-golden-" <> name)
-    File.rm_rf!(repo)
-    File.mkdir_p!(repo)
+    repo = Path.join(System.tmp_dir!(), "t27b-golden-#{name}-#{System.pid()}-#{System.unique_integer([:positive])}")
+    :ok = File.mkdir(repo)
+    owned!(repo)
     {_, 0} = System.cmd("git", ["init", "--quiet", repo])
     repo
+  end
+
+  # An owned repository's exact path, replaced only where it is a repository's `path` value. Validated: it is replaced
+  # as often as it is decoded there, and it may not appear anywhere else in the reply.
+  defp fixture_paths(shape, bytes, paths) do
+    decoded = case JSON.decode(bytes) do
+      {:ok, v} -> v
+      _ -> nil
+    end
+
+    Enum.reduce(paths, bytes, fn {path, label}, acc ->
+      want = Enum.count(collect(%{"path" => :string}, decoded), fn {_, p} -> p == path end)
+      re = ~r/"path":#{Regex.escape(JSON.encode!(path))}/
+      got = length(Regex.scan(re, acc))
+      assert got == want, "#{shape}: #{label} occurs #{want} times as a path, #{got} in the raw reply"
+      out = Regex.replace(re, acc, ~s("path":"#{label}"))
+      refute String.contains?(out, path), "#{shape}: #{label} appears outside a path value"
+      out
+    end)
   end
 
   defp world_now, do: Enum.map(~w(world_incarnation world_generation projection_epoch), &Ampd.Projection.continuity()[&1])
@@ -379,29 +441,35 @@ defmodule Ampd.T27bReplyGoldenTest do
   end
 
   test "B8 · every successful reply form the loop sends is byte for byte the base's", ctx do
-    {a, task, repo} = attempt_fixture!()
-    extra = git_repo!("extra")
+    pairs =
+      try do
+        {a, task, repo} = attempt_fixture!()
+        extra = git_repo!("extra")
+        paths = [{repo, "<lane_repo>"}, {extra, "<extra_repo>"}]
 
-    {pairs, {held, _}} =
-      Enum.map_reduce(success_shapes(a, task, repo, extra), {[], %{}}, fn {name, make, n}, {held, prev} ->
-        {reply, ends} = exchange(ctx.host, make.(prev), n)
+        {pairs, _} =
+          Enum.map_reduce(success_shapes(a, task, repo, extra), %{}, fn {name, make, n}, prev ->
+            reply = exchange(ctx.host, make.(prev), n)
+            fail_at!(name)
 
-        decoded =
-          case JSON.decode(reply) do
-            {:ok, v} -> v
-            _ -> %{}
-          end
+            decoded =
+              case JSON.decode(reply) do
+                {:ok, v} -> v
+                _ -> %{}
+              end
 
-        {{%{"shape" => name, "reply" => normalized(@success_volatile, name, reply)}, reply}, {ends ++ held, decoded}}
-      end)
+            normal = reply |> then(&normalized(@success_volatile, name, &1)) |> then(&fixture_paths(name, &1, paths))
+            {{%{"shape" => name, "reply" => normal}, reply}, decoded}
+          end)
+
+        pairs
+      after
+        write_raw!("success")
+        release_all!(true)
+      end
 
     got = Enum.map(pairs, &elem(&1, 0))
     assert_every_field_seen(@success_volatile, Enum.map(pairs, &elem(&1, 1)))
-
-    Ampd.Bridge.reset()
-    Enum.each(held, &:socket.close/1)
-    File.rm_rf!(repo)
-    File.rm_rf!(extra)
 
     case System.get_env("T27B_REPLY_GOLDEN_SUCCESS_OUT") do
       nil ->
