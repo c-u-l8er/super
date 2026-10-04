@@ -241,13 +241,27 @@ fn runtime_outcome(record: &Value, attempt: &Value) -> Value {
         .as_str()
         .or_else(|| record["message"].as_str())
         .unwrap_or("");
-    let preview: String = output.chars().filter(|c| *c != '\0').take(256).collect();
+    let head: String = output.chars().filter(|c| *c != '\0').take(256).collect();
+    // T43 (A-32): when the run's record names failures, the preview is the first of them, not the transcript's head
+    // (compile lines for a Rust or Elixir run). `output_omitted` keeps its meaning: the head did not hold everything.
+    let first = r["failures"]
+        .as_array()
+        .and_then(|f| f.first())
+        .and_then(|f| Some((f["stage"].as_str()?, f["line"].as_str()?)));
+    let preview: String = match first {
+        Some((stage, line)) => format!("first failure ({stage}): {line}")
+            .chars()
+            .filter(|c| *c != '\0')
+            .take(256)
+            .collect(),
+        None => head.clone(),
+    };
     json!({"state":if r["state"]=="completed"{"completed"}else{"failed"},"verdict":r["verdict"],
         "reason":if r.is_null(){json!("runner-error")}else{r["reason"].clone()},
         "source_basis_id":if r.is_null(){attempt["source"]["basis_id"].clone()}else{r["source_basis_id"].clone()},"result_sha256":if r.is_null(){attempt["source"]["result_sha256"].clone()}else{r["result_sha256"].clone()},
         "profile":r["profile"].as_str().or_else(||record["profile"].as_str()).unwrap_or("super-javascript-behavior@1"),"toolchain_sha256":r["toolchain_sha256"],"snapshot_sha256":r["snapshot_sha256"],"node_sha256":r["node_sha256"],
         "test_count":r["tests"].as_array().map(Vec::len).unwrap_or(0),"output":preview,
-        "output_omitted":preview!=output||r["omitted_bytes"].as_u64().unwrap_or(0)>0})
+        "output_omitted":head!=output||r["omitted_bytes"].as_u64().unwrap_or(0)>0})
 }
 impl Runs {
     fn finish(&self, receipt: PathBuf, mut record: Value, fields: Value, report: &Report) -> Value {
@@ -1083,6 +1097,36 @@ mod accepted_tests {
             changed[key] = json!("forged");
             assert!(serde_json::from_value::<Request>(changed).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod outcome_preview_tests {
+    use super::*;
+    fn record(output: &str, failures: Value) -> Value {
+        json!({"result":{"state":"completed","verdict":"fail","output":output,"omitted_bytes":0,"failures":failures,"tests":["host/Cargo.toml"]}})
+    }
+    // T43 law F3 (superlane/t43/TASK.md): ampd's preview is `first failure (<stage>): <line>` when the record names
+    // failures, else the transcript's head; at most 256 characters either way; `output_omitted` as before T43.
+    #[test]
+    fn f3_the_preview_names_the_first_failure_and_otherwise_keeps_the_head() {
+        let attempt = json!({"source":{"basis_id":"b","result_sha256":"r"}});
+        let compile = "   Compiling super-host v0.1.0\n".repeat(20);
+        let failures = json!([{"stage":"host","line":"test tests::planted ... FAILED"},{"stage":"cockpit","line":"test later ... FAILED"}]);
+        let named = runtime_outcome(&record(&compile, failures), &attempt);
+        assert_eq!(named["output"], "first failure (host): test tests::planted ... FAILED");
+        assert_eq!(named["output_omitted"], true, "the head held 256 of the transcript's 640 characters");
+        let short = runtime_outcome(&record("short", json!([{"stage":"ampd","line":"  1) test x (M)"}])), &attempt);
+        assert_eq!(short["output"], "first failure (ampd):   1) test x (M)");
+        assert_eq!(short["output_omitted"], false, "output_omitted still says whether the head held everything");
+        let long = runtime_outcome(&record("x", json!([{"stage":"ampd","line":"é".repeat(600)}])), &attempt);
+        assert_eq!(long["output"].as_str().unwrap().chars().count(), 256);
+        let none = runtime_outcome(&record(&compile, json!([])), &attempt);
+        assert_eq!(none["output"].as_str().unwrap(), compile.chars().take(256).collect::<String>());
+        assert_eq!(none["output_omitted"], true);
+        let before = runtime_outcome(&json!({"result":{"state":"completed","verdict":"pass","output":"ok","omitted_bytes":5}}), &attempt);
+        assert_eq!(before["output"], "ok", "a record from before T43 has no index and keeps its head");
+        assert_eq!(before["output_omitted"], true);
     }
 }
 

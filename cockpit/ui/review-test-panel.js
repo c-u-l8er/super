@@ -2,9 +2,19 @@ import {reviewTestCoverage} from './review-test-coverage.js';
 import {node} from './app-shell.js';
 import {runtimeWorld,heldProjection} from './runtime-bots.js';
 import {PROFILE_LABELS,profileLabelFor,recordDescription} from './review-profile-labels.js';
+// T43 (A-32): a run's first failures, from the record's index (the lines its suites printed that name a failure), shown
+// above its output: up to 3, then how many more. The verdict never comes from these lines.
+export function runFailures(result){
+  const failures=Array.isArray(result?.failures)?result.failures.filter(f=>typeof f?.line==='string'):[];
+  if(!failures.length)return null;
+  const more=failures.length-3;
+  return {lines:failures.slice(0,3).map(f=>`${typeof f.stage==='string'?f.stage:'run'}: ${f.line}`),
+    more:more>0?`and ${more} more${result.failures_overflowed?' (the record keeps 16; the run printed further failures)':''}`:null,
+    note:'These lines name what failed. Whether the run passed comes from its exit status alone.'};
+}
 export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=false}){
   const panel=node('section',undefined,'attempt-checks');panel.id='attempt-tests-'+attempt.id;
-  panel.append(node('h4','Local test runs'),node('p','Runs the captured source with every file in this review applied together. Ignored files and installed dependencies are excluded. Elixir builds super-host and runs the runtime’s whole test suite; it requires Elixir and Erlang installed with asdf and can take several minutes. Rust runs the host and cockpit suites; it requires rustup, cached Cargo dependencies and RRABBIT beside the repository, can take minutes, and runs offline. The runtime records the start and outcome; full output stays on this device. Tests do not accept the plan.','directory-note'));
+  panel.append(node('h4','Local test runs'),node('p','Runs the captured source with every file in this review applied together. Ignored files and installed dependencies are excluded. Elixir builds super-host and runs the runtime’s whole test suite; it requires Elixir and Erlang installed with asdf and can take several minutes. Rust runs the host and cockpit suites; it requires rustup, cached Cargo dependencies and RRABBIT beside the repository, can take minutes, and runs offline. The runtime records the start and outcome; full output stays on this device. A run lists the first failures its suites printed above its output; whether it passed comes from the exit status. Tests do not accept the plan.','directory-note'));
   const controls=node('div',undefined,'connection-row'),start=node('button','Run JavaScript tests','subtle');start.type='button';start.id='attempt-run-'+attempt.id;
   const profile=node('select');profile.id='attempt-test-profile-'+attempt.id;profile.setAttribute('aria-label','Test profile');for(const [value,label] of Object.entries(PROFILE_LABELS)){const option=node('option',label);option.value=value;profile.append(option);}start.textContent='Run selected tests';
   const comparison=node('label',undefined,'field'),compare=node('input');compare.type='checkbox';compare.checked=true;compare.setAttribute('aria-label','Capture baseline and benchmark comparison');comparison.append(compare,node('span','Also run the starting source and compare benchmarks when configured'));
@@ -53,6 +63,8 @@ export function reviewTestPanel({attempt,invoke,current,acceptResult,readOnly=fa
           const described=recordDescription(result);
           row.append(node('p',`${described.label} · Saved proposal only · ${described.detail} · ${result.finished_at??result.started_at}`,'directory-note'));
           if(result.reason)row.append(node('p','Run outcome: '+result.reason,'availability-note'));
+          const failed=runFailures(result);
+          if(failed){const box=node('section',undefined,'attempt-checks');box.dataset.runFailures=run.run_id;box.append(node('h4','First failures'));for(const line of failed.lines)box.append(node('pre',line,'attempt-text'));if(failed.more)box.append(node('p',failed.more,'directory-note'));box.append(node('p',failed.note,'directory-note'));row.append(box);}
           const output=node('details');output.dataset.runOutput=run.run_id;output.open=opened.has(run.run_id);
           if(result.toolchain_sha256)output.append(node('p',(described.toolchain??'Toolchain: ')+result.toolchain_sha256,'directory-note'));
           output.append(node('summary','Test output and exact snapshot'),node('p','Snapshot: '+result.snapshot_sha256,'directory-note'),node('p','Reviewed result: '+result.result_sha256,'directory-note'),node('pre',result.output||'No test output was captured.','attempt-text'));

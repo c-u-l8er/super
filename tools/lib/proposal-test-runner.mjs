@@ -2,7 +2,7 @@
 import {createHash} from 'node:crypto';
 import {hostname,arch,platform,cpus} from 'node:os';
 import {spawn,execFileSync} from 'node:child_process';
-import {constants as F,statSync,accessSync} from 'node:fs';
+import {constants as F,statSync,accessSync,writeFileSync} from 'node:fs';
 import {StringDecoder} from 'node:string_decoder';
 import {mkdir,mkdtemp,readFile,writeFile,rename,rm,realpath,open,lstat,cp,readdir,readlink,chmod} from 'node:fs/promises';
 import {resolve,dirname,join,relative,sep} from 'node:path';
@@ -84,24 +84,34 @@ function checkAttempt(attempt){
 // bound fails closed (`signals_overflowed`). Super's two compiled profiles do not read text at all: their stages are
 // judged by exit status (compiledStageCommand, stageOutcome).
 const SIGNAL=/^(?:# gates? |# tests \d|# fail \d)/,maxSignals=4096,maxLine=4096;
+// T43 (A-32): **a bounded index of the lines that name a failure,** collected like the signals from every line of every
+// stream, kept or omitted: ExUnit's `  1) test <name> (<Module>)`, cargo's `test <path> ... FAILED` and node's TAP
+// `not ok <n> - <name>` (at any depth). Each entry is {stage, line}, at most 512 characters, at most 16 in the order they
+// arrived; a further match sets `failures_overflowed`. It points people at the failure; it is never part of a verdict.
+// (The module group is closed and space-free, so the pattern stays linear on a 4,096-character line.)
+const FAILURE=/^\s*(?:\d+\) test .+ \([^()\s]+\)|test \S+ \.\.\. FAILED|not ok \d+ - .+)$/,maxFailures=16,maxFailureLine=512;
 // Cut a kept piece at whole UTF-8 characters: a head never ends inside a character, a tail never starts inside one.
 const wholeHead=b=>{let e=b.length;for(let i=b.length-1,n=0;i>=0&&n<4;i--,n++){const c=b[i];if((c&0xc0)===0x80)continue;const need=c>=0xf0?4:c>=0xe0?3:c>=0xc0?2:1;e=i+need<=b.length?b.length:i;break;}return b.subarray(0,e);};
 const wholeTail=b=>{let s=0;while(s<b.length&&s<4&&(b[s]&0xc0)===0x80)s++;return b.subarray(s);};
-export function transcriptKeeper(limit=maxOutput){
-  const half=Math.floor(limit/2),head=[],tail=[],signals=[],streams=new Map();
-  let headBytes=0,tailBytes=0,total=0,headClosed=false,overflowed=false;
-  const line=l=>{l=l.replace(/\r$/,'');if(l.length>maxLine||!SIGNAL.test(l))return;if(signals.length<maxSignals)signals.push(l);else overflowed=true;};
-  // What is kept is decoded per stream first, so every kept piece is whole characters of one stream: no character is
-  // split between stdout and stderr, nor at a cut, and the omitted count is exactly what was not kept.
-  const keep=text=>{
-    if(!text)return;const b=Buffer.from(text,'utf8');total+=b.length;let rest=b;
+export function transcriptKeeper(limit=maxOutput,stage=null){
+  const half=Math.floor(limit/2),head=[],tail=[],signals=[],failures=[],streams=new Map();
+  let headBytes=0,tailBytes=0,total=0,headClosed=false,overflowed=false,failuresOverflowed=false;
+  const failure=l=>{if(l.length>maxLine||!FAILURE.test(l))return;if(failures.length<maxFailures)failures.push({stage,line:Array.from(l).slice(0,maxFailureLine).join('')});else failuresOverflowed=true;};
+  const line=l=>{l=l.replace(/\r$/,'');failure(l);if(l.length>maxLine||!SIGNAL.test(l))return;if(signals.length<maxSignals)signals.push(l);else overflowed=true;};
+  // T43: what is kept is the bytes the stream delivered, cut per stream at whole characters (a character that a chunk
+  // splits waits for the rest of it), so no character is split between stdout and stderr, nor at a cut. `total` and the
+  // omitted count are the delivered bytes, never a re-encoding: an invalid byte counts as one byte (T36 counted the
+  // three of its U+FFFD). Valid UTF-8 keeps exactly what T36 kept. The kept bytes are decoded only for the output.
+  const keep=b=>{
+    if(!b.length)return;total+=b.length;let rest=b;
     if(!headClosed){const piece=wholeHead(b.subarray(0,Math.min(half-headBytes,b.length)));if(piece.length){head.push(piece);headBytes+=piece.length;}rest=b.subarray(piece.length);if(rest.length)headClosed=true;}
     if(rest.length){tail.push(rest);tailBytes+=rest.length;while(tail.length>1&&tailBytes-tail[0].length>=half){tailBytes-=tail[0].length;tail.shift();}}
   };
   const stream=name=>{
-    if(!streams.has(name)){const decoder=new StringDecoder('utf8');let carry='',discarding=false;
+    if(!streams.has(name)){const decoder=new StringDecoder('utf8');let carry='',discarding=false,pending=Buffer.alloc(0);
       const scan=text=>{const parts=(carry+text).split('\n');carry=parts.pop();for(const l of parts){if(discarding){discarding=false;continue;}line(l);}if(carry.length>maxLine){carry='';discarding=true;}};
-      streams.set(name,{take(b){const text=decoder.write(b);keep(text);scan(text);},end(){const text=decoder.end();keep(text);scan(text);if(!discarding&&carry)line(carry);carry='';}});}
+      streams.set(name,{take(b){const all=pending.length?Buffer.concat([pending,b]):b,whole=wholeHead(all);pending=Buffer.from(all.subarray(whole.length));keep(whole);scan(decoder.write(b));},
+        end(){keep(pending);pending=Buffer.alloc(0);scan(decoder.end());if(!discarding&&carry)line(carry);carry='';}});}
     return streams.get(name);
   };
   return {
@@ -110,20 +120,35 @@ export function transcriptKeeper(limit=maxOutput){
       for(const s of streams.values())s.end();
       const keptHead=Buffer.concat(head);let keptTail=Buffer.concat(tail);if(keptTail.length>half)keptTail=wholeTail(keptTail.subarray(keptTail.length-half));
       const omitted=total-keptHead.length-keptTail.length;
-      return {output:keptHead.toString('utf8')+(omitted?`\n[… ${omitted} bytes omitted …]\n`:'')+keptTail.toString('utf8'),omitted_bytes:omitted,signals,signals_overflowed:overflowed};
+      return {output:keptHead.toString('utf8')+(omitted?`\n[… ${omitted} bytes omitted …]\n`:'')+keptTail.toString('utf8'),omitted_bytes:omitted,signals,signals_overflowed:overflowed,failures,failures_overflowed:failuresOverflowed};
     }
   };
 }
-async function execute(args,timeoutMs,signal,limit=maxOutput){
+// T43: one run's index, from its stages' in stage order, still at most 16 entries.
+export function failureIndex(parts){
+  const failures=[];let overflowed=false;
+  for(const p of parts){for(const f of p.failures??[]){if(failures.length<maxFailures)failures.push(f);else overflowed=true;}if(p.failures_overflowed)overflowed=true;}
+  return {failures,failures_overflowed:overflowed};
+}
+// T43 (Codex T36 round 3, nonblocking 1): **a stage asked to stop prints what it wrote first.** At the deadline or on a
+// cancellation the runner creates `stop` in the stage's control directory, bound read-only at /control (a signal cannot
+// reach the wrapper through bwrap's PID namespace: superlane/t43/measure/MEASURE-stop.md); the wrapper's watcher prints
+// /tmp/stage.log and ends the wrapper. The group is SIGKILLed STOP_GRACE_MS after the request whatever happens.
+const STOP_GRACE_MS=10000;
+// `control` (a compiled stage's control directory) makes a deadline or a cancellation a stop request first; without it
+// the group is SIGKILLed at once, as before. `stage` names the failure index's entries.
+async function execute(args,timeoutMs,signal,limit=maxOutput,{control=null,stage=null}={}){
   return new Promise(resolveResult=>{
-    let timedOut=false,launchError=null;const keeper=transcriptKeeper(limit);
+    let timedOut=false,launchError=null,stopped=false,grace=null;const keeper=transcriptKeeper(limit,stage);
     const child=spawn('/usr/bin/bwrap',args,{env:{PATH:'/usr/bin:/bin',LANG:'C.UTF-8'},detached:true,stdio:['ignore','pipe','pipe']});
     child.stdout.on('data',b=>keeper.push(b,'stdout'));child.stderr.on('data',b=>keeper.push(b,'stderr'));
-    const cancel=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
+    const kill=()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}};
+    const stop=()=>{if(!control)return kill();if(stopped)return;stopped=true;grace=setTimeout(kill,STOP_GRACE_MS);try{writeFileSync(join(control,'stop'),'',{flag:'wx',mode:0o600});}catch{kill();}};
+    const cancel=()=>stop();
     signal?.addEventListener('abort',cancel,{once:true});if(signal?.aborted)cancel();
-    const timer=setTimeout(()=>{timedOut=true;try{process.kill(-child.pid,'SIGKILL');}catch{}},timeoutMs);
+    const timer=setTimeout(()=>{timedOut=true;stop();},timeoutMs);
     child.on('error',e=>{launchError=e.message;});
-    child.on('close',(code,exitSignal)=>{clearTimeout(timer);signal?.removeEventListener('abort',cancel);resolveResult({code,signal:exitSignal,timedOut,launchError,...keeper.finish()});});
+    child.on('close',(code,exitSignal)=>{clearTimeout(timer);clearTimeout(grace);signal?.removeEventListener('abort',cancel);resolveResult({code,signal:exitSignal,timedOut,launchError,stopped,...keeper.finish()});});
   });
 }
 
@@ -185,15 +210,18 @@ export function stageScript(profile,named){
   // printed when the stage ends. Measured: the whole ampd suite run straight into the pipe failed 3 of 3 times (1, 1 and
   // 908 failures; superlane/t36/pipe-test.out), and 7 of 7 through a file passed. The subshell keeps the stage's exit
   // status, its reserved 125 included.
-  return `${prepare.join(' && ')} || exit ${NOT_PREPARED}\n(${stage.script}) > /tmp/stage.log 2>&1\ncode=$?\ncat /tmp/stage.log\nexit $code`;
+  // T43: a watcher in the background waits for the runner's stop request (/control/stop), then prints the file and ends
+  // the wrapper, which tears the sandbox down. The stage stays in the foreground, its signal dispositions as before.
+  return `${prepare.join(' && ')} || exit ${NOT_PREPARED}\n${STOP_WATCHER}\n(${stage.script}) > /tmp/stage.log 2>&1\ncode=$?\ncat /tmp/stage.log\nexit $code`;
 }
+const STOP_WATCHER='{ while [ ! -e /control/stop ]; do sleep 1; done; cat /tmp/stage.log; kill -KILL $$; } &';
 // The rest of a stage's bwrap arguments after the common sandbox: its toolchains, its private RRABBIT capture, its hand-
 // over directory (writable /out for the stage that exports, read-only /built for the stage that needs it), its fixed
-// environment, and its script.
-export function compiledStageCommand(profile,named,{toolBinds,path,sibling=null,out=null,built=null}){
+// environment, and its script. T43: and its control directory, read-only at /control, where the runner asks it to stop.
+export function compiledStageCommand(profile,named,{toolBinds,path,sibling=null,out=null,built=null,control=null}){
   const stage=stageOf(profile,named);
   assert(!stage.sibling||sibling,'This stage needs the RRABBIT capture.');assert(!stage.exports||out,'This stage needs its output directory.');assert(!stage.needs||built,'This stage needs what the stage before it built.');
-  return ['--symlink','usr/bin','/bin',...toolBinds,...(stage.sibling?sibling.binds:[]),...(stage.exports?['--bind',out,'/out']:[]),...(stage.needs?['--ro-bind',built,'/built']:[]),
+  return ['--symlink','usr/bin','/bin',...toolBinds,...(stage.sibling?sibling.binds:[]),...(stage.exports?['--bind',out,'/out']:[]),...(stage.needs?['--ro-bind',built,'/built']:[]),...(control?['--ro-bind',control,'/control']:[]),
     '--setenv','PATH',path,...Object.entries(sandboxEnv[profile]).flatMap(([k,v])=>['--setenv',k,v]),'--','/bin/sh','-c',stageScript(profile,stage)];
 }
 // Round 2: what a stage hands on is a COPY the runner makes of the one validated file, never the build-controlled
@@ -225,6 +253,16 @@ export function transcriptComplete(profile,signals,overflowed=false){
   if(overflowed)return false;
   if(profile===profiles[4])return signals.includes('# gates complete');
   return signals.some(l=>/^# tests \d+$/.test(l))&&signals.some(l=>/^# fail \d+$/.test(l));
+}
+// A run's state and verdict, from what the runner observed (T43 moved these lines here unchanged, so law F2 can hold
+// them): a compiled profile by its stages' exit statuses, any other by its exit status once its transcript completed. A
+// sandbox/loader error is not a failed application assertion. The failure index is never read here.
+export function judgeRun(profile,result,{unchanged=true,aborted=false}={}){
+  const compiled=Boolean(stages[profile]);
+  const tapComplete=compiled?result.state==='completed':transcriptComplete(profile,result.signals??[],result.signals_overflowed);
+  const state=aborted||!unchanged||result.timedOut||result.launchError||result.signal||!tapComplete?'failed':'completed';
+  if(state==='completed')return {state,verdict:compiled?result.verdict:result.code===0?'pass':'fail'};
+  return {state,reason:aborted?'cancelled':!unchanged?'snapshot-changed':result.timedOut?'timeout':result.launchError?'launcher-unavailable':result.signal?'terminated':'runner-did-not-complete'};
 }
 // One toolchain_sha256 per run (the runtime records one): the Elixir profile's covers Erlang/Elixir and the Rust that
 // builds super-host; the Rust profile's covers Rust and the sibling RRABBIT, so one changed RRABBIT byte changes it.
@@ -396,17 +434,20 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
         let out=null;if(stage.exports){out=join(run,label+'-'+stage.name);await mkdir(out,{mode:0o700});}
         // No stage starts after the run's deadline.
         const left=deadline-Date.now();if(left<=0){results.push({name:stage.name,outcome:'incomplete',timed_out:true});continue;}
-        const command=[...common(snap),...compiledStageCommand(profile,stage,{toolBinds,path:toolPath,sibling,out,built})];
-        const r=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:'cancelled',output:'',omitted_bytes:0}:await execute(command,left,signal,Math.floor(maxOutput/stages[profile].length));
+        const control=join(run,label+'-'+stage.name+'-control');await mkdir(control,{mode:0o700});
+        const command=[...common(snap),...compiledStageCommand(profile,stage,{toolBinds,path:toolPath,sibling,out,built,control})];
+        const r=signal?.aborted?{code:null,signal:null,timedOut:false,launchError:'cancelled',output:'',omitted_bytes:0}:await execute(command,left,signal,Math.floor(maxOutput/stages[profile].length),{control,stage:stage.name});
         let outcome=stageOutcome(stage,r),handed=null;
         if(stage.exports&&outcome==='built'){try{handed=await handOff(out,join(run,label+'-'+stage.name+'-handoff'),stage.exports);built=handed.dir;}catch{outcome='incomplete';}}
-        results.push({name:stage.name,outcome,exit_code:r.code,signal:r.signal,timed_out:r.timedOut,launch_error:r.launchError,output:r.output,omitted_bytes:r.omitted_bytes,...(handed?{handed_on:{name:stage.exports,sha256:handed.sha256,bytes:handed.bytes}}:{})});
+        // T43: a stage stopped at its deadline or by a cancellation keeps what it printed by then, marked as cut there.
+        const cut=r.stopped?(r.timedOut?'deadline':'cancellation'):null;
+        results.push({name:stage.name,outcome,exit_code:r.code,signal:r.signal,timed_out:r.timedOut,launch_error:r.launchError,output:r.output,omitted_bytes:r.omitted_bytes,failures:r.failures??[],failures_overflowed:r.failures_overflowed??false,...(cut?{cut_at:cut}:{}),...(handed?{handed_on:{name:stage.exports,sha256:handed.sha256,bytes:handed.bytes}}:{})});
       }
       const judged=compiledVerdict(results.map(r=>r.outcome)),failing=results.find(r=>Number.isInteger(r.exit_code)&&r.exit_code!==0);
-      return {...judged,stages:results.map(({output,...rest})=>rest),code:failing?failing.exit_code:results.every(r=>r.exit_code===0)?0:null,
+      return {...judged,stages:results.map(({output,failures,failures_overflowed,...rest})=>rest),code:failing?failing.exit_code:results.every(r=>r.exit_code===0)?0:null,
         signal:results.find(r=>r.signal)?.signal??null,timedOut:results.some(r=>r.timed_out),launchError:results.find(r=>r.launch_error&&r.launch_error!=='cancelled')?.launch_error??null,
-        output:results.map(r=>`[runner] stage ${r.name}: ${r.outcome}${Number.isInteger(r.exit_code)?' (exit '+r.exit_code+')':''}\n${r.output??''}`).join('\n'),
-        omitted_bytes:results.reduce((n,r)=>n+(r.omitted_bytes??0),0)};
+        output:results.map(r=>`[runner] stage ${r.name}: ${r.outcome}${Number.isInteger(r.exit_code)?' (exit '+r.exit_code+')':''}\n${r.cut_at?`[runner] stage ${r.name} was stopped at the ${r.cut_at}: what it printed by then follows, cut there\n`:''}${r.output??''}`).join('\n'),
+        omitted_bytes:results.reduce((n,r)=>n+(r.omitted_bytes??0),0),...failureIndex(results)};
     }
     if(profile===profiles[4]){
       // The repository's own gate, with the runner's arguments, in the same sandbox:
@@ -435,20 +476,19 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
       await atomic(join(run,'baseline-outcome.json'),record.baseline);
     }
     const aborted={state:'failed',stages:[],code:null,signal:null,timedOut:false,launchError:null,output:'',omitted_bytes:0};
-    const result=signal?.aborted?aborted:compiled?await runStages(snapshot,'candidate',timeoutMs):await execute(args,timeoutMs,signal);
+    const result=signal?.aborted?aborted:compiled?await runStages(snapshot,'candidate',timeoutMs):await execute(args,timeoutMs,signal,maxOutput,{stage:profile===profiles[4]?'gate':'node'});
     const unchanged=await Promise.all(entries.map(async e=>{const f=await exactFile(snapshot,e.path);return hash(f.data)===e.sha256&&f.mode===e.mode;})).then(xs=>xs.every(Boolean));
-    const tapComplete=compiled?result.state==='completed':transcriptComplete(profile,result.signals??[],result.signals_overflowed);
-    // A sandbox/loader error is not a failed application assertion.
-    const state=signal?.aborted||!unchanged||result.timedOut||result.launchError||result.signal||!tapComplete?'failed':'completed';
-    Object.assign(record,{state,finished_at:new Date().toISOString(),exit_code:result.code,signal:result.signal,output:result.output,omitted_bytes:result.omitted_bytes});
+    const judged=judgeRun(profile,result,{unchanged,aborted:signal?.aborted});
+    // T43: the failure index sits beside the transcript; the verdict (judgeRun) never reads it.
+    Object.assign(record,{state:judged.state,finished_at:new Date().toISOString(),exit_code:result.code,signal:result.signal,output:result.output,omitted_bytes:result.omitted_bytes,failures:result.failures??[],failures_overflowed:result.failures_overflowed??false});
     if(compiled)record.stages=result.stages;
-    if(state==='completed')record.verdict=compiled?result.verdict:result.code===0?'pass':'fail';
-    else record.reason=signal?.aborted?'cancelled':!unchanged?'snapshot-changed':result.timedOut?'timeout':result.launchError?'launcher-unavailable':result.signal?'terminated':'runner-did-not-complete';
+    if(judged.state==='completed')record.verdict=judged.verdict;
+    else record.reason=judged.reason;
     if(compare&&profile===profiles[0]&&!signal?.aborted)record.benchmark=await pairedBenchmark({files,baselineFiles,args,snapshot,baselineSnapshot,signal,before,after:snapshotDigest,nodeHash:record.node_sha256});
     if(signal?.aborted){record.state='failed';record.reason='cancelled';delete record.verdict;}
     await atomic(join(run,'outcome.json'),record);return {directory:run,record};
   }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await atomic(join(run,'outcome.json'),record);throw e;}
-  finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});await rm(join(run,'sibling'),{recursive:true,force:true});for(const label of ['candidate','baseline'])for(const s of stages[profile]??[])if(s.exports){await removeTree(join(run,label+'-'+s.name));await removeTree(join(run,label+'-'+s.name+'-handoff'));}}
+  finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});await rm(join(run,'sibling'),{recursive:true,force:true});for(const label of ['candidate','baseline'])for(const s of stages[profile]??[]){await removeTree(join(run,label+'-'+s.name+'-control'));if(s.exports){await removeTree(join(run,label+'-'+s.name));await removeTree(join(run,label+'-'+s.name+'-handoff'));}}}
 }
 
 // Read-only acceptance preflight. It executes no repository code and does not

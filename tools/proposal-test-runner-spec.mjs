@@ -173,6 +173,24 @@ test('only super-host passes from the Elixir host build to the ampd suite, whate
  assert.match(r.record.stages[0].handed_on.sha256,/^[a-f0-9]{64}$/);
 });
 
+// T43 law F4 (superlane/t43/TASK.md): at the deadline the runner asks the stage to stop first (its control file), the
+// wrapper prints /tmp/stage.log, and the group is gone by the deadline plus the 10 s grace.
+test('T43 F4 · a stage past its deadline keeps the lines it printed, is incomplete by timeout, and is gone within the grace',async t=>{
+ const f=await fixture(t);await mkdir(join(f.repository,'ampd/test'),{recursive:true});await hostFixture(f.repository);
+ await writeFile(join(f.repository,'ampd/mix.exs'),'defmodule Fixture.MixProject do\n use Mix.Project\n def project, do: [app: :fixture, version: "0.1.0", deps: []]\nend\n');
+ await writeFile(join(f.repository,'ampd/test/test_helper.exs'),'ExUnit.start()');
+ await writeFile(join(f.repository,'ampd/test/development_task_test.exs'),'defmodule FixtureSlowTest do\n use ExUnit.Case\n @tag timeout: :infinity\n test "prints three lines, then outlives its deadline" do\n  for n <- 1..3, do: IO.puts("t43-line-#{n}")\n  System.cmd("sleep", ["600.4343"])\n end\nend\n');
+ const deadline=30000,started=Date.now(),r=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:deadline}),took=Date.now()-started;
+ const ampd=r.record.stages.find(s=>s.name==='ampd');
+ assert.equal(r.record.state,'failed',r.record.output);assert.equal(r.record.reason,'timeout');assert.equal(r.record.verdict,undefined);
+ assert.deepEqual([ampd.outcome,ampd.timed_out,ampd.cut_at],['incomplete',true,'deadline']);
+ for(const n of [1,2,3])assert.match(r.record.output,new RegExp('^t43-line-'+n+'$','m'),'line '+n+' was kept');
+ assert.match(r.record.output,/\[runner\] stage ampd was stopped at the deadline: what it printed by then follows, cut there/);
+ assert.ok(took<deadline+10000+3000,'gone by the deadline plus the grace: '+took+' ms');
+ let left='';try{left=execFileSync('/usr/bin/pgrep',['-fx','sleep 600.4343'],{encoding:'utf8'}).trim();}catch{}
+ assert.equal(left,'','nothing of the stage is left running');
+});
+
 async function combinedFixture(t){
  const oldTest="import test from 'node:test';import assert from 'node:assert/strict';import {value} from '../value.mjs';test('old contract',()=>assert.equal(value,1));\n";
  const newTest=oldTest.replace('old contract','new contract').replace('value,1','value,2');
