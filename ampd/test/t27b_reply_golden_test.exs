@@ -4,7 +4,7 @@ defmodule Ampd.T27bReplyGoldenTest do
   byte, the base's.
 
   The same file runs in two trees. In a throwaway clone of the installed base, with `T27B_REPLY_GOLDEN_OUT` set, it
-  CAPTURES each reply's raw bytes into that file (`superlane/t27b/golden-base-r6.sh`). In T27b it COMPARES against the
+  CAPTURES each reply's raw bytes into that file (`superlane/t27b/golden-base-r7.sh`). In T27b it COMPARES against the
   committed capture, `test/data/t27b-reply-goldens.json`.
 
   The commands are every request shape the loop answers (round 4, Codex review 3, finding 2: each `run/3` clause), plus
@@ -24,7 +24,12 @@ defmodule Ampd.T27bReplyGoldenTest do
     declared field must occur in that test's capture, so no rule is dormant.
 
   Round 6 (Codex review 5): the fixture's repositories are directories this run alone owns, and every resource is
-  released on every exit (`release_all!/1`, called from `after`).
+  released on every exit (`release_all!/3`, called from `after`).
+
+  Round 7 (Codex review 6): the teardown's steps are independent and its errors are reported together; each socket is
+  recorded the moment it exists; the bridge loop stops before the runtime releases what it adopted; the repository
+  replies must carry the owned path. B9's law here injects a failure at each of five points and checks that nothing
+  the fixture made survives.
   """
   use ExUnit.Case, async: false
   alias Ampd.Transport.HostBridge
@@ -80,7 +85,7 @@ defmodule Ampd.T27bReplyGoldenTest do
       :socket.close(runtime)
     end)
 
-    %{host: host}
+    %{host: host, bridge: bridge}
   end
 
   defp cmd(map), do: JSON.encode!(Map.put(map, "schema", "bridge-command@1"))
@@ -139,8 +144,11 @@ defmodule Ampd.T27bReplyGoldenTest do
   end
 
   defp exchange(host, bytes, n) do
-    pairs = for _ <- 1..n//1, do: Ampd.Transport.socketpair(:stream)
-    held!(Enum.flat_map(pairs, fn {mine, theirs} -> [mine, theirs] end))
+    pairs =
+      for k <- 1..n//1 do
+        if k == 2, do: inject!(:after_first_pair)
+        pair!()
+      end
 
     ctrl =
       for {mine, _} <- pairs do
@@ -151,43 +159,131 @@ defmodule Ampd.T27bReplyGoldenTest do
     :ok = :socket.sendmsg(host, %{iov: [bytes], ctrl: ctrl})
     # Both ends stay open (round 3g): :socket.close makes a socket's open file description blocking, and the runtime's
     # adopted copy shares it, so closing `mine` here would leave the runtime's reader blocking a scheduler.
-    {:ok, %{iov: iov}} = :socket.recvmsg(host, 65_536, 0, [], 5_000)
+    {:ok, %{iov: iov}} = :socket.recvmsg(host, 65_536, 0, [], if(injected?(:recv_timeout), do: 0, else: 5_000))
     reply = IO.iodata_to_binary(iov)
     raw!(reply)
     reply
   end
 
-  # ---- Round 6 (Codex review 5, finding 2): what a test makes is recorded as it is made, in the test's own process,
-  # and released on every exit by `release_all!/1` in its `after`.
-  defp held!(ends), do: Process.put(:t27b_held, ends ++ Process.get(:t27b_held, []))
+  # ---- Round 6 (Codex review 5, finding 2) and round 7 (Codex review 6): what a test makes is recorded the moment it
+  # exists, in the test's own process, and released on every exit by `release_all!/3` in its `after`.
+  defp held!(socks), do: Process.put(:t27b_held, socks ++ Process.get(:t27b_held, []))
   defp owned!(dir), do: Process.put(:t27b_owned, [dir | Process.get(:t27b_owned, [])])
 
-  # The round-3g order: the runtime releases what it adopted first, then the test's ends close; then the directories
-  # this run owns go; then, for a test that built a world, the world is reset.
-  defp release_all!(reset_world?) do
-    Ampd.Bridge.reset()
+  # The test's own socket pair (round 7, finding 2): its temporary directory is owned before it is used, and each
+  # socket is recorded the moment it exists, so a failure part-way through leaks nothing. The shape is
+  # `Ampd.Transport.socketpair(:stream)`'s: an accepted end and a connected end over a path that only this run made.
+  defp pair! do
+    dir = Path.join(System.tmp_dir!(), "t27b-pair-#{System.pid()}-#{System.unique_integer([:positive])}")
+    :ok = File.mkdir(dir)
+    owned!(dir)
+    path = Path.join(dir, "p.sock")
+    {:ok, l} = :socket.open(:local, :stream, :default)
+    held!([l])
+    :ok = :socket.bind(l, %{family: :local, path: path})
+    :ok = :socket.listen(l)
+    {:ok, c} = :socket.open(:local, :stream, :default)
+    held!([c])
+    inject!(:pair_construction)
+    me = self()
+    spawn(fn -> send(me, {:t27b_connected, c, :socket.connect(c, %{family: :local, path: path})}) end)
+    {:ok, a} = :socket.accept(l, 2_000)
+    held!([a])
+
+    receive do
+      {:t27b_connected, ^c, :ok} -> :ok
+    after
+      2_000 -> flunk("pair: the connect never landed")
+    end
+
+    {a, c}
+  end
+
+  # The teardown (rounds 3g, 6 and 7). Each step runs whatever an earlier one did, and every error is reported at the
+  # end. The order: the bridge loop stops first, so nothing is adopted after disposal begins; then the runtime releases
+  # what it adopted (round 3g: before the test closes its copies); then every recorded test socket closes; then every
+  # owned directory goes; then a test that built a world resets it; and only then is any evidence written.
+  defp release_all!(bridge, reset_world?, evidence) do
+    errors = step([], "stop the bridge loop", fn -> stop_loop!(bridge) end)
+    errors = step(errors, "release the runtime's adoptions", fn -> Ampd.Bridge.reset() end)
     held = Process.delete(:t27b_held) || []
-    Enum.each(held, &:socket.close/1)
+    errors = Enum.reduce(held, errors, fn sock, e -> step(e, "close a test socket", fn -> close!(sock) end) end)
     dirs = Process.delete(:t27b_owned) || []
-    Enum.each(dirs, &File.rm_rf!/1)
-    if reset_world?, do: Ampd.reset()
+    errors = Enum.reduce(dirs, errors, fn dir, e -> step(e, "remove #{dir}", fn -> remove!(dir) end) end)
+    errors = if reset_world?, do: step(errors, "reset the world", fn -> Ampd.reset() end), else: errors
+    errors = step(errors, "write the evidence", evidence)
 
     if log = System.get_env("T27B_GOLDEN_CLEANUP_LOG") do
       left = Enum.filter(dirs, &File.exists?/1)
-      File.write!(log, "released #{length(held)} test ends; removed #{length(dirs)} owned dirs (#{length(left)} left: #{inspect(left)}); world reset #{reset_world?}\n", [:append])
+      line = "released #{length(held)} test sockets; removed #{length(dirs) - length(left)} of #{length(dirs)} owned dirs; " <>
+        "world reset #{reset_world?}; errors #{inspect(errors)}\n"
+      File.write(log, line, [:append])
     end
 
+    if errors != [], do: flunk("cleanup errors: " <> Enum.join(errors, "; "))
     :ok
   end
 
-  # Evidence knobs, inert unless set (round 6).
-  defp raw!(reply), do: if(System.get_env("T27B_REPLY_RAW_OUT"), do: Process.put(:t27b_raw, Process.get(:t27b_raw, []) ++ [reply]))
+  defp step(errors, what, f) do
+    f.()
+    errors
+  rescue
+    e -> errors ++ ["#{what}: #{Exception.message(e)}"]
+  end
+
+  # Unlinked first: the loop was linked to this test process at setup, and a linked kill would take the test with it.
+  defp stop_loop!(bridge) do
+    Process.unlink(bridge)
+    ref = Process.monitor(bridge)
+    Process.exit(bridge, :kill)
+
+    receive do
+      {:DOWN, ^ref, :process, _, _} -> :ok
+    after
+      2_000 -> raise "the bridge loop did not stop"
+    end
+  end
+
+  defp close!(sock) do
+    case :socket.close(sock) do
+      :ok -> :ok
+      {:error, :closed} -> :ok
+      other -> raise "close: #{inspect(other)}"
+    end
+  end
+
+  defp remove!(dir) do
+    inject!(:remove)
+
+    case File.rm_rf(dir) do
+      {:ok, _} -> :ok
+      {:error, reason, file} -> raise "#{file}: #{inspect(reason)}"
+    end
+  end
+
+  # Verification knobs, inert unless set (rounds 6 and 7): an injected failure fires once per process, at the named
+  # point, from `T27B_GOLDEN_INJECT` or from B9's law below (which sets it in its own process).
+  defp injected?(point) do
+    want = Process.get(:t27b_inject) || System.get_env("T27B_GOLDEN_INJECT")
+
+    if want == Atom.to_string(point) and not Process.get({:t27b_injected, point}, false) do
+      Process.put({:t27b_injected, point}, true)
+      true
+    else
+      false
+    end
+  end
+
+  defp inject!(point), do: if(injected?(point), do: raise("injected failure: #{point}"))
+
+  defp raw_out, do: Process.get(:t27b_raw_out) || System.get_env("T27B_REPLY_RAW_OUT")
+  defp raw!(reply), do: if(raw_out(), do: Process.put(:t27b_raw, Process.get(:t27b_raw, []) ++ [reply]))
 
   defp fail_at!(name),
     do: if(System.get_env("T27B_GOLDEN_FAIL_AT") == name, do: flunk("intentional failure after #{name} (T27B_GOLDEN_FAIL_AT)"))
 
   defp write_raw!(test) do
-    if out = System.get_env("T27B_REPLY_RAW_OUT"), do: File.write!("#{out}.#{test}.json", JSON.encode!(Process.get(:t27b_raw, [])))
+    if out = raw_out(), do: File.write!("#{out}.#{test}.json", JSON.encode!(Process.get(:t27b_raw, [])))
   end
 
   # Each run-to-run field's value, checked against its declared type, then replaced IN THE RAW BYTES at that field
@@ -233,13 +329,14 @@ defmodule Ampd.T27bReplyGoldenTest do
     if Map.has_key?(t, "frame_revision") and frame_cursor?(m), do: [{"frame_revision", m["revision"]} | own], else: own
   end
 
+
+  defp collect(t, l) when is_list(l), do: Enum.flat_map(l, &collect(t, &1))
+  defp collect(_, _), do: []
+
   # A frame whose own revision is its cursor: it carries both, with no key sorting between them.
   defp frame_cursor?(m),
     do: Map.has_key?(m, "revision") and Map.has_key?(m, "view_revision") and
           not Enum.any?(Map.keys(m), &(&1 > "revision" and &1 < "view_revision"))
-
-  defp collect(t, l) when is_list(l), do: Enum.flat_map(l, &collect(t, &1))
-  defp collect(_, _), do: []
 
   defp typed?(:string, x), do: is_binary(x)
   defp typed?(:integer, x), do: is_integer(x)
@@ -266,8 +363,7 @@ defmodule Ampd.T27bReplyGoldenTest do
           {%{"shape" => name, "reply" => normalized(@refusal_volatile, name, reply)}, reply}
         end
       after
-        write_raw!("refusals")
-        release_all!(false)
+        release_all!(ctx.bridge, false, fn -> write_raw!("refusals") end)
       end
 
     got = Enum.map(pairs, &elem(&1, 0))
@@ -324,6 +420,17 @@ defmodule Ampd.T27bReplyGoldenTest do
       refute String.contains?(out, path), "#{shape}: #{label} appears outside a path value"
       out
     end)
+  end
+
+  # Round 7 (Codex review 6, finding 4): the two repository replies must carry the owned repository's real path, and no
+  # reply may already carry a fixture placeholder; only then is the path replaced.
+  @repository_replies ["register_repository, a git repository", "registered_repository, that repository"]
+
+  defp expect_repository_path!(shape, decoded, raw, extra) do
+    for label <- ["<lane_repo>", "<extra_repo>"], do: refute(String.contains?(raw, label), "#{shape}: the reply already carries #{label}")
+
+    if shape in @repository_replies,
+      do: assert(get_in(decoded, ["repository", "path"]) == extra, "#{shape}: repository.path is not the owned repository")
   end
 
   defp world_now, do: Enum.map(~w(world_incarnation world_generation projection_epoch), &Ampd.Projection.continuity()[&1])
@@ -458,14 +565,14 @@ defmodule Ampd.T27bReplyGoldenTest do
                 _ -> %{}
               end
 
+            expect_repository_path!(name, decoded, reply, extra)
             normal = reply |> then(&normalized(@success_volatile, name, &1)) |> then(&fixture_paths(name, &1, paths))
             {{%{"shape" => name, "reply" => normal}, reply}, decoded}
           end)
 
         pairs
       after
-        write_raw!("success")
-        release_all!(true)
+        release_all!(ctx.bridge, true, fn -> write_raw!("success") end)
       end
 
     got = Enum.map(pairs, &elem(&1, 0))
@@ -483,6 +590,90 @@ defmodule Ampd.T27bReplyGoldenTest do
 
       out ->
         File.write!(out, JSON.encode!(got))
+    end
+  end
+
+  # ---- B9 for the fixture itself (round 7, Codex review 6): whatever fails, and wherever, the teardown leaves nothing
+  # the fixture made. Each scenario runs on its own runtime socket pair and bridge loop, injects one failure, and then
+  # checks: the injected failure (or the cleanup error it causes) is what surfaced; every socket the fixture recorded is
+  # closed; the BEAM holds exactly the descriptors it held before; no fixture directory remains (a removal that failed
+  # on purpose leaves exactly its one, which the law then removes); and the runtime holds no adopted channel.
+
+  # The open socket descriptors, as {fd, inode}: what the fixture can leak (it makes only sockets and directories).
+  # Read once the table is settled, because background work after a world reset can open and close other files.
+  defp open_sockets do
+    read = fn ->
+      for fd <- File.ls!("/proc/self/fd"), {:ok, t} <- [File.read_link("/proc/self/fd/" <> fd)],
+          String.starts_with?(t, "socket:"), into: MapSet.new(), do: {fd, t}
+    end
+
+    Enum.reduce_while(1..30, read.(), fn _, prev ->
+      Process.sleep(100)
+      now = read.()
+      if now == prev, do: {:halt, now}, else: {:cont, now}
+    end)
+  end
+  defp fixture_dirs, do: Path.wildcard(Path.join(System.tmp_dir!(), "t27b-{pair,golden}-#{System.pid()}-*"))
+
+  test "B9 · the reply fixture leaves nothing it made, whatever fails" do
+    # Binds only: an unknown command's rights are B2's law, and its plant must stay that law's alone.
+    bind = cmd(%{"command" => "bind_agent_channel", "actor" => "t27b-b9"})
+
+    scenarios = [
+      {"a failure while a pair is built", :pair_construction, nil, fn h -> exchange(h, bind, 2) end, "injected failure: pair_construction"},
+      {"a failure after the first of three pairs", :after_first_pair, nil, fn h -> exchange(h, bind, 3) end, "injected failure: after_first_pair"},
+      {"a bind whose reply outlives the receive", :recv_timeout, nil, fn h -> exchange(h, bind, 1) end, "MatchError"},
+      {"a removal that fails, with another after it", :remove, nil, fn h -> exchange(h, bind, 2) end, "cleanup errors: remove"},
+      {"an evidence file that cannot be written", :none, "/proc/t27b-unwritable/raw", fn h -> exchange(h, bind, 1) end, "cleanup errors: write the evidence"}
+    ]
+
+    for {what, point, raw_to, run, surfaced} <- scenarios do
+      Ampd.Bridge.reset()
+      sockets = open_sockets()
+      dirs = fixture_dirs()
+      {runtime, host} = Ampd.Transport.socketpair(:seqpacket)
+      {:ok, bridge} = HostBridge.start(runtime)
+      Process.put(:t27b_inject, Atom.to_string(point))
+      if raw_to, do: Process.put(:t27b_raw_out, raw_to)
+      ledger = fn -> Process.get(:t27b_held, []) end
+
+      {recorded, outcome} =
+        try do
+          run.(host)
+          {ledger.(), :ran}
+        rescue
+          e -> {ledger.(), {:failed, Exception.format_banner(:error, e)}}
+        end
+
+      cleaned =
+        try do
+          release_all!(bridge, false, fn -> write_raw!("b9") end)
+          :clean
+        rescue
+          e -> {:cleanup, Exception.message(e)}
+        end
+
+      for key <- [:t27b_inject, :t27b_raw_out, :t27b_raw, {:t27b_injected, point}], do: Process.delete(key)
+      :socket.close(host)
+      :socket.close(runtime)
+      left = fixture_dirs() -- dirs
+
+      if point == :remove do
+        assert length(left) == 1, "#{what}: #{length(left)} fixture directories remain, not the one whose removal failed"
+        File.rm_rf!(hd(left))
+      else
+        assert left == [], "#{what}: fixture directories remain: #{inspect(left)}"
+      end
+
+      assert inspect({outcome, cleaned}) =~ surfaced, "#{what}: #{inspect({outcome, cleaned})}"
+      assert recorded != [], "#{what}: the fixture recorded no socket, so the law saw nothing"
+
+      for sock <- recorded,
+          do: assert(:socket.getopt(sock, {:otp, :fd}) == {:error, :closed}, "#{what}: a recorded socket is still open")
+
+      assert Ampd.Bridge.list() == [], "#{what}: an adopted channel survived the teardown"
+      extra = MapSet.difference(open_sockets(), sockets) |> Enum.to_list()
+      assert extra == [], "#{what}: the BEAM holds socket descriptors it did not hold before: #{inspect(extra)}"
     end
   end
 end
