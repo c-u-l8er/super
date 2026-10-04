@@ -83,9 +83,10 @@ defmodule Ampd.T27bReplyGoldenTest do
       end
 
     :ok = :socket.sendmsg(host, %{iov: [bytes], ctrl: ctrl})
-    Enum.each(pairs, fn {mine, _} -> :socket.close(mine) end)
+    # Both ends stay open (round 3g): :socket.close makes a socket's open file description blocking, and the runtime's
+    # adopted copy shares it, so closing `mine` here would leave the runtime's reader blocking a scheduler.
     {:ok, %{iov: iov}} = :socket.recvmsg(host, 65_536, 0, [], 5_000)
-    {IO.iodata_to_binary(iov), Enum.map(pairs, &elem(&1, 1))}
+    {IO.iodata_to_binary(iov), Enum.flat_map(pairs, fn {mine, theirs} -> [mine, theirs] end)}
   end
 
   # Each run-to-run value, wherever it appears, replaced in the raw bytes by "<key>".
@@ -106,9 +107,12 @@ defmodule Ampd.T27bReplyGoldenTest do
   test "B8 · every normal reply the loop sends is byte for byte the base's", ctx do
     {got, held} =
       Enum.map_reduce(shapes(), [], fn {name, bytes, n}, held ->
-        {reply, theirs} = exchange(ctx.host, bytes, n)
-        {%{"shape" => name, "reply" => normalized(reply)}, theirs ++ held}
+        {reply, ends} = exchange(ctx.host, bytes, n)
+        {%{"shape" => name, "reply" => normalized(reply)}, ends ++ held}
       end)
+
+    # The runtime releases what it adopted first; only then are the test's ends closed (round 3g).
+    Ampd.Bridge.reset()
 
     Enum.each(held, &:socket.close/1)
 
