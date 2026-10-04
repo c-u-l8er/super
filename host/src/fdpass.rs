@@ -127,6 +127,8 @@ fn make_pair(ty: i32) -> io::Result<Pair> {
         return Err(io::Error::last_os_error());
     }
     debug_assert!(is_cloexec(sv[0]) && is_cloexec(sv[1]));
+    #[cfg(test)]
+    T27B_BIRTHS.with(|b| b.borrow_mut().push(("pair", t27b_inode(sv[0]), t27b_inode(sv[1]))));
     Ok(Pair(sv[0], sv[1]))
 }
 
@@ -446,6 +448,22 @@ thread_local! {
 // T27b round 3d: the T27b tests that open descriptors run one at a time. They share one process, and a descriptor
 // count, or a closed number reused by another thread, is otherwise another test's noise (laws.py v3 at 90e9eab: three
 // plants also failed an unrelated law; the whole set failed 1 run in 15). Test builds only.
+// T27b round 4 (test only; Codex review 3, finding 4): every pair and spare the calling thread makes, in order, by
+// inode, recorded where it is made. A law can then name exactly which descriptor a hand-over must carry, independently
+// of what the host records about its own hand-overs. `("pair", ours, theirs)` or `("spare", kept, 0)`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static T27B_BIRTHS: std::cell::RefCell<Vec<(&'static str, u64, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The inode of the open file `fd` names (test only): the same number in every process that holds it.
+#[cfg(test)]
+pub(crate) fn t27b_inode(fd: RawFd) -> u64 {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    assert_eq!(unsafe { libc::fstat(fd, &mut st) }, 0, "fstat {fd}");
+    st.st_ino as u64
+}
+
 #[cfg(test)]
 pub(crate) fn t27b_serial() -> std::sync::MutexGuard<'static, ()> {
     static L: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -527,6 +545,12 @@ pub fn is_reply_too_large(e: &io::Error) -> bool {
 pub fn spare_fd() -> io::Result<RawFd> {
     let Pair(a, b) = make_pair(SOCK_STREAM)?;
     close_fd(b);
+    #[cfg(test)]
+    T27B_BIRTHS.with(|births| {
+        if let Some(last) = births.borrow_mut().last_mut() {
+            *last = ("spare", last.1, 0);
+        }
+    });
     Ok(a)
 }
 
@@ -559,12 +583,22 @@ fn send_plain_count_flags(sock: RawFd, bytes: &[u8], flags: i32) -> io::Result<u
 /// `MSG_CMSG_CLOEXEC` on every receive: a descriptor that arrives is
 /// close-on-exec too, so the rule holds on both sides of a handoff.
 pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
+    recv_msg_flags(sock, max, 0)
+}
+
+/// [`recv_msg`] that never waits: `WouldBlock` while no message is there (T27b round 4, Codex review 3, finding 1: a
+/// receive a deadline bounds must not block past it). What it returns is [`recv_msg`]'s.
+pub fn recv_msg_nowait(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
+    recv_msg_flags(sock, max, libc::MSG_DONTWAIT)
+}
+
+fn recv_msg_flags(sock: RawFd, max: usize, flags: i32) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; max];
     let mut iov = iovec(&mut buf);
 
     let mut msg = msghdr(&mut iov, std::ptr::null_mut(), 0);
 
-    let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC) };
+    let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC | flags) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -794,6 +828,23 @@ mod t27b {
         let e = send_bridge_plain(a, b"").unwrap_err();
         assert!(e.to_string().starts_with("empty-command"), "an empty command (the runtime's EOF) was sent: {e}");
         assert!(nothing_waiting(b), "a refused command reached the runtime");
+        close_fd(a);
+        close_fd(b);
+    }
+
+    #[test]
+    fn b3_the_no_wait_bridge_sender_takes_8192_bytes_and_refuses_8193_and_an_empty_command_by_name_writing_nothing() {
+        // T27b round 4 (Codex review 3, finding 5): the sender a deadline bounds keeps the same limits.
+        let _serial = super::t27b_serial();
+        let Pair(a, b) = pair_seqpacket().unwrap();
+        send_bridge_plain_nowait(a, &vec![b'x'; BRIDGE_COMMAND_MAX]).expect("8,192 bytes is a whole command");
+        assert_eq!(recv_msg(b, BRIDGE_REPLY_MAX).unwrap().len(), BRIDGE_COMMAND_MAX);
+        let e = send_bridge_plain_nowait(a, &vec![b'x'; BRIDGE_COMMAND_MAX + 1]).unwrap_err();
+        assert!(e.to_string().starts_with("frame-too-large"), "{e}");
+        assert!(nothing_waiting(b), "a refused 8,193-byte command reached the runtime");
+        let e = send_bridge_plain_nowait(a, b"").unwrap_err();
+        assert!(e.to_string().starts_with("empty-command"), "an empty command (the runtime's EOF) was sent: {e}");
+        assert!(nothing_waiting(b), "a refused empty command reached the runtime");
         close_fd(a);
         close_fd(b);
     }
