@@ -187,6 +187,12 @@ test('F7 · the outcome record always fits what the cockpit reads, with exact co
     assert.ok(bytes<=OUTCOME_MAX&&statSync(join(dir2,'outcome.json')).size===bytes,'written within the bound: '+bytes);
     assert.deepEqual([back.state,back.verdict,back.exit_code,back.omitted_bytes,back.failures,back.tests],['completed','fail',101,3,[{stage:'host',line:'test t ... FAILED'}],['host/Cargo.toml']]);
     assert.equal(back.attempt_ref.length,128);assert.match(back.record_withheld,/would not fit/);
+    // Round 5 (Codex review 4): cuts at whole characters: an emoji at the 128th character survives whole, and no string
+    // carries a lone surrogate (which the cockpit's reader refuses).
+    const emoji={...meta,attempt_ref:'a'.repeat(127)+'\u{1F600}'+'r'.repeat(300000),tests:['t'.repeat(127)+'\u{1F600}x']};
+    await writeOutcome(dir2,emoji,[]);const text=readFileSync(join(dir2,'outcome.json'),'utf8'),e2=JSON.parse(text);
+    assert.doesNotMatch(text,/\\u[dD][89abAB][0-9a-fA-F]{2}/,'no lone surrogate escape in the written record');
+    assert.equal(e2.attempt_ref,'a'.repeat(127)+'\u{1F600}');assert.equal(e2.tests[0],'t'.repeat(127)+'\u{1F600}');assert.ok(e2.attempt_ref.isWellFormed()&&e2.tests[0].isWellFormed());
   }finally{await rm(dir2,{recursive:true,force:true});}
   assert.match(runner,/attempt_ref:typeof attempt\.id==='string'&&attempt\.id\.length<=128\?attempt\.id:null,/,'the attempt reference is bounded where it is admitted');
   assert.match(runner,/const result=signal\?\.aborted\?aborted:[^\n]*\n    candidateParts=/,'the candidate\'s parts are captured at once, before anything later can throw');

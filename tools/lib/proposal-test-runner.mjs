@@ -175,7 +175,7 @@ export function fitOutcome(record,sets){
   // Clearing an output here moves no delivered bytes: a transcript was already fitted from its parts above (to nothing
   // but the runner's own prefixes and markers), and an output with no parts is the runner's own text.
   for(const t of [record,record.baseline])if(t){t.output='';if(Array.isArray(t.stages))for(const st of t.stages)delete st.output;}
-  if(record.error)record.error=String(record.error).slice(0,200);
+  if(record.error)record.error=chars(record.error,200);
   record.record_withheld='transcripts and benchmark details: the record would not fit the cockpit\'s reader';
   return record;
 }
@@ -191,11 +191,14 @@ export async function writeOutcome(run,record,sets=[]){
 }
 // The minimal outcome: the identities (each cut to 128 characters), the state, verdict, reason, exit status and signal,
 // the test count, and the failure index (16 lines of at most 1,024 B of JSON each). Everything else is withheld.
-const short=v=>typeof v==='string'?v.slice(0,128):Number.isFinite(v)||v===null||typeof v==='boolean'?v:null;
+// Round 5 (Codex review 4): cut at whole characters, never inside a surrogate pair (the cockpit's serde_json refuses a
+// lone surrogate, and the outcome would be lost).
+const chars=(v,n)=>Array.from(String(v)).slice(0,n).join('');
+const short=v=>typeof v==='string'?chars(v,128):Number.isFinite(v)||v===null||typeof v==='boolean'?v:null;
 export function minimalOutcome(r){
   const keep=['schema','provenance','profile','attempt_ref','source_basis_id','source_head','source_capture_sha256','result_sha256','snapshot_sha256','node_sha256','toolchain_sha256','timeout_ms','started_at','finished_at','state','verdict','reason','exit_code','signal','omitted_bytes','failures_overflowed'];
   const m=Object.fromEntries(keep.filter(k=>k in r).map(k=>[k,short(r[k])]));
-  m.tests=Array.isArray(r.tests)?r.tests.slice(0,64).map(t=>String(t).slice(0,128)):[];
+  m.tests=Array.isArray(r.tests)?r.tests.slice(0,64).map(t=>chars(t,128)):[];
   m.failures=Array.isArray(r.failures)?r.failures.slice(0,maxFailures).map(f=>({stage:short(f?.stage),line:failureLine(String(f?.line??''))})):[];
   m.output='';m.record_withheld='the record would not fit the cockpit\'s reader: only its outcome, identities and failure index are kept';
   return m;
@@ -584,7 +587,7 @@ export async function runProposalTests({repository,attempt,runRoot,nodePath=proc
     // T43 round 2 (fix 1): the record the cockpit reads always fits it.
     // T43 rounds 2-3: the record the cockpit reads always fits it (writeOutcome, the one bounded writer).
     await writeOutcome(run,record,[{target:record.baseline,parts:baselineParts},{target:record,parts:candidateParts}]);return {directory:run,record};
-  }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=String(e.message).slice(0,1000);await writeOutcome(run,record,[{target:record.baseline,parts:baselineParts},{target:record,parts:candidateParts}]);throw e;}
+  }catch(e){record.state='failed';record.reason='runner-error';record.finished_at=new Date().toISOString();record.error=chars(e.message,1000);await writeOutcome(run,record,[{target:record.baseline,parts:baselineParts},{target:record,parts:candidateParts}]);throw e;}
   finally{await rm(join(run,'node'),{force:true});await rm(join(run,'toolchain'),{recursive:true,force:true});await rm(join(run,'sibling'),{recursive:true,force:true});for(const label of ['candidate','baseline'])for(const s of stages[profile]??[]){await removeTree(join(run,label+'-'+s.name+'-control'));if(s.exports){await removeTree(join(run,label+'-'+s.name));await removeTree(join(run,label+'-'+s.name+'-handoff'));}}}
 }
 

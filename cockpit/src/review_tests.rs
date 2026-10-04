@@ -1152,6 +1152,13 @@ mod outcome_preview_tests {
         finished["result"] = read_back;
         save(&dir.join("run.json"), &finished).unwrap();
         assert!(read(&dir.join("run.json")).is_ok(), "the run record around it reads back");
+        // Round 5 (Codex review 4): what the runner's minimal outcome writes at its 128-character cut reads back whole (a
+        // 4-byte character at the boundary), and a lone surrogate, which a cut inside a pair would leave, is refused.
+        let a = format!("{}\u{1F600}", "a".repeat(127));
+        fs::write(dir.join("whole.json"), serde_json::to_vec_pretty(&json!({"state":"failed","attempt_ref":a,"tests":[a]})).unwrap()).unwrap();
+        assert_eq!(read(&dir.join("whole.json")).expect("whole characters read back")["attempt_ref"], json!(a));
+        fs::write(dir.join("lone.json"), format!("{{\"state\":\"failed\",\"attempt_ref\":\"{}\\ud83d\"}}", "a".repeat(127))).unwrap();
+        assert!(read(&dir.join("lone.json")).is_err(), "a lone surrogate is refused, so the runner must never cut one");
         fs::write(dir.join("over.json"), vec![b' '; 256 * 1024 + 1]).unwrap();
         assert!(read(&dir.join("over.json")).is_err(), "past 256 KiB the reader refuses");
         fs::remove_dir_all(&dir).ok();
