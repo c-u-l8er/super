@@ -173,6 +173,47 @@ test('only super-host passes from the Elixir host build to the ampd suite, whate
  assert.match(r.record.stages[0].handed_on.sha256,/^[a-f0-9]{64}$/);
 });
 
+// T43 law F4 (superlane/t43/TASK.md; round 2 after Codex review 1): at the deadline the runner asks the stage to stop
+// first (its control file) and the wrapper prints /tmp/stage.log; the group is gone by the ABSOLUTE deadline plus the
+// 10 s grace even when the wrapper cannot print (b); and the first stop reason is the one recorded (c).
+async function slowElixir(t,body){
+ const f=await fixture(t);await mkdir(join(f.repository,'ampd/test'),{recursive:true});await hostFixture(f.repository);
+ await writeFile(join(f.repository,'ampd/mix.exs'),'defmodule Fixture.MixProject do\n use Mix.Project\n def project, do: [app: :fixture, version: "0.1.0", deps: []]\nend\n');
+ await writeFile(join(f.repository,'ampd/test/test_helper.exs'),'ExUnit.start()');
+ await writeFile(join(f.repository,'ampd/test/development_task_test.exs'),'defmodule FixtureSlowTest do\n use ExUnit.Case\n @tag timeout: :infinity\n test "outlives its deadline" do\n'+body+'\n end\nend\n');
+ return f;
+}
+const leftRunning=marker=>{try{return execFileSync('/usr/bin/pgrep',['-fx','sleep '+marker],{encoding:'utf8'}).trim();}catch{return '';}};
+const endedAfterDeadline=s=>Date.parse(s.ended_at)-Date.parse(s.deadline_at);
+test('T43 F4 · a stage past its deadline keeps the lines it printed, is incomplete by timeout, and is gone soon after',async t=>{
+ const f=await slowElixir(t,'  for n <- 1..3, do: IO.puts("t43-line-#{n}")\n  System.cmd("sleep", ["600.4343"])');
+ const r=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:30000}),ampd=r.record.stages.find(s=>s.name==='ampd');
+ assert.equal(r.record.state,'failed',r.record.output);assert.equal(r.record.reason,'timeout');assert.equal(r.record.verdict,undefined);
+ assert.deepEqual([ampd.outcome,ampd.timed_out,ampd.cut_at],['incomplete',true,'deadline']);
+ for(const n of [1,2,3])assert.equal(r.record.output.split('\n').filter(l=>l==='t43-line-'+n).length,1,'line '+n+' kept once');
+ assert.match(r.record.output,/\[runner\] stage ampd was stopped at the deadline: what it had printed when the request reached it follows \(a request, not an exact cut\)/);
+ const late=endedAfterDeadline(ampd);assert.ok(late>=0&&late<2500,'ended '+late+' ms after the deadline (a 1 s poll, then the print)');
+ assert.equal(leftRunning('600.4343'),'','nothing of the stage is left running');
+});
+test('T43 F4 (b) · when the wrapper cannot print, the group is still gone by the deadline plus the grace',async t=>{
+ const f=await slowElixir(t,'  File.rm!("/tmp/stage.log")\n  {_, 0} = System.cmd("mkfifo", ["/tmp/stage.log"])\n  IO.puts("t43-unreachable")\n  System.cmd("sleep", ["600.4344"])');
+ const r=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:30000}),ampd=r.record.stages.find(s=>s.name==='ampd');
+ assert.equal(r.record.reason,'timeout',r.record.output);assert.deepEqual([ampd.outcome,ampd.cut_at],['incomplete','deadline']);
+ const late=endedAfterDeadline(ampd);assert.ok(late>=10000&&late<11500,'killed '+late+' ms after the deadline (the 10 s grace)');
+ assert.equal(leftRunning('600.4344'),'','nothing of the stage is left running');
+});
+test('T43 F4 (c) · a cancellation shortly before the deadline stays the recorded reason after the deadline passes',async t=>{
+ const f=await slowElixir(t,'  File.rm!("/tmp/stage.log")\n  {_, 0} = System.cmd("mkfifo", ["/tmp/stage.log"])\n  System.cmd("sleep", ["600.4345"])');
+ const controller=new AbortController(),started=Date.now(),timer=setTimeout(()=>controller.abort(),29000);
+ try{
+  const r=await runProposalTests({...f,profile:'super-elixir-review@1',timeoutMs:30000,signal:controller.signal}),ampd=r.record.stages.find(s=>s.name==='ampd');
+  assert.equal(r.record.reason,'cancelled',r.record.output);assert.equal(ampd.cut_at,'cancellation','the first reason, not the deadline that passed after it');
+  assert.ok(Date.parse(ampd.ended_at)>Date.parse(ampd.deadline_at),'the deadline passed before the stage ended');
+  assert.ok(Date.parse(ampd.ended_at)-(started+29000)<11500,'gone within the grace of the cancellation');
+  assert.equal(leftRunning('600.4345'),'');
+ }finally{clearTimeout(timer);}
+});
+
 async function combinedFixture(t){
  const oldTest="import test from 'node:test';import assert from 'node:assert/strict';import {value} from '../value.mjs';test('old contract',()=>assert.equal(value,1));\n";
  const newTest=oldTest.replace('old contract','new contract').replace('value,1','value,2');

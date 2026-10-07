@@ -241,13 +241,27 @@ fn runtime_outcome(record: &Value, attempt: &Value) -> Value {
         .as_str()
         .or_else(|| record["message"].as_str())
         .unwrap_or("");
-    let preview: String = output.chars().filter(|c| *c != '\0').take(256).collect();
+    let head: String = output.chars().filter(|c| *c != '\0').take(256).collect();
+    // T43 (A-32): when the run's record names failures, the preview is the first of them, not the transcript's head
+    // (compile lines for a Rust or Elixir run). `output_omitted` keeps its meaning: the head did not hold everything.
+    let first = r["failures"]
+        .as_array()
+        .and_then(|f| f.first())
+        .and_then(|f| Some((f["stage"].as_str()?, f["line"].as_str()?)));
+    let preview: String = match first {
+        Some((stage, line)) => format!("first failure ({stage}): {line}")
+            .chars()
+            .filter(|c| *c != '\0')
+            .take(256)
+            .collect(),
+        None => head.clone(),
+    };
     json!({"state":if r["state"]=="completed"{"completed"}else{"failed"},"verdict":r["verdict"],
         "reason":if r.is_null(){json!("runner-error")}else{r["reason"].clone()},
         "source_basis_id":if r.is_null(){attempt["source"]["basis_id"].clone()}else{r["source_basis_id"].clone()},"result_sha256":if r.is_null(){attempt["source"]["result_sha256"].clone()}else{r["result_sha256"].clone()},
         "profile":r["profile"].as_str().or_else(||record["profile"].as_str()).unwrap_or("super-javascript-behavior@1"),"toolchain_sha256":r["toolchain_sha256"],"snapshot_sha256":r["snapshot_sha256"],"node_sha256":r["node_sha256"],
         "test_count":r["tests"].as_array().map(Vec::len).unwrap_or(0),"output":preview,
-        "output_omitted":preview!=output||r["omitted_bytes"].as_u64().unwrap_or(0)>0})
+        "output_omitted":head!=output||r["omitted_bytes"].as_u64().unwrap_or(0)>0})
 }
 impl Runs {
     fn finish(&self, receipt: PathBuf, mut record: Value, fields: Value, report: &Report) -> Value {
@@ -1083,6 +1097,71 @@ mod accepted_tests {
             changed[key] = json!("forged");
             assert!(serde_json::from_value::<Request>(changed).is_err());
         }
+    }
+}
+
+#[cfg(test)]
+mod outcome_preview_tests {
+    use super::*;
+    fn record(output: &str, failures: Value) -> Value {
+        json!({"result":{"state":"completed","verdict":"fail","output":output,"omitted_bytes":0,"failures":failures,"tests":["host/Cargo.toml"]}})
+    }
+    // T43 law F3 (superlane/t43/TASK.md): ampd's preview is `first failure (<stage>): <line>` when the record names
+    // failures, else the transcript's head; at most 256 characters either way; `output_omitted` as before T43.
+    #[test]
+    fn f3_the_preview_names_the_first_failure_and_otherwise_keeps_the_head() {
+        let attempt = json!({"source":{"basis_id":"b","result_sha256":"r"}});
+        let compile = "   Compiling super-host v0.1.0\n".repeat(20);
+        let failures = json!([{"stage":"host","line":"test tests::planted ... FAILED"},{"stage":"cockpit","line":"test later ... FAILED"}]);
+        let named = runtime_outcome(&record(&compile, failures), &attempt);
+        assert_eq!(named["output"], "first failure (host): test tests::planted ... FAILED");
+        assert_eq!(named["output_omitted"], true, "the head held 256 of the transcript's 640 characters");
+        let short = runtime_outcome(&record("short", json!([{"stage":"ampd","line":"  1) test x (M)"}])), &attempt);
+        assert_eq!(short["output"], "first failure (ampd):   1) test x (M)");
+        assert_eq!(short["output_omitted"], false, "output_omitted still says whether the head held everything");
+        let long = runtime_outcome(&record("x", json!([{"stage":"ampd","line":"é".repeat(600)}])), &attempt);
+        assert_eq!(long["output"].as_str().unwrap().chars().count(), 256);
+        let none = runtime_outcome(&record(&compile, json!([])), &attempt);
+        assert_eq!(none["output"].as_str().unwrap(), compile.chars().take(256).collect::<String>());
+        assert_eq!(none["output_omitted"], true);
+        let before = runtime_outcome(&json!({"result":{"state":"completed","verdict":"pass","output":"ok","omitted_bytes":5}}), &attempt);
+        assert_eq!(before["output"], "ok", "a record from before T43 has no index and keeps its head");
+        assert_eq!(before["output_omitted"], true);
+    }
+    // T43 round 2 (Codex review 1, fix 1), law F7's cockpit half: a runner record at the runner's bound (OUTCOME_MAX,
+    // 240 KiB, tools/lib/proposal-test-runner.mjs) is read, and the run record the cockpit saves around it reads back;
+    // one byte past the reader's 256 KiB is refused, which is why the runner fits its records.
+    #[test]
+    fn f7_a_runner_record_at_its_bound_is_read_and_its_run_record_reads_back() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let dir = std::env::temp_dir().join(format!("t43-f7-{}-{nanos}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let outcome_max = 240 * 1024;
+        let mut result = json!({"state":"completed","verdict":"fail","output":"","omitted_bytes":1,"failures":[{"stage":"ampd","line":"  1) test x (M)"}],"tests":["ampd/mix.exs","ampd/test/test_helper.exs","host/Cargo.toml","host/Cargo.lock"]});
+        let base = serde_json::to_vec_pretty(&result).unwrap().len() + 1;
+        result["output"] = json!("\u{fffd}".repeat((outcome_max - base) / 3));
+        let pretty = [serde_json::to_vec_pretty(&result).unwrap().as_slice(), b"\n"].concat();
+        assert!(pretty.len() <= outcome_max && pretty.len() > outcome_max - 3, "{}", pretty.len());
+        fs::write(dir.join("outcome.json"), &pretty).unwrap();
+        let read_back = read(&dir.join("outcome.json")).expect("a record at the runner's bound is read");
+        // The envelope carries what the completion path saves around the result (round 3, Codex review 2): the
+        // runtime's start record, and the save-error flag `finish` sets before the outcome is reported.
+        let mut finished = json!({"run_id":"t43-f7","attempt_ref":"da_0000","state":"completed","profile":"super-elixir-review@1","world":["w-0000000000000000",1,"e"],"started_at":"2026-10-04T00:00:00Z",
+            "runtime_record":{"run_id":"t43-f7","attempt_ref":"da_0000","revision":3,"state":"started","profile":"super-elixir-review@1","started_at":"2026-10-04T00:00:00Z","path":"/home/travis/ProjectAmp2/super"},
+            "runtime_save_error":true});
+        finished["result"] = read_back;
+        save(&dir.join("run.json"), &finished).unwrap();
+        assert!(read(&dir.join("run.json")).is_ok(), "the run record around it reads back");
+        // Round 5 (Codex review 4): what the runner's minimal outcome writes at its 128-character cut reads back whole (a
+        // 4-byte character at the boundary), and a lone surrogate, which a cut inside a pair would leave, is refused.
+        let a = format!("{}\u{1F600}", "a".repeat(127));
+        fs::write(dir.join("whole.json"), serde_json::to_vec_pretty(&json!({"state":"failed","attempt_ref":a,"tests":[a]})).unwrap()).unwrap();
+        assert_eq!(read(&dir.join("whole.json")).expect("whole characters read back")["attempt_ref"], json!(a));
+        fs::write(dir.join("lone.json"), format!("{{\"state\":\"failed\",\"attempt_ref\":\"{}\\ud83d\"}}", "a".repeat(127))).unwrap();
+        assert!(read(&dir.join("lone.json")).is_err(), "a lone surrogate is refused, so the runner must never cut one");
+        fs::write(dir.join("over.json"), vec![b' '; 256 * 1024 + 1]).unwrap();
+        assert!(read(&dir.join("over.json")).is_err(), "past 256 KiB the reader refuses");
+        fs::remove_dir_all(&dir).ok();
     }
 }
 
