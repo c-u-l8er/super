@@ -56,3 +56,14 @@ ampd/priv/data/worktrees/
 # moved aside and `tools/dogfood-validation.exs` drove the full chain from
 # repository to OUTCOME on a runtime that had never had one.
 ampd/priv/data/
+
+# ampd's descriptor sink, built from `c_src/` by `Mix.Tasks.Compile.AmpdFd`
+# on the machine that runs it, and the record of which machine that was. A
+# prebuilt object is a claim about one OS and one architecture: the x86-64
+# ELF tracked here until T30 was kept by every fresh checkout, because
+# "source newer than object" is false on a clone, and on the MacBook it left
+# `Ampd.NativeFd` silently absent. As with the dets tables above, this rule
+# does nothing for a file git already tracks; removing the tracked object
+# is the other half.
+ampd/priv/*.so
+ampd/priv/*.so.identity
