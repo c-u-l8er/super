@@ -1163,15 +1163,17 @@ defmodule Ampd.DevelopmentAttempt do
           "accepted_at" => DateTime.to_iso8601(DateTime.utc_now())
         }
 
-        persist(
+        accepted =
           a
           |> Map.delete("acceptance_check")
           |> Map.put("acceptance", decision)
           |> Map.put("status", "accepted")
           |> Map.put("revision", revision + 1)
-          |> Map.update!("history", &(&1 ++ [event(revision + 1, "accepted", note)])),
-          s
-        )
+          |> Map.update!("history", &(&1 ++ [event(revision + 1, "accepted", note)]))
+
+        # T47: the older rounds this accept replaces are dismissed in the same write, and
+        # `persist/2` measures the one candidate state after T25 has archived them.
+        persist(accepted, retire_replaced(accepted, s))
     end
   end
 
@@ -1442,6 +1444,96 @@ defmodule Ampd.DevelopmentAttempt do
       "note" => note,
       "at" => DateTime.to_iso8601(DateTime.utc_now())
     }
+
+  # ── T47 · an accept retires the older rounds it replaces ────────────────
+  #
+  # A plan goes through rounds, and each earlier round stayed `recorded` in the
+  # live directory until someone dismissed it, even when accepted rounds had
+  # replaced every path it touched. On 2026-10-04 twelve such attempts held
+  # 53 KB of the 128 KiB and refused the next check (`superlane/a47/`). Travis
+  # ruled (R167, `superlane/t47/TASK.md` Q1 = A) that his accept may dismiss
+  # them by this standing rule, with no separate dismissal line.
+  #
+  # Y of the same plan is retired on the fresh accept of X when it is
+  # `recorded` or `needs_changes`, older than X, has no `started` run and fewer
+  # than 32 notes, and every path it touched has a WITNESS: an accepted attempt
+  # of the plan newer than Y on that path. X must be one of the named
+  # witnesses, so the retirement rides on this accept and nothing else. Ages
+  # are the numbers in the ids, never the strings (`da_9999` < `da_10000`).
+  #
+  # The transition is exactly a manual dismissal's, so everything that reads a
+  # dismissed attempt reads these the same way, and T25 archives them in the
+  # write. An exact replay returns before this, and `prepare_acceptance`
+  # never calls it.
+  defp retire_replaced(x, %{"development_attempts" => live} = s) do
+    plan = x["task_ref"]
+
+    accepted =
+      live
+      |> Map.put(x["id"], x)
+      |> Map.values()
+      |> Enum.filter(&(&1["task_ref"] == plan and &1["status"] == "accepted" and seq(&1) != nil))
+
+    retired =
+      for {id, y} <- live,
+          y["task_ref"] == plan,
+          note <- [replaced_by(y, x, accepted)],
+          note,
+          into: %{},
+          do: {id, dismissal(y, note)}
+
+    Map.put(s, "development_attempts", Map.merge(live, retired))
+  end
+
+  defp replaced_by(y, x, accepted) do
+    n = seq(y)
+    paths = attempt_paths(y)
+
+    if n != nil and n < seq(x) and y["status"] in ~w(recorded needs_changes) and paths != [] and
+         Enum.all?(paths, &is_binary/1) and not started?(y) and length(y["history"]) < 32 do
+      chosen = Enum.map(paths, &witness(&1, n, x, accepted))
+
+      if Enum.all?(chosen) and x in chosen do
+        names = chosen |> Enum.uniq() |> Enum.sort_by(&seq/1) |> Enum.map_join(", ", & &1["id"])
+        note = "Superseded by accepted #{names}: retired on the accept of #{x["id"]} (T47)"
+        if String.length(note) <= 250, do: note
+      end
+    end
+  end
+
+  # X when X witnesses the path, otherwise the newest witness; nil when none does.
+  defp witness(path, n, x, accepted) do
+    case Enum.filter(accepted, &(seq(&1) > n and path in attempt_paths(&1))) do
+      [] -> nil
+      found -> if x in found, do: x, else: Enum.max_by(found, &seq/1)
+    end
+  end
+
+  defp dismissal(y, note) do
+    next = y["revision"] + 1
+
+    y
+    |> Map.put("revision", next)
+    |> Map.put("status", "dismissed")
+    |> Map.update!("history", &(&1 ++ [event(next, "dismissed", note)]))
+  end
+
+  defp attempt_paths(%{"files" => files}) when is_list(files),
+    do: Enum.map(files, &get_in(&1, ["source", "path"]))
+
+  defp attempt_paths(a), do: [get_in(a, ["source", "path"])]
+
+  defp started?(a),
+    do: Enum.any?(Map.values(Map.get(a, "test_runs", %{})), &(&1["state"] == "started"))
+
+  defp seq(%{"id" => id}) when is_binary(id) do
+    case Regex.run(~r/\Ada_([0-9]+)\z/, id) do
+      [_, digits] -> String.to_integer(digits)
+      nil -> nil
+    end
+  end
+
+  defp seq(_), do: nil
 
   # ── Retirement ───────────────────────────────────────────────────────────
   #
