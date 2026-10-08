@@ -1097,14 +1097,14 @@ mod laws {
     fn l10_a_final_body_read_that_ends_after_the_limit_closes_the_bridge() {
         let _s = serial();
         let p = pair();
-        // The whole frame is queued; its reads are the first byte (0), the prefix's rest (1) and the body (2). Before
-        // the body's receive syscall, after its wait and lock, the test seam pauses 5.5 s.
-        raw(p.0, &wire(b"z"), &[]);
-        fdpass::RECV_PAUSE_AT.with(|c| c.set(Some((2, SPEC + Duration::from_millis(500)))));
+        // The whole frame is queued, a 7-byte body (no prefix read is 7 bytes). Before the body's receive syscall, after
+        // its wait and lock, the test seam pauses 5.5 s, whatever reads came before it.
+        raw(p.0, &wire(b"zzzzzzz"), &[]);
+        fdpass::RECV_PAUSE_LEN.with(|c| c.set(Some((7, SPEC + Duration::from_millis(500)))));
         let t0 = Instant::now();
         let r = framed::recv(p.1, 4096, false);
         let took = t0.elapsed();
-        fdpass::RECV_PAUSE_AT.with(|c| c.set(None));
+        fdpass::RECV_PAUSE_LEN.with(|c| c.set(None));
         assert!(r.as_ref().is_err_and(super::closes_for_good), "a body read that ended after the limit was taken: {:?}", r.map(|x| x.0));
         assert!(took <= CEILING, "the rest took {took:?}");
         close_pair(&p);

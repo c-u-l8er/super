@@ -521,9 +521,10 @@ thread_local! {
     pub(crate) static INJECT: std::cell::Cell<Option<(Fault, usize, i32)>> = const { std::cell::Cell::new(None) };
     pub(crate) static SLOW_SEND: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static SLOW_RECV: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
-    // Codex review 2: a pause before the calling thread's k-th framed receive syscall, and every poll of the calling
-    // thread from its k-th on failing EINTR.
-    pub(crate) static RECV_PAUSE_AT: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
+    // Codex review 2: a pause, once, before the calling thread's framed receive syscall whose buffer is exactly n bytes
+    // (keyed on the read, not on how many reads came before it), and every poll of the calling thread from its k-th on
+    // failing EINTR.
+    pub(crate) static RECV_PAUSE_LEN: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
     pub(crate) static POLL_EINTR_FROM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
@@ -925,13 +926,13 @@ fn recv_part_by(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Insta
         let cap: Option<usize> = None;
         let len = cap.map_or(buf.len(), |n| n.min(buf.len()));
         #[cfg(test)]
-        RECV_PAUSE_AT.with(|c| match c.get() {
-            Some((0, d)) => {
-                c.set(None);
-                std::thread::sleep(d);
+        RECV_PAUSE_LEN.with(|c| {
+            if let Some((n, d)) = c.get() {
+                if n == len {
+                    c.set(None);
+                    std::thread::sleep(d);
+                }
             }
-            Some((k, d)) => c.set(Some((k - 1, d))),
-            None => {}
         });
         // A frame's rest: nothing is read once its deadline has passed, however long the wait and the lock took.
         if rest && deadline.is_some_and(|d| Instant::now() >= d) {
