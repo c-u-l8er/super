@@ -3994,7 +3994,7 @@ mod t28_bridge {
             [&framed::prefix_of(body.len())[..], body].concat()
         }
 
-        /// A reply that stalls after its first byte fails the call within FRAME_REST_LIMIT plus a scheduling tolerance;
+        /// A reply that stalls after its first byte fails the call within the 6.5 s ceiling (the 5 s specification);
         /// the bridge is marked closed, and the next call refuses at once without reading (a whole reply written after
         /// the stall is still unread).
         #[test]
@@ -4021,7 +4021,7 @@ mod t28_bridge {
             let t = std::thread::spawn(move || {
                 let _command = framed::recv(peer, 65536, false).unwrap();
                 raw(peer, &[&framed::prefix_of(40)[..], b"{"].concat());
-                std::thread::sleep(bridge::FRAME_REST_LIMIT + Duration::from_secs(1));
+                std::thread::sleep(Duration::from_secs(7));
                 raw(peer, &wire(b"{\"ok\":true}"));
                 fdpass::close_fd(peer);
             });
@@ -4030,7 +4030,7 @@ mod t28_bridge {
             let e = rt.bridge_call(&status).unwrap_err();
             let took = t0.elapsed();
             assert!(e.contains(bridge::GONE), "{e}");
-            assert!(took <= bridge::FRAME_REST_LIMIT + Duration::from_millis(1500), "the stalled reply took {took:?}");
+            assert!(took <= Duration::from_millis(6500), "the stalled reply took {took:?}");
             t.join().unwrap();
             let t1 = Instant::now();
             let e = rt.bridge_call(&status).unwrap_err();

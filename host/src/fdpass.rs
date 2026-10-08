@@ -521,6 +521,10 @@ thread_local! {
     pub(crate) static INJECT: std::cell::Cell<Option<(Fault, usize, i32)>> = const { std::cell::Cell::new(None) };
     pub(crate) static SLOW_SEND: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
     pub(crate) static SLOW_RECV: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
+    // Codex review 2: a pause before the calling thread's k-th framed receive syscall, and every poll of the calling
+    // thread from its k-th on failing EINTR.
+    pub(crate) static RECV_PAUSE_AT: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
+    pub(crate) static POLL_EINTR_FROM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
 /// Where a test may inject a failure (T28; only test builds' `INJECT` ever names one).
@@ -894,6 +898,17 @@ pub(crate) struct Part {
 /// and mark every arrival close-on-exec before the lock is let go. `None` when `deadline` passed with nothing to read.
 /// A zero-byte `Part` is the peer's close.
 pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Instant>) -> io::Result<Option<Part>> {
+    recv_part_by(sock, buf, room, deadline, false)
+}
+
+/// [`recv_part`] for a frame's rest (Codex review 2, finding 1): `until` is checked once more right before the receive
+/// syscall, after the readiness wait and the fork lock, so a read whose wait, lock or anything between ends after it
+/// reads nothing (`None`). The first-byte probe and the blocking first read use [`recv_part`].
+pub(crate) fn recv_rest(sock: RawFd, buf: &mut [u8], room: usize, until: Instant) -> io::Result<Option<Part>> {
+    recv_part_by(sock, buf, room, Some(until), true)
+}
+
+fn recv_part_by(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Instant>, rest: bool) -> io::Result<Option<Part>> {
     loop {
         if !wait_ready(sock, libc::POLLIN, deadline)? {
             return Ok(None);
@@ -909,6 +924,19 @@ pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Opti
         #[cfg(not(test))]
         let cap: Option<usize> = None;
         let len = cap.map_or(buf.len(), |n| n.min(buf.len()));
+        #[cfg(test)]
+        RECV_PAUSE_AT.with(|c| match c.get() {
+            Some((0, d)) => {
+                c.set(None);
+                std::thread::sleep(d);
+            }
+            Some((k, d)) => c.set(Some((k - 1, d))),
+            None => {}
+        });
+        // A frame's rest: nothing is read once its deadline has passed, however long the wait and the lock took.
+        if rest && deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(None);
+        }
         let mut iov = iovec(&mut buf[..len]);
         let space = rights_space(room);
         let mut ctrl = vec![0u8; space];
@@ -969,13 +997,34 @@ pub fn wait_ready(sock: RawFd, events: i16, deadline: Option<Instant>) -> io::Re
         if let Some(e) = injected(Fault::Poll) {
             return Err(e);
         }
-        match unsafe { libc::poll(&mut p, 1, ms) } {
+        #[cfg(test)]
+        let forced = POLL_EINTR_FROM.with(|c| match c.get() {
+            Some(0) => true,
+            Some(k) => {
+                c.set(Some(k - 1));
+                false
+            }
+            None => false,
+        });
+        #[cfg(not(test))]
+        let forced = false;
+        let rc = if forced {
+            std::thread::sleep(Duration::from_millis(1));
+            -1
+        } else {
+            unsafe { libc::poll(&mut p, 1, ms) }
+        };
+        match rc {
             0 => return Ok(false),
             n if n > 0 => return Ok(true),
             _ => {
-                let e = io::Error::last_os_error();
+                let e = if forced { io::Error::from_raw_os_error(libc::EINTR) } else { io::Error::last_os_error() };
                 if e.kind() != io::ErrorKind::Interrupted {
                     return Err(e);
+                }
+                // Codex review 2, finding 1: an interrupted wait is retried only until its deadline.
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Ok(false);
                 }
             }
         }

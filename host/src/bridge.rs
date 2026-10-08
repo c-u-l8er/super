@@ -316,7 +316,7 @@ pub mod framed {
         }
         // Codex review 1, finding 4: a read that fails mid-frame sinks every right the frame brought, and the bridge is
         // gone (the frame was begun).
-        let got = match fdpass::recv_part(sock, buf, RIGHTS_ROOM, Some(until)) {
+        let got = match fdpass::recv_rest(sock, buf, RIGHTS_ROOM, until) {
             Ok(got) => got,
             Err(e) => {
                 sink(rights);
@@ -358,8 +358,10 @@ mod laws {
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    /// Scheduling tolerance past FRAME_REST_LIMIT for the laws that bound a frame's rest from above.
-    const BOUND: Duration = Duration::from_millis(1500);
+    /// The specification, independent of the implementation's constant (Codex review 2, finding 3): the rest of a
+    /// frame may take 5 s, and these laws allow it at most a 6.5 s ceiling (scheduling included).
+    const SPEC: Duration = Duration::from_secs(5);
+    const CEILING: Duration = Duration::from_millis(6500);
 
     /// Make the calling thread's k-th `fault` fail with `errno` (fdpass's test seam).
     fn inject(fault: Fault, k: usize, errno: i32) {
@@ -981,8 +983,8 @@ mod laws {
         let e = framed::recv(p.1, 4096, false).unwrap_err();
         let took = t0.elapsed();
         assert!(super::closes_for_good(&e), "{e}");
-        assert!(took + Duration::from_millis(100) >= super::FRAME_REST_LIMIT, "closed early: {took:?}");
-        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "closed late: {took:?}");
+        assert!(took + Duration::from_millis(100) >= SPEC, "closed early: {took:?}");
+        assert!(took <= CEILING, "closed late: {took:?}");
         close_pair(&p);
     }
 
@@ -996,7 +998,7 @@ mod laws {
         let e = framed::send(p.0, &vec![1u8; 4 << 20], &[], usize::MAX, true).expect_err("a 4 MiB frame finished with no reader");
         let took = t0.elapsed();
         assert!(super::closes_for_good(&e), "a frame begun and not finished left the bridge open: {e}");
-        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the sender gave up late: {took:?}");
+        assert!(took <= CEILING, "the sender gave up late: {took:?}");
         close_pair(&p);
     }
 
@@ -1012,7 +1014,7 @@ mod laws {
         fdpass::SLOW_RECV.with(|c| c.set(None));
         let took = t0.elapsed();
         // Only the bound is judged: a frame begun is finished within it, or the bridge is closed for good.
-        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the rest took {took:?}");
+        assert!(took <= CEILING, "the rest took {took:?}");
         if let Err(e) = &r {
             assert!(super::closes_for_good(e), "{e}");
         }
@@ -1044,7 +1046,7 @@ mod laws {
         fdpass::shutdown_fd(p.0);
         reader.join().unwrap();
         // Only the bound is judged.
-        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the rest took {took:?}");
+        assert!(took <= CEILING, "the rest took {took:?}");
         if let Err(e) = &r {
             assert!(super::closes_for_good(e), "{e}");
         }
@@ -1080,15 +1082,58 @@ mod laws {
         std::thread::sleep(Duration::from_millis(300));
         let guard = fdpass::spawn_guard();
         raw(q.0, b"bcdef", &[]);
-        while !t.is_finished() && t0.elapsed() < super::FRAME_REST_LIMIT + Duration::from_secs(3) {
+        while !t.is_finished() && t0.elapsed() < SPEC + Duration::from_secs(3) {
             std::thread::sleep(Duration::from_millis(20));
         }
         let took = t0.elapsed();
         drop(guard);
         let r = t.join().unwrap();
-        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the rest waited {took:?} on the fork lock");
+        assert!(took <= CEILING, "the rest waited {took:?} on the fork lock");
         assert!(r.as_ref().is_err_and(super::closes_for_good), "{:?}", r.map(|x| x.0));
         close_pair(&q);
+    }
+
+    #[test]
+    fn l10_a_final_body_read_that_ends_after_the_limit_closes_the_bridge() {
+        let _s = serial();
+        let p = pair();
+        // The whole frame is queued; its reads are the first byte (0), the prefix's rest (1) and the body (2). Before
+        // the body's receive syscall, after its wait and lock, the test seam pauses 5.5 s.
+        raw(p.0, &wire(b"z"), &[]);
+        fdpass::RECV_PAUSE_AT.with(|c| c.set(Some((2, SPEC + Duration::from_millis(500)))));
+        let t0 = Instant::now();
+        let r = framed::recv(p.1, 4096, false);
+        let took = t0.elapsed();
+        fdpass::RECV_PAUSE_AT.with(|c| c.set(None));
+        assert!(r.as_ref().is_err_and(super::closes_for_good), "a body read that ended after the limit was taken: {:?}", r.map(|x| x.0));
+        assert!(took <= CEILING, "the rest took {took:?}");
+        close_pair(&p);
+    }
+
+    #[test]
+    fn l10_a_continuation_whose_polls_are_interrupted_without_end_ends_at_the_limit() {
+        let _s = serial();
+        let p = pair();
+        // A frame stalled after its first bytes; every poll of the reading thread from its second on fails EINTR.
+        raw(p.0, &[&framed::prefix_of(10)[..], b"1"].concat(), &[]);
+        let rd = p.1;
+        let t0 = Instant::now();
+        let t = std::thread::spawn(move || {
+            fdpass::POLL_EINTR_FROM.with(|c| c.set(Some(1)));
+            let r = framed::recv(rd, 4096, false).map(|x| x.0);
+            fdpass::POLL_EINTR_FROM.with(|c| c.set(None));
+            r
+        });
+        // Judged from here, so a receive that spins is failed, not waited on.
+        while !t.is_finished() && t0.elapsed() < CEILING + Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let took = t0.elapsed();
+        assert!(t.is_finished(), "the interrupted receive did not end ({took:?})");
+        let r = t.join().unwrap();
+        assert!(r.as_ref().is_err_and(super::closes_for_good), "{r:?}");
+        assert!(took <= CEILING, "the interrupted receive took {took:?}");
+        close_pair(&p);
     }
 
     #[test]
