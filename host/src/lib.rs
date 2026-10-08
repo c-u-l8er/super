@@ -58,6 +58,13 @@ pub mod sha256;
 pub mod effect;
 #[cfg(target_os = "linux")]
 pub mod fdpass;
+
+// T28: the bridge's transport (SEQPACKET on Linux; a framed stream on macOS and under the test feature
+// `framed-bridge`), behind the gate like `fdpass` until T29a lifts it. `spawn.rs` (posix_spawnp with
+// POSIX_SPAWN_CLOEXEC_DEFAULT, for ampd and engines on macOS) is not declared here: with bridge.rs and fdpass.rs it
+// builds and runs on macOS through superlane/t28/mac-probe (MP1), and T29a declares it.
+#[cfg(target_os = "linux")]
+pub mod bridge;
 #[cfg(target_os = "linux")]
 pub mod confine;
 #[cfg(target_os = "linux")]
@@ -89,6 +96,13 @@ use std::os::unix::io::RawFd;
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+
+/// What `Runtime` holds for the runtime it spawned (T28): std's `Child` on Linux, `spawn::Child` (the same `id`,
+/// `kill` and `wait`) on macOS.
+#[cfg(target_os = "linux")]
+type RuntimeChild = Child;
+#[cfg(target_os = "macos")]
+type RuntimeChild = spawn::Child;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Condvar, Mutex};
@@ -1750,7 +1764,7 @@ pub struct Runtime {
     /// Held for the host's lifetime — an advisory lock lives on the open
     /// file description, so releasing this descriptor releases the world.
     world_lock: RawFd,
-    child: Child,
+    child: RuntimeChild,
     bridge: RawFd,
     /// The bridge is one descriptor carrying send/recv transactions with
     /// no correlation ids, so two concurrent channel creations would read
@@ -1935,13 +1949,14 @@ impl Runtime {
         // corruption path DETS would not report.
         let world_lock = Owned::new(fdpass::lock_world(&world_path.join("world.lock"))?);
 
-        let fdpass::Pair(ours, theirs) =
-            fdpass::pair_seqpacket().map_err(|e| format!("bridge socketpair: {e}"))?;
+        // T28: SEQPACKET on Linux (fdpass::pair_seqpacket, unchanged); a framed stream pair on macOS.
+        let fdpass::Pair(ours, theirs) = bridge::pair().map_err(|e| format!("bridge socketpair: {e}"))?;
         // T27b round 3 (Codex review 2, finding 7): the lock and both ends are owned until the Runtime holds them, so a
         // pair or a spawn that fails closes them instead of leaking them; a leaked lock would keep the world shut.
         let (ours, theirs) = (Owned::new(ours), Owned::new(theirs));
         let theirs_fd = theirs.fd();
 
+        #[cfg(target_os = "linux")]
         let child = unsafe {
             Command::new("mix")
                 .args(["run", "--no-halt"])
@@ -1966,6 +1981,17 @@ impl Runtime {
                     fdpass::dup_onto(theirs_fd, 3)
                 })
                 .spawn()
+        };
+        // T28 (C4): on macOS the spawn itself possesses: ampd holds 0, 1, 2 and the bridge as fd 3, and nothing else
+        // (POSIX_SPAWN_CLOEXEC_DEFAULT), whatever this process holds inheritable. The same environment as above.
+        #[cfg(target_os = "macos")]
+        let child = {
+            let mut env: Vec<(String, String)> = std::env::vars().collect();
+            env.retain(|(k, _)| !matches!(k.as_str(), "AMPD_BRIDGE_FD" | "AMPD_DATA_DIR" | "MIX_ENV"));
+            env.push(("AMPD_BRIDGE_FD".into(), "3".into()));
+            env.push(("AMPD_DATA_DIR".into(), world_path.to_string_lossy().into_owned()));
+            env.push(("MIX_ENV".into(), "dev".into()));
+            spawn::spawn_possessing("mix", &["run", "--no-halt"], &env, Some(ampd_dir), &[(theirs_fd, 3)])
         };
         let child = match child {
             Ok(c) => c,
@@ -2028,6 +2054,18 @@ impl Runtime {
         serde_json::from_slice(&reply).map_err(|e| format!("bridge reply: {e}"))
     }
 
+    /// T28: an error after which the bridge cannot be used again (a framed stream that lost its alignment, or the
+    /// runtime's close) marks it closed, so every later call refuses at once. Never the case on the Linux default.
+    #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+    fn bridge_io<T>(&self, r: io::Result<T>) -> io::Result<T> {
+        if let Err(e) = &r {
+            if bridge::closes_for_good(e) {
+                self.bridge_closed.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        r
+    }
+
     // T27b round 3 (Codex review 2, finding 1): the reply accounting. A command that went out owes exactly one reply;
     // `bridge_owed` is set by the send and cleared only when that reply's packet is consumed. The two senders below are
     // the only senders on the bridge (`tests/t27b_bridge_sends.rs`), and each drains an owed reply BEFORE it sends, so
@@ -2038,12 +2076,19 @@ impl Runtime {
     fn bridge_send_plain(&self, bytes: &[u8], deadline: Option<Instant>) -> io::Result<()> {
         self.bridge_drain(deadline)?;
         match deadline {
+            #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
             None => fdpass::send_bridge_plain(self.bridge, bytes)?,
+            #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+            None => self.bridge_io(bridge::send_plain(self.bridge, bytes))?,
             Some(d) => loop {
                 // Round 4 (Codex review 3, finding 1): nothing is written once the deadline has passed, whatever a
                 // readiness poll said. This is the check after the lock, the serialization and the drain.
                 past(d, "the command was written")?;
-                match fdpass::send_bridge_plain_nowait(self.bridge, bytes) {
+                #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
+                let sent = fdpass::send_bridge_plain_nowait(self.bridge, bytes);
+                #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+                let sent = self.bridge_io(bridge::send_plain_nowait(self.bridge, bytes));
+                match sent {
                     Ok(()) => break,
                     Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) => {
                         if !self.bridge_ready_by(libc::POLLOUT, d)? {
@@ -2061,7 +2106,10 @@ impl Runtime {
     /// Send one command with `fds` in the same message, after draining any reply still owed.
     fn bridge_send_with_fds(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
         self.bridge_drain(None)?;
+        #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
         fdpass::send_bridge_with_fds(self.bridge, bytes, fds)?;
+        #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+        self.bridge_io(bridge::send_with_fds(self.bridge, bytes, fds))?;
         self.bridge_owed.store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
@@ -2105,10 +2153,18 @@ impl Runtime {
             if let Some(d) = deadline {
                 past(d, "the reply was read")?;
             }
+            #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
             let got = match deadline {
                 None => fdpass::recv_msg(self.bridge, fdpass::BRIDGE_REPLY_MAX),
                 Some(_) => fdpass::recv_msg_nowait(self.bridge, fdpass::BRIDGE_REPLY_MAX),
             };
+            // T28: a framed reply. The deadline bounds only the wait for its first byte; the rest of a frame begun
+            // moves within bridge::FRAME_REST_LIMIT or the bridge is closed for good (bridge_io marks it).
+            #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+            let got = self.bridge_io(match deadline {
+                None => bridge::recv(self.bridge),
+                Some(_) => bridge::recv_nowait(self.bridge),
+            });
             match got {
                 Ok(b) if b.is_empty() => {
                     self.bridge_closed.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -2126,7 +2182,9 @@ impl Runtime {
                         }
                     }
                     _ => {
-                        if fdpass::is_reply_too_large(&e) {
+                        // T28: a framed reply refused after it was read whole (rights on it, empty, or rights off its
+                        // first byte) was consumed too; it is no longer owed.
+                        if fdpass::is_reply_too_large(&e) || bridge::consumed(&e) {
                             self.bridge_owed.store(false, std::sync::atomic::Ordering::SeqCst);
                         }
                         return Err(e);
@@ -2987,7 +3045,7 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
         Err(e) => eprintln!("  carrier channel  UNAVAILABLE: {e}"),
     }
 
-    let mut children: Vec<Child> = Vec::new();
+    let mut children: Vec<RuntimeChild> = Vec::new();
 
     if let Some(split) = rest.iter().position(|a| a == "--") {
         let actor = rest[..split].join("");
@@ -2997,14 +3055,26 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
             match rt.agent_fd(&actor) {
                 Ok(fd) => {
                     println!("  channel          {actor} → inherited as fd 3");
-                    match unsafe {
+                    #[cfg(target_os = "linux")]
+                    let spawned = unsafe {
                         Command::new(&argv[0])
                             .args(&argv[1..])
                             .env("AMPD_CHANNEL_FD", "3")
                             .env("AMPD_ACTOR", &actor)
                             .pre_exec(move || fdpass::dup_onto(fd, 3))
                             .spawn()
-                    } {
+                    };
+                    // T28 (C4): on macOS the engine holds 0, 1, 2 and its channel as fd 3, and nothing else.
+                    #[cfg(target_os = "macos")]
+                    let spawned = {
+                        let mut env: Vec<(String, String)> = std::env::vars().collect();
+                        env.retain(|(k, _)| !matches!(k.as_str(), "AMPD_CHANNEL_FD" | "AMPD_ACTOR"));
+                        env.push(("AMPD_CHANNEL_FD".into(), "3".into()));
+                        env.push(("AMPD_ACTOR".into(), actor.clone()));
+                        let args: Vec<&str> = argv[1..].iter().map(String::as_str).collect();
+                        spawn::spawn_possessing(&argv[0], &args, &env, None, &[(fd, 3)])
+                    };
+                    match spawned {
                         Ok(c) => children.push(c),
                         Err(e) => eprintln!("  could not spawn {actor}: {e}"),
                     }
@@ -3143,7 +3213,10 @@ mod t27b_stream {
     }
 }
 
-#[cfg(test)]
+// T28: a SEQPACKET peer by construction (fdpass::pair_seqpacket), so not built under the test feature framed-bridge,
+// whose bridge is the frame. T27b's laws run it on the default build; the framed bridge has T28's laws and the
+// framed verify.
+#[cfg(all(test, not(feature = "framed-bridge")))]
 mod t27b_runtime {
     //! T27b, Codex review 1, at the caller: a Runtime whose bridge is one end of a SEQPACKET pair this test holds (no
     //! ampd), so refusals, undecodable replies and timeouts are driven exactly. B9 (no constructor leaks a descriptor),
@@ -3896,6 +3969,80 @@ mod t27b_carrier_golden {
     }
 }
 
+
+// T28 (Codex review 1, finding 6): L10 through the Runtime, on the framed bridge (Linux under the test feature), where
+// the Runtime's own fields are reachable. Named so that `superlane/t28/laws.py`'s `bridge::laws` filter selects it with
+// the host's laws.
+#[cfg(all(test, feature = "framed-bridge"))]
+mod t28_bridge {
+    mod laws {
+        use super::super::*;
+        use crate::bridge::{self, framed};
+        use crate::fdpass::{self, Pair};
+        use std::os::unix::io::RawFd;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        fn raw(sock: RawFd, bytes: &[u8]) {
+            let mut sent = 0usize;
+            while sent < bytes.len() {
+                sent += fdpass::send_part(sock, &bytes[sent..], &[], 0).expect("a raw send");
+            }
+        }
+
+        fn wire(body: &[u8]) -> Vec<u8> {
+            [&framed::prefix_of(body.len())[..], body].concat()
+        }
+
+        /// A reply that stalls after its first byte fails the call within the 6.5 s ceiling (the 5 s specification);
+        /// the bridge is marked closed, and the next call refuses at once without reading (a whole reply written after
+        /// the stall is still unread).
+        #[test]
+        fn l10_through_the_runtime_a_stalled_reply_closes_the_bridge_and_the_next_call_reads_nothing() {
+            let _s = fdpass::t27b_serial();
+            let Pair(ours, peer) = framed::pair().unwrap();
+            let dir = std::env::temp_dir().join(format!("t28-rt-{}-{ours}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let lock = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+            let rt = Runtime {
+                dir: dir.clone(),
+                world: WorldDir::Ephemeral(dir.join("world")),
+                world_lock: lock,
+                child,
+                bridge: ours,
+                bridge_lock: Mutex::new(()),
+                bridge_owed: AtomicBool::new(false),
+                bridge_closed: AtomicBool::new(false),
+                channels: Mutex::new(Vec::new()),
+                channel_inodes: Mutex::new(Vec::new()),
+                released: false,
+            };
+            let t = std::thread::spawn(move || {
+                let _command = framed::recv(peer, 65536, false).unwrap();
+                raw(peer, &[&framed::prefix_of(40)[..], b"{"].concat());
+                std::thread::sleep(Duration::from_secs(7));
+                raw(peer, &wire(b"{\"ok\":true}"));
+                fdpass::close_fd(peer);
+            });
+            let status = serde_json::json!({"schema": "bridge-command@1", "command": "runtime_status"});
+            let t0 = Instant::now();
+            let e = rt.bridge_call(&status).unwrap_err();
+            let took = t0.elapsed();
+            assert!(e.contains(bridge::GONE), "{e}");
+            assert!(took <= Duration::from_millis(6500), "the stalled reply took {took:?}");
+            t.join().unwrap();
+            let t1 = Instant::now();
+            let e = rt.bridge_call(&status).unwrap_err();
+            assert!(t1.elapsed() < Duration::from_millis(200), "the next call waited {:?}", t1.elapsed());
+            assert!(e.contains("closed the bridge"), "{e}");
+            let mut b = [0u8; 4];
+            let n = unsafe { libc::recv(ours, b.as_mut_ptr().cast(), b.len(), libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+            assert!(n > 0, "the next call read the bridge (peek {n})");
+            drop(rt);
+        }
+    }
+}
 } // mod linux_layer
 
 #[cfg(target_os = "linux")]

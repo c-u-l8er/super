@@ -11,6 +11,8 @@
 
 use std::io;
 use std::os::unix::io::RawFd;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------- libc
 //
@@ -23,6 +25,8 @@ const SHUT_RDWR: i32 = libc::SHUT_RDWR;
 
 const AF_UNIX: i32 = libc::AF_UNIX;
 const SOCK_STREAM: i32 = libc::SOCK_STREAM;
+// T28: Linux only. macOS has no SOCK_SEQPACKET for AF_UNIX (MP0), so a macOS build cannot ask for one.
+#[cfg(target_os = "linux")]
 const SOCK_SEQPACKET: i32 = libc::SOCK_SEQPACKET;
 /// `SOCK_CLOEXEC` — Linux `0o2000000` on x86-64 and aarch64; libc's, so the target's.
 ///
@@ -40,8 +44,13 @@ const SOCK_SEQPACKET: i32 = libc::SOCK_SEQPACKET;
 /// the person's socket and the bridge that mints identities. "The agent
 /// cannot issue human commands" stopped being enforced by possession at
 /// the moment the agent possessed it.
+///
+/// T28: Linux only. macOS has neither flag (DESIGN §2); there a birth or an arrival is marked close-on-exec by
+/// `fcntl` at once, under [`FD_BIRTH`].
+#[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
 const SOCK_CLOEXEC: i32 = libc::SOCK_CLOEXEC;
 /// `MSG_CMSG_CLOEXEC` — the same rule for descriptors that *arrive*.
+#[cfg(target_os = "linux")]
 pub const MSG_CMSG_CLOEXEC: i32 = libc::MSG_CMSG_CLOEXEC;
 const SOL_SOCKET: i32 = libc::SOL_SOCKET;
 const SCM_RIGHTS: i32 = libc::SCM_RIGHTS;
@@ -51,7 +60,52 @@ const FD_CLOEXEC: i32 = libc::FD_CLOEXEC;
 
 /// `CLOSE_RANGE_CLOEXEC` — Linux 5.11. **Marks the range close-on-exec; it
 /// does not close it.** That distinction is the whole of `seal_inheritance`.
+#[cfg(target_os = "linux")]
 const CLOSE_RANGE_CLOEXEC: u32 = libc::CLOSE_RANGE_CLOEXEC;
+
+/// **The fork lock (T28, DESIGN C2).** Where a birth or an arrival cannot be close-on-exec atomically (macOS; and on
+/// Linux under the test feature `framed-bridge`, which behaves as macOS does), the descriptor is made and marked while
+/// this is held for reading, and a spawn holds it for writing ([`spawn_guard`]), so no spawn that takes it can see a
+/// descriptor between its birth and its `FD_CLOEXEC`. It is never held while a call blocks (Go's caveat).
+pub static FD_BIRTH: RwLock<()> = RwLock::new(());
+
+/// Held across a spawn: no descriptor is born or arrives unmarked while it is held (T28; T29 routes the cockpit's own
+/// spawn sites through it).
+pub fn spawn_guard() -> RwLockWriteGuard<'static, ()> {
+    FD_BIRTH.write().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The fork lock for reading, no later than `deadline` (T28, Codex review 1, finding 2): without one, as long as it
+/// takes; with one, tried until it passes, and `None` then, so a bounded read never waits on a spawn past its bound.
+fn birth_by(deadline: Option<Instant>) -> Option<RwLockReadGuard<'static, ()>> {
+    let Some(d) = deadline else { return Some(FD_BIRTH.read().unwrap_or_else(|p| p.into_inner())) };
+    loop {
+        match FD_BIRTH.try_read() {
+            Ok(g) => return Some(g),
+            Err(TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() >= d => return None,
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_micros(200)),
+        }
+    }
+}
+
+/// Set `O_NONBLOCK` on `fd`'s open file description (T28: the host's end of a framed pair; XNU ignores MSG_DONTWAIT on a
+/// stream write that does not fit, MP1).
+pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let f = unsafe { fcntl(fd, libc::F_GETFL) };
+    if f == -1 || unsafe { fcntl(fd, libc::F_SETFL, f | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Set `FD_CLOEXEC` on `fd`.
+pub fn set_cloexec(fd: RawFd) -> io::Result<()> {
+    if unsafe { fcntl(fd, F_SETFD, FD_CLOEXEC) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
 
 /// A `msghdr` for one buffer and an optional control buffer.
 ///
@@ -102,6 +156,7 @@ pub fn pair_stream() -> io::Result<Pair> {
     make_pair(SOCK_STREAM)
 }
 
+#[cfg(target_os = "linux")]
 pub fn pair_seqpacket() -> io::Result<Pair> {
     make_pair(SOCK_SEQPACKET)
 }
@@ -122,7 +177,24 @@ fn make_pair(ty: i32) -> io::Result<Pair> {
         return Err(io::Error::from_raw_os_error(libc::EMFILE));
     }
     let mut sv = [0i32; 2];
+    #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
     let rc = unsafe { socketpair(AF_UNIX, ty | SOCK_CLOEXEC, 0, sv.as_mut_ptr()) };
+    // T28 (C2): no atomic close-on-exec at birth on macOS. The pair is made and both ends marked under the fork lock.
+    #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+    let rc = {
+        let _birth = FD_BIRTH.read().unwrap_or_else(|p| p.into_inner());
+        let rc = unsafe { socketpair(AF_UNIX, ty, 0, sv.as_mut_ptr()) };
+        if rc == 0 {
+            for fd in sv {
+                if let Err(e) = set_cloexec(fd) {
+                    close_fd(sv[0]);
+                    close_fd(sv[1]);
+                    return Err(e);
+                }
+            }
+        }
+        rc
+    };
     if rc != 0 {
         return Err(io::Error::last_os_error());
     }
@@ -218,6 +290,10 @@ pub fn make_inheritable(fd: RawFd) -> io::Result<()> {
 /// would have refused it in — one step earlier and by a better name.
 ///
 /// Runs after `fork`, before `exec`: one syscall, no allocation.
+///
+/// T28: Linux only. On macOS the spawn itself closes everything it was not given (`POSIX_SPAWN_CLOEXEC_DEFAULT`,
+/// `spawn.rs`); Carrier spawns there are M2.
+#[cfg(target_os = "linux")]
 pub fn seal_inheritance(first: RawFd) -> io::Result<()> {
     // **A raw syscall on purpose**, numbered by libc since T27 (it was x86-64's
     // 436): not glibc's `close_range` wrapper, so the failure this floor must
@@ -437,6 +513,63 @@ thread_local! {
     pub(crate) static SHORT_SEND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+// T28's seams (Codex review 1, findings 3 and 4): a test can make the calling thread's k-th poll, recvmsg, arrival mark or
+// sendmsg on the framed path fail with an errno (`Some((fault, k, errno))`; k = 0 fails the next), and pause before each
+// framed sendmsg, so the error paths and the rest deadline are driven exactly. Absent from every non-test build.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static INJECT: std::cell::Cell<Option<(Fault, usize, i32)>> = const { std::cell::Cell::new(None) };
+    pub(crate) static SLOW_SEND: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    pub(crate) static SLOW_RECV: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
+    // Codex review 2: a pause, once, before the calling thread's framed receive syscall whose buffer is exactly n bytes
+    // (keyed on the read, not on how many reads came before it), and every poll of the calling thread from its k-th on
+    // failing EINTR.
+    pub(crate) static RECV_PAUSE_LEN: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
+    pub(crate) static POLL_EINTR_FROM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Where a test may inject a failure (T28; only test builds' `INJECT` ever names one).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Fault {
+    Poll,
+    Recvmsg,
+    Mark,
+    Send,
+}
+
+#[cfg(test)]
+fn injected(f: Fault) -> Option<io::Error> {
+    INJECT.with(|c| match c.get() {
+        Some((g, 0, errno)) if g == f => {
+            c.set(None);
+            Some(io::Error::from_raw_os_error(errno))
+        }
+        Some((g, k, errno)) if g == f => {
+            c.set(Some((g, k - 1, errno)));
+            None
+        }
+        _ => None,
+    })
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn injected(_f: Fault) -> Option<io::Error> {
+    None
+}
+
+/// Mark one arrival close-on-exec (or fail as a test injected).
+fn mark_arrival(fd: RawFd) -> io::Result<()> {
+    match injected(Fault::Mark) {
+        Some(e) => Err(e),
+        None => set_cloexec(fd),
+    }
+}
+
+/// The prefix of the error when an arrival could not be marked: its bytes were consumed and every arrival is closed, so
+/// a framed caller treats the bridge as closed for good (Codex review 1, finding 4).
+pub(crate) const UNMARKED: &str = "arrival-unmarked";
+
 // T27b round 3's seam (Codex review 2, finding 7): a test can make a socketpair fail as EMFILE does, after `k` more
 // succeed (`Some(k)`; `Some(0)` fails the next), to show what a constructor holds when a later allocation fails.
 // Absent from every non-test build.
@@ -582,16 +715,22 @@ fn send_plain_count_flags(sock: RawFd, bytes: &[u8], flags: i32) -> io::Result<u
 ///
 /// `MSG_CMSG_CLOEXEC` on every receive: a descriptor that arrives is
 /// close-on-exec too, so the rule holds on both sides of a handoff.
+///
+/// T28: Linux only. It reads without a control buffer, which on macOS installs any rights the peer attached where
+/// nobody can name them (DESIGN §2); a macOS build cannot call it.
+#[cfg(target_os = "linux")]
 pub fn recv_msg(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
     recv_msg_flags(sock, max, 0)
 }
 
 /// [`recv_msg`] that never waits: `WouldBlock` while no message is there (T27b round 4, Codex review 3, finding 1: a
 /// receive a deadline bounds must not block past it). What it returns is [`recv_msg`]'s.
+#[cfg(target_os = "linux")]
 pub fn recv_msg_nowait(sock: RawFd, max: usize) -> io::Result<Vec<u8>> {
     recv_msg_flags(sock, max, libc::MSG_DONTWAIT)
 }
 
+#[cfg(target_os = "linux")]
 fn recv_msg_flags(sock: RawFd, max: usize, flags: i32) -> io::Result<Vec<u8>> {
     let mut buf = vec![0u8; max];
     let mut iov = iovec(&mut buf);
@@ -641,7 +780,14 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
 
     let mut msg = msghdr(&mut iov, ctrl.as_mut_ptr(), ctrl.len());
 
+    // T28 (C3): `MSG_CMSG_CLOEXEC` on Linux; on macOS (and under the test feature) every arrival is marked by `fcntl`
+    // at once, under the fork lock, below.
+    #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
     let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC) };
+    #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+    let _birth = FD_BIRTH.read().unwrap_or_else(|p| p.into_inner());
+    #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+    let n = unsafe { recvmsg(sock, &mut msg, 0) };
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -669,23 +815,226 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
             }
         }
     }
+    // Codex review 1, finding 4: an arrival that cannot be marked is never returned; every arrival is closed.
+    #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+    for f in &fds {
+        if let Err(e) = mark_arrival(*f) {
+            for g in &fds {
+                close_fd(*g);
+            }
+            return Err(io::Error::new(e.kind(), format!("{UNMARKED}: a received descriptor could not be marked; all are closed: {e}")));
+        }
+    }
 
     if (msg.msg_flags & MSG_CTRUNC) != 0 {
         // Whatever did arrive is still this process's to close.
         for f in &fds {
             close_fd(*f);
         }
+        // T28: on macOS the excess was not discarded but installed, where nothing can name it (DESIGN §2, §4.6).
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "the control message was truncated — a descriptor was discarded in transit",
+            if cfg!(target_os = "macos") {
+                "the control message was truncated — on macOS the excess descriptors were installed, not closed"
+            } else {
+                "the control message was truncated — a descriptor was discarded in transit"
+            },
         ));
     }
 
     Ok((buf, fds))
 }
 
+// ------------------------------------------------------------------ T28: the framed transport's primitives
+
+/// One `sendmsg` of part of a frame (T28, R1–R2): `fds` ride it when given (the part that carries the frame's first
+/// byte), none otherwise. Returns how many bytes it took. Written beside, not into, the SEQPACKET senders above, which
+/// L8 holds byte for byte.
+pub(crate) fn send_part(sock: RawFd, bytes: &[u8], fds: &[RawFd], flags: i32) -> io::Result<usize> {
+    #[cfg(test)]
+    if let Some(d) = SLOW_SEND.with(|c| c.get()) {
+        std::thread::sleep(d);
+    }
+    if let Some(e) = injected(Fault::Send) {
+        return Err(e);
+    }
+    if fds.is_empty() {
+        return send_plain_count_flags(sock, bytes, flags);
+    }
+    let mut buf = bytes[..short_send_cap(bytes.len())].to_vec();
+    let mut iov = iovec(&mut buf);
+    let space = rights_space(fds.len());
+    let mut control = vec![0u8; space];
+    let msg = msghdr(&mut iov, control.as_mut_ptr(), space);
+    unsafe {
+        let cmsg = libc::CMSG_FIRSTHDR(&msg);
+        if cmsg.is_null() {
+            return Err(io::Error::other("a control buffer too small for its own header"));
+        }
+        (*cmsg).cmsg_len = rights_len(fds.len()) as _;
+        (*cmsg).cmsg_level = SOL_SOCKET;
+        (*cmsg).cmsg_type = SCM_RIGHTS;
+        let data = libc::CMSG_DATA(cmsg) as *mut i32;
+        for (i, fd) in fds.iter().enumerate() {
+            *data.add(i) = *fd;
+        }
+    }
+    let n = unsafe { sendmsg(sock, &msg, flags) };
+    if n < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(n as usize)
+}
+
+/// What one framed read returned: how many bytes, the rights that came with them, and whether the kernel truncated the
+/// control data (on macOS the excess is installed, not closed).
+pub(crate) struct Part {
+    pub n: usize,
+    pub fds: Vec<RawFd>,
+    pub ctrunc: bool,
+}
+
+/// One framed read (T28, R4 and C2): wait for input with no lock held (no later than `deadline`, or for as long as it
+/// takes without one), then, holding the fork lock, `recvmsg(MSG_DONTWAIT)` into `buf` with room for `room` rights,
+/// and mark every arrival close-on-exec before the lock is let go. `None` when `deadline` passed with nothing to read.
+/// A zero-byte `Part` is the peer's close.
+pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Instant>) -> io::Result<Option<Part>> {
+    recv_part_by(sock, buf, room, deadline, false)
+}
+
+/// [`recv_part`] for a frame's rest (Codex review 2, finding 1): `until` is checked once more right before the receive
+/// syscall, after the readiness wait and the fork lock, so a read whose wait, lock or anything between ends after it
+/// reads nothing (`None`). The first-byte probe and the blocking first read use [`recv_part`].
+pub(crate) fn recv_rest(sock: RawFd, buf: &mut [u8], room: usize, until: Instant) -> io::Result<Option<Part>> {
+    recv_part_by(sock, buf, room, Some(until), true)
+}
+
+fn recv_part_by(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Instant>, rest: bool) -> io::Result<Option<Part>> {
+    loop {
+        if !wait_ready(sock, libc::POLLIN, deadline)? {
+            return Ok(None);
+        }
+        // Codex review 1, finding 2: by the deadline, so a spawn holding the writer lock cannot hold a bounded read.
+        let Some(_birth) = birth_by(deadline) else { return Ok(None) };
+        // Test builds only: at most `n` bytes per read, after a pause (SLOW_RECV).
+        #[cfg(test)]
+        let cap = SLOW_RECV.with(|c| c.get()).map(|(n, d)| {
+            std::thread::sleep(d);
+            n
+        });
+        #[cfg(not(test))]
+        let cap: Option<usize> = None;
+        let len = cap.map_or(buf.len(), |n| n.min(buf.len()));
+        #[cfg(test)]
+        RECV_PAUSE_LEN.with(|c| {
+            if let Some((n, d)) = c.get() {
+                if n == len {
+                    c.set(None);
+                    std::thread::sleep(d);
+                }
+            }
+        });
+        // A frame's rest: nothing is read once its deadline has passed, however long the wait and the lock took.
+        if rest && deadline.is_some_and(|d| Instant::now() >= d) {
+            return Ok(None);
+        }
+        let mut iov = iovec(&mut buf[..len]);
+        let space = rights_space(room);
+        let mut ctrl = vec![0u8; space];
+        let mut msg = msghdr(&mut iov, ctrl.as_mut_ptr(), space);
+        if let Some(e) = injected(Fault::Recvmsg) {
+            return Err(e);
+        }
+        let n = unsafe { recvmsg(sock, &mut msg, libc::MSG_DONTWAIT) };
+        if n < 0 {
+            let e = io::Error::last_os_error();
+            if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) {
+                // A spurious readiness after the deadline is the deadline: never spin past it (MP1).
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Ok(None);
+                }
+                continue;
+            }
+            return Err(e);
+        }
+        let mut fds = Vec::new();
+        unsafe {
+            let mut c = libc::CMSG_FIRSTHDR(&msg);
+            while !c.is_null() {
+                if (*c).cmsg_level == SOL_SOCKET && (*c).cmsg_type == SCM_RIGHTS {
+                    let payload = (*c).cmsg_len as usize - rights_len(0);
+                    let base = libc::CMSG_DATA(c) as *const u8;
+                    for i in 0..(payload / 4) {
+                        let mut raw = [0u8; 4];
+                        std::ptr::copy_nonoverlapping(base.add(i * 4), raw.as_mut_ptr(), 4);
+                        fds.push(i32::from_ne_bytes(raw));
+                    }
+                }
+                c = libc::CMSG_NXTHDR(&msg, c);
+            }
+        }
+        // Codex review 1, finding 4: an arrival that cannot be marked is never kept; every arrival is closed.
+        for fd in &fds {
+            if let Err(e) = mark_arrival(*fd) {
+                for g in &fds {
+                    close_fd(*g);
+                }
+                return Err(io::Error::new(e.kind(), format!("{UNMARKED}: an arrival could not be marked; all are closed: {e}")));
+            }
+        }
+        return Ok(Some(Part { n: n as usize, fds, ctrunc: msg.msg_flags & libc::MSG_CTRUNC != 0 }));
+    }
+}
+
+/// Wait until `sock` is ready for `events`, no later than `deadline` (`None`: for as long as it takes). False when the
+/// deadline passes first. Rounded up to the millisecond, so a wait never ends before its deadline.
+pub fn wait_ready(sock: RawFd, events: i16, deadline: Option<Instant>) -> io::Result<bool> {
+    loop {
+        let ms = match deadline {
+            None => -1,
+            Some(d) => d.saturating_duration_since(Instant::now()).as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32,
+        };
+        let mut p = libc::pollfd { fd: sock, events, revents: 0 };
+        if let Some(e) = injected(Fault::Poll) {
+            return Err(e);
+        }
+        #[cfg(test)]
+        let forced = POLL_EINTR_FROM.with(|c| match c.get() {
+            Some(0) => true,
+            Some(k) => {
+                c.set(Some(k - 1));
+                false
+            }
+            None => false,
+        });
+        #[cfg(not(test))]
+        let forced = false;
+        let rc = if forced {
+            std::thread::sleep(Duration::from_millis(1));
+            -1
+        } else {
+            unsafe { libc::poll(&mut p, 1, ms) }
+        };
+        match rc {
+            0 => return Ok(false),
+            n if n > 0 => return Ok(true),
+            _ => {
+                let e = if forced { io::Error::from_raw_os_error(libc::EINTR) } else { io::Error::last_os_error() };
+                if e.kind() != io::ErrorKind::Interrupted {
+                    return Err(e);
+                }
+                // Codex review 2, finding 1: an interrupted wait is retried only until its deadline.
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+}
+
 // ------------------------------------------------------------------ T27 laws
-#[cfg(test)]
+// T28: Linux's (SEQPACKET, recv_msg and close_range); MP1 builds this file's tests on macOS too.
+#[cfg(all(test, target_os = "linux"))]
 mod t27 {
     use super::*;
 
@@ -799,7 +1148,7 @@ mod t27 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod t27b {
     //! T27b's laws on the host's side of the bridge (`superlane/t27b/TASK.md`): B3 (the sender's 8,192-byte limit,
     //! by name, nothing written), B5 (a cut reply is named, never read), B6 (a short `sendmsg` is never `Ok`) and B8 (a

@@ -159,6 +159,7 @@ fn t27_l2_no_numeric_syscall_literal_and_no_raw_extern_in_host_src() {
     assert!(files.len() >= 10, "scanned only {} files in {dir:?}", files.len());
 
     let mut bad: Vec<String> = Vec::new();
+    let mut registered = 0;
     let mut saw_denied = false;
     let mut saw_census = false;
 
@@ -172,7 +173,16 @@ fn t27_l2_no_numeric_syscall_literal_and_no_raw_extern_in_host_src() {
             let at = from + k;
             let after = code[at + "extern \"C\"".len()..].trim_start();
             if after.starts_with('{') {
-                bad.push(format!("{name}:{} a raw extern \"C\" block", line_of(&code, at)));
+                // T28 (DESIGN C4; superlane/t28/TASK.md item 4): the ONE registered exception, by name and file:
+                // macOS 26.0's posix_spawn_file_actions_addchdir, which libc 0.2.189 does not declare, alone in its
+                // block in spawn.rs. Any other extern block, or any other fn in that one, is still refused.
+                let body = &after[1..after.find('}').unwrap_or(after.len())];
+                let fns: Vec<&str> = body.split("fn ").skip(1).collect();
+                if name == "spawn.rs" && fns.len() == 1 && fns[0].trim_start().starts_with("posix_spawn_file_actions_addchdir(") {
+                    registered += 1;
+                } else {
+                    bad.push(format!("{name}:{} a raw extern \"C\" block", line_of(&code, at)));
+                }
             }
             from = at + 1;
         }
@@ -268,6 +278,7 @@ fn t27_l2_no_numeric_syscall_literal_and_no_raw_extern_in_host_src() {
         }
     }
 
+    assert!(registered <= 1, "the registered extern (spawn.rs's posix_spawn_file_actions_addchdir) appears {registered} times");
     assert!(saw_denied, "confine.rs's DENIED table was not found: the guard would be blind to it");
     assert!(saw_census, "verify.rs's CENSUS table was not found: the guard would be blind to it");
     assert!(bad.is_empty(), "raw syscall numbers or extern blocks in host/src:\n  {}", bad.join("\n  "));
