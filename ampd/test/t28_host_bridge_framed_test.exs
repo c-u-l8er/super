@@ -43,6 +43,16 @@ defmodule Ampd.T28HostBridgeFramedTest do
     Enum.each(socks, &:socket.close/1)
   end
 
+  # A loop of its own whose end the test waits for through its link: exits trapped BEFORE the start, so its
+  # {:EXIT, pid, reason} cannot be missed. (A monitor set after the start reported :noproc about 2 runs in 100 for a loop
+  # that then ran and returned normally.)
+  defp watched_loop do
+    Process.flag(:trap_exit, true)
+    {runtime, host} = Ampd.Transport.socketpair(:stream)
+    {:ok, bridge} = HostBridge.start(runtime)
+    {bridge, runtime, host}
+  end
+
   defp cmd(name, extra \\ %{}), do: Map.merge(%{"schema" => "bridge-command@1", "command" => name}, extra)
   defp frame(%{} = m), do: frame(JSON.encode!(m))
   defp frame(bytes) when is_binary(bytes), do: <<byte_size(bytes)::big-32>> <> bytes
@@ -262,10 +272,11 @@ defmodule Ampd.T28HostBridgeFramedTest do
 
   # ---- L6
 
-  test "L6 · the host's close at a frame boundary ends the loop", ctx do
-    ref = Process.monitor(ctx.bridge)
-    :ok = :socket.close(ctx.host)
-    assert_receive {:DOWN, ^ref, :process, _, :normal}, 5_000
+  test "L6 · the host's close at a frame boundary ends the loop" do
+    {bridge, runtime, host} = watched_loop()
+    :ok = :socket.close(host)
+    assert_receive {:EXIT, ^bridge, :normal}, 5_000
+    :socket.close(runtime)
   end
 
   test "L6 · a close inside a frame runs nothing and sinks its rights" do
@@ -293,11 +304,12 @@ defmodule Ampd.T28HostBridgeFramedTest do
     assert reply(ctx.host)["ok"] == true
   end
 
-  test "L7 · 8,193 bytes announced is refused before its body is read, and the bridge ends", ctx do
-    ref = Process.monitor(ctx.bridge)
-    :ok = :socket.send(ctx.host, <<8_193::32>>)
-    r = reply(ctx.host)
+  test "L7 · 8,193 bytes announced is refused before its body is read, and the bridge ends" do
+    {bridge, runtime, host} = watched_loop()
+    :ok = :socket.send(host, <<8_193::32>>)
+    r = reply(host)
     assert r["refusal"]["code"] == "frame-too-large", inspect(r)
-    assert_receive {:DOWN, ^ref, :process, _, :normal}, 5_000
+    assert_receive {:EXIT, ^bridge, :normal}, 5_000
+    Enum.each([host, runtime], &:socket.close/1)
   end
 end

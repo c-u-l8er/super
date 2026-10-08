@@ -662,7 +662,9 @@ mod laws {
             raw(p.0, &wire(b"a frame with three rights"), &r);
             sink(&r);
             inject(fault, k, libc::EIO);
-            let _ = framed::recv(p.1, 4096, false);
+            if let Ok((_, fds)) = framed::recv(p.1, 4096, false) {
+                sink(&fds);
+            }
             clear_inject();
             close_pair(&p);
         }
@@ -673,7 +675,9 @@ mod laws {
         raw(p.0, b"violation", &r);
         sink(&r);
         inject(Fault::Mark, 0, libc::EIO);
-        let _ = framed::recv(p.1, 4096, false);
+        if let Ok((_, fds)) = framed::recv(p.1, 4096, false) {
+            sink(&fds);
+        }
         clear_inject();
         close_pair(&p);
         assert_eq!(open_fds(), base, "a failed read or mark kept descriptors");
@@ -815,8 +819,15 @@ mod laws {
         inject(Fault::Send, 0, libc::EINTR);
         framed::send(p.0, b"retried", &r, 4096, false).unwrap();
         clear_inject();
-        let (got, fds) = framed::recv(p.1, 4096, false).unwrap();
-        assert_eq!(got, b"retried");
+        // Judged on the raw wire: the frame's bytes and its one right, wherever on the frame it rides (that is L2's).
+        let (mut got, mut fds, mut buf) = (Vec::new(), Vec::new(), [0u8; 64]);
+        while got.len() < wire(b"retried").len() {
+            let part = fdpass::recv_part(p.1, &mut buf, 64, soon()).unwrap().expect("bytes");
+            assert!(part.n > 0, "the frame was cut");
+            got.extend_from_slice(&buf[..part.n]);
+            fds.extend(part.fds);
+        }
+        assert_eq!(got, wire(b"retried"));
         assert_eq!(inos(&fds), want, "the retry after EINTR did not carry the right");
         sink(&fds);
         sink(&r);
@@ -1090,9 +1101,14 @@ mod laws {
             raw(p.0, &wire(b"begun"), &r);
             sink(&r);
             inject(fault, k, libc::EIO);
-            let e = framed::recv(p.1, 4096, false).unwrap_err();
+            let got = framed::recv(p.1, 4096, false);
             clear_inject();
-            assert!(super::closes_for_good(&e), "{fault:?}: {e}");
+            match (fault, got) {
+                (_, Err(e)) => assert!(super::closes_for_good(&e), "{fault:?}: {e}"),
+                // Only the error's class is judged: a receive that marks nothing returned whole, which is L4's.
+                (Fault::Mark, Ok((_, fds))) => sink(&fds),
+                (_, Ok(_)) => panic!("{fault:?}: a failed read returned a frame"),
+            }
             close_pair(&p);
         }
         // Sending: the wait for room after the first byte fails.
