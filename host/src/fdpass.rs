@@ -763,7 +763,6 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
 /// One `sendmsg` of part of a frame (T28, R1–R2): `fds` ride it when given (the part that carries the frame's first
 /// byte), none otherwise. Returns how many bytes it took. Written beside, not into, the SEQPACKET senders above, which
 /// L8 holds byte for byte.
-#[cfg(any(target_os = "macos", feature = "framed-bridge", test))]
 pub(crate) fn send_part(sock: RawFd, bytes: &[u8], fds: &[RawFd], flags: i32) -> io::Result<usize> {
     if fds.is_empty() {
         return send_plain_count_flags(sock, bytes, flags);
@@ -795,7 +794,6 @@ pub(crate) fn send_part(sock: RawFd, bytes: &[u8], fds: &[RawFd], flags: i32) ->
 
 /// What one framed read returned: how many bytes, the rights that came with them, and whether the kernel truncated the
 /// control data (on macOS the excess is installed, not closed).
-#[cfg(any(target_os = "macos", feature = "framed-bridge", test))]
 pub(crate) struct Part {
     pub n: usize,
     pub fds: Vec<RawFd>,
@@ -806,7 +804,6 @@ pub(crate) struct Part {
 /// takes without one), then, holding the fork lock, `recvmsg(MSG_DONTWAIT)` into `buf` with room for `room` rights,
 /// and mark every arrival close-on-exec before the lock is let go. `None` when `deadline` passed with nothing to read.
 /// A zero-byte `Part` is the peer's close.
-#[cfg(any(target_os = "macos", feature = "framed-bridge", test))]
 pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Instant>) -> io::Result<Option<Part>> {
     loop {
         if !wait_ready(sock, libc::POLLIN, deadline)? {
