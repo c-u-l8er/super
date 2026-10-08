@@ -135,6 +135,22 @@ defmodule Ampd.Transport do
       :socket.send(sock, <<byte_size(body)::big-32>> <> body)
     end
 
+    @doc """
+    The reader for one channel (T28, C9). On Linux, `reader/2`: `:socket.recv`, unchanged; the kernel closes any
+    rights an agent attaches. On macOS (or when app config `:ampd, :untrusted_rights_reader` forces it, for Linux
+    tests) rights an agent attaches would be installed in this runtime and never reported (DESIGN §2), so
+    `sinking_reader/2` reads every byte with `recvmsg` and a control buffer, sinks any rights, and ends the channel:
+    an agent that sends rights has broken the protocol.
+    """
+    def reader_for(sock, owner) do
+      if sinks_rights?(), do: sinking_reader(sock, owner), else: reader(sock, owner)
+    end
+
+    @doc false
+    def sinks_rights? do
+      Application.get_env(:ampd, :untrusted_rights_reader, :os.type() == {:unix, :darwin})
+    end
+
     @doc false
     def reader(sock, owner) do
       case :socket.recv(sock, 4) do
@@ -165,6 +181,69 @@ defmodule Ampd.Transport do
           send(owner, :closed)
       end
     end
+
+    # T28 (C9): room for 64 rights (CMSG_SPACE(256): 272 bytes on 64-bit Linux, 268 on macOS).
+    @ctrl_bytes 272
+
+    @doc false
+    def sinking_reader(sock, owner) do
+      case exactly(sock, 4) do
+        {:ok, <<n::big-32>>} ->
+          cond do
+            n == 0 ->
+              sinking_reader(sock, owner)
+
+            n > Ampd.Frame.max_bytes() ->
+              send(owner, {:oversize, n})
+
+            true ->
+              case exactly(sock, n) do
+                {:ok, body} ->
+                  send(owner, {:frame, body})
+                  sinking_reader(sock, owner)
+
+                _ ->
+                  send(owner, :closed)
+              end
+          end
+
+        _ ->
+          send(owner, :closed)
+      end
+    end
+
+    # `n` bytes, read with `recvmsg` and a control buffer. Rights on any read are sunk at once, and the channel ends.
+    defp exactly(sock, n), do: exactly(sock, n, <<>>)
+
+    defp exactly(_sock, n, acc) when byte_size(acc) == n, do: {:ok, acc}
+
+    defp exactly(sock, n, acc) do
+      case :socket.recvmsg(sock, n - byte_size(acc), @ctrl_bytes, [], :infinity) do
+        {:ok, msg} ->
+          fds = rights_in(msg)
+
+          if fds != [] do
+            Enum.each(fds, &Ampd.NativeFd.discard/1)
+            :rights
+          else
+            case IO.iodata_to_binary(Map.get(msg, :iov, [])) do
+              "" -> :closed
+              b -> exactly(sock, n, acc <> b)
+            end
+          end
+
+        _ ->
+          :closed
+      end
+    end
+
+    defp rights_in(%{ctrl: ctrl}) when is_list(ctrl) do
+      ctrl
+      |> Enum.filter(&(&1[:type] == :rights and &1[:level] == :socket))
+      |> Enum.flat_map(fn %{data: d} -> for <<fd::native-32 <- d>>, do: fd end)
+    end
+
+    defp rights_in(_), do: []
   end
 
   # ===================================================================
@@ -329,7 +408,7 @@ defmodule Ampd.Transport do
           Wire.send_frame(sock, hello(peer, kind, actor))
 
           me = self()
-          reader = spawn_link(fn -> Wire.reader(sock, me) end)
+          reader = spawn_link(fn -> Wire.reader_for(sock, me) end)
           loop(sock, peer_id, ref, reader)
 
         # **No frame, and no close.** A channel that was refused never
@@ -574,8 +653,18 @@ defmodule Ampd.Transport do
     """
 
     def start(sock) do
-      pid = spawn_link(fn -> loop(sock) end)
+      pid = spawn_link(fn -> read(sock) end)
       {:ok, pid}
+    end
+
+    # T28 (C7): the reader by the bridge socket's own type, which OTP keeps (no syscall). A SEQPACKET bridge (Linux)
+    # runs `loop/1`, T27b's text verbatim; a stream bridge (macOS, and Linux under the host's test feature) runs
+    # `framed_loop/2`. Nothing is configured.
+    defp read(sock) do
+      case :socket.info(sock) do
+        %{type: :stream} -> framed_loop(sock, <<>>)
+        _ -> loop(sock)
+      end
     end
 
     def stop(pid) when is_pid(pid), do: Process.exit(pid, :normal)
@@ -650,6 +739,143 @@ defmodule Ampd.Transport do
 
     defp truncated?(%{flags: flags}) when is_list(flags), do: :trunc in flags
     defp truncated?(_), do: false
+
+    # ------------------------------------------------------------------ T28 (C8): the framed bridge
+    #
+    # The same commands, in the runtime's existing frame: `len (u32, big-endian) ‖ body`, the body exactly what one
+    # SEQPACKET record carries. R3: never ask past the current frame (4 bytes of prefix, then exactly the body). R4:
+    # every read is a `recvmsg` with a control buffer. R5: rights only with the read that consumed the frame's first
+    # byte; on any later read they are a violation, every right the frame brought is sunk, `invalid-bridge-frame` is
+    # answered, and the bridge stays (the stream is still aligned). R6: a short read is never a frame; a close inside a
+    # frame runs nothing, sinks its rights and ends the loop. An announced length over @command_max is answered
+    # `frame-too-large` before the body is read, and the bridge ends (the stream is unaligned). `buf` is what a read
+    # returned beyond what was asked; every read asks for exactly what the frame still needs, so it stays empty.
+    @frame_ctrl_bytes 272
+
+    defp framed_loop(sock, buf) do
+      case frame(sock, buf) do
+        {:ok, body, fds, buf} ->
+          if send_frame_reply(sock, answer(body, fds)) == :ok, do: framed_loop(sock, buf), else: :ok
+
+        {:refuse, refusal, buf} ->
+          if send_frame_reply(sock, refusal) == :ok, do: framed_loop(sock, buf), else: :ok
+
+        {:end, refusal} ->
+          _ = send_frame_reply(sock, refusal)
+          :ok
+
+        :closed ->
+          :ok
+      end
+    end
+
+    # One reply frame; a failed send (the host is gone) ends the loop.
+    defp send_frame_reply(sock, reply) do
+      body = encode_reply(reply)
+
+      case :socket.send(sock, <<byte_size(body)::big-32>> <> body) do
+        :ok -> :ok
+        _ -> :closed
+      end
+    end
+
+    defp frame(sock, buf) do
+      case take(sock, buf, 4) do
+        :closed ->
+          :closed
+
+        {:ok, b0, rights, trunc0, buf} ->
+          case fill(sock, buf, b0, 4, [], trunc0) do
+            {:closed, late} ->
+              sink(rights ++ late)
+              :closed
+
+            {:ok, <<n::big-32>>, late, trunc1, buf} ->
+              if n > @command_max do
+                sink(rights ++ late)
+
+                {:end,
+                 err("frame-too-large", %{
+                   "limit_bytes" => @command_max,
+                   "frame_bytes" => n,
+                   "reason" => "the frame was announced over the limit; its body was not read, and the bridge ends"
+                 })}
+              else
+                body_of(sock, buf, n, rights, late, trunc1)
+              end
+          end
+      end
+    end
+
+    defp body_of(sock, buf, n, rights, late, trunc) do
+      case fill(sock, buf, <<>>, n, late, trunc) do
+        {:closed, late} ->
+          sink(rights ++ late)
+          :closed
+
+        {:ok, body, [], false, buf} ->
+          {:ok, body, rights, buf}
+
+        {:ok, _body, late, trunc, buf} ->
+          sink(rights ++ late)
+
+          {:refuse,
+           err("invalid-bridge-frame", %{
+             "reason" =>
+               if(trunc,
+                 do: "more rights than the receiver's room; those that landed are closed",
+                 else: "rights not on the frame's first byte; every right the frame brought is closed"
+               )
+           }), buf}
+      end
+    end
+
+    # Read until `acc` is `want` bytes. Every right that arrives here is late (not on the frame's first byte).
+    defp fill(_sock, buf, acc, want, late, trunc) when byte_size(acc) == want, do: {:ok, acc, late, trunc, buf}
+
+    defp fill(sock, buf, acc, want, late, trunc) do
+      case take(sock, buf, want - byte_size(acc)) do
+        :closed -> {:closed, late}
+        {:ok, b, fds, t, buf} -> fill(sock, buf, acc <> b, want, late ++ fds, trunc or t)
+      end
+    end
+
+    # At most `want` bytes: from `buf` first, otherwise one `recvmsg` asking for exactly `want` with room for 64
+    # rights. Every right that lands is marked close-on-exec at once (the `fcntl` straight after `recvmsg`).
+    defp take(_sock, buf, want) when byte_size(buf) > 0 do
+      n = min(want, byte_size(buf))
+      <<b::binary-size(n), rest::binary>> = buf
+      {:ok, b, [], false, rest}
+    end
+
+    defp take(sock, <<>>, want) do
+      case :socket.recvmsg(sock, want, @frame_ctrl_bytes, [], :infinity) do
+        {:ok, msg} ->
+          fds = rights(msg)
+          Enum.each(fds, &Ampd.NativeFd.set_cloexec/1)
+
+          case iov(msg) do
+            "" ->
+              sink(fds)
+              :closed
+
+            bytes when byte_size(bytes) > want ->
+              <<b::binary-size(want), rest::binary>> = bytes
+              {:ok, b, fds, ctrunc?(msg), rest}
+
+            bytes ->
+              {:ok, bytes, fds, ctrunc?(msg), <<>>}
+          end
+
+        {:error, _} ->
+          :closed
+      end
+    end
+
+    defp ctrunc?(%{flags: flags}) when is_list(flags), do: :ctrunc in flags
+    defp ctrunc?(_), do: false
+
+    defp sink(fds), do: Enum.each(fds, &close_fd/1)
 
     @doc """
     The bytes sent for `reply`: its JSON, or — when that is longer than the

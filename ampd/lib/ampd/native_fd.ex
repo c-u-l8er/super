@@ -109,9 +109,11 @@ defmodule Ampd.NativeFd do
   allows rather than as tightly as one would like.
   """
   def adopt_socket(fd) when is_integer(fd) do
-    case :socket.open(fd, %{dup: true}) do
+    os = :os.type()
+
+    case :socket.open(fd, adopt_opts(os)) do
       {:ok, sock} ->
-        case confine(sock) do
+        case confine(sock, os) do
           :ok ->
             discard(fd)
             {:ok, sock}
@@ -156,8 +158,31 @@ defmodule Ampd.NativeFd do
 
   def discard(_), do: :ok
 
-  defp confine(sock) do
-    with {:ok, fd} <- :socket.getopt(sock, :otp, :fd),
+  @doc """
+  The options a received descriptor is opened with (T28 item 7, L11). On Linux `%{dup: true}`, unchanged: OTP finds
+  the domain with `SO_DOMAIN`. macOS has no `SO_DOMAIN`, so every adoption failed there (the Mac lane's finding A);
+  the domain and type are named instead, and `local_stream?/1` must then hold, because OTP takes a named domain on
+  trust (MP0b: an inet TCP descriptor "adopted as local" opens).
+  """
+  def adopt_opts({:unix, :darwin}), do: %{dup: true, domain: :local, type: :stream}
+  def adopt_opts(_), do: %{dup: true}
+
+  @doc "Whether `sock` is a local stream end, by the kernel's own answers: its socket name and its `SO_TYPE`."
+  def local_stream?(sock) do
+    match?({:ok, %{family: :local}}, :socket.sockname(sock)) and
+      :socket.getopt(sock, :socket, :type) == {:ok, :stream}
+  end
+
+  @doc """
+  What an adopted duplicate must be before it is served (T28): on macOS a local stream end (`local_stream?/1`); on
+  Linux nothing more is asked (no new check runs). `:ok` or `:error`.
+  """
+  def adopt_check(sock, {:unix, :darwin}), do: if(local_stream?(sock), do: :ok, else: :error)
+  def adopt_check(_sock, _os), do: :ok
+
+  defp confine(sock, os) do
+    with :ok <- adopt_check(sock, os),
+         {:ok, fd} <- :socket.getopt(sock, :otp, :fd),
          :ok <- set_cloexec(fd) do
       :ok
     else
