@@ -64,7 +64,8 @@ defmodule Ampd.T28HostBridgeFramedTest do
     [%{level: :socket, type: :rights, data: data}]
   end
 
-  defp beam_fds, do: length(File.ls!("/proc/self/fd"))
+  # /proc on Linux; /dev/fd on macOS (MP2; the Mac lane's finding C). A listing's own descriptor cancels out.
+  defp beam_fds, do: length(File.ls!(if :os.type() == {:unix, :darwin}, do: "/dev/fd", else: "/proc/self/fd"))
   defp actors, do: Ampd.Bridge.list() |> Enum.map(&(&1["actor"] || &1[:actor]))
 
   # ---- L1

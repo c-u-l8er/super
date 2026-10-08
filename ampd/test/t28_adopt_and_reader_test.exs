@@ -25,6 +25,24 @@ defmodule Ampd.T28AdoptTest do
     assert NativeFd.adopt_check(tcp, {:unix, :linux}) == :ok
     Enum.each([a, b, tcp, dgram], &:socket.close/1)
   end
+
+  test "L11 · a descriptor received as a right is adopted, and carries bytes" do
+    {a, b} = Ampd.Transport.socketpair(:stream)
+    {x, y} = Ampd.Transport.socketpair(:stream)
+    {:ok, yfd} = :socket.getopt(y, {:otp, :fd})
+    :ok = :socket.sendmsg(a, %{iov: ["r"], ctrl: [%{level: :socket, type: :rights, data: <<yfd::native-32>>}]})
+    {:ok, msg} = :socket.recvmsg(b, 1, 64, [], 3_000)
+    [<<fd::native-32>>] = for %{type: :rights, data: d} <- msg.ctrl, do: d
+    if :os.type() == {:unix, :darwin} do
+      # MP0b, measured on the Mac: OTP finds an adopted descriptor's domain with SO_DOMAIN, which macOS lacks.
+      assert {:error, {:invalid, {:options, :domain, _}}} = :socket.open(fd, %{dup: true})
+    end
+
+    assert {:ok, sock} = NativeFd.adopt_socket(fd)
+    :ok = :socket.send(x, "bytes over the adopted end")
+    assert {:ok, "bytes over the adopted end"} = :socket.recv(sock, 26, 3_000)
+    Enum.each([a, b, x, y, sock], &:socket.close/1)
+  end
 end
 
 defmodule Ampd.T28WireReaderTest do
@@ -54,7 +72,8 @@ defmodule Ampd.T28WireReaderTest do
   end
 
   defp frame(b), do: <<byte_size(b)::big-32>> <> b
-  defp beam_fds, do: length(File.ls!("/proc/self/fd"))
+  # /proc on Linux; /dev/fd on macOS (MP2; the Mac lane's finding C). A listing's own descriptor cancels out.
+  defp beam_fds, do: length(File.ls!(if :os.type() == {:unix, :darwin}, do: "/dev/fd", else: "/proc/self/fd"))
 
   defp rights(socks) do
     data = for s <- socks, into: <<>>, do: (fn {:ok, fd} -> <<fd::native-32>> end).(:socket.getopt(s, {:otp, :fd}))
@@ -91,7 +110,8 @@ defmodule Ampd.T28WireReaderTest do
 
   test "L12 · on the Linux default the reader is Wire.reader/2, and its text is the base's" do
     Application.delete_env(:ampd, :untrusted_rights_reader)
-    refute Wire.sinks_rights?(), "the Linux default takes the sinking reader"
+    # The default follows the OS: the sinking reader is macOS's (MP2), and Linux keeps reader/2.
+    assert Wire.sinks_rights?() == (:os.type() == {:unix, :darwin}), "the default reader does not follow the OS"
     lines = File.read!("lib/ampd/transport.ex") |> String.split("\n")
     i = Enum.find_index(lines, &String.starts_with?(&1, "    def reader(sock, owner) do"))
     j = i + 1 + Enum.find_index(Enum.drop(lines, i + 1), &(&1 == "    end"))
