@@ -769,15 +769,16 @@ defmodule Ampd.Transport do
       end
     end
 
-    # One reply frame; a failed send (the host is gone) ends the loop.
+    # One reply frame; a failed send (the host is gone) ends the loop. Written as every bridge send is, through
+    # encode_reply/1 (T27b's B5 reads this form), then given its length prefix.
     defp send_frame_reply(sock, reply) do
-      body = encode_reply(reply)
-
-      case :socket.send(sock, <<byte_size(body)::big-32>> <> body) do
+      case :socket.send(sock, encode_reply(reply) |> prefixed()) do
         :ok -> :ok
         _ -> :closed
       end
     end
+
+    defp prefixed(body), do: <<byte_size(body)::big-32>> <> body
 
     defp frame(sock, buf) do
       case take(sock, buf, 4) do

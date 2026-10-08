@@ -15,7 +15,8 @@ defmodule Ampd.RegisteredRepositoryBridgeTest do
     Ampd.reset_demo()
     Ampd.Bridge.reset()
     Ampd.Peer.reset()
-    {runtime, host} = Ampd.Transport.socketpair()
+    # SEQPACKET, as Linux's real bridge is: HostBridge reads a stream bridge as framed since T28 (C7).
+    {runtime, host} = Ampd.Transport.socketpair(:seqpacket)
     {:ok, bridge} = Ampd.Transport.HostBridge.start(runtime)
 
     on_exit(fn ->
