@@ -142,9 +142,17 @@ pub mod framed {
     pub fn prefix_of(len: usize) -> [u8; 4] { (len as u32).to_be_bytes() }
     fn len_of(prefix: [u8; 4]) -> usize { u32::from_be_bytes(prefix) as usize }
 
-    /// An unnamed `AF_UNIX` stream pair (possession, never a path), both ends close-on-exec as `fdpass` makes them.
+    /// An unnamed `AF_UNIX` stream pair (possession, never a path), both ends close-on-exec as `fdpass` makes them. The
+    /// host's end (`Pair.0`) is `O_NONBLOCK`: XNU ignores `MSG_DONTWAIT` on a stream write that does not fit (MP1), so
+    /// every wait is a `poll`. The runtime's end is its own socket and is left as it is.
     pub fn pair() -> io::Result<Pair> {
-        fdpass::pair_stream()
+        let p = fdpass::pair_stream()?;
+        if let Err(e) = fdpass::set_nonblocking(p.0) {
+            fdpass::close_fd(p.0);
+            fdpass::close_fd(p.1);
+            return Err(e);
+        }
+        Ok(p)
     }
 
     /// A command to the runtime: the host's refusals of an empty or over-long command, by name, before anything is
@@ -195,9 +203,14 @@ pub mod framed {
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock && sent == 0 && nowait => return Err(e),
+                // Not even the first byte fits, and the caller waits: for room, for as long as it takes (O_NONBLOCK).
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock && sent == 0 => {
+                    fdpass::wait_ready(sock, libc::POLLOUT, None)?;
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock && sent > 0 => {
                     let d = until.expect("set by the first byte");
-                    if !fdpass::wait_ready(sock, libc::POLLOUT, Some(d))? {
+                    // The deadline is checked here too: XNU can report a stream writable while sendmsg keeps refusing.
+                    if Instant::now() >= d || !fdpass::wait_ready(sock, libc::POLLOUT, Some(d))? {
                         return Err(gone("the rest of a frame could not be written within the frame limit"));
                     }
                 }
@@ -325,7 +338,9 @@ mod laws {
     }
 
     fn open_fds() -> usize {
-        std::fs::read_dir("/proc/self/fd").expect("/proc/self/fd").count()
+        // /proc on Linux; /dev/fd on macOS (MP1), which has no /proc.
+        let dir = if cfg!(target_os = "linux") { "/proc/self/fd" } else { "/dev/fd" };
+        std::fs::read_dir(dir).expect(dir).count()
     }
 
     /// `n` distinct open files to send: the read ends of pipes whose write ends are closed at once.
@@ -333,7 +348,10 @@ mod laws {
         (0..n)
             .map(|_| {
                 let mut p = [0; 2];
-                assert_eq!(unsafe { libc::pipe2(p.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+                assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+                for fd in p {
+                    fdpass::set_cloexec(fd).unwrap();
+                }
                 fdpass::close_fd(p[1]);
                 p[0]
             })
@@ -667,16 +685,21 @@ mod laws {
     fn l7_exactly_the_limits_are_accepted_and_one_byte_more_is_refused_by_name() {
         let _s = serial();
         let p = pair();
-        framed::send_command(p.0, &vec![b'c'; super::TO_RUNTIME_MAX], &[], false).unwrap();
+        // Written from a thread: macOS's stream pair buffers 8 KiB (MP1), so a limit-sized frame waits for its reader.
+        let w = p.0;
+        let t = std::thread::spawn(move || framed::send_command(w, &vec![b'c'; super::TO_RUNTIME_MAX], &[], false));
         assert_eq!(framed::recv(p.1, super::TO_RUNTIME_MAX, false).unwrap().0.len(), super::TO_RUNTIME_MAX);
+        t.join().unwrap().unwrap();
         let e = framed::send_command(p.0, &vec![b'c'; super::TO_RUNTIME_MAX + 1], &[], false).unwrap_err();
         assert!(e.to_string().starts_with("frame-too-large"), "{e}");
         assert!(fdpass::recv_part(p.1, &mut [0u8; 8], 4, Some(Instant::now())).unwrap().is_none(), "a refused command wrote");
         framed::send_command(p.0, b"next", &[], false).unwrap();
         assert_eq!(framed::recv(p.1, super::TO_RUNTIME_MAX, false).unwrap().0, b"next");
         let q = pair();
-        framed::send(q.0, &vec![b'r'; super::TO_HOST_MAX], &[], super::TO_HOST_MAX, false).unwrap();
+        let w = q.0;
+        let t = std::thread::spawn(move || framed::send(w, &vec![b'r'; super::TO_HOST_MAX], &[], super::TO_HOST_MAX, false));
         assert_eq!(framed::recv_reply(q.1, false).unwrap().len(), super::TO_HOST_MAX);
+        t.join().unwrap().unwrap();
         raw(q.0, &framed::prefix_of(super::TO_HOST_MAX + 1), &[]);
         let e = framed::recv_reply(q.1, false).unwrap_err();
         assert!(super::closes_for_good(&e) && e.to_string().contains("frame-too-large"), "{e}");
@@ -692,7 +715,10 @@ mod laws {
             let mut l = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
             assert_eq!(unsafe { f(fd, &mut a as *mut _ as *mut libc::sockaddr, &mut l) }, 0);
             let path = a.sun_path.iter().take_while(|c| **c != 0).count();
-            (a.sun_family as i32, if (l as usize) > std::mem::size_of::<libc::sa_family_t>() { path.max(1) } else { 0 })
+            // Named: a path; or, on Linux, any address longer than the family (an abstract name starts with a 0 byte).
+            // XNU reports the whole sockaddr length even for an unnamed socket (MP1), so length alone is Linux's test.
+            let named = path > 0 || (cfg!(target_os = "linux") && (l as usize) > std::mem::size_of::<libc::sa_family_t>());
+            (a.sun_family as i32, if named { path.max(1) } else { 0 })
         };
         let (sf, sp) = get(libc::getsockname);
         let (pf, pp) = get(libc::getpeername);

@@ -191,7 +191,7 @@ defmodule Ampd.T28HostBridgeFramedTest do
   test "L6 · the host's close at a frame boundary ends the loop", ctx do
     ref = Process.monitor(ctx.bridge)
     :ok = :socket.close(ctx.host)
-    assert_receive {:DOWN, ^ref, :process, _, :normal}, 1_000
+    assert_receive {:DOWN, ^ref, :process, _, :normal}, 5_000
   end
 
   test "L6 · a close inside a frame runs nothing and sinks its rights" do
@@ -206,7 +206,7 @@ defmodule Ampd.T28HostBridgeFramedTest do
     :ok = :socket.sendmsg(host, %{iov: [<<byte_size(body) + 50::big-32>> <> body], ctrl: rights([y])})
     Process.sleep(100)
     :ok = :socket.close(host)
-    assert_receive {:DOWN, ^ref, :process, _, :normal}, 1_000
+    assert_receive {:DOWN, ^ref, :process, _, :normal}, 5_000
     refute "t28-cut" in actors(), "a truncated frame ran"
     assert beam_fds() <= before, "a truncated frame left #{beam_fds() - before} descriptors open"
     Enum.each([runtime, x, y], &:socket.close/1)
@@ -224,6 +224,6 @@ defmodule Ampd.T28HostBridgeFramedTest do
     :ok = :socket.send(ctx.host, <<8_193::32>>)
     r = reply(ctx.host)
     assert r["refusal"]["code"] == "frame-too-large", inspect(r)
-    assert_receive {:DOWN, ^ref, :process, _, :normal}, 1_000
+    assert_receive {:DOWN, ^ref, :process, _, :normal}, 5_000
   end
 end

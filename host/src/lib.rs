@@ -59,12 +59,12 @@ pub mod effect;
 #[cfg(target_os = "linux")]
 pub mod fdpass;
 
-/// T28: the bridge's transport. SEQPACKET on Linux; a framed stream on macOS and under the test feature `framed-bridge`.
+// T28: the bridge's transport (SEQPACKET on Linux; a framed stream on macOS and under the test feature
+// `framed-bridge`), behind the gate like `fdpass` until T29a lifts it. `spawn.rs` (posix_spawnp with
+// POSIX_SPAWN_CLOEXEC_DEFAULT, for ampd and engines on macOS) is not declared here: with bridge.rs and fdpass.rs it
+// builds and runs on macOS through superlane/t28/mac-probe (MP1), and T29a declares it.
+#[cfg(target_os = "linux")]
 pub mod bridge;
-
-/// T28 (C4): `posix_spawnp` with `POSIX_SPAWN_CLOEXEC_DEFAULT`, for ampd and engines on macOS.
-#[cfg(target_os = "macos")]
-pub mod spawn;
 #[cfg(target_os = "linux")]
 pub mod confine;
 #[cfg(target_os = "linux")]
@@ -3213,7 +3213,10 @@ mod t27b_stream {
     }
 }
 
-#[cfg(test)]
+// T28: a SEQPACKET peer by construction (fdpass::pair_seqpacket), so not built under the test feature framed-bridge,
+// whose bridge is the frame. T27b's laws run it on the default build; the framed bridge has T28's laws and the
+// framed verify.
+#[cfg(all(test, not(feature = "framed-bridge")))]
 mod t27b_runtime {
     //! T27b, Codex review 1, at the caller: a Runtime whose bridge is one end of a SEQPACKET pair this test holds (no
     //! ampd), so refusals, undecodable replies and timeouts are driven exactly. B9 (no constructor leaks a descriptor),

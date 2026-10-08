@@ -75,6 +75,16 @@ pub fn spawn_guard() -> RwLockWriteGuard<'static, ()> {
     FD_BIRTH.write().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Set `O_NONBLOCK` on `fd`'s open file description (T28: the host's end of a framed pair; XNU ignores MSG_DONTWAIT on a
+/// stream write that does not fit, MP1).
+pub fn set_nonblocking(fd: RawFd) -> io::Result<()> {
+    let f = unsafe { fcntl(fd, libc::F_GETFL) };
+    if f == -1 || unsafe { fcntl(fd, libc::F_SETFL, f | libc::O_NONBLOCK) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Set `FD_CLOEXEC` on `fd`.
 pub fn set_cloexec(fd: RawFd) -> io::Result<()> {
     if unsafe { fcntl(fd, F_SETFD, FD_CLOEXEC) } == -1 {
@@ -818,6 +828,10 @@ pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Opti
         if n < 0 {
             let e = io::Error::last_os_error();
             if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) {
+                // A spurious readiness after the deadline is the deadline: never spin past it (MP1).
+                if deadline.is_some_and(|d| Instant::now() >= d) {
+                    return Ok(None);
+                }
                 continue;
             }
             return Err(e);
@@ -868,7 +882,8 @@ pub fn wait_ready(sock: RawFd, events: i16, deadline: Option<Instant>) -> io::Re
 }
 
 // ------------------------------------------------------------------ T27 laws
-#[cfg(test)]
+// T28: Linux's (SEQPACKET, recv_msg and close_range); MP1 builds this file's tests on macOS too.
+#[cfg(all(test, target_os = "linux"))]
 mod t27 {
     use super::*;
 
@@ -982,7 +997,7 @@ mod t27 {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod t27b {
     //! T27b's laws on the host's side of the bridge (`superlane/t27b/TASK.md`): B3 (the sender's 8,192-byte limit,
     //! by name, nothing written), B5 (a cut reply is named, never read), B6 (a short `sendmsg` is never `Ok`) and B8 (a
