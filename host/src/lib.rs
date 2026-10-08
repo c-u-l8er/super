@@ -3969,6 +3969,80 @@ mod t27b_carrier_golden {
     }
 }
 
+
+// T28 (Codex review 1, finding 6): L10 through the Runtime, on the framed bridge (Linux under the test feature), where
+// the Runtime's own fields are reachable. Named so that `superlane/t28/laws.py`'s `bridge::laws` filter selects it with
+// the host's laws.
+#[cfg(all(test, feature = "framed-bridge"))]
+mod t28_bridge {
+    mod laws {
+        use super::super::*;
+        use crate::bridge::{self, framed};
+        use crate::fdpass::{self, Pair};
+        use std::os::unix::io::RawFd;
+        use std::sync::atomic::AtomicBool;
+        use std::time::{Duration, Instant};
+
+        fn raw(sock: RawFd, bytes: &[u8]) {
+            let mut sent = 0usize;
+            while sent < bytes.len() {
+                sent += fdpass::send_part(sock, &bytes[sent..], &[], 0).expect("a raw send");
+            }
+        }
+
+        fn wire(body: &[u8]) -> Vec<u8> {
+            [&framed::prefix_of(body.len())[..], body].concat()
+        }
+
+        /// A reply that stalls after its first byte fails the call within FRAME_REST_LIMIT plus a scheduling tolerance;
+        /// the bridge is marked closed, and the next call refuses at once without reading (a whole reply written after
+        /// the stall is still unread).
+        #[test]
+        fn l10_through_the_runtime_a_stalled_reply_closes_the_bridge_and_the_next_call_reads_nothing() {
+            let _s = fdpass::t27b_serial();
+            let Pair(ours, peer) = framed::pair().unwrap();
+            let dir = std::env::temp_dir().join(format!("t28-rt-{}-{ours}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let lock = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+            let rt = Runtime {
+                dir: dir.clone(),
+                world: WorldDir::Ephemeral(dir.join("world")),
+                world_lock: lock,
+                child,
+                bridge: ours,
+                bridge_lock: Mutex::new(()),
+                bridge_owed: AtomicBool::new(false),
+                bridge_closed: AtomicBool::new(false),
+                channels: Mutex::new(Vec::new()),
+                channel_inodes: Mutex::new(Vec::new()),
+                released: false,
+            };
+            let t = std::thread::spawn(move || {
+                let _command = framed::recv(peer, 65536, false).unwrap();
+                raw(peer, &[&framed::prefix_of(40)[..], b"{"].concat());
+                std::thread::sleep(bridge::FRAME_REST_LIMIT + Duration::from_secs(1));
+                raw(peer, &wire(b"{\"ok\":true}"));
+                fdpass::close_fd(peer);
+            });
+            let status = serde_json::json!({"schema": "bridge-command@1", "command": "runtime_status"});
+            let t0 = Instant::now();
+            let e = rt.bridge_call(&status).unwrap_err();
+            let took = t0.elapsed();
+            assert!(e.contains(bridge::GONE), "{e}");
+            assert!(took <= bridge::FRAME_REST_LIMIT + Duration::from_millis(1500), "the stalled reply took {took:?}");
+            t.join().unwrap();
+            let t1 = Instant::now();
+            let e = rt.bridge_call(&status).unwrap_err();
+            assert!(t1.elapsed() < Duration::from_millis(200), "the next call waited {:?}", t1.elapsed());
+            assert!(e.contains("closed the bridge"), "{e}");
+            let mut b = [0u8; 4];
+            let n = unsafe { libc::recv(ours, b.as_mut_ptr().cast(), b.len(), libc::MSG_PEEK | libc::MSG_DONTWAIT) };
+            assert!(n > 0, "the next call read the bridge (peek {n})");
+            drop(rt);
+        }
+    }
+}
 } // mod linux_layer
 
 #[cfg(target_os = "linux")]

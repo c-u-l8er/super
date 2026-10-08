@@ -781,7 +781,10 @@ defmodule Ampd.Transport do
     defp prefixed(body), do: <<byte_size(body)::big-32>> <> body
 
     defp frame(sock, buf) do
-      case take(sock, buf, 4) do
+      # Codex review 1, finding 1: the read that accepts rights takes exactly the frame's first byte; the other three
+      # prefix bytes are continuation reads (fill/6), where any right is late. On Linux a longer read can run on into a
+      # later send and collect ITS rights.
+      case take(sock, buf, 1) do
         :closed ->
           :closed
 
@@ -854,19 +857,22 @@ defmodule Ampd.Transport do
       case :socket.recvmsg(sock, want, @frame_ctrl_bytes, [], :infinity) do
         {:ok, msg} ->
           fds = rights(msg)
-          Enum.each(fds, &Ampd.NativeFd.set_cloexec/1)
 
-          case iov(msg) do
-            "" ->
-              sink(fds)
-              :closed
+          # Every arrival is marked close-on-exec at once; if one cannot be, all are closed and the read ends (Codex
+          # review 1, finding 4: its bytes were consumed, so the stream is no longer known to be aligned).
+          with :ok <- mark_arrivals(fds) do
+            case iov(msg) do
+              "" ->
+                sink(fds)
+                :closed
 
-            bytes when byte_size(bytes) > want ->
-              <<b::binary-size(want), rest::binary>> = bytes
-              {:ok, b, fds, ctrunc?(msg), rest}
+              bytes when byte_size(bytes) > want ->
+                <<b::binary-size(want), rest::binary>> = bytes
+                {:ok, b, fds, ctrunc?(msg), rest}
 
-            bytes ->
-              {:ok, bytes, fds, ctrunc?(msg), <<>>}
+              bytes ->
+                {:ok, bytes, fds, ctrunc?(msg), <<>>}
+            end
           end
 
         {:error, _} ->
@@ -878,6 +884,18 @@ defmodule Ampd.Transport do
     defp ctrunc?(_), do: false
 
     defp sink(fds), do: Enum.each(fds, &close_fd/1)
+
+    @doc false
+    # T28 (Codex review 1, finding 4): every arrival marked close-on-exec (`mark`, `Ampd.NativeFd.set_cloexec/1`), or,
+    # when one cannot be, every arrival closed and `:closed`. A test passes a `mark` that fails.
+    def mark_arrivals(fds, mark \\ &Ampd.NativeFd.set_cloexec/1) do
+      if Enum.all?(fds, &(mark.(&1) == :ok)) do
+        :ok
+      else
+        sink(fds)
+        :closed
+      end
+    end
 
     @doc """
     The bytes sent for `reply`: its JSON, or — when that is longer than the

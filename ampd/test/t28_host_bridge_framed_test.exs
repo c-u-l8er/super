@@ -5,10 +5,12 @@ defmodule Ampd.T28HostBridgeFramedTest do
 
     * L1 — frames several to a write are answered in that sequence; a zero-length frame is one frame, answered once;
       a reply is a big-endian u32 length and its body;
-    * L2 — frames A (no rights), B (one) and C (two), written before the loop runs, each bind exactly their own rights;
-      rights on a later byte than a frame's first are refused with that frame, and the next frame is unaffected;
+    * L2 — frames A (no rights), B (one) and C (two), written before the loop runs, each bind exactly their own rights
+      (traffic proves which socket each actor holds); rights on a later byte than a frame's first, prefix bytes 2-4
+      included, are refused with that frame, and the next frame is unaffected;
     * L3 — after 100 frames of 0 to 16 rights, with refusals and violations, the runtime's descriptors are back at
       their baseline; an over-limit frame's rights are sunk;
+    * L4 — an arrival that cannot be marked is closed with every other arrival, and `take/3` ends the read on it;
     * L5 — a frame delivered a byte at a time is one frame with its rights;
     * L6 — the host's close at a frame boundary ends the loop; a close inside a frame runs nothing and sinks its rights;
     * L7 — exactly 8,192 bytes is a command; 8,193 announced is refused before its body is read, and the bridge ends.
@@ -68,6 +70,31 @@ defmodule Ampd.T28HostBridgeFramedTest do
   defp beam_fds, do: length(File.ls!(if :os.type() == {:unix, :darwin}, do: "/dev/fd", else: "/proc/self/fd"))
   defp actors, do: Ampd.Bridge.list() |> Enum.map(&(&1["actor"] || &1[:actor]))
 
+  # The socket the runtime adopted for `actor`, from the bridge's own state.
+  defp adopted(actor) do
+    :sys.get_state(Ampd.Bridge).channels |> Map.values() |> Enum.find_value(&(&1.meta["actor"] == actor && &1.sock))
+  end
+
+  # Whether `probe`, written on `from`, comes out of `at` within 2 s (whatever else the channel says first).
+  defp heard(at, from, probe) do
+    :ok = :socket.send(from, probe)
+    listen(at, probe, <<>>, System.monotonic_time(:millisecond) + 2_000)
+  end
+
+  defp listen(at, probe, acc, until) do
+    left = until - System.monotonic_time(:millisecond)
+
+    cond do
+      String.contains?(acc, probe) -> true
+      left <= 0 -> false
+      true ->
+        case :socket.recv(at, 0, left) do
+          {:ok, b} -> listen(at, probe, acc <> b, until)
+          _ -> false
+        end
+    end
+  end
+
   # ---- L1
 
   test "L1 · frames several to a write are answered in that sequence", ctx do
@@ -109,7 +136,30 @@ defmodule Ampd.T28HostBridgeFramedTest do
     assert a["ok"] == true and Map.has_key?(a, "runtime"), "A: #{inspect(a)}"
     assert b["ok"] == true and b["actor"] == "t28-b", "B: #{inspect(b)}"
     assert c["ok"] == true and c["actor"] == "t28-c", "C: #{inspect(c)}"
+    # Traffic proves which socket each actor holds (Codex review 1, finding 6): bytes written on an actor's adopted end
+    # come out of the other end of the pair whose right was sent: b1x for B, c1x (C's first right) for C.
+    assert heard(b1x, adopted("t28-b"), "probe-b"), "t28-b does not hold the right B sent"
+    assert heard(c1x, adopted("t28-c"), "probe-c"), "t28-c does not hold C's first right"
     stop(bridge, [host, runtime, b1x, b1y, c1x, c1y, c2x, c2y])
+  end
+
+  test "L2 · rights on prefix byte 2, 3 or 4 are refused with that frame; the next frame is unaffected" do
+    for k <- 1..3 do
+      Ampd.Bridge.reset()
+      {runtime, host} = Ampd.Transport.socketpair(:stream)
+      {x, y} = Ampd.Transport.socketpair(:stream)
+      body = JSON.encode!(cmd("bind_agent_channel", %{"actor" => "t28-prefix-#{k}"}))
+      <<pre::binary-size(k), rest::binary>> = <<byte_size(body)::big-32>>
+      # Queued before the loop runs, so on Linux one longer read would collect the right with the frame's first byte.
+      :ok = :socket.send(host, pre)
+      :ok = :socket.sendmsg(host, %{iov: [rest <> body], ctrl: rights([y])})
+      :ok = :socket.send(host, frame(cmd("runtime_status")))
+      {:ok, bridge} = HostBridge.start(runtime)
+      assert reply(host)["refusal"]["code"] == "invalid-bridge-frame", "prefix byte #{k + 1}"
+      refute "t28-prefix-#{k}" in actors(), "a right on prefix byte #{k + 1} was bound"
+      assert reply(host)["ok"] == true, "prefix byte #{k + 1}: the next frame"
+      stop(bridge, [host, runtime, x, y])
+    end
   end
 
   test "L2 · rights on a later byte than a frame's first are refused with that frame; the next frame is unaffected", ctx do
@@ -167,6 +217,29 @@ defmodule Ampd.T28HostBridgeFramedTest do
     Process.sleep(100)
     assert beam_fds() <= before, "an over-limit frame left #{beam_fds() - before} descriptors open"
     stop(bridge, [host, runtime, x, y])
+  end
+
+  # ---- L4
+
+  test "L4 · an arrival that cannot be marked is closed with every other arrival, and the read ends" do
+    {a, b} = Ampd.Transport.socketpair(:stream)
+    {x, y} = Ampd.Transport.socketpair(:stream)
+    {p, q} = Ampd.Transport.socketpair(:stream)
+    :ok = :socket.sendmsg(a, %{iov: ["r"], ctrl: rights([y, q])})
+    {:ok, msg} = :socket.recvmsg(b, 1, 64, [], 3_000)
+    fds = for %{type: :rights, data: d} <- msg.ctrl, <<fd::native-32 <- d>>, do: fd
+    assert length(fds) == 2
+    assert HostBridge.mark_arrivals(fds, fn _fd -> {:error, :eio} end) == :closed
+    assert Enum.all?(fds, &(Ampd.NativeFd.state(&1) == :closed)), "an arrival that could not be marked was kept"
+    assert HostBridge.mark_arrivals([], fn _fd -> {:error, :eio} end) == :ok
+    Enum.each([a, b, x, y, p, q], &:socket.close/1)
+  end
+
+  test "L4 · the framed reader's take/3 ends the read when an arrival cannot be marked (its text)" do
+    src = File.read!(Path.join(__DIR__, "../lib/ampd/transport.ex"))
+    [_, from_take] = String.split(src, "    defp take(sock, <<>>, want) do\n", parts: 2)
+    [take, _] = String.split(from_take, "\n    end\n", parts: 2)
+    assert take =~ "with :ok <- mark_arrivals(fds) do", "take/3 does not end the read on a failed mark"
   end
 
   # ---- L5

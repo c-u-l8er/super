@@ -191,6 +191,11 @@ pub mod framed {
         let mut pending = true;
         let mut until: Option<Instant> = None;
         while sent < frame.len() {
+            // Codex review 1, finding 3: once the first byte has moved, the rest deadline is checked before every pass,
+            // so neither writes that keep succeeding nor interrupted ones can outlive FRAME_REST_LIMIT.
+            if until.is_some_and(|d| Instant::now() >= d) {
+                return Err(gone("the frame limit passed before the rest of a frame was written"));
+            }
             let part = &frame[sent..];
             let carry: &[RawFd] = if pending { fds } else { &[] };
             let flags = if nowait || sent > 0 { libc::MSG_DONTWAIT } else { 0 };
@@ -201,6 +206,8 @@ pub mod framed {
                     pending = pending && carry.is_empty();
                     until.get_or_insert_with(|| Instant::now() + FRAME_REST_LIMIT);
                 }
+                // A no-wait send interrupted before its first byte returns to its caller, whose own deadline decides.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted && sent == 0 && nowait => return Err(e),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock && sent == 0 && nowait => return Err(e),
                 // Not even the first byte fits, and the caller waits: for room, for as long as it takes (O_NONBLOCK).
@@ -210,7 +217,11 @@ pub mod framed {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock && sent > 0 => {
                     let d = until.expect("set by the first byte");
                     // The deadline is checked here too: XNU can report a stream writable while sendmsg keeps refusing.
-                    if Instant::now() >= d || !fdpass::wait_ready(sock, libc::POLLOUT, Some(d))? {
+                    // A failed wait after the first byte is the bridge gone (Codex review 1, finding 4).
+                    if Instant::now() >= d
+                        || !fdpass::wait_ready(sock, libc::POLLOUT, Some(d))
+                            .map_err(|e| gone(format!("the wait to write a frame's rest failed: {e}")))?
+                    {
                         return Err(gone("the rest of a frame could not be written within the frame limit"));
                     }
                 }
@@ -248,7 +259,11 @@ pub mod framed {
     /// over `limit` is refused before the body is read and closes the bridge for good (the stream is unaligned).
     pub fn recv(sock: RawFd, limit: usize, nowait: bool) -> io::Result<(Vec<u8>, Vec<RawFd>)> {
         let mut prefix = [0u8; 4];
-        let first = fdpass::recv_part(sock, &mut prefix, RIGHTS_ROOM, if nowait { Some(Instant::now()) } else { None })?;
+        // Codex review 1, finding 1: the read that accepts rights takes exactly the frame's first byte. On Linux a longer
+        // read can run on into a later send and collect ITS rights; the other prefix bytes are continuation reads, where
+        // any right is late. A first read that consumed its byte but could not mark an arrival leaves the bridge gone.
+        let first = fdpass::recv_part(sock, &mut prefix[..1], RIGHTS_ROOM, if nowait { Some(Instant::now()) } else { None })
+            .map_err(|e| if e.to_string().starts_with(fdpass::UNMARKED) { gone(e) } else { e })?;
         let Some(first) = first else { return Err(io::Error::from(io::ErrorKind::WouldBlock)) };
         if first.n == 0 {
             return Err(gone("the peer closed the bridge at a frame boundary"));
@@ -293,7 +308,23 @@ pub mod framed {
     /// One read of the rest of a frame, waiting no later than `until`. A close here, or no byte by `until`, ends the
     /// bridge for good, and every right the frame brought so far is sunk.
     fn rest(sock: RawFd, buf: &mut [u8], until: Instant, rights: &[RawFd], late: &[RawFd]) -> io::Result<fdpass::Part> {
-        match fdpass::recv_part(sock, buf, RIGHTS_ROOM, Some(until))? {
+        // Codex review 1, finding 3: the rest deadline before every continuation read, not only through poll.
+        if Instant::now() >= until {
+            sink(rights);
+            sink(late);
+            return Err(gone("the frame limit passed before the rest of a frame arrived"));
+        }
+        // Codex review 1, finding 4: a read that fails mid-frame sinks every right the frame brought, and the bridge is
+        // gone (the frame was begun).
+        let got = match fdpass::recv_part(sock, buf, RIGHTS_ROOM, Some(until)) {
+            Ok(got) => got,
+            Err(e) => {
+                sink(rights);
+                sink(late);
+                return Err(gone(format!("a read of a frame's rest failed: {e}")));
+            }
+        };
+        match got {
             Some(p) if p.n > 0 => Ok(p),
             Some(p) => {
                 sink(rights);
@@ -320,9 +351,65 @@ mod laws {
     //! caught by its own law alone: L3 only counts descriptors, L2 only binds them to frames, and only L1 writes the
     //! prefix by hand (the other raw peers use `framed::prefix_of`).
     use super::framed;
-    use crate::fdpass::{self, Pair};
+    use crate::fdpass::{self, Fault, Pair};
     use std::os::unix::io::RawFd;
+    use std::os::unix::thread::JoinHandleExt;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
     use std::time::{Duration, Instant};
+
+    /// Scheduling tolerance past FRAME_REST_LIMIT for the laws that bound a frame's rest from above.
+    const BOUND: Duration = Duration::from_millis(1500);
+
+    /// Make the calling thread's k-th `fault` fail with `errno` (fdpass's test seam).
+    fn inject(fault: Fault, k: usize, errno: i32) {
+        fdpass::INJECT.with(|c| c.set(Some((fault, k, errno))));
+    }
+
+    fn clear_inject() {
+        fdpass::INJECT.with(|c| c.set(None));
+    }
+
+    extern "C" fn on_usr1(_: libc::c_int) {}
+
+    struct Thread(libc::pthread_t);
+    unsafe impl Send for Thread {}
+
+    /// `SIGUSR1`, without `SA_RESTART`, to `target` every millisecond until the flag is set; the count sent.
+    fn usr1_storm(target: libc::pthread_t) -> (Arc<AtomicBool>, std::thread::JoinHandle<usize>) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| unsafe {
+            let mut sa: libc::sigaction = std::mem::zeroed();
+            sa.sa_sigaction = on_usr1 as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            libc::sigemptyset(&mut sa.sa_mask);
+            sa.sa_flags = 0;
+            assert_eq!(libc::sigaction(libc::SIGUSR1, &sa, std::ptr::null_mut()), 0);
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let (s2, t) = (stop.clone(), Thread(target));
+        let h = std::thread::spawn(move || {
+            let t = t;
+            let mut n = 0usize;
+            while !s2.load(Ordering::SeqCst) {
+                unsafe { libc::pthread_kill(t.0, libc::SIGUSR1) };
+                n += 1;
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            n
+        });
+        (stop, h)
+    }
+
+    /// Small socket buffers, so a 60 KiB frame waits for its reader on Linux as it does on macOS.
+    fn small_buffers(p: &Pair) {
+        let n: libc::c_int = 4096;
+        for (fd, opt) in [(p.0, libc::SO_SNDBUF), (p.1, libc::SO_RCVBUF)] {
+            let rc = unsafe {
+                libc::setsockopt(fd, libc::SOL_SOCKET, opt, &n as *const _ as *const libc::c_void, std::mem::size_of::<libc::c_int>() as libc::socklen_t)
+            };
+            assert_eq!(rc, 0, "setsockopt");
+        }
+    }
 
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         fdpass::t27b_serial()
@@ -491,6 +578,28 @@ mod laws {
         close_pair(&p);
     }
 
+    #[test]
+    fn l2_rights_on_prefix_byte_2_3_or_4_are_refused_with_that_frame_and_the_next_frame_is_unaffected() {
+        let _s = serial();
+        for k in 1..4usize {
+            let p = pair();
+            let r = pipes(1);
+            let body = b"prefix rights";
+            let pre = framed::prefix_of(body.len());
+            // The bytes before prefix byte k + 1 plain, then the rest with the right: all queued before the reader runs,
+            // so on Linux one longer read would collect the right together with the frame's first byte.
+            raw(p.0, &pre[..k], &[]);
+            raw(p.0, &[&pre[k..], &body[..]].concat(), &r);
+            framed::send(p.0, b"next", &[], 4096, false).unwrap();
+            let e = framed::recv(p.1, 4096, false).unwrap_err();
+            assert!(e.to_string().starts_with("invalid-bridge-frame"), "prefix byte {}: {e}", k + 1);
+            assert!(!super::closes_for_good(&e), "prefix byte {}: the stream is still aligned: {e}", k + 1);
+            assert_eq!(framed::recv(p.1, 4096, false).unwrap().0, b"next", "prefix byte {}", k + 1);
+            sink(&r);
+            close_pair(&p);
+        }
+    }
+
     // ---- L3 · no descriptor lost, leaked or duplicated
 
     #[test]
@@ -542,9 +651,39 @@ mod laws {
     }
 
     #[test]
+    fn l3_a_failed_read_or_an_unmarkable_arrival_mid_frame_leaves_no_descriptor() {
+        let _s = serial();
+        let base = open_fds();
+        // A continuation read that fails (its recvmsg, then its poll), and an arrival on the first read that cannot be
+        // marked: every right the frame brought is closed.
+        for (fault, k) in [(Fault::Recvmsg, 1), (Fault::Poll, 1), (Fault::Mark, 0)] {
+            let p = pair();
+            let r = pipes(3);
+            raw(p.0, &wire(b"a frame with three rights"), &r);
+            sink(&r);
+            inject(fault, k, libc::EIO);
+            let _ = framed::recv(p.1, 4096, false);
+            clear_inject();
+            close_pair(&p);
+        }
+        // A late right whose mark fails.
+        let p = pair();
+        let r = pipes(2);
+        raw(p.0, &framed::prefix_of(9), &[]);
+        raw(p.0, b"violation", &r);
+        sink(&r);
+        inject(Fault::Mark, 0, libc::EIO);
+        let _ = framed::recv(p.1, 4096, false);
+        clear_inject();
+        close_pair(&p);
+        assert_eq!(open_fds(), base, "a failed read or mark kept descriptors");
+    }
+
+    #[test]
     fn l3_a_60_kib_frame_with_one_right_cut_into_short_writes_delivers_exactly_one_right() {
         let _s = serial();
         let p = pair();
+        small_buffers(&p);
         let r = pipes(1);
         let (w, one) = (p.0, r[0]);
         let t = std::thread::spawn(move || {
@@ -553,6 +692,9 @@ mod laws {
             fdpass::SHORT_SEND.with(|c| c.set(None));
             fdpass::shutdown_fd(w);
         });
+        // Under signals (SIGUSR1 every millisecond, no SA_RESTART) while the reader stalls.
+        let (stop, storm) = usr1_storm(t.as_pthread_t() as libc::pthread_t);
+        std::thread::sleep(Duration::from_millis(300));
         let (mut rights, mut buf) = (0usize, vec![0u8; 4096]);
         while let Some(part) = fdpass::recv_part(p.1, &mut buf, 64, soon()).unwrap() {
             if part.n == 0 {
@@ -561,6 +703,8 @@ mod laws {
             rights += part.fds.len();
             sink(&part.fds);
         }
+        stop.store(true, Ordering::SeqCst);
+        assert!(storm.join().unwrap() > 0, "no signal was sent");
         t.join().unwrap();
         assert_eq!(rights, 1, "rights that arrived for one right sent");
         sink(&r);
@@ -585,6 +729,32 @@ mod laws {
         sink(&got);
         sink(&r);
         close_pair(&p);
+    }
+
+    #[test]
+    fn l4_an_arrival_that_cannot_be_marked_is_never_returned() {
+        let _s = serial();
+        let p = pair();
+        let r = pipes(2);
+        raw(p.0, &wire(b"x"), &r);
+        inject(Fault::Mark, 1, libc::EIO);
+        let got = framed::recv(p.1, 4096, false);
+        clear_inject();
+        assert!(got.is_err(), "the framed receive returned an arrival it could not mark: {got:?}");
+        close_pair(&p);
+        // The battery's receiver (it marks by fcntl where there is no MSG_CMSG_CLOEXEC: macOS, and the test feature).
+        if cfg!(any(target_os = "macos", feature = "framed-bridge")) {
+            let q = fdpass::pair_stream().unwrap();
+            raw(q.0, b"y", &r);
+            let base = open_fds();
+            inject(Fault::Mark, 0, libc::EIO);
+            let got = fdpass::recv_msg_with_fds(q.1, 64, 8);
+            clear_inject();
+            assert!(got.is_err(), "recv_msg_with_fds returned an arrival it could not mark: {got:?}");
+            assert_eq!(open_fds(), base, "recv_msg_with_fds kept the arrivals it could not mark");
+            close_pair(&q);
+        }
+        sink(&r);
     }
 
     // ---- L5 · a short read is never a frame; a short write is finished
@@ -618,15 +788,38 @@ mod laws {
         let _s = serial();
         let p = pair();
         let body: Vec<u8> = (0..60 * 1024).map(|i| (i % 251) as u8).collect();
+        small_buffers(&p);
         let (w, b2) = (p.0, body.clone());
         let t = std::thread::spawn(move || {
             fdpass::SHORT_SEND.with(|c| c.set(Some(997)));
             framed::send(w, &b2, &[], 65536, false).unwrap();
             fdpass::SHORT_SEND.with(|c| c.set(None));
         });
+        // Under signals (SIGUSR1 every millisecond, no SA_RESTART) while the reader stalls.
+        let (stop, storm) = usr1_storm(t.as_pthread_t() as libc::pthread_t);
+        std::thread::sleep(Duration::from_millis(300));
         let (got, _) = framed::recv(p.1, 65536, false).unwrap();
+        stop.store(true, Ordering::SeqCst);
+        assert!(storm.join().unwrap() > 0, "no signal was sent");
         t.join().unwrap();
         assert!(got == body, "the frame did not arrive byte-identical");
+        close_pair(&p);
+    }
+
+    #[test]
+    fn l5_an_eintr_before_any_byte_is_retried_with_the_rights() {
+        let _s = serial();
+        let p = pair();
+        let r = pipes(1);
+        let want = inos(&r);
+        inject(Fault::Send, 0, libc::EINTR);
+        framed::send(p.0, b"retried", &r, 4096, false).unwrap();
+        clear_inject();
+        let (got, fds) = framed::recv(p.1, 4096, false).unwrap();
+        assert_eq!(got, b"retried");
+        assert_eq!(inos(&fds), want, "the retry after EINTR did not carry the right");
+        sink(&fds);
+        sink(&r);
         close_pair(&p);
     }
 
@@ -775,8 +968,10 @@ mod laws {
         raw(p.0, &[&framed::prefix_of(10)[..], b"1"].concat(), &[]);
         let t0 = Instant::now();
         let e = framed::recv(p.1, 4096, false).unwrap_err();
+        let took = t0.elapsed();
         assert!(super::closes_for_good(&e), "{e}");
-        assert!(t0.elapsed() + Duration::from_millis(100) >= super::FRAME_REST_LIMIT, "closed early: {:?}", t0.elapsed());
+        assert!(took + Duration::from_millis(100) >= super::FRAME_REST_LIMIT, "closed early: {took:?}");
+        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "closed late: {took:?}");
         close_pair(&p);
     }
 
@@ -784,10 +979,143 @@ mod laws {
     fn l10_a_sender_whose_frame_cannot_finish_within_the_limit_closes_the_bridge_for_good() {
         let _s = serial();
         let p = pair();
-        // Only how an error is classed is judged here: the bytes of a cut write are L5's.
-        if let Err(e) = framed::send(p.0, &vec![1u8; 4 << 20], &[], usize::MAX, true) {
-            assert!(super::closes_for_good(&e), "a frame begun and not finished left the bridge open: {e}");
+        // Nothing reads, so a 4 MiB frame cannot finish: the send must fail, GONE, within the bound. (The bytes of a cut
+        // write are L5's.)
+        let t0 = Instant::now();
+        let e = framed::send(p.0, &vec![1u8; 4 << 20], &[], usize::MAX, true).expect_err("a 4 MiB frame finished with no reader");
+        let took = t0.elapsed();
+        assert!(super::closes_for_good(&e), "a frame begun and not finished left the bridge open: {e}");
+        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the sender gave up late: {took:?}");
+        close_pair(&p);
+    }
+
+    #[test]
+    fn l10_a_receiver_whose_reads_keep_succeeding_slowly_closes_at_the_limit() {
+        let _s = serial();
+        let p = pair();
+        // The whole frame is queued; the receiver takes one byte per read after a 40 ms pause (a test seam): ~8 s.
+        raw(p.0, &wire(&[5u8; 200]), &[]);
+        fdpass::SLOW_RECV.with(|c| c.set(Some((1, Duration::from_millis(40)))));
+        let t0 = Instant::now();
+        let r = framed::recv(p.1, 4096, false);
+        fdpass::SLOW_RECV.with(|c| c.set(None));
+        let took = t0.elapsed();
+        // Only the bound is judged: a frame begun is finished within it, or the bridge is closed for good.
+        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the rest took {took:?}");
+        if let Err(e) = &r {
+            assert!(super::closes_for_good(e), "{e}");
         }
+        close_pair(&p);
+    }
+
+    #[test]
+    fn l10_a_sender_whose_writes_keep_succeeding_slowly_closes_at_the_limit() {
+        let _s = serial();
+        let p = pair();
+        let rd = p.1;
+        let reader = std::thread::spawn(move || {
+            let mut b = vec![0u8; 65536];
+            while let Ok(Some(x)) = fdpass::recv_part(rd, &mut b, 4, Some(Instant::now() + Duration::from_secs(10))) {
+                if x.n == 0 {
+                    break;
+                }
+            }
+        });
+        // At most 1,000 bytes per write after a 40 ms pause (test seams), and a reader that keeps up: ~8 s of writes that
+        // all succeed.
+        fdpass::SHORT_SEND.with(|c| c.set(Some(1000)));
+        fdpass::SLOW_SEND.with(|c| c.set(Some(Duration::from_millis(40))));
+        let t0 = Instant::now();
+        let r = framed::send(p.0, &vec![3u8; 200 * 1000], &[], usize::MAX, false);
+        let took = t0.elapsed();
+        fdpass::SHORT_SEND.with(|c| c.set(None));
+        fdpass::SLOW_SEND.with(|c| c.set(None));
+        fdpass::shutdown_fd(p.0);
+        reader.join().unwrap();
+        // Only the bound is judged.
+        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the rest took {took:?}");
+        if let Err(e) = &r {
+            assert!(super::closes_for_good(e), "{e}");
+        }
+        close_pair(&p);
+    }
+
+    #[test]
+    fn l10_a_bounded_receive_never_waits_on_the_fork_lock_past_its_bound() {
+        let _s = serial();
+        // A no-wait receive, a frame waiting, while a spawn holds the fork lock: WouldBlock at once, the frame untouched.
+        let p = pair();
+        raw(p.0, &wire(b"waiting"), &[]);
+        let rd = p.1;
+        let guard = fdpass::spawn_guard();
+        let t0 = Instant::now();
+        let t = std::thread::spawn(move || framed::recv(rd, 4096, true).map(|x| x.0));
+        while !t.is_finished() && t0.elapsed() < Duration::from_millis(1500) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let took = t0.elapsed();
+        drop(guard);
+        let r = t.join().unwrap();
+        assert!(took <= Duration::from_millis(300), "the no-wait receive waited {took:?} on the fork lock");
+        assert_eq!(r.unwrap_err().kind(), std::io::ErrorKind::WouldBlock);
+        assert_eq!(framed::recv(p.1, 4096, false).unwrap().0, b"waiting", "the waiting frame was touched");
+        close_pair(&p);
+        // A frame's rest that arrives while the lock is held: the bridge closes at the limit.
+        let q = pair();
+        raw(q.0, &[&framed::prefix_of(6)[..], b"a"].concat(), &[]);
+        let rd = q.1;
+        let t0 = Instant::now();
+        let t = std::thread::spawn(move || framed::recv(rd, 4096, false));
+        std::thread::sleep(Duration::from_millis(300));
+        let guard = fdpass::spawn_guard();
+        raw(q.0, b"bcdef", &[]);
+        while !t.is_finished() && t0.elapsed() < super::FRAME_REST_LIMIT + Duration::from_secs(3) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let took = t0.elapsed();
+        drop(guard);
+        let r = t.join().unwrap();
+        assert!(took <= super::FRAME_REST_LIMIT + BOUND, "the rest waited {took:?} on the fork lock");
+        assert!(r.as_ref().is_err_and(super::closes_for_good), "{:?}", r.map(|x| x.0));
+        close_pair(&q);
+    }
+
+    #[test]
+    fn l10_a_hard_error_after_a_frames_first_byte_closes_the_bridge_for_good() {
+        let _s = serial();
+        // Receiving: a continuation read that fails (its recvmsg, then its poll); a first read that cannot mark its right.
+        for (fault, k) in [(Fault::Recvmsg, 1), (Fault::Poll, 1), (Fault::Mark, 0)] {
+            let p = pair();
+            let r = pipes(1);
+            raw(p.0, &wire(b"begun"), &r);
+            sink(&r);
+            inject(fault, k, libc::EIO);
+            let e = framed::recv(p.1, 4096, false).unwrap_err();
+            clear_inject();
+            assert!(super::closes_for_good(&e), "{fault:?}: {e}");
+            close_pair(&p);
+        }
+        // Sending: the wait for room after the first byte fails.
+        let p = pair();
+        inject(Fault::Poll, 0, libc::EIO);
+        let e = framed::send(p.0, &vec![2u8; 4 << 20], &[], usize::MAX, false).unwrap_err();
+        clear_inject();
+        assert!(super::closes_for_good(&e), "{e}");
+        close_pair(&p);
+    }
+
+    #[test]
+    fn l10_a_no_wait_send_interrupted_before_its_first_byte_returns_to_its_caller() {
+        let _s = serial();
+        let p = pair();
+        inject(Fault::Send, 0, libc::EINTR);
+        let e = framed::send(p.0, b"interrupted", &[], 4096, true).unwrap_err();
+        clear_inject();
+        assert_eq!(e.kind(), std::io::ErrorKind::Interrupted, "{e}");
+        assert!(!super::closes_for_good(&e), "{e}");
+        assert!(fdpass::recv_part(p.1, &mut [0u8; 8], 4, Some(Instant::now())).unwrap().is_none(), "an interrupted send wrote");
+        framed::send(p.0, b"usable", &[], 4096, true).unwrap();
+        assert_eq!(framed::recv(p.1, 4096, false).unwrap().0, b"usable");
         close_pair(&p);
     }
 }

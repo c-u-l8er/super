@@ -11,8 +11,8 @@
 
 use std::io;
 use std::os::unix::io::RawFd;
-use std::sync::{RwLock, RwLockWriteGuard};
-use std::time::Instant;
+use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard, TryLockError};
+use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------- libc
 //
@@ -73,6 +73,20 @@ pub static FD_BIRTH: RwLock<()> = RwLock::new(());
 /// spawn sites through it).
 pub fn spawn_guard() -> RwLockWriteGuard<'static, ()> {
     FD_BIRTH.write().unwrap_or_else(|p| p.into_inner())
+}
+
+/// The fork lock for reading, no later than `deadline` (T28, Codex review 1, finding 2): without one, as long as it
+/// takes; with one, tried until it passes, and `None` then, so a bounded read never waits on a spawn past its bound.
+fn birth_by(deadline: Option<Instant>) -> Option<RwLockReadGuard<'static, ()>> {
+    let Some(d) = deadline else { return Some(FD_BIRTH.read().unwrap_or_else(|p| p.into_inner())) };
+    loop {
+        match FD_BIRTH.try_read() {
+            Ok(g) => return Some(g),
+            Err(TryLockError::Poisoned(p)) => return Some(p.into_inner()),
+            Err(TryLockError::WouldBlock) if Instant::now() >= d => return None,
+            Err(TryLockError::WouldBlock) => std::thread::sleep(Duration::from_micros(200)),
+        }
+    }
 }
 
 /// Set `O_NONBLOCK` on `fd`'s open file description (T28: the host's end of a framed pair; XNU ignores MSG_DONTWAIT on a
@@ -499,6 +513,58 @@ thread_local! {
     pub(crate) static SHORT_SEND: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
 }
 
+// T28's seams (Codex review 1, findings 3 and 4): a test can make the calling thread's k-th poll, recvmsg, arrival mark or
+// sendmsg on the framed path fail with an errno (`Some((fault, k, errno))`; k = 0 fails the next), and pause before each
+// framed sendmsg, so the error paths and the rest deadline are driven exactly. Absent from every non-test build.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static INJECT: std::cell::Cell<Option<(Fault, usize, i32)>> = const { std::cell::Cell::new(None) };
+    pub(crate) static SLOW_SEND: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
+    pub(crate) static SLOW_RECV: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
+}
+
+/// Where a test may inject a failure (T28; only test builds' `INJECT` ever names one).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Fault {
+    Poll,
+    Recvmsg,
+    Mark,
+    Send,
+}
+
+#[cfg(test)]
+fn injected(f: Fault) -> Option<io::Error> {
+    INJECT.with(|c| match c.get() {
+        Some((g, 0, errno)) if g == f => {
+            c.set(None);
+            Some(io::Error::from_raw_os_error(errno))
+        }
+        Some((g, k, errno)) if g == f => {
+            c.set(Some((g, k - 1, errno)));
+            None
+        }
+        _ => None,
+    })
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn injected(_f: Fault) -> Option<io::Error> {
+    None
+}
+
+/// Mark one arrival close-on-exec (or fail as a test injected).
+fn mark_arrival(fd: RawFd) -> io::Result<()> {
+    match injected(Fault::Mark) {
+        Some(e) => Err(e),
+        None => set_cloexec(fd),
+    }
+}
+
+/// The prefix of the error when an arrival could not be marked: its bytes were consumed and every arrival is closed, so
+/// a framed caller treats the bridge as closed for good (Codex review 1, finding 4).
+pub(crate) const UNMARKED: &str = "arrival-unmarked";
+
 // T27b round 3's seam (Codex review 2, finding 7): a test can make a socketpair fail as EMFILE does, after `k` more
 // succeed (`Some(k)`; `Some(0)` fails the next), to show what a constructor holds when a later allocation fails.
 // Absent from every non-test build.
@@ -744,9 +810,15 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
             }
         }
     }
+    // Codex review 1, finding 4: an arrival that cannot be marked is never returned; every arrival is closed.
     #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
     for f in &fds {
-        let _ = set_cloexec(*f);
+        if let Err(e) = mark_arrival(*f) {
+            for g in &fds {
+                close_fd(*g);
+            }
+            return Err(io::Error::new(e.kind(), format!("{UNMARKED}: a received descriptor could not be marked; all are closed: {e}")));
+        }
     }
 
     if (msg.msg_flags & MSG_CTRUNC) != 0 {
@@ -774,6 +846,13 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
 /// byte), none otherwise. Returns how many bytes it took. Written beside, not into, the SEQPACKET senders above, which
 /// L8 holds byte for byte.
 pub(crate) fn send_part(sock: RawFd, bytes: &[u8], fds: &[RawFd], flags: i32) -> io::Result<usize> {
+    #[cfg(test)]
+    if let Some(d) = SLOW_SEND.with(|c| c.get()) {
+        std::thread::sleep(d);
+    }
+    if let Some(e) = injected(Fault::Send) {
+        return Err(e);
+    }
     if fds.is_empty() {
         return send_plain_count_flags(sock, bytes, flags);
     }
@@ -819,11 +898,24 @@ pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Opti
         if !wait_ready(sock, libc::POLLIN, deadline)? {
             return Ok(None);
         }
-        let _birth = FD_BIRTH.read().unwrap_or_else(|p| p.into_inner());
-        let mut iov = iovec(buf);
+        // Codex review 1, finding 2: by the deadline, so a spawn holding the writer lock cannot hold a bounded read.
+        let Some(_birth) = birth_by(deadline) else { return Ok(None) };
+        // Test builds only: at most `n` bytes per read, after a pause (SLOW_RECV).
+        #[cfg(test)]
+        let cap = SLOW_RECV.with(|c| c.get()).map(|(n, d)| {
+            std::thread::sleep(d);
+            n
+        });
+        #[cfg(not(test))]
+        let cap: Option<usize> = None;
+        let len = cap.map_or(buf.len(), |n| n.min(buf.len()));
+        let mut iov = iovec(&mut buf[..len]);
         let space = rights_space(room);
         let mut ctrl = vec![0u8; space];
         let mut msg = msghdr(&mut iov, ctrl.as_mut_ptr(), space);
+        if let Some(e) = injected(Fault::Recvmsg) {
+            return Err(e);
+        }
         let n = unsafe { recvmsg(sock, &mut msg, libc::MSG_DONTWAIT) };
         if n < 0 {
             let e = io::Error::last_os_error();
@@ -852,8 +944,14 @@ pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Opti
                 c = libc::CMSG_NXTHDR(&msg, c);
             }
         }
+        // Codex review 1, finding 4: an arrival that cannot be marked is never kept; every arrival is closed.
         for fd in &fds {
-            set_cloexec(*fd)?;
+            if let Err(e) = mark_arrival(*fd) {
+                for g in &fds {
+                    close_fd(*g);
+                }
+                return Err(io::Error::new(e.kind(), format!("{UNMARKED}: an arrival could not be marked; all are closed: {e}")));
+            }
         }
         return Ok(Some(Part { n: n as usize, fds, ctrunc: msg.msg_flags & libc::MSG_CTRUNC != 0 }));
     }
@@ -868,6 +966,9 @@ pub fn wait_ready(sock: RawFd, events: i16, deadline: Option<Instant>) -> io::Re
             Some(d) => d.saturating_duration_since(Instant::now()).as_nanos().div_ceil(1_000_000).min(i32::MAX as u128) as i32,
         };
         let mut p = libc::pollfd { fd: sock, events, revents: 0 };
+        if let Some(e) = injected(Fault::Poll) {
+            return Err(e);
+        }
         match unsafe { libc::poll(&mut p, 1, ms) } {
             0 => return Ok(false),
             n if n > 0 => return Ok(true),
