@@ -786,7 +786,7 @@ defmodule Ampd.Transport do
 
         {:ok, b0, rights, trunc0, buf} ->
           case fill(sock, buf, b0, 4, [], trunc0) do
-            {:closed, late} ->
+            {:closed, _acc, late} ->
               sink(rights ++ late)
               :closed
 
@@ -809,7 +809,7 @@ defmodule Ampd.Transport do
 
     defp body_of(sock, buf, n, rights, late, trunc) do
       case fill(sock, buf, <<>>, n, late, trunc) do
-        {:closed, late} ->
+        {:closed, _acc, late} ->
           sink(rights ++ late)
           :closed
 
@@ -830,12 +830,13 @@ defmodule Ampd.Transport do
       end
     end
 
-    # Read until `acc` is `want` bytes. Every right that arrives here is late (not on the frame's first byte).
+    # Read until `acc` is `want` bytes. Every right that arrives here is late (not on the frame's first byte). A close
+    # first is `{:closed, what_was_read, late}`: what was read is never a frame.
     defp fill(_sock, buf, acc, want, late, trunc) when byte_size(acc) == want, do: {:ok, acc, late, trunc, buf}
 
     defp fill(sock, buf, acc, want, late, trunc) do
       case take(sock, buf, want - byte_size(acc)) do
-        :closed -> {:closed, late}
+        :closed -> {:closed, acc, late}
         {:ok, b, fds, t, buf} -> fill(sock, buf, acc <> b, want, late ++ fds, trunc or t)
       end
     end
