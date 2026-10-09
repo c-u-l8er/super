@@ -4591,6 +4591,30 @@ mod t29a_macos {
     }
 
     #[test]
+    fn a7_mix_is_found_by_path_else_the_start_refuses_by_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PathBuf::from(macos_user_temp_dir().unwrap()).join(format!("t29a-a7-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exe = |p: &Path, mode: u32| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let (onpath, noexec, dir) = (root.join("onpath"), root.join("noexec"), root.join("dir"));
+        exe(&onpath.join("mix"), 0o755);
+        exe(&noexec.join("mix"), 0o644);
+        std::fs::create_dir_all(dir.join("mix")).unwrap();
+        let p = |dirs: &[&Path]| dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(":");
+        assert_eq!(macos_mix_on_path_in(&p(&[Path::new("/usr/bin"), &onpath])), Ok(()));
+        assert_eq!(macos_mix_on_path_in(&p(&[&onpath, Path::new("/bin")])), Ok(()));
+        for path in ["/usr/bin:/bin".to_string(), String::new(), ":".to_string(), p(&[&noexec, Path::new("/bin")]), p(&[&dir])] {
+            assert_eq!(macos_mix_on_path_in(&path), Err(MIX_NOT_FOUND.to_string()), "PATH={path}");
+        }
+        assert_eq!(MIX_NOT_FOUND, "mix not found: put it on PATH");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
     fn a5_the_runtime_directory_is_private_and_never_the_shared_tmp() {
         // Codex review 1, finding 4: the base must be private (owner, mode, ACL), the leaf made relative to it.
         use std::os::unix::fs::PermissionsExt;
