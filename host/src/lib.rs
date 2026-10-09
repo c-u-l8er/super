@@ -42,13 +42,19 @@
 // name rather than compiled into a host that only looks like one. T28 (the
 // portable bridge) and T29 (cockpit portability) are where a second layer
 // comes from.
-#[cfg(not(target_os = "linux"))]
+//
+// **T29a: the second platform is macOS.** The bridge is T28's framed stream
+// there, `spawn` is T28's `posix_spawnp`, and the runtime's readings get
+// macOS arms. The Carrier floor (`effect`, `confine`, `pty`, `attach`,
+// `carrier`) and `verify` stay Linux-only and refuse by name on macOS until
+// M2. Every other target still stops here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!(
-    "super-host has one platform layer, Linux's, and none for this target. Its descriptor bridge \
-     (SOCK_SEQPACKET, MSG_CMSG_CLOEXEC, close_range), its Carrier floor (Landlock, seccomp, \
-     no_new_privs, PR_SET_PDEATHSIG), its terminals (TIOCGPTPEER) and its /proc readings have no \
-     meaning here yet: the portable bridge is T28 and cockpit portability T29 \
-     (superlane/NATIVE-PROGRAM.md). It refuses to compile rather than compile Linux semantics (T27)."
+    "super-host has two platform layers, Linux's and macOS's, and none for this target. Its \
+     descriptor bridge (SOCK_SEQPACKET on Linux, a framed stream on macOS), its spawns, its \
+     runtime readings and its Carrier floor (Landlock, seccomp, PR_SET_PDEATHSIG, TIOCGPTPEER, \
+     /proc; Linux only) have no meaning here (superlane/NATIVE-PROGRAM.md). It refuses to \
+     compile rather than compile another platform's semantics (T27, T29a)."
 );
 
 /// Portable: pure Rust over `std::io`, no platform call. The one module that
@@ -56,15 +62,16 @@ compile_error!(
 pub mod sha256;
 #[cfg(target_os = "linux")]
 pub mod effect;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod fdpass;
 
 // T28: the bridge's transport (SEQPACKET on Linux; a framed stream on macOS and under the test feature
-// `framed-bridge`), behind the gate like `fdpass` until T29a lifts it. `spawn.rs` (posix_spawnp with
-// POSIX_SPAWN_CLOEXEC_DEFAULT, for ampd and engines on macOS) is not declared here: with bridge.rs and fdpass.rs it
-// builds and runs on macOS through superlane/t28/mac-probe (MP1), and T29a declares it.
-#[cfg(target_os = "linux")]
+// `framed-bridge`). T29a lifts its gate and `fdpass`'s to both platforms, and declares `spawn.rs` (T28's posix_spawnp
+// with POSIX_SPAWN_CLOEXEC_DEFAULT, for ampd and engines on macOS), which MP1 built and ran on the Mac.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod bridge;
+#[cfg(target_os = "macos")]
+pub mod spawn;
 #[cfg(target_os = "linux")]
 pub mod confine;
 #[cfg(target_os = "linux")]
@@ -74,7 +81,7 @@ pub mod attach;
 #[cfg(target_os = "linux")]
 pub mod carrier;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use linux_layer::*;
 
 /// The rest of the crate root — the runtime, the bridge's framing, the
@@ -85,7 +92,11 @@ pub use linux_layer::*;
 /// body the crate's modules as the root did. **The body is deliberately not
 /// re-indented**, so every line keeps the exact text it had, which
 /// `tools/sabotage-host.sh` anchors on.
-#[cfg(target_os = "linux")]
+///
+/// T29a: the layer compiles for macOS too, under its old name. Its
+/// Linux-only items are `#[cfg(target_os = "linux")]`, with a macOS arm or
+/// a refusal by name beside them; none of them moved.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux_layer {
 use super::*;
 
@@ -4004,7 +4015,10 @@ mod t28_bridge {
             let dir = std::env::temp_dir().join(format!("t28-rt-{}-{ours}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let lock = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            #[cfg(target_os = "linux")]
             let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+            #[cfg(target_os = "macos")]
+            let child = spawn::spawn_possessing("sleep", &["60"], &[], None, &[]).unwrap();
             let rt = Runtime {
                 dir: dir.clone(),
                 world: WorldDir::Ephemeral(dir.join("world")),
