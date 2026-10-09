@@ -1942,7 +1942,12 @@ fn sweep_stale_runtime_dirs(base: &Path) {
         }
 
         // The owner is still here.
+        #[cfg(target_os = "linux")]
         if Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        if pid_alive(pid) {
             continue;
         }
 
@@ -1958,6 +1963,20 @@ fn sweep_stale_runtime_dirs(base: &Path) {
 
         let _ = std::fs::remove_dir(&p);
     }
+}
+
+/// macOS (T29a item 4): whether a process `pid` exists, by `kill(pid, 0)`, which sends nothing. `ESRCH` is gone;
+/// success, or `EPERM` (a process of another user), is alive. A number that is not a positive `pid_t` names no single
+/// process (`kill` would read 0 and negatives as process groups), so it is gone, as `/proc/{pid}` is on Linux.
+#[cfg(target_os = "macos")]
+fn pid_alive(pid: u32) -> bool {
+    if pid == 0 || pid > libc::pid_t::MAX as u32 {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 impl Runtime {
