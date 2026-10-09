@@ -321,6 +321,13 @@ impl Runs {
         profile: String,
         compare: bool,
     ) -> Result<Value, String> {
+        // T29b1 item 8: the runner (tools/proposal-test-runner.mjs) sandboxes with bwrap, which macOS does not
+        // have; required checks on the Mac are M2's (T-13). Refused by name; nothing is recorded as a run or a verdict.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &root, &attempt, &report, &profile, &compare);
+            return Err("Required checks run on a Linux node until M2.".into());
+        }
         if ![
             "super-javascript-behavior@1",
             "super-elixir-review@1",
@@ -925,6 +932,12 @@ pub fn verify_acceptance(
     attempt: &Value,
     run_id: &str,
 ) -> Result<Value, String> {
+    // T29b1 item 8: the acceptance check runs tools/lib/proposal-test-runner.mjs's sandbox too: refused by name on macOS.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (&data, &root, &attempt, &run_id);
+        return Err("Required checks run on a Linux node until M2.".into());
+    }
     let run = &attempt["test_runs"][run_id];
     if run["state"] != "completed" || run["outcome"]["verdict"] != "pass" {
         return Err("Choose a completed passing test run.".into());
