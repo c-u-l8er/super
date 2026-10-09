@@ -4276,6 +4276,145 @@ mod t28_bridge {
         }
     }
 }
+
+/// T29a's laws A2-A5 on macOS (`superlane/t29a/TASK.md`; each has a planted bug that only it catches, `t29a/laws.py`).
+#[cfg(all(test, target_os = "macos"))]
+mod t29a_macos {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn nothing_waiting(fd: RawFd) -> bool {
+        let mut b = [0u8; 1];
+        let r = unsafe { libc::recv(fd, b.as_mut_ptr().cast(), 1, libc::MSG_DONTWAIT | libc::MSG_PEEK) };
+        r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+    }
+
+    /// A Runtime around a framed pair whose far end nothing serves, as T28's l10 test builds one.
+    fn fake_runtime() -> (Runtime, RawFd) {
+        let fdpass::Pair(ours, peer) = bridge::framed::pair().unwrap();
+        let dir = std::env::temp_dir().join(format!("t29a-rt-{}-{ours}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        let child = spawn::spawn_possessing("sleep", &["60"], &[], None, &[]).unwrap();
+        let rt = Runtime {
+            dir: dir.clone(),
+            world: WorldDir::Ephemeral(dir.join("world")),
+            world_lock: lock,
+            child,
+            bridge: ours,
+            bridge_lock: Mutex::new(()),
+            bridge_owed: AtomicBool::new(false),
+            bridge_closed: AtomicBool::new(false),
+            channels: Mutex::new(Vec::new()),
+            channel_inodes: Mutex::new(Vec::new()),
+            released: false,
+        };
+        (rt, peer)
+    }
+
+    #[test]
+    fn a2_the_carrier_floor_constructors_refuse_by_name_and_send_nothing() {
+        let _s = fdpass::t27b_serial();
+        let (rt, peer) = fake_runtime();
+        assert_eq!(rt.effect_channel(), Err(CARRIER_FLOOR_ON_MACOS.to_string()));
+        assert_eq!(rt.terminal_endpoint(), Err(CARRIER_FLOOR_ON_MACOS.to_string()));
+        assert_eq!(rt.carrier_channel(), Err(CARRIER_FLOOR_ON_MACOS.to_string()));
+        assert!(nothing_waiting(peer), "a refused constructor sent a bridge command");
+        assert!(rt.channels.lock().unwrap().is_empty(), "a refused constructor kept a channel");
+        drop(rt);
+        fdpass::close_fd(peer);
+    }
+
+    fn served(serve: fn(RawFd), requests: &[Value]) -> Vec<Value> {
+        let fdpass::Pair(ours, theirs) = fdpass::pair_stream().unwrap();
+        let t = std::thread::spawn(move || serve(theirs));
+        let mut out = Vec::new();
+        for r in requests {
+            write_frame(ours, r).unwrap();
+            out.push(read_frame(ours).unwrap());
+        }
+        fdpass::close_fd(ours);
+        t.join().unwrap();
+        out
+    }
+
+    #[test]
+    fn a2_the_carrier_service_refuses_every_op_by_name_under_its_schema() {
+        let ops = [("drain", "carrier-runtime-drain-observation@1"), ("start", "carrier-start-observation@1"),
+                   ("stop", "carrier-stop-observation@1"), ("pty-attach", "carrier-pty-attach-observation@1"),
+                   ("pty-detach", "carrier-pty-detach-observation@1"), ("pty-resize", "carrier-pty-resize-observation@1"),
+                   ("no-such-op", "carrier-start-observation@1")];
+        let reqs: Vec<Value> = ops.iter().enumerate().map(|(i, (op, _))| json!({"op": op, "request_id": i,
+            "channel_epoch": "e", "carrier_ref": format!("c{i}"), "carrier_epoch": "ce", "rows": 24, "cols": 80})).collect();
+        let got = served(|fd| serve_carrier(fd, std::env::temp_dir()), &reqs);
+        for ((i, (op, schema)), o) in ops.iter().enumerate().zip(&got) {
+            assert_eq!(o["schema"], *schema, "{op}");
+            assert_eq!(o["refused"], CARRIER_FLOOR_ON_MACOS, "{op}");
+            assert_eq!((&o["request_id"], &o["channel_epoch"], &o["carrier_ref"], &o["carrier_epoch"]),
+                       (&json!(i), &json!("e"), &json!(format!("c{i}")), &json!("ce")), "{op}: the correlation is not echoed");
+        }
+    }
+
+    #[test]
+    fn a2_the_effect_service_refuses_by_name() {
+        let got = served(serve_effects, &[json!({"schema": "worktree-effect-request@1", "request_id": "r1", "channel_epoch": "e1"})]);
+        assert_eq!(got[0]["schema"], "worktree-effect-observation@1");
+        assert_eq!(got[0]["ok"], false);
+        assert_eq!(got[0]["reason"], CARRIER_FLOOR_ON_MACOS);
+        assert_eq!((&got[0]["request_id"], &got[0]["channel_epoch"]), (&json!("r1"), &json!("e1")));
+    }
+
+    #[test]
+    fn a3_a_socket_end_s_identity_is_shared_by_its_dup_and_not_by_its_peer() {
+        let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
+        let d = unsafe { libc::dup(a) };
+        let (ia, ib, id) = (fd_inode(a), fd_inode(b), fd_inode(d));
+        assert!(ia.is_some() && ib.is_some(), "a socket end has no identity: {ia:?} {ib:?}");
+        assert_eq!(ia, id, "a dup is not the same socket");
+        assert_ne!(ia, ib, "the peer is the same socket");
+        let mut p = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        let f = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert_eq!((fd_inode(p[0]), fd_inode(f)), (None, None), "a pipe or a file has a socket identity");
+        for x in [a, b, d, p[0], p[1], f] {
+            fdpass::close_fd(x);
+        }
+    }
+
+    #[test]
+    fn a4_a_live_pid_is_alive_a_reaped_one_is_gone_and_another_user_s_is_alive() {
+        assert!(pid_alive(std::process::id()), "this process is not alive");
+        let mut c = spawn::spawn_possessing("sleep", &["60"], &[], None, &[]).unwrap();
+        let pid = c.id();
+        assert!(pid_alive(pid), "a running child is not alive");
+        c.kill().unwrap();
+        c.wait().unwrap();
+        assert!(!pid_alive(pid), "a reaped child is alive");
+        assert!(pid_alive(1), "launchd (another user's process: EPERM) is not alive");
+        assert!(!pid_alive(0) && !pid_alive(u32::MAX), "a number that names no single process is alive");
+    }
+
+    #[test]
+    fn a5_the_runtime_directory_is_private_and_never_the_shared_tmp() {
+        let t = std::env::temp_dir().to_string_lossy().into_owned();
+        assert_eq!(macos_runtime_base_from(Some("/x/xdg".into()), Some(t.clone())), Err("runtime dir: /x/xdg: No such file or directory (os error 2)".into()));
+        assert_eq!(macos_runtime_base_from(None, Some(t.clone())), Ok(t.clone()));
+        let own = macos_runtime_base_from(None, None).expect("no private temporary directory");
+        let real = std::fs::canonicalize(&own).unwrap();
+        assert!(real.starts_with("/private/var/folders"), "the fallback is not the user's private directory: {own}");
+        for shared in ["/tmp", "/private/tmp", "/tmp/"] {
+            assert!(macos_runtime_base_from(None, Some(shared.into())).is_err(), "{shared} was accepted");
+            assert!(macos_runtime_base_from(Some(shared.into()), Some(t.clone())).is_err(), "XDG_RUNTIME_DIR={shared} was accepted");
+        }
+        let d = PathBuf::from(&t).join(format!("t29a-a5-{}", std::process::id()));
+        let _ = std::fs::remove_dir(&d);
+        macos_runtime_dir(&d).unwrap();
+        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o7777, 0o700);
+        assert!(macos_runtime_dir(&d).is_err(), "an existing directory was taken as this run's");
+        std::fs::remove_dir(&d).unwrap();
+    }
+}
+
 } // mod linux_layer
 
 #[cfg(target_os = "linux")]
