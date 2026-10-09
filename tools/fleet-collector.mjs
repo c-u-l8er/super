@@ -44,13 +44,27 @@ export function configuration(value){
   sshArguments(h.target,h);return {id:h.id,label:h.label,hostname:h.hostname,target:h.target,identityFile:h.identityFile,knownHosts:h.knownHosts,nextStep:h.nextStep};
  });
 }
-// The check transport's own worker list (fleet-checks config.json): host, guest, target, keys.
+// The check transport's own worker list (fleet-checks config.json), projected as an ALLOWLIST (T49): exactly the keys
+// a supported row can carry, copied as given: host, guest, target, identityFile and knownHosts, and when present port,
+// hostKeyAlias and jump (with exactly its target, port, identityFile and knownHosts). Nothing else passes. The remote
+// command is the client's table's, never a config key. Beyond the row count and the host and guest patterns, every
+// support decision is supportedTarget()'s (tools/fleet/check-client.mjs).
+const WORKER_OPTIONAL_KEYS=['port','hostKeyAlias'],WORKER_JUMP_KEYS=['target','port','identityFile','knownHosts'];
+const ownKey=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
 export function workerConfiguration(value){
  const rows=value&&Array.isArray(value.workers)?value.workers:[];
  if(rows.length>2)throw Error('Configure at most two workers.');
  return rows.map(w=>{
   if(!w||!/^[a-z0-9-]{1,64}$/.test(w.host)||typeof w.guest!=='string'||!/^[A-Za-z0-9_.-]{1,64}$/.test(w.guest))throw Error('Invalid worker identity.');
-  return {host:w.host,guest:w.guest,target:w.target,identityFile:w.identityFile,knownHosts:w.knownHosts};
+  const out={host:w.host,guest:w.guest,target:w.target,identityFile:w.identityFile,knownHosts:w.knownHosts};
+  for(const k of WORKER_OPTIONAL_KEYS)if(ownKey(w,k))out[k]=w[k];
+  if(ownKey(w,'jump')){
+   const j=w.jump;
+   // A jump that is not an object is passed as given; supportedTarget() refuses it.
+   if(j!==null&&typeof j==='object'&&!Array.isArray(j)){out.jump={};for(const k of WORKER_JUMP_KEYS)if(ownKey(j,k))out.jump[k]=j[k];}
+   else out.jump=j;
+  }
+  return out;
  });
 }
 export async function askWorker(config){
