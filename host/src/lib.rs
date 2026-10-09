@@ -1984,14 +1984,23 @@ fn pid_alive(pid: u32) -> bool {
 /// (`confstr(_CS_DARWIN_USER_TEMP_DIR)`) when `TMPDIR` is unset, as a cockpit started outside a shell may find. Never
 /// the shared `/tmp`: a base that resolves there is refused by name.
 #[cfg(target_os = "macos")]
-fn macos_runtime_base() -> Result<String, String> {
+fn macos_runtime_base() -> Result<(String, Owned), String> {
     let set = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-    macos_runtime_base_from(set("XDG_RUNTIME_DIR"), set("TMPDIR"))
+    macos_open_runtime_base(set("XDG_RUNTIME_DIR"), set("TMPDIR"))
 }
 
-/// `macos_runtime_base`'s rule over its two inputs, so the law can hold it without changing this process's environment.
-#[cfg(target_os = "macos")]
+/// `macos_open_runtime_base`'s path alone, for the law (A5).
+#[cfg(all(test, target_os = "macos"))]
 fn macos_runtime_base_from(xdg: Option<String>, tmpdir: Option<String>) -> Result<String, String> {
+    macos_open_runtime_base(xdg, tmpdir).map(|(path, _fd)| path)
+}
+
+/// `macos_runtime_base`'s rule over its two inputs, so the law can hold it without changing this process's environment:
+/// the base chosen, refused if it is the shared /tmp, opened, and checked private ON THAT DESCRIPTOR, which comes back
+/// with the canonical path. The sweep and the leaf use the descriptor (Codex review 2, finding 1), so the directory
+/// checked is the directory used, whatever takes its path meanwhile.
+#[cfg(target_os = "macos")]
+fn macos_open_runtime_base(xdg: Option<String>, tmpdir: Option<String>) -> Result<(String, Owned), String> {
     let base = match xdg.or(tmpdir) {
         Some(b) => b,
         None => macos_user_temp_dir()?,
@@ -2001,11 +2010,9 @@ fn macos_runtime_base_from(xdg: Option<String>, tmpdir: Option<String>) -> Resul
         return Err(format!("runtime dir: {base} is the shared /tmp; set TMPDIR or XDG_RUNTIME_DIR to a private directory"));
     }
     // Codex review 1, finding 4: private, checked on the opened directory, before the sweep or anything else uses it.
-    let fd = macos_open_dir(&real)?;
-    let private = macos_private_dir(fd, &base);
-    fdpass::close_fd(fd);
-    private?;
-    Ok(real.to_string_lossy().into_owned())
+    let fd = Owned::new(macos_open_dir(&real)?);
+    macos_private_dir(fd.fd(), &base)?;
+    Ok((real.to_string_lossy().into_owned(), fd))
 }
 
 /// macOS: the system's answer for this user's private temporary directory, `confstr(_CS_DARWIN_USER_TEMP_DIR)`.
@@ -2050,21 +2057,85 @@ fn macos_private_dir(fd: RawFd, what: &str) -> Result<(), String> {
     if st.st_mode & 0o077 != 0 {
         return Err(format!("runtime dir: {what} is open to group or other (mode {:o})", st.st_mode & 0o7777));
     }
+    // Codex review 2, finding 2: each call's errno is read right after it, and the verdict refuses every error.
+    let errno = || io::Error::last_os_error().raw_os_error().unwrap_or(0);
     let acl = unsafe { macos_acl::acl_get_fd_np(fd, macos_acl::ACL_TYPE_EXTENDED) };
-    if acl.is_null() {
-        let e = io::Error::last_os_error();
-        if e.raw_os_error() != Some(libc::ENOENT) {
-            return Err(format!("runtime dir: {what}: its access control list could not be read: {e}"));
+    let got = if acl.is_null() {
+        Err(errno())
+    } else {
+        let mut entry: macos_acl::AclEntry = std::ptr::null_mut();
+        let rc = unsafe { macos_acl::acl_get_entry(acl, macos_acl::ACL_FIRST_ENTRY, &mut entry) };
+        let e = if rc == 0 { 0 } else { errno() };
+        unsafe { macos_acl::acl_free(acl) };
+        Ok((rc, e))
+    };
+    macos_acl_verdict(got).map_err(|why| format!("runtime dir: {what} {why}"))
+}
+
+/// The verdict on what the two ACL calls gave (Codex review 2, finding 2; measured with the descriptor call on the Mac,
+/// superlane/t29a/aclprobe/aclfd-probe.txt): no ACL (`acl_get_fd_np`: NULL with ENOENT) or an empty one
+/// (`acl_get_entry(ACL_FIRST_ENTRY)`: -1 with EINVAL) is private; an entry (0) is refused; anything else could not be
+/// read, and is refused too.
+#[cfg(target_os = "macos")]
+fn macos_acl_verdict(got: Result<(libc::c_int, libc::c_int), libc::c_int>) -> Result<(), String> {
+    match got {
+        Err(libc::ENOENT) | Ok((-1, libc::EINVAL)) => Ok(()),
+        Ok((0, _)) => Err("has an access control list".into()),
+        Err(e) => Err(format!("its access control list could not be read (acl_get_fd_np errno {e})")),
+        Ok((rc, e)) => Err(format!("its access control list could not be read (acl_get_entry {rc}, errno {e})")),
+    }
+}
+
+/// macOS (Codex review 2, finding 1): `sweep_stale_runtime_dirs`, relative to the base's descriptor: the entries listed
+/// through a `dup` of it, each checked with `fstatat` (not following a symlink), the same rules (`ampd-<pid>-<digits>`,
+/// a directory, its pid gone, older than the grace), and removed with `unlinkat(AT_REMOVEDIR)`, which removes only an
+/// empty directory. Failures are ignored, as on Linux.
+#[cfg(target_os = "macos")]
+fn macos_sweep_at(base: RawFd) {
+    const GRACE: Duration = Duration::from_secs(3600);
+    let d = unsafe { libc::dup(base) };
+    if d < 0 {
+        return;
+    }
+    let dir = unsafe { libc::fdopendir(d) };
+    if dir.is_null() {
+        fdpass::close_fd(d);
+        return;
+    }
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let e = unsafe { libc::readdir(dir) };
+        if e.is_null() {
+            break;
         }
-        return Ok(());
+        names.push(unsafe { std::ffi::CStr::from_ptr((*e).d_name.as_ptr()) }.to_bytes().to_vec());
     }
-    let mut entry: macos_acl::AclEntry = std::ptr::null_mut();
-    let has_entry = unsafe { macos_acl::acl_get_entry(acl, macos_acl::ACL_FIRST_ENTRY, &mut entry) } == 0;
-    unsafe { macos_acl::acl_free(acl) };
-    if has_entry {
-        return Err(format!("runtime dir: {what} has an access control list"));
+    unsafe { libc::closedir(dir) };
+    let now = SystemTime::now();
+    for raw in names {
+        let Ok(name) = std::str::from_utf8(&raw) else { continue };
+        let Some(rest) = name.strip_prefix("ampd-") else { continue };
+        let Some((pid, stampf)) = rest.split_once('-') else { continue };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        if stampf.is_empty() || !stampf.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(c) = std::ffi::CString::new(raw.clone()) else { continue };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(base, c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0
+            || st.st_mode & libc::S_IFMT != libc::S_IFDIR
+        {
+            continue;
+        }
+        if pid_alive(pid) {
+            continue;
+        }
+        let mtime = UNIX_EPOCH + Duration::from_secs(st.st_mtime.max(0) as u64);
+        if now.duration_since(mtime).map(|a| a < GRACE).unwrap_or(true) {
+            continue;
+        }
+        unsafe { libc::unlinkat(base, c.as_ptr(), libc::AT_REMOVEDIR) };
     }
-    Ok(())
 }
 
 /// macOS: the three ACL calls the privacy check needs (Codex review 1, finding 4). libc 0.2.189 declares no ACL call for
@@ -2085,36 +2156,43 @@ mod macos_acl {
 /// macOS (T29a item 5; Codex review 1, finding 4): the runtime directory, made relative to its parent opened as a
 /// descriptor and re-checked private there, 0700, and only if it does not exist yet (its name carries this pid and a
 /// nanosecond stamp; an existing one, or a symlink, is not this run's).
-#[cfg(target_os = "macos")]
+#[cfg(all(test, target_os = "macos"))]
 fn macos_runtime_dir(dir: &Path) -> Result<(), String> {
+    let Some(parent) = dir.parent() else {
+        return Err(format!("runtime dir: {} has no parent", dir.display()));
+    };
+    let pfd = Owned::new(macos_open_dir(parent)?);
+    macos_runtime_dir_at(pfd.fd(), dir)
+}
+
+/// macOS (Codex review 2, finding 1): the leaf `dir`, made relative to `base`, its parent's descriptor (re-checked
+/// private there): `mkdirat` 0700, `openat` without following a symlink, `fstat` (a directory, this user's), `fchmod`
+/// 0700. An existing leaf, or a symlink, is not this run's.
+#[cfg(target_os = "macos")]
+fn macos_runtime_dir_at(base: RawFd, dir: &Path) -> Result<(), String> {
     use std::os::unix::ffi::OsStrExt;
     let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
         return Err(format!("runtime dir: {} has no parent", dir.display()));
     };
     let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| "runtime dir: a NUL in the name".to_string())?;
-    let pfd = macos_open_dir(parent)?;
-    let made = (|| {
-        macos_private_dir(pfd, &parent.to_string_lossy())?;
-        if unsafe { libc::mkdirat(pfd, name.as_ptr(), 0o700) } != 0 {
-            return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
-        }
-        let fd = unsafe { libc::openat(pfd, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-        if fd < 0 {
-            return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
-        }
-        let mut st: libc::stat = unsafe { std::mem::zeroed() };
-        let ours = unsafe { libc::fstat(fd, &mut st) } == 0
-            && st.st_mode & libc::S_IFMT == libc::S_IFDIR
-            && st.st_uid == unsafe { libc::geteuid() };
-        let mode = unsafe { libc::fchmod(fd, 0o700) } == 0;
-        fdpass::close_fd(fd);
-        if !ours || !mode {
-            return Err(format!("runtime dir: {} is not this user's 0700 directory", dir.display()));
-        }
-        Ok(())
-    })();
-    fdpass::close_fd(pfd);
-    made
+    macos_private_dir(base, &parent.to_string_lossy())?;
+    if unsafe { libc::mkdirat(base, name.as_ptr(), 0o700) } != 0 {
+        return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
+    }
+    let fd = unsafe { libc::openat(base, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let ours = unsafe { libc::fstat(fd, &mut st) } == 0
+        && st.st_mode & libc::S_IFMT == libc::S_IFDIR
+        && st.st_uid == unsafe { libc::geteuid() };
+    let mode = unsafe { libc::fchmod(fd, 0o700) } == 0;
+    fdpass::close_fd(fd);
+    if !ours || !mode {
+        return Err(format!("runtime dir: {} is not this user's 0700 directory", dir.display()));
+    }
+    Ok(())
 }
 
 /// What the start says on macOS when `PATH` has no `mix` (T29a item 7).
@@ -2156,16 +2234,20 @@ impl Runtime {
         #[cfg(target_os = "linux")]
         let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
         #[cfg(target_os = "macos")]
-        let base = macos_runtime_base()?;
+        let (base, base_fd) = macos_runtime_base()?;
 
         // Before this run adds one of its own. See `sweep_stale_runtime_dirs`.
+        #[cfg(target_os = "linux")]
         sweep_stale_runtime_dirs(Path::new(&base));
+        // Codex review 2, finding 1: on macOS the sweep and the leaf use the descriptor that was checked private.
+        #[cfg(target_os = "macos")]
+        macos_sweep_at(base_fd.fd());
 
         let dir = PathBuf::from(base).join(format!("ampd-{}-{}", std::process::id(), stamp));
         #[cfg(target_os = "linux")]
         std::fs::create_dir_all(&dir).map_err(|e| format!("runtime dir: {e}"))?;
         #[cfg(target_os = "macos")]
-        macos_runtime_dir(&dir)?;
+        macos_runtime_dir_at(base_fd.fd(), &dir)?;
 
         let world_path = world.path().to_path_buf();
         std::fs::create_dir_all(&world_path).map_err(|e| format!("world dir: {e}"))?;
