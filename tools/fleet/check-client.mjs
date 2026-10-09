@@ -7,12 +7,52 @@ import {pathToFileURL} from 'node:url';
 export const FILES=['cockpit/ui/task-activity.js','tools/fleet-probe.mjs','tools/fleet-probe-test.mjs','tools/task-activity-test.mjs'];
 export const hash=b=>createHash('sha256').update(b).digest('hex');
 const assert=(ok,msg)=>{if(!ok)throw Error(msg);};
+// The supported workers, field for field the same rows as SUPPORTED_WORKERS in cockpit/src/fleet_checks.rs (law L3).
+// jumpTarget '' and jumpPort 0 mean a direct row; command '' means the worker's own forced command decides.
+export const WORKER_TABLE=Object.freeze([
+ Object.freeze({host:'locuchest',guest:'100',target:'root@192.168.1.69',port:22,jumpTarget:'',jumpPort:0,hostKeyAlias:'',command:''}),
+ Object.freeze({host:'locuchest',guest:'100',target:'root@192.168.88.252',port:22,jumpTarget:'',jumpPort:0,hostKeyAlias:'',command:''}),
+ Object.freeze({host:'cd-floor-01',guest:'super-worker-02',target:'root@192.168.1.71',port:22,jumpTarget:'',jumpPort:0,hostKeyAlias:'',command:''}),
+ Object.freeze({host:'cd-floor-01',guest:'super-worker-02',target:'fleet@127.0.0.1',port:2222,jumpTarget:'travis@192.168.88.254',jumpPort:22,hostKeyAlias:'super-worker-02',command:'super-fleet-check'}),
+]);
+const UNSUPPORTED='Unsupported worker configuration.';
+// The root bridge's bounds (tools/fleet/bhyve-bridge.py), applied here to the jump row.
+const GUEST_MESSAGE_LIMIT=196608,ANSWER_LIMIT=98304,GUEST_TIMEOUT=55000;
+const GUEST_UNAVAILABLE='Guest response unavailable; reconcile the same request';
+const DIRECT_KEYS=['host','guest','target','port','identityFile','knownHosts'];
+const JUMP_ROW_KEYS=[...DIRECT_KEYS,'jump','hostKeyAlias'];
+const JUMP_KEYS=['target','port','identityFile','knownHosts'];
+// OpenSSH runs a ProxyCommand through a shell, so every path in a jump row matches this.
+const JUMP_PATH=/^\/[A-Za-z0-9._\/-]{1,512}$/;
+const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
+const plain=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
+const only=(o,keys)=>Object.keys(o).every(k=>keys.includes(k));
+// An absent port is 22. A present one is a JSON number whose parsed value is an integer in 1-65535 (22, 22.0 and 2.2e1
+// alike; fleet_checks.rs holds the same policy); anything else (a string, null, a fraction) matches no table row.
+const portOf=o=>{if(!own(o,'port'))return 22;const p=o.port;return Number.isInteger(p)&&p>=1&&p<=65535?p:NaN;};
 export async function atomic(path,value){
  const tmp=path+'.pending';const f=await open(tmp,'w',0o600);try{await f.writeFile(JSON.stringify(value));await f.sync();}finally{await f.close();}await rename(tmp,path);
  const dir=await open(join(path,'..'),'r');try{await dir.sync();}finally{await dir.close();}
 }
 export function destination(value){
  assert(value&&(value.host==='locuchest'&&value.guest==='100'||value.host==='cd-floor-01'&&value.guest==='super-worker-02'),'Unsupported check destination.');return {host:value.host,guest:value.guest};
+}
+// The one check: the SSH argument vector from the matched table row and the config's checked paths only, or a refusal.
+// The config is read exactly once; nothing after this line reads it again.
+export function supportedTarget(config){
+ let c;try{c=JSON.parse(JSON.stringify(config));}catch{c=undefined;}
+ assert(plain(c),UNSUPPORTED);
+ const row=WORKER_TABLE.find(r=>c.host===r.host&&c.guest===r.guest&&c.target===r.target&&portOf(c)===r.port&&(r.jumpTarget===''?only(c,DIRECT_KEYS):only(c,JUMP_ROW_KEYS)&&(!own(c,'hostKeyAlias')||c.hostKeyAlias===r.hostKeyAlias)&&plain(c.jump)&&only(c.jump,JUMP_KEYS)&&c.jump.target===r.jumpTarget&&portOf(c.jump)===r.jumpPort));
+ assert(row,UNSUPPORTED);
+ if(row.jumpTarget===''){
+  assert([c.identityFile,c.knownHosts].every(p=>typeof p==='string'&&isAbsolute(p)&&!p.includes('\0')),UNSUPPORTED);
+  return ['-F','/dev/null','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o','ForwardAgent=no','-o','ForwardX11=no','-o','ClearAllForwardings=yes','-o','ControlMaster=no','-o','ControlPath=none','-o','ConnectTimeout=6','-o','ConnectionAttempts=1','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','-o','UserKnownHostsFile='+c.knownHosts,'-i',c.identityFile,row.target,'super-fleet-check'];
+ }
+ assert([c.identityFile,c.knownHosts,c.jump.identityFile,c.jump.knownHosts].every(p=>typeof p==='string'&&JUMP_PATH.test(p)),UNSUPPORTED);
+ const address=row.target.slice(row.target.indexOf('@')+1);
+ // -W opens only the permitted tunnel; the jump account's forced command never runs.
+ const proxy=['/usr/bin/ssh','-F','/dev/null','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o','ForwardAgent=no','-o','UserKnownHostsFile='+c.jump.knownHosts,'-o','ConnectTimeout=5','-i',c.jump.identityFile,'-p',String(row.jumpPort),'-W',address+':'+row.port,row.jumpTarget].join(' ');
+ return ['-F','/dev/null','-T','-p',String(row.port),'-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o','ForwardAgent=no','-o','ClearAllForwardings=yes','-o','HostKeyAlias='+row.hostKeyAlias,'-o','UserKnownHostsFile='+c.knownHosts,'-o','ConnectTimeout=5','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','-i',c.identityFile,'-o','ProxyCommand='+proxy,row.target,row.command];
 }
 export function capture(repository,binding,id,target={host:'locuchest',guest:'100'}){
  const selected=destination(target);
@@ -30,12 +70,28 @@ export function checkedReceipt(value,request){
  if(value.state==='completed')assert(['pass','fail'].includes(value.verdict)&&Number.isSafeInteger(value.exitCode)&&typeof value.timedOut==='boolean'&&value.verdict===(value.exitCode===0&&!value.timedOut?'pass':'fail')&&typeof value.output==='string'&&Buffer.byteLength(value.output)<=65536&&Number.isSafeInteger(value.omittedBytes)&&value.omittedBytes>=0&&/^[a-f0-9]{64}$/.test(value.nodeSha256),'Invalid remote completion.');
  return {state:value.state==='reserved'?'unknown':value.state,...(value.state==='completed'?{verdict:value.verdict,output:value.output,exitCode:value.exitCode,timedOut:value.timedOut,omittedBytes:value.omittedBytes,nodeSha256:value.nodeSha256}:{}),reason:value.state==='reserved'?'The worker reserved this request; a completed result is not available yet.':value.state==='unknown'?'The worker has no confirmed outcome. This request will not be rerun.':'',startedAt:value.startedAt,finishedAt:value.finishedAt};
 }
-export async function transport(config,message){
- const selected=destination(config);assert(config.target===(selected.host==='locuchest'?'root@192.168.1.69':'root@192.168.1.71'),'Unsupported worker configuration.');
- for(const key of ['identityFile','knownHosts'])assert(typeof config[key]==='string'&&isAbsolute(config[key])&&!config[key].includes('\0'),'Invalid transport identity.');
+// The guest message, as the root bridge checked it: exactly {operation:'start',request} or {operation:'status',id},
+// at most 196,608 bytes of the text actually sent.
+function guestMessage(message){
+ let text;try{text=JSON.stringify(message);}catch{}
+ assert(typeof text==='string'&&Buffer.byteLength(text)<=GUEST_MESSAGE_LIMIT,'Invalid guest message.');
+ const m=JSON.parse(text),keys=plain(m)?Object.keys(m).sort().join(','):'';
+ assert(m&&(m.operation==='start'&&keys==='operation,request'||m.operation==='status'&&keys==='id,operation'),'Invalid guest message.');
+ return text;
+}
+export async function transport(config,message,spawn=execFile){
+ const args=supportedTarget(config);
+ // Only the jump row has a ProxyCommand; the root bridge's bounds apply to it here, before anything is spawned.
+ const guest=args.some(a=>a.startsWith('ProxyCommand='));
+ const input=guest?guestMessage(message):JSON.stringify(message);
+ const lost=guest?GUEST_UNAVAILABLE:'Remote response was lost. Check the saved request status.';
+ const incomplete=guest?GUEST_UNAVAILABLE:'Remote response was incomplete. Check the saved request status.';
  return new Promise((resolve,reject)=>{
- const child=execFile('/usr/bin/ssh',['-F','/dev/null','-T','-o','BatchMode=yes','-o','StrictHostKeyChecking=yes','-o','IdentitiesOnly=yes','-o','ForwardAgent=no','-o','ForwardX11=no','-o','ClearAllForwardings=yes','-o','ControlMaster=no','-o','ControlPath=none','-o','ConnectTimeout=6','-o','ConnectionAttempts=1','-o','ServerAliveInterval=5','-o','ServerAliveCountMax=2','-o','UserKnownHostsFile='+config.knownHosts,'-i',config.identityFile,config.target,'super-fleet-check'],{timeout:60000,killSignal:'SIGKILL',maxBuffer:98304},(error,stdout)=>{if(error)reject(Error('Remote response was lost. Check the saved request status.'));else{try{resolve(JSON.parse(stdout));}catch{reject(Error('Remote response was incomplete. Check the saved request status.'));}}});
- child.stdin.on('error',()=>{});child.stdin.end(JSON.stringify(message));
+ const child=spawn('/usr/bin/ssh',args,{timeout:guest?GUEST_TIMEOUT:60000,killSignal:'SIGKILL',maxBuffer:ANSWER_LIMIT},(error,stdout)=>{
+  if(error||!(typeof stdout==='string'||Buffer.isBuffer(stdout))||Buffer.byteLength(stdout)>ANSWER_LIMIT){reject(Error(lost));return;}
+  try{resolve(JSON.parse(stdout));}catch{reject(Error(incomplete));}
+ });
+ child.stdin.on('error',()=>{});child.stdin.end(input);
  });
 }
 export async function run(operation,dir,send=transport){

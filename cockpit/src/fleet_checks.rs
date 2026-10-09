@@ -97,17 +97,69 @@ fn config_path(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<PathB
         .ok_or("Remote checks are not configured on this device.".into())
 }
 fn worker_id(v: &Value) -> String { format!("{}/{}", v["host"].as_str().unwrap_or(""), v["guest"].as_str().unwrap_or("")) }
+// The supported workers, one row each: host, guest, target (user@address), port, jump target (user@address), jump
+// port, the guest's HostKeyAlias and the fixed remote command; "" and 0 mean none (a direct row). The same rows, field
+// for field, are WORKER_TABLE in tools/fleet/check-client.mjs; law L3 reads this constant's literals, so it holds
+// string and integer literals only. No jump row has root anywhere (R103).
+const SUPPORTED_WORKERS: [(&str, &str, &str, u64, &str, u64, &str, &str); 4] = [
+    ("locuchest", "100", "root@192.168.1.69", 22, "", 0, "", ""),
+    ("locuchest", "100", "root@192.168.88.252", 22, "", 0, "", ""),
+    ("cd-floor-01", "super-worker-02", "root@192.168.1.71", 22, "", 0, "", ""),
+    ("cd-floor-01", "super-worker-02", "fleet@127.0.0.1", 2222, "travis@192.168.88.254", 22, "super-worker-02", "super-fleet-check"),
+];
+type Fields = serde_json::Map<String, Value>;
+const DIRECT_FIELDS: [&str; 6] = ["host", "guest", "target", "port", "identityFile", "knownHosts"];
+const JUMP_ROW_FIELDS: [&str; 8] = ["host", "guest", "target", "port", "identityFile", "knownHosts", "jump", "hostKeyAlias"];
+const JUMP_FIELDS: [&str; 4] = ["target", "port", "identityFile", "knownHosts"];
+fn text<'a>(m: &'a Fields, key: &str) -> Option<&'a str> { m.get(key).and_then(Value::as_str) }
+fn only(m: &Fields, keys: &[&str]) -> bool { m.keys().all(|k| keys.contains(&k.as_str())) }
+// An absent port is 22. A present one is a JSON number whose parsed value is an integer in 1-65535: 22, 22.0 and
+// 2.2e1 alike, since the spelling is not judged (JavaScript's parser cannot see it; check-client.mjs holds the same
+// policy). A string, null, a fraction or a value out of range is refused.
+fn port(m: &Fields) -> Option<u64> {
+    match m.get("port") {
+        None => Some(22),
+        Some(p) => p
+            .as_u64()
+            .or_else(|| p.as_f64().filter(|f| f.fract() == 0.0 && (1.0..=65535.0).contains(f)).map(|f| f as u64))
+            .filter(|p| (1..=65535).contains(p)),
+    }
+}
+// OpenSSH runs a ProxyCommand through a shell, so every path in a jump row matches ^/[A-Za-z0-9._/-]{1,512}$.
+fn jump_path(s: &str) -> bool {
+    s.starts_with('/') && (2..=513).contains(&s.len()) && s.bytes().all(|c| c.is_ascii_alphanumeric() || b"._/-".contains(&c))
+}
+// The table row this configuration equals in every field, if any; a field outside the row's own set refuses it.
+fn table_row(r: &Value) -> Option<usize> {
+    let m = r.as_object()?;
+    SUPPORTED_WORKERS.iter().position(|&(host, guest, target, p, jump_target, jump_port, alias, _)| {
+        let same = text(m, "host") == Some(host) && text(m, "guest") == Some(guest) && text(m, "target") == Some(target) && port(m) == Some(p);
+        let route = if jump_target.is_empty() {
+            only(m, &DIRECT_FIELDS)
+        } else {
+            only(m, &JUMP_ROW_FIELDS)
+                && m.get("hostKeyAlias").map_or(true, |a| a.as_str() == Some(alias))
+                && m.get("jump").and_then(Value::as_object).is_some_and(|j| {
+                    only(j, &JUMP_FIELDS) && text(j, "target") == Some(jump_target) && port(j) == Some(jump_port)
+                })
+        };
+        same && route
+    })
+}
 fn configurations(v: Value) -> Result<Vec<Value>, String> {
     let rows = if let Some(rows) = v.get("workers") { rows.as_array().ok_or("Invalid worker list.")?.clone() } else { vec![v] };
     if rows.is_empty() || rows.len() > 2 { return Err("Configure one or two supported workers.".into()); }
     let mut seen = BTreeSet::new();
     for r in &rows {
-        let supported = (r["host"] == "locuchest" && r["guest"] == "100" && r["target"] == "root@192.168.1.69") ||
-            (r["host"] == "cd-floor-01" && r["guest"] == "super-worker-02" && r["target"] == "root@192.168.1.71");
-        if !supported || !seen.insert(worker_id(r)) { return Err("The configured worker is unsupported or duplicated.".into()); }
-        for field in ["identityFile", "knownHosts"] {
-            if !r[field].as_str().is_some_and(|s| Path::new(s).is_absolute() && !s.contains('\0')) { return Err("Invalid worker transport identity.".into()); }
-        }
+        let row = match table_row(r) {
+            Some(i) if seen.insert(worker_id(r)) => SUPPORTED_WORKERS[i],
+            _ => return Err("The configured worker is unsupported or duplicated.".into()),
+        };
+        let jump = !row.4.is_empty();
+        let mut paths = vec![&r["identityFile"], &r["knownHosts"]];
+        if jump { paths.extend([&r["jump"]["identityFile"], &r["jump"]["knownHosts"]]); }
+        let valid = |s: &str| if jump { jump_path(s) } else { Path::new(s).is_absolute() && !s.contains('\0') };
+        if !paths.iter().all(|p| p.as_str().is_some_and(|s| valid(s))) { return Err("Invalid worker transport identity.".into()); }
     }
     Ok(rows)
 }
@@ -308,5 +360,162 @@ mod tests {
     #[test]
     fn page_cannot_supply_source_or_commands() {
         assert!(serde_json::from_value::<Request>(json!({"operation":"start","generation":1,"task_ref":"dt_1","revision":1,"world":["w",1,1],"path":"/tmp","command":"id"})).is_err());
+    }
+    // The law cases: L1 runs them here, and tools/fleet-check-test.mjs reads this constant to run the same cases
+    // against check-client.mjs (L2, L4) and the observer's projection (L8). "rows" are the four supported rows in table
+    // order; each case builds its rows from a base row, then "set" (a dotted key reaches into "jump"), then "long"
+    // (key: n sets the key to a path of n characters, "/" and n-1 letters), then "unset" (dotted too); one row is
+    // given alone, several as {"workers": [...]}.
+    const LAW_CASES: &str = r##"{
+"rows": [
+ {"host":"locuchest","guest":"100","target":"root@192.168.1.69","identityFile":"/private/a","knownHosts":"/private/hosts"},
+ {"host":"locuchest","guest":"100","target":"root@192.168.88.252","identityFile":"/private/a","knownHosts":"/private/locuchest_known_hosts"},
+ {"host":"cd-floor-01","guest":"super-worker-02","target":"root@192.168.1.71","identityFile":"/private/b","knownHosts":"/private/hosts"},
+ {"host":"cd-floor-01","guest":"super-worker-02","target":"fleet@127.0.0.1","port":2222,"hostKeyAlias":"super-worker-02","identityFile":"/private/guest_ed25519","knownHosts":"/private/guest_known_hosts","jump":{"target":"travis@192.168.88.254","port":22,"identityFile":"/private/super-fleet-jump","knownHosts":"/private/jump_known_hosts"}}
+],
+"cases": [
+ {"ok":true,"rows":[{"base":0}]},
+ {"ok":true,"rows":[{"base":1}]},
+ {"ok":true,"rows":[{"base":2}]},
+ {"ok":true,"rows":[{"base":3}]},
+ {"ok":true,"rows":[{"base":1,"set":{"port":22}}]},
+ {"ok":true,"rows":[{"base":3,"unset":"hostKeyAlias"}]},
+ {"ok":true,"rows":[{"base":1,"set":{"identityFile":"/private/with space"}}]},
+ {"ok":true,"rows":[{"base":0},{"base":2}]},
+ {"ok":true,"rows":[{"base":0},{"base":3}]},
+ {"ok":true,"rows":[{"base":1},{"base":2}]},
+ {"ok":true,"rows":[{"base":1},{"base":3}]},
+ {"ok":true,"rows":[{"base":3},{"base":1}]},
+ {"ok":false,"rows":[]},
+ {"ok":false,"rows":[{"base":0},{"base":1}]},
+ {"ok":false,"rows":[{"base":2},{"base":3}]},
+ {"ok":false,"rows":[{"base":3},{"base":3}]},
+ {"ok":false,"rows":[{"base":1},{"base":2},{"base":3}]},
+ {"ok":false,"rows":[{"base":2,"set":{"target":"root@192.168.88.252"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":"root@192.168.88.254"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":"travis@192.168.88.254"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"host":"locuchest","guest":"100"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":"travis@192.168.88.252"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":"root@192.168.88.253"}}]},
+ {"ok":false,"rows":[{"base":2,"set":{"target":"root@192.168.88.253"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":"root@192.168.88.2520"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":" root@192.168.88.252"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":"root@192.168.88.252 "}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":"root@cd-floor-01"}}]},
+ {"ok":false,"rows":[{"base":2,"set":{"target":"root@cd-floor-01"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"target":""}}]},
+ {"ok":false,"rows":[{"base":1,"unset":"target"}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":2222}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":0}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":65536}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":"22"}}]},
+ {"ok":false,"rows":[{"base":0,"set":{"port":2222}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"guest":"super-worker-02"}}]},
+ {"ok":false,"rows":[{"base":2,"set":{"host":"locuchest"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"jump":{"target":"travis@192.168.88.254","port":22,"identityFile":"/private/super-fleet-jump","knownHosts":"/private/jump_known_hosts"}}}]},
+ {"ok":false,"rows":[{"base":2,"set":{"hostKeyAlias":"super-worker-02"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"command":"id"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"target":"root@127.0.0.1"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"target":"fleet@127.0.0.2"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.target":"root@192.168.88.254"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.target":"travis@192.168.88.253"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.target":"travis@192.168.88.2540"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.port":2222}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.port":"22"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"port":22}}]},
+ {"ok":false,"rows":[{"base":3,"unset":"port"}]},
+ {"ok":false,"rows":[{"base":3,"set":{"hostKeyAlias":"locuchest"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"hostKeyAlias":""}}]},
+ {"ok":false,"rows":[{"base":3,"unset":"jump"}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump":null}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.command":"id"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"proxyCommand":"/bin/sh"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/super fleet-jump"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/super'fleet-jump"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/super\"fleet-jump"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/$HOME"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/`id`"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/a;id"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/a\nid"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.knownHosts":"/private/jump known_hosts"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.knownHosts":"/private/a;id"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.knownHosts":"/private/a\nid"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"identityFile":"/private/guest ed25519"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"knownHosts":"/private/$(id)"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"private/super-fleet-jump"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/"}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/%h"}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"identityFile":"relative"}}]},
+ {"ok":true,"rows":[{"base":1,"set":{"port":22.0}}]},
+ {"ok":true,"rows":[{"base":1,"set":{"port":2.2e1}}]},
+ {"ok":true,"rows":[{"base":1,"set":{"port":22.000000000000001}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":22.5}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":null}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":-22}}]},
+ {"ok":true,"rows":[{"base":3,"set":{"port":2222.0}}]},
+ {"ok":true,"rows":[{"base":3,"set":{"jump.port":22.0}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.port":22.5}}]},
+ {"ok":true,"rows":[{"base":3,"unset":"jump.port"}]},
+ {"ok":true,"rows":[{"base":3,"long":{"jump.identityFile":513}}]},
+ {"ok":false,"rows":[{"base":3,"long":{"jump.identityFile":514}}]},
+ {"ok":true,"rows":[{"base":3,"long":{"knownHosts":513}}]},
+ {"ok":false,"rows":[{"base":3,"long":{"knownHosts":514}}]}
+]
+}"##;
+    fn law_put(row: &mut Value, key: &str, value: Value) {
+        let mut parts: Vec<&str> = key.split('.').collect();
+        let last = parts.pop().unwrap();
+        let at = parts.into_iter().fold(row, |at, p| &mut at[p]);
+        at[last] = value;
+    }
+    fn law_unset(row: &mut Value, key: &str) {
+        let mut parts: Vec<&str> = key.split('.').collect();
+        let last = parts.pop().unwrap();
+        let at = parts.into_iter().fold(row, |at, p| &mut at[p]);
+        at.as_object_mut().unwrap().remove(last);
+    }
+    fn law_row(cases: &Value, spec: &Value) -> Value {
+        let mut row = cases["rows"][spec["base"].as_u64().unwrap() as usize].clone();
+        for (key, value) in spec["set"].as_object().into_iter().flatten() {
+            law_put(&mut row, key, value.clone());
+        }
+        for (key, n) in spec["long"].as_object().into_iter().flatten() {
+            law_put(&mut row, key, json!(format!("/{}", "a".repeat(n.as_u64().unwrap() as usize - 1))));
+        }
+        if let Some(key) = spec["unset"].as_str() {
+            law_unset(&mut row, key);
+        }
+        row
+    }
+    fn law_input(cases: &Value, case: &Value) -> Value {
+        let mut rows: Vec<Value> = case["rows"].as_array().unwrap().iter().map(|s| law_row(cases, s)).collect();
+        if rows.len() == 1 { rows.pop().unwrap() } else { json!({"workers": rows}) }
+    }
+    #[test]
+    fn l1_configurations_answer_every_law_case() {
+        let cases: Value = serde_json::from_str(LAW_CASES).unwrap();
+        let all = cases["cases"].as_array().unwrap();
+        assert!(all.len() >= 60);
+        for case in all {
+            assert_eq!(configurations(law_input(&cases, case)).is_ok(), case["ok"].as_bool().unwrap(), "{}", case);
+        }
+    }
+    #[test]
+    fn l1_each_supported_row_matches_only_its_own_table_row() {
+        let cases: Value = serde_json::from_str(LAW_CASES).unwrap();
+        for i in 0..SUPPORTED_WORKERS.len() {
+            assert_eq!(table_row(&cases["rows"][i]), Some(i));
+            assert_eq!(configurations(cases["rows"][i].clone()).unwrap(), vec![cases["rows"][i].clone()]);
+        }
+    }
+    #[test]
+    fn l1_no_jump_row_has_root_anywhere() {
+        for &(host, guest, target, _, jump, _, alias, command) in SUPPORTED_WORKERS.iter() {
+            if !jump.is_empty() {
+                for f in [host, guest, target, jump, alias, command] {
+                    assert!(!f.contains("root"), "{}", f);
+                }
+            }
+        }
     }
 }
