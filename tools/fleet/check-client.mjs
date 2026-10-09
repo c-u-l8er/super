@@ -27,8 +27,9 @@ const JUMP_PATH=/^\/[A-Za-z0-9._\/-]{1,512}$/;
 const own=(o,k)=>Object.prototype.hasOwnProperty.call(o,k);
 const plain=v=>v!==null&&typeof v==='object'&&!Array.isArray(v);
 const only=(o,keys)=>Object.keys(o).every(k=>keys.includes(k));
-// An absent port is 22; a present one must equal the table's integer (never a string).
-const portOf=o=>own(o,'port')?o.port:22;
+// An absent port is 22. A present one is a JSON number whose parsed value is an integer in 1-65535 (22, 22.0 and 2.2e1
+// alike; fleet_checks.rs holds the same policy); anything else (a string, null, a fraction) matches no table row.
+const portOf=o=>{if(!own(o,'port'))return 22;const p=o.port;return Number.isInteger(p)&&p>=1&&p<=65535?p:NaN;};
 export async function atomic(path,value){
  const tmp=path+'.pending';const f=await open(tmp,'w',0o600);try{await f.writeFile(JSON.stringify(value));await f.sync();}finally{await f.close();}await rename(tmp,path);
  const dir=await open(join(path,'..'),'r');try{await dir.sync();}finally{await dir.close();}

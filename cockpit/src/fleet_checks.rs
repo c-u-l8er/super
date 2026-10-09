@@ -113,11 +113,16 @@ const JUMP_ROW_FIELDS: [&str; 8] = ["host", "guest", "target", "port", "identity
 const JUMP_FIELDS: [&str; 4] = ["target", "port", "identityFile", "knownHosts"];
 fn text<'a>(m: &'a Fields, key: &str) -> Option<&'a str> { m.get(key).and_then(Value::as_str) }
 fn only(m: &Fields, keys: &[&str]) -> bool { m.keys().all(|k| keys.contains(&k.as_str())) }
-// An absent port is 22; a present one is an integer 1-65535, never a string.
+// An absent port is 22. A present one is a JSON number whose parsed value is an integer in 1-65535: 22, 22.0 and
+// 2.2e1 alike, since the spelling is not judged (JavaScript's parser cannot see it; check-client.mjs holds the same
+// policy). A string, null, a fraction or a value out of range is refused.
 fn port(m: &Fields) -> Option<u64> {
     match m.get("port") {
         None => Some(22),
-        Some(p) => p.as_u64().filter(|p| (1..=65535).contains(p)),
+        Some(p) => p
+            .as_u64()
+            .or_else(|| p.as_f64().filter(|f| f.fract() == 0.0 && (1.0..=65535.0).contains(f)).map(|f| f as u64))
+            .filter(|p| (1..=65535).contains(p)),
     }
 }
 // OpenSSH runs a ProxyCommand through a shell, so every path in a jump row matches ^/[A-Za-z0-9._/-]{1,512}$.
@@ -357,9 +362,10 @@ mod tests {
         assert!(serde_json::from_value::<Request>(json!({"operation":"start","generation":1,"task_ref":"dt_1","revision":1,"world":["w",1,1],"path":"/tmp","command":"id"})).is_err());
     }
     // The law cases: L1 runs them here, and tools/fleet-check-test.mjs reads this constant to run the same cases
-    // against check-client.mjs (L2, L4). "rows" are the four supported rows in table order; each case builds its rows
-    // from a base row, "set" (a dotted key reaches into "jump") and "unset"; one row is given alone, several as
-    // {"workers": [...]}.
+    // against check-client.mjs (L2, L4) and the observer's projection (L8). "rows" are the four supported rows in table
+    // order; each case builds its rows from a base row, then "set" (a dotted key reaches into "jump"), then "long"
+    // (key: n sets the key to a path of n characters, "/" and n-1 letters), then "unset" (dotted too); one row is
+    // given alone, several as {"workers": [...]}.
     const LAW_CASES: &str = r##"{
 "rows": [
  {"host":"locuchest","guest":"100","target":"root@192.168.1.69","identityFile":"/private/a","knownHosts":"/private/hosts"},
@@ -439,19 +445,45 @@ mod tests {
  {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"private/super-fleet-jump"}}]},
  {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/"}}]},
  {"ok":false,"rows":[{"base":3,"set":{"jump.identityFile":"/private/%h"}}]},
- {"ok":false,"rows":[{"base":1,"set":{"identityFile":"relative"}}]}
+ {"ok":false,"rows":[{"base":1,"set":{"identityFile":"relative"}}]},
+ {"ok":true,"rows":[{"base":1,"set":{"port":22.0}}]},
+ {"ok":true,"rows":[{"base":1,"set":{"port":2.2e1}}]},
+ {"ok":true,"rows":[{"base":1,"set":{"port":22.000000000000001}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":22.5}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":null}}]},
+ {"ok":false,"rows":[{"base":1,"set":{"port":-22}}]},
+ {"ok":true,"rows":[{"base":3,"set":{"port":2222.0}}]},
+ {"ok":true,"rows":[{"base":3,"set":{"jump.port":22.0}}]},
+ {"ok":false,"rows":[{"base":3,"set":{"jump.port":22.5}}]},
+ {"ok":true,"rows":[{"base":3,"unset":"jump.port"}]},
+ {"ok":true,"rows":[{"base":3,"long":{"jump.identityFile":513}}]},
+ {"ok":false,"rows":[{"base":3,"long":{"jump.identityFile":514}}]},
+ {"ok":true,"rows":[{"base":3,"long":{"knownHosts":513}}]},
+ {"ok":false,"rows":[{"base":3,"long":{"knownHosts":514}}]}
 ]
 }"##;
+    fn law_put(row: &mut Value, key: &str, value: Value) {
+        let mut parts: Vec<&str> = key.split('.').collect();
+        let last = parts.pop().unwrap();
+        let at = parts.into_iter().fold(row, |at, p| &mut at[p]);
+        at[last] = value;
+    }
+    fn law_unset(row: &mut Value, key: &str) {
+        let mut parts: Vec<&str> = key.split('.').collect();
+        let last = parts.pop().unwrap();
+        let at = parts.into_iter().fold(row, |at, p| &mut at[p]);
+        at.as_object_mut().unwrap().remove(last);
+    }
     fn law_row(cases: &Value, spec: &Value) -> Value {
         let mut row = cases["rows"][spec["base"].as_u64().unwrap() as usize].clone();
         for (key, value) in spec["set"].as_object().into_iter().flatten() {
-            let mut parts: Vec<&str> = key.split('.').collect();
-            let last = parts.pop().unwrap();
-            let at = parts.into_iter().fold(&mut row, |at, p| &mut at[p]);
-            at[last] = value.clone();
+            law_put(&mut row, key, value.clone());
+        }
+        for (key, n) in spec["long"].as_object().into_iter().flatten() {
+            law_put(&mut row, key, json!(format!("/{}", "a".repeat(n.as_u64().unwrap() as usize - 1))));
         }
         if let Some(key) = spec["unset"].as_str() {
-            row.as_object_mut().unwrap().remove(key);
+            law_unset(&mut row, key);
         }
         row
     }
