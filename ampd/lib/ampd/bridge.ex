@@ -84,6 +84,7 @@ defmodule Ampd.Bridge do
             case Ampd.NativeFd.adopt_socket(fd) do
               {:ok, sock} ->
                 {:ok, pid} = Ampd.Transport.HostBridge.start(sock)
+                watch_host(pid)
                 pid
 
               :error ->
@@ -505,6 +506,16 @@ defmodule Ampd.Bridge do
   # The socket is this process's to close — it is the controlling process —
   # so this is not defensive tidying, it is the owner doing its job.
   @impl true
+  # T29a item 6, macOS only (Linux's half is A-57, after the Mac milestone, so Linux is unchanged here): **the runtime
+  # does not outlive its host.** The host's bridge reader returns when the host's end closes, and that end closes when
+  # the host dies, SIGKILL included, where no `Drop` runs to kill this runtime. Measured on the Mac with T29a's items
+  # 1-5: beam.smp outlived a SIGKILLed host for 60 s, adopted by launchd (superlane/t29a/a6/). A runtime whose host is
+  # gone has no person and nothing to hand it descriptors, so it stops.
+  def handle_info({:DOWN, _ref, :process, pid, _why}, %{bridge: pid} = st) when is_pid(pid) do
+    host_gone()
+    {:noreply, st}
+  end
+
   def handle_info({:DOWN, ref, :process, pid, _reason}, st) do
     case st.channels[pid] do
       %{ref: ^ref} -> {:noreply, forget(pid, st, :died)}
@@ -513,6 +524,24 @@ defmodule Ampd.Bridge do
   end
 
   def handle_info(_msg, st), do: {:noreply, st}
+
+  # Armed at adoption, before the bridge has answered anything (a monitor on a reader that has already ended still
+  # delivers its :DOWN, so there is no window), and only on macOS.
+  defp watch_host(pid) do
+    if :os.type() == {:unix, :darwin}, do: Process.monitor(pid)
+    :ok
+  end
+
+  # A graceful stop (the stores close as on any stop), bounded: a stop that has not finished within the bound is
+  # halted. The guard's group leader is `:user`, outside every application, so the stop's own shutdown of this
+  # application does not end the guard first.
+  @host_gone_bound_ms 10_000
+  defp host_gone do
+    IO.puts(:stderr, "ampd: the host's bridge closed, so the host is gone; stopping (T29a item 6)")
+    guard = spawn(fn -> Process.sleep(@host_gone_bound_ms); System.halt(1) end)
+    Process.group_leader(guard, Process.whereis(:user) || Process.whereis(:init))
+    System.stop(0)
+  end
 
   # One removal path, two entrances. `:graceful` means the connection has
   # already closed the socket and detached itself; `:died` means nothing
