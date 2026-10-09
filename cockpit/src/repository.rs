@@ -375,3 +375,27 @@ pub fn choose_development(window: &tauri::Window) -> Result<Option<PathBuf>, Str
 pub fn choose_development(_window: &tauri::Window) -> Result<Option<PathBuf>, String> {
     Err("Local development is currently supported on Linux.".into())
 }
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B3 (c), a spawn takes the fork lock for writing (item 4).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b3_git_root_waits_for_the_fork_lock() {
+        let p = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b3", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&p).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&p).status().unwrap().success());
+        let held = super_host::fdpass::FD_BIRTH.read().unwrap_or_else(|e| e.into_inner());
+        let (tx, rx) = std::sync::mpsc::channel();
+        let q = p.clone();
+        let h = std::thread::spawn(move || {
+            let r = git_root(&q);
+            let _ = tx.send(());
+            r
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(500)).is_err(), "git_root started its child while the fork lock was held for reading");
+        drop(held);
+        assert_eq!(h.join().unwrap().unwrap(), p.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&p);
+    }
+}

@@ -606,3 +606,27 @@ mod deletion_tests {
         std::fs::remove_dir_all(p).unwrap();
     }
 }
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B1, the journal's no-replace rename (item 1).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b1_an_existing_journal_is_not_replaced() {
+        let p = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b1", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&p).unwrap();
+        assert!(Command::new("git").args(["init", "-q"]).arg(&p).status().unwrap().success());
+        let s = Session { root: Some(p.clone()), directory: Some(File::open(&p).unwrap()), ..Session::default() };
+        let store = Store::open(&s).unwrap();
+        let git = p.join(".git");
+        std::fs::write(git.join(JOURNAL), b"held").unwrap();
+        let j = Journal { version: 2, device: 0, inode: 0, files: vec![], modes: BTreeMap::new() };
+        let e = store.write(&j).unwrap_err();
+        assert!(e.contains("exists"), "the rename replaced or failed otherwise: {e}");
+        assert_eq!(std::fs::read(git.join(JOURNAL)).unwrap(), b"held");
+        let left: Vec<String> = std::fs::read_dir(&git).unwrap().filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(".super-apply-")).collect();
+        assert!(left.is_empty(), "the temporary journal was left: {left:?}");
+        let _ = std::fs::remove_dir_all(&p);
+    }
+}

@@ -1282,3 +1282,29 @@ mod review_content_tests {
         assert!(e.contains("not named by a digest"), "{e}");
     }
 }
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B9, the review run's and the acceptance check's refusals (item 8).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b9_a_review_run_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9r", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let report: Report = Arc::new(|_, v| Ok(v));
+        let r = Runs::default().start(&data, [json!("default"), json!(1), json!("w")], data.clone(), json!({}), report, "super-rust-review@1".into(), false);
+        assert_eq!(r.unwrap_err(), "Required checks run on a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
+    }
+    #[test]
+    fn b9_an_acceptance_check_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9a", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let attempt = json!({"test_runs": {"r": {"state": "completed", "outcome": {"verdict": "pass"}}}});
+        let r = verify_acceptance(&data, &data, &attempt, "r");
+        assert_eq!(r.unwrap_err(), "Required checks run on a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
+    }
+}

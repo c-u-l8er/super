@@ -553,3 +553,28 @@ mod tests {
         }
     }
 }
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B9, the fleet checks' refusals (item 10).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b9_a_fleet_check_prepare_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9p", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let r = Checks::default().prepare(&data, [json!("default"), json!(1), json!("w")], &data, "dt_0001", 1, None);
+        assert_eq!(r.unwrap_err(), "Fleet checks run from a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
+    }
+    #[test]
+    fn b9_a_fleet_check_launch_refuses_by_name_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9l", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("record.json"), br#"{"id":"fc-1","state":"prepared"}"#).unwrap();
+        let r = Checks::default().launch(dir.clone(), "start");
+        assert_eq!(r.unwrap_err(), "Fleet checks run from a Linux node until M2.");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "something was written");
+        let _ = fs::remove_dir_all(&dir);
+    }
+}

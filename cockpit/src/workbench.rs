@@ -1895,3 +1895,44 @@ mod tests {
         w.shutdown();
     }
 }
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B8, listing the OPENED directory by its descriptor (item 7).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    fn by_path(p: &Path) -> Vec<(String, bool)> {
+        let mut v: Vec<(String, bool)> = std::fs::read_dir(p).unwrap().filter_map(Result::ok).filter_map(|e| {
+            let n = e.file_name().into_string().ok()?;
+            let k = e.file_type().ok()?;
+            (n != ".git" && (k.is_dir() || k.is_file())).then_some((n, k.is_dir()))
+        }).collect();
+        v.sort();
+        v
+    }
+    fn listed(v: &Value) -> Vec<(String, bool)> {
+        let mut g: Vec<(String, bool)> = v["entries"].as_array().unwrap().iter()
+            .map(|e| (e["name"].as_str().unwrap().to_string(), e["directory"].as_bool().unwrap())).collect();
+        g.sort();
+        g
+    }
+    #[test]
+    fn b8_the_listing_reads_the_opened_directory() {
+        let p = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b8", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(p.join("b")).unwrap();
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::write(p.join("a"), "").unwrap();
+        std::fs::write(p.join("c.txt"), "").unwrap();
+        std::os::unix::fs::symlink("a", p.join("l")).unwrap();
+        let root = File::open(&p).unwrap();
+        let first = listing(&root, "").unwrap();
+        assert_eq!(listed(&first), by_path(&p));
+        assert_eq!(listed(&first), vec![("a".to_string(), false), ("b".to_string(), true), ("c.txt".to_string(), false)]);
+        let moved = p.with_extension("moved");
+        std::fs::rename(&p, &moved).unwrap();
+        std::fs::create_dir(&p).unwrap();
+        std::fs::write(p.join("x"), "").unwrap();
+        assert_eq!(listed(&listing(&root, "").unwrap()), by_path(&moved), "the listing followed the path, not the descriptor");
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+}

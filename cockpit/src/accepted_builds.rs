@@ -307,3 +307,18 @@ mod tests {
             .is_err());
     }
 }
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B2, the accepted build's refusal (item 2).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b2_an_accepted_build_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b2b", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let r = Builds::default().start(&data, [json!("default"), json!(1), json!("w")], data.clone(), json!({}));
+        assert_eq!(r.unwrap_err(), "Accepted builds run on a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
+    }
+}
