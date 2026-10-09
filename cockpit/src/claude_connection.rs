@@ -302,6 +302,7 @@ fn login_link(line: &str) -> Option<String> {
 }
 fn open_login(url: &str) -> Result<(), String> {
     // Use the user's Chrome profile, without a temporary browser or profile.
+    #[cfg(target_os = "linux")]
     let mut c = if Path::new("/usr/bin/google-chrome-stable").exists() {
         let mut c = Command::new("/usr/bin/google-chrome-stable");
         c.arg("--new-tab");
@@ -309,6 +310,9 @@ fn open_login(url: &str) -> Result<(), String> {
     } else {
         Command::new("xdg-open")
     };
+    // T29b1 item 6: on macOS the default browser opens the link through /usr/bin/open.
+    #[cfg(target_os = "macos")]
+    let mut c = Command::new("/usr/bin/open");
     let mut child = c
         .arg(url)
         .stdin(Stdio::null())

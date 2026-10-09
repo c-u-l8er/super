@@ -278,7 +278,19 @@ impl Connection {
             if !official_login_url(url) {
                 return Err("Codex returned an unexpected sign-in destination.".into());
             }
+            #[cfg(target_os = "linux")]
             let mut browser = Command::new("xdg-open")
+                .arg(url)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .map_err(|_| {
+                    "Could not open your browser. Check your default browser and try again."
+                })?;
+            // T29b1 item 6: on macOS the default browser opens the link through /usr/bin/open.
+            #[cfg(target_os = "macos")]
+            let mut browser = Command::new("/usr/bin/open")
                 .arg(url)
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
