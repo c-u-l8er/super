@@ -382,6 +382,7 @@ fn save_mode(
             .map_err(error)?;
         file.sync_all().map_err(error)?;
         // New files must not replace a file created since the initial check.
+        #[cfg(target_os = "linux")]
         let renamed = unsafe {
             libc::renameat2(
                 parent.as_raw_fd(),
@@ -393,6 +394,17 @@ fn save_mode(
                 } else {
                     0
                 },
+            )
+        };
+        // T29b1 item 1: macOS's no-replace rename is renameatx_np with RENAME_EXCL.
+        #[cfg(target_os = "macos")]
+        let renamed = unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                if original.is_none() { libc::RENAME_EXCL } else { 0 },
             )
         };
         if renamed != 0 {

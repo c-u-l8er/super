@@ -128,6 +128,7 @@ impl Store {
             f.write_all(&serde_json::to_vec(j).map_err(error)?)
                 .map_err(error)?;
             f.sync_all().map_err(error)?;
+            #[cfg(target_os = "linux")]
             if unsafe {
                 libc::renameat2(
                     self.dir.as_raw_fd(),
@@ -139,6 +140,22 @@ impl Store {
             } != 0
             {
                 return Err(error(std::io::Error::last_os_error()));
+            }
+            // T29b1 item 1: macOS has no renameat2; renameatx_np with RENAME_EXCL is its no-replace rename.
+            #[cfg(target_os = "macos")]
+            {
+                if unsafe {
+                    libc::renameatx_np(
+                        self.dir.as_raw_fd(),
+                        from.as_ptr(),
+                        self.dir.as_raw_fd(),
+                        to.as_ptr(),
+                        libc::RENAME_EXCL,
+                    )
+                } != 0
+                {
+                    return Err(error(std::io::Error::last_os_error()));
+                }
             }
             self.dir.sync_all().map_err(error)
         })();
