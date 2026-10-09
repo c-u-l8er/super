@@ -2211,6 +2211,8 @@ impl Runtime {
 
     /// Send one command with `fds` in the same message, after draining any reply still owed.
     fn bridge_send_with_fds(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        macos_descriptor_command(bytes)?;
         self.bridge_drain(None)?;
         #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
         fdpass::send_bridge_with_fds(self.bridge, bytes, fds)?;
@@ -2417,6 +2419,10 @@ impl Runtime {
     /// Hand the runtime one end of a new pair, labelled. The label and the
     /// capability travel in the same message.
     pub fn bind_channel(&self, command: &str, actor: Option<&str>) -> Result<Chan, String> {
+        #[cfg(target_os = "macos")]
+        if CARRIER_FLOOR_BINDS.contains(&command) {
+            return Err(CARRIER_FLOOR_ON_MACOS.to_string());
+        }
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
@@ -3001,6 +3007,29 @@ pub const CARRIER_FLOOR_ON_MACOS: &str = "carriers and terminals run on a Linux 
 /// drives the Carrier floor, so it runs on Linux until M2.
 #[cfg(target_os = "macos")]
 pub const VERIFY_ON_MACOS: &str = "the acceptance battery runs on Linux until M2";
+
+/// The bridge commands that bind a Carrier-floor endpoint (Codex review 1, finding 1).
+#[cfg(target_os = "macos")]
+const CARRIER_FLOOR_BINDS: [&str; 3] = ["bind_effect_channel", "bind_terminal_endpoint", "bind_carrier_channel"];
+
+/// macOS (Codex review 1, finding 1): every send that carries a descriptor passes here first, before the drain and
+/// before any byte is written. A Carrier-floor bind needs a descriptor, and `bridge_send_with_fds` is the only sender
+/// that carries one, so this is the one place no public path gets past: `bind_channel`, `agent_channel_with_surplus`,
+/// `bridge_call_with_rights` and any later caller. Only canonical JSON (serde_json's own serialization of what it
+/// parses: a duplicate key or an escape two decoders might read differently is not) whose `command` is
+/// `bind_agent_channel` or `bind_control_channel` may carry a descriptor; anything else is refused with the floor's text.
+#[cfg(target_os = "macos")]
+fn macos_descriptor_command(bytes: &[u8]) -> io::Result<()> {
+    let ok = serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .filter(|v| serde_json::to_vec(v).ok().as_deref() == Some(bytes))
+        .is_some_and(|v| matches!(v["command"].as_str(), Some("bind_agent_channel" | "bind_control_channel")));
+    if ok {
+        Ok(())
+    } else {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, CARRIER_FLOOR_ON_MACOS))
+    }
+}
 
 #[cfg(target_os = "macos")]
 impl Runtime {
