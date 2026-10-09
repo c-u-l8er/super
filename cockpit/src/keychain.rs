@@ -167,3 +167,35 @@ pub fn save(provider: &str, key: &str) -> Result<(), String> {
 pub fn forget(provider: &str) -> Result<(), String> {
     run("clear", provider, None).map(|_| ())
 }
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md, amendment 2): B6, the key never in argv (item 5).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b6_the_key_goes_on_stdin_never_argv() {
+        let d = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b6", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (log, input, store) = (d.join("argv.log"), d.join("stdin.log"), d.join("item"));
+        let fake = d.join("security");
+        std::fs::write(&fake, format!(
+            "#!/bin/sh\nprintf 'ARGV:%s\\n' \"$*\" >> '{log}'\ncase \"$1\" in\n  -i) cat >> '{input}'; sed -n 's/.* -w \"\\(.*\\)\"$/\\1/p' '{input}' | tail -1 > '{store}'; exit 0;;\n  find-generic-password) [ -s '{store}' ] && cat '{store}' && exit 0; exit 44;;\n  delete-generic-password) [ -s '{store}' ] || exit 44; rm -f '{store}'; exit 0;;\nesac\nexit 1\n",
+            log = log.display(), input = input.display(), store = store.display())).unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+        *TEST_SECURITY.lock().unwrap() = Some(fake.clone());
+        let key = "sk-ant-api03-T29b1_test.Key-123";
+        save("anthropic", key).unwrap();
+        assert_eq!(load("anthropic").unwrap().as_deref(), Some(key));
+        forget("anthropic").unwrap();
+        assert_eq!(load("anthropic").unwrap(), None);
+        let argv = std::fs::read_to_string(&log).unwrap();
+        assert!(!argv.contains(key), "the key reached argv: {argv}");
+        assert_eq!(std::fs::read_to_string(&input).unwrap(), format!(
+            "add-generic-password -U -a \"anthropic\" -s \"com.computedriven.super.cockpit\" -l \"Super provider API key\" -w \"{key}\"\n"));
+        let before = argv.lines().count();
+        assert_eq!(save("anthropic", "bad\"key").unwrap_err(), "This key has characters the macOS keychain helper cannot take safely. Use a session-only key.");
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), before, "something started for a refused key");
+        *TEST_SECURITY.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&d);
+    }
+}
