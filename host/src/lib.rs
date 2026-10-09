@@ -4492,23 +4492,46 @@ mod t29a_macos {
 
     #[test]
     fn a2_a_floor_bind_by_any_other_path_is_refused_and_sends_nothing() {
-        // Codex review 1, finding 1: bind_channel and bridge_call_with_rights reach the bridge too.
+        // Codex review 1, finding 1: bind_channel and bridge_call_with_rights reach the bridge too. A bounded responder
+        // stands on the runtime's end, so a command that gets through is answered (the call returns rather than hangs)
+        // and counted.
         let _s = fdpass::t27b_serial();
         let (rt, peer) = fake_runtime();
+        let responder = std::thread::spawn(move || {
+            let mut seen = 0;
+            loop {
+                let mut p = libc::pollfd { fd: peer, events: libc::POLLIN, revents: 0 };
+                if unsafe { libc::poll(&mut p, 1, 2000) } != 1 {
+                    break;
+                }
+                match bridge::framed::recv(peer, 65536, false) {
+                    Ok((_body, fds)) => {
+                        seen += 1;
+                        for f in fds {
+                            fdpass::close_fd(f);
+                        }
+                        let _ = bridge::framed::send(peer, br#"{"ok":false,"refusal":{"code":"t29a-a2"}}"#, &[], 65536, false);
+                    }
+                    Err(_) => break,
+                }
+            }
+            (peer, seen)
+        });
         for c in ["bind_effect_channel", "bind_terminal_endpoint", "bind_carrier_channel"] {
             assert_eq!(rt.bind_channel(c, None).err(), Some(CARRIER_FLOOR_ON_MACOS.to_string()), "bind_channel({c})");
             let raw = serde_json::to_vec(&json!({"schema": "bridge-command@1", "command": c})).unwrap();
-            let e = rt.bridge_call_with_rights(&raw, 1).unwrap_err();
+            let e = rt.bridge_call_with_rights(&raw, 1).err().unwrap_or_default();
             assert!(e.contains(CARRIER_FLOOR_ON_MACOS), "bridge_call_with_rights({c}): {e}");
         }
         for raw in [&br#"{"command":"bind_agent_channel","command":"bind_terminal_endpoint","schema":"bridge-command@1"}"#[..],
                     &br#"{"command":"bind_terminal_endpoint","schema":"bridge-command@1"} "#[..], &b"not json"[..]] {
-            let e = rt.bridge_call_with_rights(raw, 1).unwrap_err();
+            let e = rt.bridge_call_with_rights(raw, 1).err().unwrap_or_default();
             assert!(e.contains(CARRIER_FLOOR_ON_MACOS), "{}: {e}", String::from_utf8_lossy(raw));
         }
-        assert!(nothing_waiting(peer), "a refused bind sent a bridge command");
         assert!(rt.channels.lock().unwrap().is_empty(), "a refused bind kept a channel");
         drop(rt);
+        let (peer, seen) = responder.join().unwrap();
+        assert_eq!(seen, 0, "a refused bind reached the runtime");
         fdpass::close_fd(peer);
     }
 
