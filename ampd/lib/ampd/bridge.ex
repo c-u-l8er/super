@@ -531,9 +531,12 @@ defmodule Ampd.Bridge do
   @doc false
   def watch_host(reader) do
     if :os.type() == {:unix, :darwin} do
+      parent = self()
+
       watcher =
         spawn(fn ->
           ref = Process.monitor(reader)
+          send(parent, {:t29a_watching, self()})
 
           receive do
             {:DOWN, ^ref, :process, ^reader, _why} -> host_gone()
@@ -541,6 +544,13 @@ defmodule Ampd.Bridge do
         end)
 
       Process.group_leader(watcher, Process.whereis(:user) || Process.whereis(:init))
+
+      # Codex review 2, finding 3: return only once the watcher's monitor is set, so whoever looks next sees it.
+      receive do
+        {:t29a_watching, ^watcher} -> :ok
+      after
+        5_000 -> :ok
+      end
     end
 
     :ok
