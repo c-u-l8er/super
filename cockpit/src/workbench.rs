@@ -1026,6 +1026,7 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    #[cfg(target_os = "linux")]
     if unsafe {
         libc::openpty(
             &mut master,
@@ -1037,6 +1038,22 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
     } != 0
     {
         return Err(error(std::io::Error::last_os_error()));
+    }
+    // T29b1 item 3: Apple's openpty takes *mut termios and *mut winsize; it only reads the size.
+    #[cfg(target_os = "macos")]
+    {
+        if unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &size as *const libc::winsize as *mut libc::winsize,
+            )
+        } != 0
+        {
+            return Err(error(std::io::Error::last_os_error()));
+        }
     }
     let mut reader = unsafe { File::from_raw_fd(master) };
     let slave = unsafe { File::from_raw_fd(slave) };
@@ -1058,12 +1075,27 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
         .stdin(Stdio::from(slave.try_clone().map_err(error)?))
         .stdout(Stdio::from(slave.try_clone().map_err(error)?))
         .stderr(Stdio::from(slave));
+    #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             if libc::ioctl(0, libc::TIOCSCTTY, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    // T29b1 item 3: the same session and controlling terminal on macOS, whose ioctl request is a c_ulong. pre_exec
+    // forks there (no posix_spawn); the fork holds the spawn guard (item 4).
+    #[cfg(target_os = "macos")]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             Ok(())
