@@ -4744,6 +4744,38 @@ mod t29a_macos {
         std::os::unix::fs::symlink(&root, &trap).unwrap();
         assert!(macos_runtime_dir(&trap).is_err(), "a leaf that is a symlink was taken");
         assert!(macos_runtime_dir(&PathBuf::from(canon(&mk("open2", 0o777))).join("ampd-1-4")).is_err(), "a leaf under an open parent was made");
+        // Codex review 2, finding 1: the sweep and the leaf act on the directory that was checked, even when another takes
+        // its path in between (each holds a stale-looking entry: an empty ampd-<pid none has>-<digits>, aged past the grace)
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let stale = |d: &Path| {
+                let e = d.join("ampd-999999-1");
+                std::fs::create_dir(&e).unwrap();
+                let c = std::ffi::CString::new(e.as_os_str().as_bytes()).unwrap();
+                let t = [libc::timeval { tv_sec: 1_000_000_000, tv_usec: 0 }; 2];
+                assert_eq!(unsafe { libc::utimes(c.as_ptr(), t.as_ptr()) }, 0);
+                e
+            };
+            let orig = mk("orig", 0o700);
+            stale(&orig);
+            let (path, fd) = macos_open_runtime_base(None, Some(s(&orig))).unwrap();
+            std::fs::rename(&orig, root.join("orig-moved")).unwrap();
+            let swapped = mk("orig", 0o700);
+            let theirs = stale(&swapped);
+            macos_sweep_at(fd.fd());
+            assert!(!root.join("orig-moved/ampd-999999-1").exists(), "the checked directory's stale entry was not swept");
+            assert!(theirs.exists(), "the sweep reached the directory that took the checked one's path");
+            assert_eq!(macos_runtime_dir_at(fd.fd(), &Path::new(&path).join("ampd-1-6")), Ok(()));
+            assert!(root.join("orig-moved/ampd-1-6").is_dir(), "the leaf is not in the checked directory");
+            assert!(!swapped.join("ampd-1-6").exists(), "the leaf was made in the directory that took the path");
+        }
+        // Codex review 2, finding 2: what the ACL calls give (aclprobe/aclfd-probe.txt), and errors refused
+        assert_eq!(macos_acl_verdict(Err(libc::ENOENT)), Ok(()));
+        assert_eq!(macos_acl_verdict(Ok((-1, libc::EINVAL))), Ok(()));
+        assert!(macos_acl_verdict(Ok((0, 0))).is_err(), "an ACL entry was accepted");
+        assert!(macos_acl_verdict(Err(libc::EBADF)).is_err(), "an unreadable ACL was accepted");
+        assert!(macos_acl_verdict(Ok((-1, libc::ENOMEM))).is_err(), "an ACL iteration error was read as empty");
+        assert!(macos_private_dir(-1, "a bad descriptor").is_err(), "a bad descriptor was found private");
         std::fs::remove_dir_all(&root).unwrap();
     }
 }
