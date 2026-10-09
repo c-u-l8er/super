@@ -2117,6 +2117,30 @@ fn macos_runtime_dir(dir: &Path) -> Result<(), String> {
     made
 }
 
+/// What the start says on macOS when `PATH` has no `mix` (T29a item 7).
+#[cfg(target_os = "macos")]
+const MIX_NOT_FOUND: &str = "mix not found: put it on PATH";
+
+/// macOS (T29a item 7, option C, the coordinator's decision SLOTS b921fb9c): `mix` is found by `PATH`, as on Linux,
+/// and `posix_spawnp` searches this process's `PATH`; when it has no executable `mix`, the start refuses by name
+/// instead of failing inside the spawn. The host reads no version manager's files. How a cockpit started outside a
+/// shell (a minimal `PATH`) gets `mix` on it is T29b1's launcher.
+#[cfg(target_os = "macos")]
+fn macos_mix_on_path() -> Result<(), String> {
+    macos_mix_on_path_in(&std::env::var("PATH").unwrap_or_default())
+}
+
+/// `macos_mix_on_path`'s rule over its input, so the law can hold it without changing this process's environment.
+#[cfg(target_os = "macos")]
+fn macos_mix_on_path_in(path: &str) -> Result<(), String> {
+    let runnable = |p: &Path| std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false);
+    if path.split(':').any(|d| !d.is_empty() && runnable(&Path::new(d).join("mix"))) {
+        Ok(())
+    } else {
+        Err(MIX_NOT_FOUND.to_string())
+    }
+}
+
 impl Runtime {
     /// Spawn `ampd` holding one end of a sequenced-packet pair.
     ///
@@ -2194,6 +2218,7 @@ impl Runtime {
             env.push(("AMPD_BRIDGE_FD".into(), "3".into()));
             env.push(("AMPD_DATA_DIR".into(), world_path.to_string_lossy().into_owned()));
             env.push(("MIX_ENV".into(), "dev".into()));
+            macos_mix_on_path()?;
             spawn::spawn_possessing("mix", &["run", "--no-halt"], &env, Some(ampd_dir), &[(theirs_fd, 3)])
         };
         let child = match child {
