@@ -135,7 +135,11 @@ impl Builds {
                 Ok(())
             });
         }
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let child = command.spawn();
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let child = match child {
             Ok(child) => Arc::new(Mutex::new(child)),
             Err(e) => {

@@ -105,12 +105,16 @@ impl Rpc {
             .env_remove("OPENAI_API_KEY")
             .env_remove("CODEX_API_KEY")
             .current_dir(home.join("workspace"));
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let mut child = cmd
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .spawn()
             .map_err(|_| "Codex is not available. Install the Codex CLI and reopen Super.")?;
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let input = child
             .stdin
             .take()
@@ -290,6 +294,8 @@ impl Connection {
                 })?;
             // T29b1 item 6: on macOS the default browser opens the link through /usr/bin/open.
             #[cfg(target_os = "macos")]
+            let spawn_guard = super_host::fdpass::spawn_guard();
+            #[cfg(target_os = "macos")]
             let mut browser = Command::new("/usr/bin/open")
                 .arg(url)
                 .stdin(Stdio::null())
@@ -299,6 +305,8 @@ impl Connection {
                 .map_err(|_| {
                     "Could not open your browser. Check your default browser and try again."
                 })?;
+            #[cfg(target_os = "macos")]
+            drop(spawn_guard);
             std::thread::spawn(move || {
                 let _ = browser.wait();
             });

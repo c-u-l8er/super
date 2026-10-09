@@ -144,8 +144,12 @@ fn observe_reply(state: &mut ReplyState, event: &Value) {
 }
 fn run_reply(mut command: Command, input: String, state: Arc<Mutex<ReplyState>>, seconds: u64) -> Result<(bool, Value), String> {
     let _guard = ReplyGuard(state.clone());
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let mut child = OwnedChild(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null())
         .spawn().map_err(|_| "Claude Code is unavailable. Install the Claude CLI and reopen Super.")?);
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     let mut stdin = child.0.stdin.take().ok_or("Claude input unavailable.")?;
     std::thread::spawn(move || { let _ = stdin.write_all(input.as_bytes()); });
     let stdout = child.0.stdout.take().ok_or("Claude output unavailable.")?;
@@ -220,6 +224,8 @@ fn command(home: &Path) -> Result<Command, String> {
     Ok(c)
 }
 fn run(mut command: Command, input: Option<String>, seconds: u64) -> Result<(bool, Value), String> {
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let mut child = OwnedChild(
         command
             .stdin(Stdio::piped())
@@ -228,6 +234,8 @@ fn run(mut command: Command, input: Option<String>, seconds: u64) -> Result<(boo
             .spawn()
             .map_err(|_| "Claude Code is unavailable. Install the Claude CLI and reopen Super.")?,
     );
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     let mut stdin = child
         .0
         .stdin
@@ -313,6 +321,8 @@ fn open_login(url: &str) -> Result<(), String> {
     // T29b1 item 6: on macOS the default browser opens the link through /usr/bin/open.
     #[cfg(target_os = "macos")]
     let mut c = Command::new("/usr/bin/open");
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let mut child = c
         .arg(url)
         .stdin(Stdio::null())
@@ -320,6 +330,8 @@ fn open_login(url: &str) -> Result<(), String> {
         .stderr(Stdio::null())
         .spawn()
         .map_err(|_| "Could not open your browser for Claude sign-in.")?;
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     std::thread::spawn(move || {
         let _ = child.wait();
     });
@@ -446,6 +458,8 @@ impl Connection {
             .lock()
             .map_err(|_| "Claude connection is unavailable.")?;
         if state.is_none() {
+            #[cfg(target_os = "macos")]
+            let spawn_guard = super_host::fdpass::spawn_guard();
             let mut child = command(&home)?
                 .args(["auth", "login", "--claudeai"])
                 .stdin(Stdio::null())
@@ -453,6 +467,8 @@ impl Connection {
                 .stderr(Stdio::null())
                 .spawn()
                 .map_err(|_| "Claude sign-in could not start.")?;
+            #[cfg(target_os = "macos")]
+            drop(spawn_guard);
             let stdout = child
                 .stdout
                 .take()
@@ -520,6 +536,8 @@ impl Connection {
             "--settings",
             "{\"disableAllHooks\":true}",
         ]);
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let mut child = OwnedChild(
             c.stdin(Stdio::piped())
                 .stdout(Stdio::piped())
@@ -527,6 +545,8 @@ impl Connection {
                 .spawn()
                 .map_err(|_| "Claude Code unavailable.")?,
         );
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let mut input = child.0.stdin.take().ok_or("Claude input unavailable.")?;
         writeln!(input,"{}",json!({"type":"control_request","request_id":"models","request":{"subtype":"initialize"}})).map_err(|_|"Claude catalog request failed.")?;
         let output = child.0.stdout.take().ok_or("Claude output unavailable.")?;

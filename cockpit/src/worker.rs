@@ -957,6 +957,7 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
         &["add", "-A"][..],
         &["commit", "-q", "--allow-empty", "-m", "init"][..],
     ] {
+        #[cfg(target_os = "linux")]
         let ok = std::process::Command::new("git")
             .arg("-C")
             .arg(&repo)
@@ -964,6 +965,24 @@ fn seed_carrier(rt: &Runtime) -> Result<(super_host::Chan, String), String> {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false);
+        // T29b1 item 4: the fork lock is held across the spawn only, never the wait (amendment 1).
+        #[cfg(target_os = "macos")]
+        let ok = {
+            let spawn_guard = super_host::fdpass::spawn_guard();
+            let child = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn();
+            drop(spawn_guard);
+            child
+                .and_then(|c| c.wait_with_output())
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        };
         if !ok {
             return Err(format!("git {args:?} failed in {}", repo.display()));
         }

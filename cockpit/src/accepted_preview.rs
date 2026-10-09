@@ -322,6 +322,8 @@ impl Previews {
                     Ok(())
                 });
             }
+            #[cfg(target_os = "macos")]
+            let _spawn_guard = super_host::fdpass::spawn_guard();
             command.spawn().map_err(|e| e.to_string())
         })();
         match launch {

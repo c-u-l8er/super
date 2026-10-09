@@ -407,6 +407,8 @@ impl Runs {
                 return Err(message);
             }
         }
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let child = Command::new("node")
             .arg(dir.join("runner.mjs"))
             .arg(root)
@@ -418,6 +420,8 @@ impl Runs {
             .stdout(output)
             .stderr(errors)
             .spawn();
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let child = match child {
             Ok(c) => Arc::new(Mutex::new(c)),
             Err(_) => {
@@ -972,6 +976,8 @@ pub fn verify_acceptance(
         fs::write(dir.join("run.json"), serde_json::to_vec(run).map_err(err)?).map_err(err)?;
         let stdout = fs::File::create(dir.join("result.json")).map_err(err)?;
         let stderr = fs::File::create(dir.join("error.txt")).map_err(err)?;
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let mut child = Command::new("node")
             .arg(dir.join("check.mjs"))
             .arg(root)
@@ -982,6 +988,8 @@ pub fn verify_acceptance(
             .stderr(stderr)
             .spawn()
             .map_err(err)?;
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let started = std::time::Instant::now();
         loop {
             if let Some(status) = child.try_wait().map_err(err)? {

@@ -84,12 +84,30 @@ pub fn git_root(path: &Path) -> Result<PathBuf, String> {
     if !selected.is_dir() {
         return Err("Select a repository folder.".into());
     }
+    #[cfg(target_os = "linux")]
     let result = std::process::Command::new("git")
         .arg("-C")
         .arg(&selected)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .map_err(|_| "Git is unavailable on this machine.")?;
+    // T29b1 item 4: the fork lock is held across the spawn only, never the wait (amendment 1).
+    #[cfg(target_os = "macos")]
+    let result = {
+        let spawn_guard = super_host::fdpass::spawn_guard();
+        let child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&selected)
+            .args(["rev-parse", "--show-toplevel"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        drop(spawn_guard);
+        child
+            .and_then(|c| c.wait_with_output())
+            .map_err(|_| "Git is unavailable on this machine.")?
+    };
     if !result.status.success() {
         return Err("This folder is not a Git working tree.".into());
     }

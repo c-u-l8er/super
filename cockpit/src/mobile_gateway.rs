@@ -301,6 +301,8 @@ pub fn start() {
             command.env(key, v);
         }
     }
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let mut child = match command.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -308,6 +310,8 @@ pub fn start() {
             return;
         }
     };
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     if let Ok(file) = std::env::var("SUPER_MOBILE_PAIR_FILE") {
         let _ = PAIR_FILE.set(PathBuf::from(file));
     }

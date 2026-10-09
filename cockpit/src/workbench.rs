@@ -880,6 +880,8 @@ impl Workbench {
                     }
                 }
                 session.run = None;
+                #[cfg(target_os = "macos")]
+                let spawn_guard = super_host::fdpass::spawn_guard();
                 let mut child = Command::new("/bin/bash")
                     .args(["-c", &command])
                     .current_dir(session.root.as_ref().unwrap())
@@ -891,6 +893,8 @@ impl Workbench {
                     .process_group(0)
                     .spawn()
                     .map_err(error)?;
+                #[cfg(target_os = "macos")]
+                drop(spawn_guard);
                 let output = Arc::new(Mutex::new(Output::default()));
                 fn drain(mut pipe: impl Read + Send + 'static, output: Arc<Mutex<Output>>) {
                     std::thread::spawn(move || {
@@ -1056,7 +1060,11 @@ fn git_read(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     ] {
         cmd.env_remove(key);
     }
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let mut child = cmd.spawn().map_err(error)?;
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     fn capture(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
         std::thread::spawn(move || {
             let mut bytes = vec![];
@@ -1190,7 +1198,11 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
             Ok(())
         });
     }
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let child = command.spawn().map_err(error)?;
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     let pgid = child.id() as i32;
     let output = Arc::new(Mutex::new(Output::default()));
     let sink = output.clone();

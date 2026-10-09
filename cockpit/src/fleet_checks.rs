@@ -235,6 +235,7 @@ impl Checks {
             &json!({"id":id,"binding":{"world":[world[0],world[1]],"task":task,"revision":revision},"destination":{"host":cfg["host"],"guest":cfg["guest"]}}),
         )?;
         save(&dir.join("transport.json"), &cfg)?;
+        #[cfg(target_os = "linux")]
         let out = Command::new("node")
             .arg(dir.join("client.mjs"))
             .arg("prepare")
@@ -243,6 +244,22 @@ impl Checks {
             .stdin(Stdio::null())
             .output()
             .map_err(err)?;
+        // T29b1 item 4: the fork lock is held across the spawn only, never the wait (amendment 1).
+        #[cfg(target_os = "macos")]
+        let out = {
+            let spawn_guard = super_host::fdpass::spawn_guard();
+            let child = Command::new("node")
+                .arg(dir.join("client.mjs"))
+                .arg("prepare")
+                .arg(&dir)
+                .arg(root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            drop(spawn_guard);
+            child.and_then(|c| c.wait_with_output()).map_err(err)?
+        };
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr)
                 .chars()
@@ -269,6 +286,8 @@ impl Checks {
         }
         let out = fs::File::create(dir.join("launcher.json")).map_err(err)?;
         let error = fs::File::create(dir.join("launcher-error.txt")).map_err(err)?;
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let mut child = Command::new("/usr/bin/flock")
             .arg("-n")
             .arg(dir.join("operation.lock"))
@@ -281,6 +300,8 @@ impl Checks {
             .stderr(error)
             .spawn()
             .map_err(err)?;
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         active.insert(id.clone());
         let state = self.clone();
         std::thread::spawn(move || {
