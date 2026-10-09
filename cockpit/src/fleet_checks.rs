@@ -179,6 +179,13 @@ impl Checks {
         revision: u64,
         worker: Option<&str>,
     ) -> Result<PathBuf, String> {
+        // T29b1 item 10 (amendment 1): every remote operation starts through util-linux's flock(1), which macOS
+        // does not have; fleet checks from the Mac are M2's (T-13). Refused by name before a request is written.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &root, &task, &revision, &worker);
+            return Err("Fleet checks run from a Linux node until M2.".into());
+        }
         let active = self.0.lock().map_err(|_| "Checks are busy.")?;
         if !active.is_empty() {
             return Err("Wait for the current remote operation.".into());
@@ -245,6 +252,12 @@ impl Checks {
         Ok(dir)
     }
     pub fn launch(&self, dir: PathBuf, operation: &'static str) -> Result<Value, String> {
+        // T29b1 item 10 (amendment 1): flock(1) is util-linux's; refused by name on macOS.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&dir, &operation);
+            return Err("Fleet checks run from a Linux node until M2.".into());
+        }
         let record = read(&dir.join("record.json"))?;
         let id = record["id"]
             .as_str()
