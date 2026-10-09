@@ -104,8 +104,10 @@ use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::RawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
 
 /// What `Runtime` holds for the runtime it spawned (T28): std's `Child` on Linux, `spawn::Child` (the same `id`,
@@ -160,6 +162,7 @@ fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
 /// 16 bytes of kernel randomness, hex. No crate, and not a counter: an
 /// epoch that can be predicted is an epoch a replaced endpoint's
 /// observation can be stamped with.
+#[cfg(target_os = "linux")]
 pub(crate) fn new_epoch() -> String {
     use std::io::Read;
     let mut b = [0u8; 16];
@@ -203,6 +206,7 @@ pub(crate) fn new_epoch() -> String {
 /// The `carrier_ref` and `carrier_epoch` are **echoed, never consulted** —
 /// the same rule `serve_effects` follows for `request_id`. Letting the machine
 /// read them would be letting it decide which start it is answering.
+#[cfg(target_os = "linux")]
 pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
     use std::collections::HashMap;
     let mut live: HashMap<String, carrier::Carrier> = HashMap::new();
@@ -473,6 +477,7 @@ pub fn world_dir_for_carriers() -> PathBuf {
     d
 }
 
+#[cfg(target_os = "linux")]
 use libc::getuid;
 
 /// Content identity of the Carrier payload **as installed**.
@@ -481,6 +486,7 @@ use libc::getuid;
 /// asked at Carrier-channel establishment, when no Carrier is running and the
 /// question is which implementation is installed to be launched. It is the
 /// admission basis, not an attestation about a process.
+#[cfg(target_os = "linux")]
 fn installed_payload_digest(p: &Path) -> String {
     match std::fs::read(p) {
         Ok(b) => crate::sha256::digest(&b),
@@ -524,6 +530,7 @@ fn installed_payload_digest(p: &Path) -> String {
 /// So the **link target is the wrong evidence** — it goes stale and says
 /// `(deleted)` — and the **bytes read through the link are the right
 /// evidence**. This reads the bytes and never the target.
+#[cfg(target_os = "linux")]
 fn running_image_digest(pid: u32) -> String {
     match std::fs::read(format!("/proc/{pid}/exe")) {
         Ok(b) => crate::sha256::digest(&b),
@@ -545,6 +552,7 @@ fn running_image_digest(pid: u32) -> String {
 /// discontinuity is exercised by a falsifier; nothing decorative is bound,
 /// because a field nobody can move is a field that only makes the comparison
 /// look stronger than it is.
+#[cfg(target_os = "linux")]
 fn execution_basis(payload_digest: String) -> Value {
     json!({
         "schema": "carrier-execution-basis@1",
@@ -554,6 +562,7 @@ fn execution_basis(payload_digest: String) -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn start_one(
     root: &Path,
     carrier_ref: &str,
@@ -686,6 +695,7 @@ fn start_one(
 /// given a name it could try to open; what crosses the wire is whether the
 /// relationships hold, which is the only part a floor can check and the only
 /// part that is not an invitation.
+#[cfg(target_os = "linux")]
 fn terminal_attestation(c: &carrier::Carrier) -> Value {
     let Some(p) = c.pty() else { return Value::Null };
     let t = crate::pty::TermProps::read(c.pid);
@@ -710,6 +720,7 @@ fn terminal_attestation(c: &carrier::Carrier) -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 pub fn carrier_attestation(c: &carrier::Carrier, dir: &Path) -> Value {
     let cfg = c.configured().clone();
 
@@ -766,6 +777,7 @@ pub fn carrier_attestation(c: &carrier::Carrier, dir: &Path) -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 pub fn serve_effects(fd: RawFd) {
     loop {
         let req = match read_frame(fd) {
@@ -893,6 +905,7 @@ pub(crate) fn write_frame(fd: RawFd, v: &Value) -> io::Result<()> {
 /// falsifiers could see it. A second reader for one new response shape is the
 /// smaller change, and the Gate's single-submitter guarantee is what makes it
 /// safe.
+#[cfg(target_os = "linux")]
 pub(crate) fn write_frame_with_fd(fd: RawFd, v: &Value, pass: Option<RawFd>) -> io::Result<()> {
     let Some(p) = pass else { return write_frame(fd, v) };
 
@@ -2392,6 +2405,7 @@ impl Runtime {
     /// object `super-host identity` prints — the runtime therefore learns
     /// what performs its effects from the endpoint that will perform them,
     /// instead of from a second resolution of a pathname.
+    #[cfg(target_os = "linux")]
     pub fn effect_channel(&self) -> Result<RawFd, String> {
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
@@ -2454,6 +2468,7 @@ impl Runtime {
     /// Same socketpair, same `SCM_RIGHTS`, same adoption, same disposal as
     /// `effect_channel` and `carrier_channel` above. One more bridge command
     /// and no new descriptor mechanism.
+    #[cfg(target_os = "linux")]
     pub fn terminal_endpoint(&self) -> Result<(RawFd, String), String> {
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
@@ -2511,6 +2526,7 @@ impl Runtime {
     ///
     /// Same socketpair, same `SCM_RIGHTS`, same adoption, same framing. One
     /// more bridge command and no new descriptor mechanism.
+    #[cfg(target_os = "linux")]
     pub fn carrier_channel(&self) -> Result<RawFd, String> {
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
@@ -2706,6 +2722,7 @@ impl Runtime {
         self.child.id()
     }
 
+    #[cfg(target_os = "linux")]
     pub fn runtime_fd_count(&self) -> usize {
         self.runtime_socket_count()
     }
@@ -2717,6 +2734,7 @@ impl Runtime {
     /// count taken right after a close is a race. Returns the final count
     /// either way — a check that fails should report the number it saw,
     /// not the word "timeout".
+    #[cfg(target_os = "linux")]
     pub fn settle_sockets(&self, target: usize, limit: Duration) -> usize {
         let deadline = Instant::now() + limit;
         loop {
@@ -2732,6 +2750,7 @@ impl Runtime {
     /// nothing to do with us — epoll, eventfd, the DETS stores — and they
     /// move for their own reasons. Counting all of them measures the VM;
     /// counting sockets measures channels.
+    #[cfg(target_os = "linux")]
     pub fn runtime_socket_count(&self) -> usize {
         std::fs::read_dir(format!("/proc/{}/fd", self.child.id()))
             .map(|d| {
@@ -2775,6 +2794,7 @@ impl Runtime {
     /// a channel is bound measures our adoption and nothing else. A check
     /// that has to reason about which of the VM's descriptors to forgive
     /// is a check that will forgive one of ours.
+    #[cfg(target_os = "linux")]
     pub fn runtime_unix_fds(&self) -> std::collections::BTreeMap<String, bool> {
         const O_CLOEXEC: u32 = libc::O_CLOEXEC as u32;
         let pid = self.child.id();
@@ -2831,6 +2851,7 @@ impl Runtime {
     /// 3 before `exec`, so 3 is where it lands, and after adoption there
     /// should be nothing there.
     /// Every endpoint inode this host has handed to the runtime.
+    #[cfg(target_os = "linux")]
     pub fn adopted_channel_inodes(&self) -> Vec<u64> {
         self.channel_inodes.lock().unwrap().clone()
     }
@@ -2841,6 +2862,7 @@ impl Runtime {
     /// **Not "is it a socket".** A socket the launcher supplied as stdio is
     /// a socket and is not a channel; the difference is whether this host
     /// gave it away. Independent of how the verifier itself was started.
+    #[cfg(target_os = "linux")]
     pub fn is_adopted_channel(&self, target: &str) -> bool {
         match socket_inode(target) {
             None => false,
@@ -2848,12 +2870,14 @@ impl Runtime {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn runtime_fd_open(&self, n: RawFd) -> bool {
         std::fs::read_link(format!("/proc/{}/fd/{}", self.child.id(), n)).is_ok()
     }
 
     /// What the runtime has on descriptor `n`, for a failure message that
     /// says something.
+    #[cfg(target_os = "linux")]
     pub fn runtime_fd_target(&self, n: RawFd) -> String {
         std::fs::read_link(format!("/proc/{}/fd/{}", self.child.id(), n))
             .map(|p| p.to_string_lossy().to_string())
@@ -2878,6 +2902,99 @@ fn read_hello(chan: &Chan) -> Result<Value, String> {
     Err("the channel never greeted".into())
 }
 
+// ================================================= T29a: macOS refusals
+//
+// **On macOS the Carrier floor refuses by name** (T29a item 2). Carriers,
+// terminals and worktree effects stand on Landlock, seccomp,
+// PR_SET_PDEATHSIG, TIOCGPTPEER and /proc, none of which macOS has. Until M2
+// rules on a macOS floor, each entry point answers with one text instead of
+// compiling Linux semantics. The Linux items these stand for are
+// `#[cfg(target_os = "linux")]` and keep their bytes.
+
+/// The one text every Carrier-floor entry point gives on macOS.
+#[cfg(target_os = "macos")]
+pub const CARRIER_FLOOR_ON_MACOS: &str = "carriers and terminals run on a Linux node until M2";
+
+/// What `super-host verify` gives on macOS: the battery reads `/proc` and
+/// drives the Carrier floor, so it runs on Linux until M2.
+#[cfg(target_os = "macos")]
+pub const VERIFY_ON_MACOS: &str = "the acceptance battery runs on Linux until M2";
+
+#[cfg(target_os = "macos")]
+impl Runtime {
+    /// macOS: refused by name, before any descriptor is made or any bridge
+    /// command is sent. Linux: `effect_channel` above.
+    pub fn effect_channel(&self) -> Result<RawFd, String> {
+        Err(CARRIER_FLOOR_ON_MACOS.to_string())
+    }
+
+    /// macOS: refused by name, as `effect_channel`. Linux: above.
+    pub fn terminal_endpoint(&self) -> Result<(RawFd, String), String> {
+        Err(CARRIER_FLOOR_ON_MACOS.to_string())
+    }
+
+    /// macOS: refused by name, as `effect_channel`. Linux: above.
+    pub fn carrier_channel(&self) -> Result<RawFd, String> {
+        Err(CARRIER_FLOOR_ON_MACOS.to_string())
+    }
+}
+
+/// macOS: every effect request is answered with the refusal, its
+/// correlation echoed as `serve_effects` echoes it on Linux. Nothing is
+/// performed.
+#[cfg(target_os = "macos")]
+pub fn serve_effects(fd: RawFd) {
+    loop {
+        let req = match read_frame(fd) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let obs = json!({
+            "schema": "worktree-effect-observation@1",
+            "ok": false,
+            "reason": CARRIER_FLOOR_ON_MACOS,
+            "request_id": req["request_id"].clone(),
+            "channel_epoch": req["channel_epoch"].clone(),
+        });
+        if write_frame(fd, &obs).is_err() {
+            return;
+        }
+    }
+}
+
+/// macOS: every Carrier lifecycle and terminal request is refused by name,
+/// under the schema its op expects and with its correlation echoed, as
+/// `serve_carrier` answers on Linux. No process is started, so nothing is
+/// held, drained or terminated.
+#[cfg(target_os = "macos")]
+pub fn serve_carrier(fd: RawFd, _workdir: PathBuf) {
+    loop {
+        let req = match read_frame(fd) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let schema = match req["op"].as_str() {
+            Some("drain") => "carrier-runtime-drain-observation@1",
+            Some("stop") => "carrier-stop-observation@1",
+            Some("pty-attach") => "carrier-pty-attach-observation@1",
+            Some("pty-detach") => "carrier-pty-detach-observation@1",
+            Some("pty-resize") => "carrier-pty-resize-observation@1",
+            _ => "carrier-start-observation@1",
+        };
+        let obs = json!({
+            "schema": schema,
+            "refused": CARRIER_FLOOR_ON_MACOS,
+            "request_id": req["request_id"].clone(),
+            "channel_epoch": req["channel_epoch"].clone(),
+            "carrier_ref": req["carrier_ref"].clone(),
+            "carrier_epoch": req["carrier_epoch"].clone(),
+        });
+        if write_frame(fd, &obs).is_err() {
+            break;
+        }
+    }
+}
+
 /// The binary's whole body, in the library, so `super-host` and the
 /// cockpit are one program with two entry points rather than two programs
 /// that agree by inspection.
@@ -2892,11 +3009,20 @@ pub fn cli() -> i32 {
                 .join("ampd")
         });
 
+    // T29a: on macOS the Carrier floor's three subcommands refuse by name, at
+    // the same place their Linux arms run (before the `ampd/` requirement).
+    #[cfg(target_os = "macos")]
+    if let Some(cmd @ ("effect" | "identity" | "carrier-orphan-fixture")) = args.get(1).map(String::as_str) {
+        eprintln!("super-host {cmd}: {CARRIER_FLOOR_ON_MACOS}");
+        return 2;
+    }
+
     // **Before the `ampd/` requirement, deliberately.** `effect` performs a
     // machine operation that was already admitted; it does not start a
     // runtime, read a world, or consult anything in `ampd/`. Requiring the
     // runtime's source tree to be present would couple the performer to the
     // decider in the one direction this boundary exists to remove.
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("effect") {
         return effect::run();
     }
@@ -2904,6 +3030,7 @@ pub fn cli() -> i32 {
     // Same reason as `effect`, one step earlier: `ampd` asks what this
     // machine *is* before it decides anything, and answering requires no
     // world, no runtime and no `ampd/` tree.
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("identity") {
         return effect::identity_run();
     }
@@ -2944,6 +3071,7 @@ pub fn cli() -> i32 {
         return 0;
     }
 
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("carrier-orphan-fixture") {
         let dir = std::env::temp_dir().join("super-orphan-fixture");
         let _ = std::fs::create_dir_all(&dir);
@@ -2981,7 +3109,13 @@ pub fn cli() -> i32 {
     }
 
     let code = match args.get(1).map(String::as_str) {
+        #[cfg(target_os = "linux")]
         Some("verify") => verify::run(&ampd_dir),
+        #[cfg(target_os = "macos")]
+        Some("verify") => {
+            eprintln!("super-host verify: {VERIFY_ON_MACOS}");
+            2
+        }
         Some("run") | None => run_host(&ampd_dir, args.iter().skip(2).cloned().collect()),
         Some("world") => {
             println!("{}", WorldDir::product("default").path().display());
@@ -3127,6 +3261,7 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
     0
 }
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod t27b_stream {
     //! T27b B6 and B8 on the Carrier stream (`write_frame_with_fd`, SOCK_STREAM): a short send is finished, the peer
@@ -3227,6 +3362,7 @@ mod t27b_stream {
 // T28: a SEQPACKET peer by construction (fdpass::pair_seqpacket), so not built under the test feature framed-bridge,
 // whose bridge is the frame. T27b's laws run it on the default build; the framed bridge has T28's laws and the
 // framed verify.
+#[cfg(target_os = "linux")]
 #[cfg(all(test, not(feature = "framed-bridge")))]
 mod t27b_runtime {
     //! T27b, Codex review 1, at the caller: a Runtime whose bridge is one end of a SEQPACKET pair this test holds (no
@@ -3918,6 +4054,7 @@ mod t27b_runtime {
 
 }
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod t27b_carrier_golden {
     //! T27b B8 on the Carrier stream (round 3, Codex review 2, finding 4): normal Carrier frames are, byte for byte, the
