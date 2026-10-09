@@ -1979,6 +1979,47 @@ fn pid_alive(pid: u32) -> bool {
     io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
+/// macOS (T29a item 5): where the runtime directory goes. `XDG_RUNTIME_DIR` when it is set, as on Linux; otherwise the
+/// user's private temporary directory, `$TMPDIR` (macOS makes it per user, 0700), or the system's own answer for it
+/// (`confstr(_CS_DARWIN_USER_TEMP_DIR)`) when `TMPDIR` is unset, as a cockpit started outside a shell may find. Never
+/// the shared `/tmp`: a base that resolves there is refused by name.
+#[cfg(target_os = "macos")]
+fn macos_runtime_base() -> Result<String, String> {
+    let set = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    macos_runtime_base_from(set("XDG_RUNTIME_DIR"), set("TMPDIR"))
+}
+
+/// `macos_runtime_base`'s rule over its two inputs, so the law can hold it without changing this process's environment.
+#[cfg(target_os = "macos")]
+fn macos_runtime_base_from(xdg: Option<String>, tmpdir: Option<String>) -> Result<String, String> {
+    let base = match xdg.or(tmpdir) {
+        Some(b) => b,
+        None => {
+            let mut buf = vec![0u8; 1024];
+            let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+            if n == 0 || n > buf.len() {
+                return Err("runtime dir: no private temporary directory (set TMPDIR or XDG_RUNTIME_DIR)".into());
+            }
+            buf.truncate(n - 1);
+            String::from_utf8(buf).map_err(|_| "runtime dir: the private temporary directory is not UTF-8".to_string())?
+        }
+    };
+    let real = std::fs::canonicalize(&base).map_err(|e| format!("runtime dir: {base}: {e}"))?;
+    if real == Path::new("/private/tmp") || real == Path::new("/tmp") {
+        return Err(format!("runtime dir: {base} is the shared /tmp; set TMPDIR or XDG_RUNTIME_DIR to a private directory"));
+    }
+    Ok(base)
+}
+
+/// macOS (T29a item 5): make the runtime directory itself 0700, and only if it does not exist yet (its name carries
+/// this pid and a nanosecond stamp; an existing one is not this run's).
+#[cfg(target_os = "macos")]
+fn macos_runtime_dir(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+    std::fs::DirBuilder::new().mode(0o700).create(dir).map_err(|e| format!("runtime dir: {e}"))?;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("runtime dir mode: {e}"))
+}
+
 impl Runtime {
     /// Spawn `ampd` holding one end of a sequenced-packet pair.
     ///
@@ -1991,13 +2032,19 @@ impl Runtime {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
 
+        #[cfg(target_os = "linux")]
         let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+        #[cfg(target_os = "macos")]
+        let base = macos_runtime_base()?;
 
         // Before this run adds one of its own. See `sweep_stale_runtime_dirs`.
         sweep_stale_runtime_dirs(Path::new(&base));
 
         let dir = PathBuf::from(base).join(format!("ampd-{}-{}", std::process::id(), stamp));
+        #[cfg(target_os = "linux")]
         std::fs::create_dir_all(&dir).map_err(|e| format!("runtime dir: {e}"))?;
+        #[cfg(target_os = "macos")]
+        macos_runtime_dir(&dir)?;
 
         let world_path = world.path().to_path_buf();
         std::fs::create_dir_all(&world_path).map_err(|e| format!("world dir: {e}"))?;
