@@ -178,7 +178,13 @@ fn t27_l2_no_numeric_syscall_literal_and_no_raw_extern_in_host_src() {
                 // block in spawn.rs. Any other extern block, or any other fn in that one, is still refused.
                 let body = &after[1..after.find('}').unwrap_or(after.len())];
                 let fns: Vec<&str> = body.split("fn ").skip(1).collect();
+                // T29a (Codex review 1, finding 4; superlane/t29a/AMENDMENT-3.md): the second, by name and file:
+                // libSystem's acl_get_fd_np, acl_get_entry and acl_free (sys/acl.h), which libc 0.2.189 does not declare
+                // for Apple targets, exactly these three in lib.rs's macOS block (the runtime directory's privacy check).
+                let acl = ["acl_get_fd_np(", "acl_get_entry(", "acl_free("];
                 if name == "spawn.rs" && fns.len() == 1 && fns[0].trim_start().starts_with("posix_spawn_file_actions_addchdir(") {
+                    registered += 1;
+                } else if name == "lib.rs" && fns.len() == 3 && acl.iter().all(|a| fns.iter().filter(|f| f.trim_start().starts_with(a)).count() == 1) {
                     registered += 1;
                 } else {
                     bad.push(format!("{name}:{} a raw extern \"C\" block", line_of(&code, at)));
@@ -278,7 +284,7 @@ fn t27_l2_no_numeric_syscall_literal_and_no_raw_extern_in_host_src() {
         }
     }
 
-    assert!(registered <= 1, "the registered extern (spawn.rs's posix_spawn_file_actions_addchdir) appears {registered} times");
+    assert!(registered <= 2, "the registered externs (spawn.rs's posix_spawn_file_actions_addchdir, lib.rs's ACL block) appear {registered} times");
     assert!(saw_denied, "confine.rs's DENIED table was not found: the guard would be blind to it");
     assert!(saw_census, "verify.rs's CENSUS table was not found: the guard would be blind to it");
     assert!(bad.is_empty(), "raw syscall numbers or extern blocks in host/src:\n  {}", bad.join("\n  "));

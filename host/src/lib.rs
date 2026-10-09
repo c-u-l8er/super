@@ -1994,30 +1994,127 @@ fn macos_runtime_base() -> Result<String, String> {
 fn macos_runtime_base_from(xdg: Option<String>, tmpdir: Option<String>) -> Result<String, String> {
     let base = match xdg.or(tmpdir) {
         Some(b) => b,
-        None => {
-            let mut buf = vec![0u8; 1024];
-            let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
-            if n == 0 || n > buf.len() {
-                return Err("runtime dir: no private temporary directory (set TMPDIR or XDG_RUNTIME_DIR)".into());
-            }
-            buf.truncate(n - 1);
-            String::from_utf8(buf).map_err(|_| "runtime dir: the private temporary directory is not UTF-8".to_string())?
-        }
+        None => macos_user_temp_dir()?,
     };
     let real = std::fs::canonicalize(&base).map_err(|e| format!("runtime dir: {base}: {e}"))?;
     if real == Path::new("/private/tmp") || real == Path::new("/tmp") {
         return Err(format!("runtime dir: {base} is the shared /tmp; set TMPDIR or XDG_RUNTIME_DIR to a private directory"));
     }
-    Ok(base)
+    // Codex review 1, finding 4: private, checked on the opened directory, before the sweep or anything else uses it.
+    let fd = macos_open_dir(&real)?;
+    let private = macos_private_dir(fd, &base);
+    fdpass::close_fd(fd);
+    private?;
+    Ok(real.to_string_lossy().into_owned())
 }
 
-/// macOS (T29a item 5): make the runtime directory itself 0700, and only if it does not exist yet (its name carries
-/// this pid and a nanosecond stamp; an existing one is not this run's).
+/// macOS: the system's answer for this user's private temporary directory, `confstr(_CS_DARWIN_USER_TEMP_DIR)`.
+#[cfg(target_os = "macos")]
+fn macos_user_temp_dir() -> Result<String, String> {
+    let mut buf = vec![0u8; 1024];
+    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+    if n == 0 || n > buf.len() {
+        return Err("runtime dir: no private temporary directory (set TMPDIR or XDG_RUNTIME_DIR)".into());
+    }
+    buf.truncate(n - 1);
+    String::from_utf8(buf).map_err(|_| "runtime dir: the private temporary directory is not UTF-8".to_string())
+}
+
+/// macOS: `path` opened as a directory, the last component not followed.
+#[cfg(target_os = "macos")]
+fn macos_open_dir(path: &Path) -> Result<RawFd, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| "runtime dir: a NUL in the path".to_string())?;
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!("runtime dir: {}: {}", path.display(), io::Error::last_os_error()));
+    }
+    Ok(fd)
+}
+
+/// macOS (Codex review 1, finding 4): the directory open as `fd` is private to this user: a directory, owned by the
+/// effective user, no permission bit for group or other, and no extended ACL entry. Read from the descriptor, so a
+/// rename between the check and its use cannot swap the directory checked.
+#[cfg(target_os = "macos")]
+fn macos_private_dir(fd: RawFd, what: &str) -> Result<(), String> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(format!("runtime dir: {what}: {}", io::Error::last_os_error()));
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(format!("runtime dir: {what} is not a directory"));
+    }
+    if st.st_uid != unsafe { libc::geteuid() } {
+        return Err(format!("runtime dir: {what} is not owned by this user"));
+    }
+    if st.st_mode & 0o077 != 0 {
+        return Err(format!("runtime dir: {what} is open to group or other (mode {:o})", st.st_mode & 0o7777));
+    }
+    let acl = unsafe { macos_acl::acl_get_fd_np(fd, macos_acl::ACL_TYPE_EXTENDED) };
+    if acl.is_null() {
+        let e = io::Error::last_os_error();
+        if e.raw_os_error() != Some(libc::ENOENT) {
+            return Err(format!("runtime dir: {what}: its access control list could not be read: {e}"));
+        }
+        return Ok(());
+    }
+    let mut entry: macos_acl::AclEntry = std::ptr::null_mut();
+    let has_entry = unsafe { macos_acl::acl_get_entry(acl, macos_acl::ACL_FIRST_ENTRY, &mut entry) } == 0;
+    unsafe { macos_acl::acl_free(acl) };
+    if has_entry {
+        return Err(format!("runtime dir: {what} has an access control list"));
+    }
+    Ok(())
+}
+
+/// macOS: the three ACL calls the privacy check needs (Codex review 1, finding 4). libc 0.2.189 declares no ACL call for
+/// Apple targets; these are libSystem's (`sys/acl.h`), registered by name in T27's L2 guard.
+#[cfg(target_os = "macos")]
+mod macos_acl {
+    pub type Acl = *mut libc::c_void;
+    pub type AclEntry = *mut libc::c_void;
+    pub const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
+    pub const ACL_FIRST_ENTRY: libc::c_int = 0;
+    extern "C" {
+        pub fn acl_get_fd_np(fd: libc::c_int, ty: libc::c_int) -> Acl;
+        pub fn acl_get_entry(acl: Acl, entry_id: libc::c_int, entry: *mut AclEntry) -> libc::c_int;
+        pub fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+    }
+}
+
+/// macOS (T29a item 5; Codex review 1, finding 4): the runtime directory, made relative to its parent opened as a
+/// descriptor and re-checked private there, 0700, and only if it does not exist yet (its name carries this pid and a
+/// nanosecond stamp; an existing one, or a symlink, is not this run's).
 #[cfg(target_os = "macos")]
 fn macos_runtime_dir(dir: &Path) -> Result<(), String> {
-    use std::os::unix::fs::DirBuilderExt;
-    std::fs::DirBuilder::new().mode(0o700).create(dir).map_err(|e| format!("runtime dir: {e}"))?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).map_err(|e| format!("runtime dir mode: {e}"))
+    use std::os::unix::ffi::OsStrExt;
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return Err(format!("runtime dir: {} has no parent", dir.display()));
+    };
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| "runtime dir: a NUL in the name".to_string())?;
+    let pfd = macos_open_dir(parent)?;
+    let made = (|| {
+        macos_private_dir(pfd, &parent.to_string_lossy())?;
+        if unsafe { libc::mkdirat(pfd, name.as_ptr(), 0o700) } != 0 {
+            return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
+        }
+        let fd = unsafe { libc::openat(pfd, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+        if fd < 0 {
+            return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
+        }
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let ours = unsafe { libc::fstat(fd, &mut st) } == 0
+            && st.st_mode & libc::S_IFMT == libc::S_IFDIR
+            && st.st_uid == unsafe { libc::geteuid() };
+        let mode = unsafe { libc::fchmod(fd, 0o700) } == 0;
+        fdpass::close_fd(fd);
+        if !ours || !mode {
+            return Err(format!("runtime dir: {} is not this user's 0700 directory", dir.display()));
+        }
+        Ok(())
+    })();
+    fdpass::close_fd(pfd);
+    made
 }
 
 impl Runtime {
