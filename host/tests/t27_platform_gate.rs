@@ -14,11 +14,18 @@
 //! download). Its behavioural half is `superlane/t27/platform-gate.sh`, which
 //! checks a copy of the crate with the predicate made false and requires
 //! exactly one error, this gate's; the Mac session confirms the real one.
+//!
+//! **T29a** widens the gate to two platforms: a target that is neither Linux
+//! nor macOS is refused by name; `fdpass`, `bridge`, the layer and its
+//! re-export are compiled for both, `spawn` for macOS, and the Carrier floor
+//! and `verify` for Linux only. This test holds that map.
 
 use std::path::PathBuf;
 
 const GATE: &str = "#[cfg(target_os = \"linux\")]";
-const REFUSE: &str = "#[cfg(not(target_os = \"linux\"))]";
+const GATE_BOTH: &str = "#[cfg(any(target_os = \"linux\", target_os = \"macos\"))]";
+const GATE_MACOS: &str = "#[cfg(target_os = \"macos\")]";
+const REFUSE: &str = "#[cfg(not(any(target_os = \"linux\", target_os = \"macos\")))]";
 /// Modules that are not behind the gate, and why: each must be plain Rust.
 const PORTABLE: &[&str] = &["sha256"];
 
@@ -63,18 +70,18 @@ fn t27_l5_a_non_linux_target_is_refused_by_name_and_linux_pieces_are_gated() {
     let r = lines
         .iter()
         .position(|(_, t)| t == REFUSE)
-        .expect("lib.rs has no #[cfg(not(target_os = \"linux\"))] at its root");
+        .expect("lib.rs has no #[cfg(not(any(target_os = \"linux\", target_os = \"macos\")))] at its root");
     assert_eq!(at(r + 1), "compile_error!(", "the refusal is not a compile_error! at the crate root");
     let msg_from = src.find("compile_error!(").unwrap();
     let msg = &src[msg_from..msg_from + src[msg_from..].find(");").unwrap()];
-    for needed in ["Linux", "T28", "T29"] {
+    for needed in ["Linux", "macOS", "T29a"] {
         assert!(msg.contains(needed), "the refusal does not name {needed}: {msg}");
     }
 
     // 2 · every crate-root item is the refusal, a gated item, a portable module,
     //     or doc text — nothing compiles for a non-Linux target but `PORTABLE`
     let mut k = 0;
-    let mut gated_mods = Vec::new();
+    let mut gated_mods: Vec<(String, &str)> = Vec::new();
     let mut saw_layer = false;
     let mut saw_reexport = false;
     while k < lines.len() {
@@ -92,13 +99,15 @@ fn t27_l5_a_non_linux_target_is_refused_by_name_and_linux_pieces_are_gated() {
             k += 1;
             continue;
         }
-        if t == GATE {
+        if let Some(g) = [GATE, GATE_BOTH, GATE_MACOS].into_iter().find(|g| t == *g) {
             let item = at(k + 1).to_string();
             if let Some(m) = item.strip_prefix("pub mod ").and_then(|m| m.strip_suffix(';')) {
-                gated_mods.push(m.to_string());
+                gated_mods.push((m.to_string(), g));
             } else if item == "pub use linux_layer::*;" {
+                assert_eq!(g, GATE_BOTH, "the layer's re-export is not compiled for Linux and macOS");
                 saw_reexport = true;
             } else if item == "mod linux_layer {" {
+                assert_eq!(g, GATE_BOTH, "the layer is not compiled for Linux and macOS");
                 saw_layer = true;
                 assert_eq!(at(k + 2), "} // mod linux_layer", "something sits between the layer's open and close");
                 k += 1;
@@ -117,9 +126,11 @@ fn t27_l5_a_non_linux_target_is_refused_by_name_and_linux_pieces_are_gated() {
     }
     assert!(saw_layer, "the Linux layer module was not found behind the gate");
     assert!(saw_reexport, "the Linux layer's re-export was not found behind the gate");
-    for m in ["effect", "fdpass", "confine", "pty", "attach", "carrier", "verify"] {
-        assert!(gated_mods.iter().any(|g| g == m), "`{m}` is not declared behind the gate: {gated_mods:?}");
+    for (m, g) in [("effect", GATE), ("confine", GATE), ("pty", GATE), ("attach", GATE), ("carrier", GATE), ("verify", GATE),
+                   ("fdpass", GATE_BOTH), ("bridge", GATE_BOTH), ("spawn", GATE_MACOS)] {
+        assert!(gated_mods.iter().any(|(n, h)| n == m && *h == g), "`{m}` is not declared behind {g}: {gated_mods:?}");
     }
+    assert_eq!(gated_mods.len(), 9, "a module behind a gate this test does not map: {gated_mods:?}");
 
     // 3 · a portable module is portable: no libc, no unix extension, no /proc, no unsafe
     //     (in its code; its comments may name what it is used for)

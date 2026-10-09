@@ -42,13 +42,19 @@
 // name rather than compiled into a host that only looks like one. T28 (the
 // portable bridge) and T29 (cockpit portability) are where a second layer
 // comes from.
-#[cfg(not(target_os = "linux"))]
+//
+// **T29a: the second platform is macOS.** The bridge is T28's framed stream
+// there, `spawn` is T28's `posix_spawnp`, and the runtime's readings get
+// macOS arms. The Carrier floor (`effect`, `confine`, `pty`, `attach`,
+// `carrier`) and `verify` stay Linux-only and refuse by name on macOS until
+// M2. Every other target still stops here.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 compile_error!(
-    "super-host has one platform layer, Linux's, and none for this target. Its descriptor bridge \
-     (SOCK_SEQPACKET, MSG_CMSG_CLOEXEC, close_range), its Carrier floor (Landlock, seccomp, \
-     no_new_privs, PR_SET_PDEATHSIG), its terminals (TIOCGPTPEER) and its /proc readings have no \
-     meaning here yet: the portable bridge is T28 and cockpit portability T29 \
-     (superlane/NATIVE-PROGRAM.md). It refuses to compile rather than compile Linux semantics (T27)."
+    "super-host has two platform layers, Linux's and macOS's, and none for this target. Its \
+     descriptor bridge (SOCK_SEQPACKET on Linux, a framed stream on macOS), its spawns, its \
+     runtime readings and its Carrier floor (Landlock, seccomp, PR_SET_PDEATHSIG, TIOCGPTPEER, \
+     /proc; Linux only) have no meaning here (superlane/NATIVE-PROGRAM.md). It refuses to \
+     compile rather than compile another platform's semantics (T27, T29a)."
 );
 
 /// Portable: pure Rust over `std::io`, no platform call. The one module that
@@ -56,15 +62,16 @@ compile_error!(
 pub mod sha256;
 #[cfg(target_os = "linux")]
 pub mod effect;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod fdpass;
 
 // T28: the bridge's transport (SEQPACKET on Linux; a framed stream on macOS and under the test feature
-// `framed-bridge`), behind the gate like `fdpass` until T29a lifts it. `spawn.rs` (posix_spawnp with
-// POSIX_SPAWN_CLOEXEC_DEFAULT, for ampd and engines on macOS) is not declared here: with bridge.rs and fdpass.rs it
-// builds and runs on macOS through superlane/t28/mac-probe (MP1), and T29a declares it.
-#[cfg(target_os = "linux")]
+// `framed-bridge`). T29a lifts its gate and `fdpass`'s to both platforms, and declares `spawn.rs` (T28's posix_spawnp
+// with POSIX_SPAWN_CLOEXEC_DEFAULT, for ampd and engines on macOS), which MP1 built and ran on the Mac.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub mod bridge;
+#[cfg(target_os = "macos")]
+pub mod spawn;
 #[cfg(target_os = "linux")]
 pub mod confine;
 #[cfg(target_os = "linux")]
@@ -74,7 +81,7 @@ pub mod attach;
 #[cfg(target_os = "linux")]
 pub mod carrier;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub use linux_layer::*;
 
 /// The rest of the crate root — the runtime, the bridge's framing, the
@@ -85,7 +92,11 @@ pub use linux_layer::*;
 /// body the crate's modules as the root did. **The body is deliberately not
 /// re-indented**, so every line keeps the exact text it had, which
 /// `tools/sabotage-host.sh` anchors on.
-#[cfg(target_os = "linux")]
+///
+/// T29a: the layer compiles for macOS too, under its old name. Its
+/// Linux-only items are `#[cfg(target_os = "linux")]`, with a macOS arm or
+/// a refusal by name beside them; none of them moved.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 mod linux_layer {
 use super::*;
 
@@ -93,8 +104,10 @@ use std::collections::HashMap;
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::io::RawFd;
+#[cfg(target_os = "linux")]
 use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
+#[cfg(target_os = "linux")]
 use std::process::{Child, Command, Stdio};
 
 /// What `Runtime` holds for the runtime it spawned (T28): std's `Child` on Linux, `spawn::Child` (the same `id`,
@@ -149,6 +162,7 @@ fn write_all(fd: RawFd, buf: &[u8]) -> io::Result<()> {
 /// 16 bytes of kernel randomness, hex. No crate, and not a counter: an
 /// epoch that can be predicted is an epoch a replaced endpoint's
 /// observation can be stamped with.
+#[cfg(target_os = "linux")]
 pub(crate) fn new_epoch() -> String {
     use std::io::Read;
     let mut b = [0u8; 16];
@@ -192,6 +206,7 @@ pub(crate) fn new_epoch() -> String {
 /// The `carrier_ref` and `carrier_epoch` are **echoed, never consulted** —
 /// the same rule `serve_effects` follows for `request_id`. Letting the machine
 /// read them would be letting it decide which start it is answering.
+#[cfg(target_os = "linux")]
 pub fn serve_carrier(fd: RawFd, workdir: PathBuf) {
     use std::collections::HashMap;
     let mut live: HashMap<String, carrier::Carrier> = HashMap::new();
@@ -462,6 +477,7 @@ pub fn world_dir_for_carriers() -> PathBuf {
     d
 }
 
+#[cfg(target_os = "linux")]
 use libc::getuid;
 
 /// Content identity of the Carrier payload **as installed**.
@@ -470,6 +486,7 @@ use libc::getuid;
 /// asked at Carrier-channel establishment, when no Carrier is running and the
 /// question is which implementation is installed to be launched. It is the
 /// admission basis, not an attestation about a process.
+#[cfg(target_os = "linux")]
 fn installed_payload_digest(p: &Path) -> String {
     match std::fs::read(p) {
         Ok(b) => crate::sha256::digest(&b),
@@ -513,6 +530,7 @@ fn installed_payload_digest(p: &Path) -> String {
 /// So the **link target is the wrong evidence** — it goes stale and says
 /// `(deleted)` — and the **bytes read through the link are the right
 /// evidence**. This reads the bytes and never the target.
+#[cfg(target_os = "linux")]
 fn running_image_digest(pid: u32) -> String {
     match std::fs::read(format!("/proc/{pid}/exe")) {
         Ok(b) => crate::sha256::digest(&b),
@@ -534,6 +552,7 @@ fn running_image_digest(pid: u32) -> String {
 /// discontinuity is exercised by a falsifier; nothing decorative is bound,
 /// because a field nobody can move is a field that only makes the comparison
 /// look stronger than it is.
+#[cfg(target_os = "linux")]
 fn execution_basis(payload_digest: String) -> Value {
     json!({
         "schema": "carrier-execution-basis@1",
@@ -543,6 +562,7 @@ fn execution_basis(payload_digest: String) -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 fn start_one(
     root: &Path,
     carrier_ref: &str,
@@ -675,6 +695,7 @@ fn start_one(
 /// given a name it could try to open; what crosses the wire is whether the
 /// relationships hold, which is the only part a floor can check and the only
 /// part that is not an invitation.
+#[cfg(target_os = "linux")]
 fn terminal_attestation(c: &carrier::Carrier) -> Value {
     let Some(p) = c.pty() else { return Value::Null };
     let t = crate::pty::TermProps::read(c.pid);
@@ -699,6 +720,7 @@ fn terminal_attestation(c: &carrier::Carrier) -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 pub fn carrier_attestation(c: &carrier::Carrier, dir: &Path) -> Value {
     let cfg = c.configured().clone();
 
@@ -755,6 +777,7 @@ pub fn carrier_attestation(c: &carrier::Carrier, dir: &Path) -> Value {
     })
 }
 
+#[cfg(target_os = "linux")]
 pub fn serve_effects(fd: RawFd) {
     loop {
         let req = match read_frame(fd) {
@@ -798,10 +821,26 @@ pub fn fd_inode_pub(fd: RawFd) -> Option<u64> {
     fd_inode(fd)
 }
 
+#[cfg(target_os = "linux")]
 fn fd_inode(fd: RawFd) -> Option<u64> {
     std::fs::read_link(format!("/proc/self/fd/{fd}"))
         .ok()
         .and_then(|p| socket_inode(&p.to_string_lossy()))
+}
+
+/// macOS (T29a item 3, measured on the Mac first: `superlane/t29a/fd-identity-probe.txt`): a socket's identity is
+/// `fstat`'s `st_ino`. A `dup` and a copy received by `SCM_RIGHTS` share it, the peer's differs, and a descriptor that
+/// is not a socket gives `None`, as on Linux. libproc's `vst_ino` is 0 for sockets, so it is not used.
+#[cfg(target_os = "macos")]
+fn fd_inode(fd: RawFd) -> Option<u64> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return None;
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return None;
+    }
+    Some(st.st_ino as u64)
 }
 
 /// `pub(crate)` so `verify` can drive a Carrier channel as the runtime end
@@ -882,6 +921,7 @@ pub(crate) fn write_frame(fd: RawFd, v: &Value) -> io::Result<()> {
 /// falsifiers could see it. A second reader for one new response shape is the
 /// smaller change, and the Gate's single-submitter guarantee is what makes it
 /// safe.
+#[cfg(target_os = "linux")]
 pub(crate) fn write_frame_with_fd(fd: RawFd, v: &Value, pass: Option<RawFd>) -> io::Result<()> {
     let Some(p) = pass else { return write_frame(fd, v) };
 
@@ -1902,7 +1942,12 @@ fn sweep_stale_runtime_dirs(base: &Path) {
         }
 
         // The owner is still here.
+        #[cfg(target_os = "linux")]
         if Path::new(&format!("/proc/{pid}")).exists() {
+            continue;
+        }
+        #[cfg(target_os = "macos")]
+        if pid_alive(pid) {
             continue;
         }
 
@@ -1920,6 +1965,260 @@ fn sweep_stale_runtime_dirs(base: &Path) {
     }
 }
 
+/// macOS (T29a item 4): whether a process `pid` exists, by `kill(pid, 0)`, which sends nothing. `ESRCH` is gone;
+/// success, or `EPERM` (a process of another user), is alive. A number that is not a positive `pid_t` names no single
+/// process (`kill` would read 0 and negatives as process groups), so it is gone, as `/proc/{pid}` is on Linux.
+#[cfg(target_os = "macos")]
+fn pid_alive(pid: u32) -> bool {
+    if pid == 0 || pid > libc::pid_t::MAX as u32 {
+        return false;
+    }
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return true;
+    }
+    io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
+
+/// macOS (T29a item 5): where the runtime directory goes. `XDG_RUNTIME_DIR` when it is set, as on Linux; otherwise the
+/// user's private temporary directory, `$TMPDIR` (macOS makes it per user, 0700), or the system's own answer for it
+/// (`confstr(_CS_DARWIN_USER_TEMP_DIR)`) when `TMPDIR` is unset, as a cockpit started outside a shell may find. Never
+/// the shared `/tmp`: a base that resolves there is refused by name.
+#[cfg(target_os = "macos")]
+fn macos_runtime_base() -> Result<(String, Owned), String> {
+    let set = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+    macos_open_runtime_base(set("XDG_RUNTIME_DIR"), set("TMPDIR"))
+}
+
+/// `macos_open_runtime_base`'s path alone, for the law (A5).
+#[cfg(all(test, target_os = "macos"))]
+fn macos_runtime_base_from(xdg: Option<String>, tmpdir: Option<String>) -> Result<String, String> {
+    macos_open_runtime_base(xdg, tmpdir).map(|(path, _fd)| path)
+}
+
+/// `macos_runtime_base`'s rule over its two inputs, so the law can hold it without changing this process's environment:
+/// the base chosen, refused if it is the shared /tmp, opened, and checked private ON THAT DESCRIPTOR, which comes back
+/// with the canonical path. The sweep and the leaf use the descriptor (Codex review 2, finding 1), so the directory
+/// checked is the directory used, whatever takes its path meanwhile.
+#[cfg(target_os = "macos")]
+fn macos_open_runtime_base(xdg: Option<String>, tmpdir: Option<String>) -> Result<(String, Owned), String> {
+    let base = match xdg.or(tmpdir) {
+        Some(b) => b,
+        None => macos_user_temp_dir()?,
+    };
+    let real = std::fs::canonicalize(&base).map_err(|e| format!("runtime dir: {base}: {e}"))?;
+    if real == Path::new("/private/tmp") || real == Path::new("/tmp") {
+        return Err(format!("runtime dir: {base} is the shared /tmp; set TMPDIR or XDG_RUNTIME_DIR to a private directory"));
+    }
+    // Codex review 1, finding 4: private, checked on the opened directory, before the sweep or anything else uses it.
+    let fd = Owned::new(macos_open_dir(&real)?);
+    macos_private_dir(fd.fd(), &base)?;
+    Ok((real.to_string_lossy().into_owned(), fd))
+}
+
+/// macOS: the system's answer for this user's private temporary directory, `confstr(_CS_DARWIN_USER_TEMP_DIR)`.
+#[cfg(target_os = "macos")]
+fn macos_user_temp_dir() -> Result<String, String> {
+    let mut buf = vec![0u8; 1024];
+    let n = unsafe { libc::confstr(libc::_CS_DARWIN_USER_TEMP_DIR, buf.as_mut_ptr().cast(), buf.len()) };
+    if n == 0 || n > buf.len() {
+        return Err("runtime dir: no private temporary directory (set TMPDIR or XDG_RUNTIME_DIR)".into());
+    }
+    buf.truncate(n - 1);
+    String::from_utf8(buf).map_err(|_| "runtime dir: the private temporary directory is not UTF-8".to_string())
+}
+
+/// macOS: `path` opened as a directory, the last component not followed.
+#[cfg(target_os = "macos")]
+fn macos_open_dir(path: &Path) -> Result<RawFd, String> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).map_err(|_| "runtime dir: a NUL in the path".to_string())?;
+    let fd = unsafe { libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!("runtime dir: {}: {}", path.display(), io::Error::last_os_error()));
+    }
+    Ok(fd)
+}
+
+/// macOS (Codex review 1, finding 4): the directory open as `fd` is private to this user: a directory, owned by the
+/// effective user, no permission bit for group or other, and no extended ACL entry. Read from the descriptor, so a
+/// rename between the check and its use cannot swap the directory checked.
+#[cfg(target_os = "macos")]
+fn macos_private_dir(fd: RawFd, what: &str) -> Result<(), String> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return Err(format!("runtime dir: {what}: {}", io::Error::last_os_error()));
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+        return Err(format!("runtime dir: {what} is not a directory"));
+    }
+    if st.st_uid != unsafe { libc::geteuid() } {
+        return Err(format!("runtime dir: {what} is not owned by this user"));
+    }
+    if st.st_mode & 0o077 != 0 {
+        return Err(format!("runtime dir: {what} is open to group or other (mode {:o})", st.st_mode & 0o7777));
+    }
+    // Codex review 2, finding 2: each call's errno is read right after it, and the verdict refuses every error.
+    let errno = || io::Error::last_os_error().raw_os_error().unwrap_or(0);
+    let acl = unsafe { macos_acl::acl_get_fd_np(fd, macos_acl::ACL_TYPE_EXTENDED) };
+    let got = if acl.is_null() {
+        Err(errno())
+    } else {
+        let mut entry: macos_acl::AclEntry = std::ptr::null_mut();
+        let rc = unsafe { macos_acl::acl_get_entry(acl, macos_acl::ACL_FIRST_ENTRY, &mut entry) };
+        let e = if rc == 0 { 0 } else { errno() };
+        unsafe { macos_acl::acl_free(acl) };
+        Ok((rc, e))
+    };
+    macos_acl_verdict(got).map_err(|why| format!("runtime dir: {what} {why}"))
+}
+
+/// The verdict on what the two ACL calls gave (Codex review 2, finding 2; measured with the descriptor call on the Mac,
+/// superlane/t29a/aclprobe/aclfd-probe.txt): no ACL (`acl_get_fd_np`: NULL with ENOENT) or an empty one
+/// (`acl_get_entry(ACL_FIRST_ENTRY)`: -1 with EINVAL) is private; an entry (0) is refused; anything else could not be
+/// read, and is refused too.
+#[cfg(target_os = "macos")]
+fn macos_acl_verdict(got: Result<(libc::c_int, libc::c_int), libc::c_int>) -> Result<(), String> {
+    match got {
+        Err(libc::ENOENT) | Ok((-1, libc::EINVAL)) => Ok(()),
+        Ok((0, _)) => Err("has an access control list".into()),
+        Err(e) => Err(format!("its access control list could not be read (acl_get_fd_np errno {e})")),
+        Ok((rc, e)) => Err(format!("its access control list could not be read (acl_get_entry {rc}, errno {e})")),
+    }
+}
+
+/// macOS (Codex review 2, finding 1): `sweep_stale_runtime_dirs`, relative to the base's descriptor: the entries listed
+/// through a `dup` of it, each checked with `fstatat` (not following a symlink), the same rules (`ampd-<pid>-<digits>`,
+/// a directory, its pid gone, older than the grace), and removed with `unlinkat(AT_REMOVEDIR)`, which removes only an
+/// empty directory. Failures are ignored, as on Linux.
+#[cfg(target_os = "macos")]
+fn macos_sweep_at(base: RawFd) {
+    const GRACE: Duration = Duration::from_secs(3600);
+    let d = unsafe { libc::dup(base) };
+    if d < 0 {
+        return;
+    }
+    let dir = unsafe { libc::fdopendir(d) };
+    if dir.is_null() {
+        fdpass::close_fd(d);
+        return;
+    }
+    let mut names: Vec<Vec<u8>> = Vec::new();
+    loop {
+        let e = unsafe { libc::readdir(dir) };
+        if e.is_null() {
+            break;
+        }
+        names.push(unsafe { std::ffi::CStr::from_ptr((*e).d_name.as_ptr()) }.to_bytes().to_vec());
+    }
+    unsafe { libc::closedir(dir) };
+    let now = SystemTime::now();
+    for raw in names {
+        let Ok(name) = std::str::from_utf8(&raw) else { continue };
+        let Some(rest) = name.strip_prefix("ampd-") else { continue };
+        let Some((pid, stampf)) = rest.split_once('-') else { continue };
+        let Ok(pid) = pid.parse::<u32>() else { continue };
+        if stampf.is_empty() || !stampf.bytes().all(|b| b.is_ascii_digit()) {
+            continue;
+        }
+        let Ok(c) = std::ffi::CString::new(raw.clone()) else { continue };
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        if unsafe { libc::fstatat(base, c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0
+            || st.st_mode & libc::S_IFMT != libc::S_IFDIR
+        {
+            continue;
+        }
+        if pid_alive(pid) {
+            continue;
+        }
+        let mtime = UNIX_EPOCH + Duration::from_secs(st.st_mtime.max(0) as u64);
+        if now.duration_since(mtime).map(|a| a < GRACE).unwrap_or(true) {
+            continue;
+        }
+        unsafe { libc::unlinkat(base, c.as_ptr(), libc::AT_REMOVEDIR) };
+    }
+}
+
+/// macOS: the three ACL calls the privacy check needs (Codex review 1, finding 4). libc 0.2.189 declares no ACL call for
+/// Apple targets; these are libSystem's (`sys/acl.h`), registered by name in T27's L2 guard.
+#[cfg(target_os = "macos")]
+mod macos_acl {
+    pub type Acl = *mut libc::c_void;
+    pub type AclEntry = *mut libc::c_void;
+    pub const ACL_TYPE_EXTENDED: libc::c_int = 0x100;
+    pub const ACL_FIRST_ENTRY: libc::c_int = 0;
+    extern "C" {
+        pub fn acl_get_fd_np(fd: libc::c_int, ty: libc::c_int) -> Acl;
+        pub fn acl_get_entry(acl: Acl, entry_id: libc::c_int, entry: *mut AclEntry) -> libc::c_int;
+        pub fn acl_free(obj: *mut libc::c_void) -> libc::c_int;
+    }
+}
+
+/// macOS (T29a item 5; Codex review 1, finding 4): the runtime directory, made relative to its parent opened as a
+/// descriptor and re-checked private there, 0700, and only if it does not exist yet (its name carries this pid and a
+/// nanosecond stamp; an existing one, or a symlink, is not this run's).
+#[cfg(all(test, target_os = "macos"))]
+fn macos_runtime_dir(dir: &Path) -> Result<(), String> {
+    let Some(parent) = dir.parent() else {
+        return Err(format!("runtime dir: {} has no parent", dir.display()));
+    };
+    let pfd = Owned::new(macos_open_dir(parent)?);
+    macos_runtime_dir_at(pfd.fd(), dir)
+}
+
+/// macOS (Codex review 2, finding 1): the leaf `dir`, made relative to `base`, its parent's descriptor (re-checked
+/// private there): `mkdirat` 0700, `openat` without following a symlink, `fstat` (a directory, this user's), `fchmod`
+/// 0700. An existing leaf, or a symlink, is not this run's.
+#[cfg(target_os = "macos")]
+fn macos_runtime_dir_at(base: RawFd, dir: &Path) -> Result<(), String> {
+    use std::os::unix::ffi::OsStrExt;
+    let (Some(parent), Some(name)) = (dir.parent(), dir.file_name()) else {
+        return Err(format!("runtime dir: {} has no parent", dir.display()));
+    };
+    let name = std::ffi::CString::new(name.as_bytes()).map_err(|_| "runtime dir: a NUL in the name".to_string())?;
+    macos_private_dir(base, &parent.to_string_lossy())?;
+    if unsafe { libc::mkdirat(base, name.as_ptr(), 0o700) } != 0 {
+        return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
+    }
+    let fd = unsafe { libc::openat(base, name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+    if fd < 0 {
+        return Err(format!("runtime dir: {}: {}", dir.display(), io::Error::last_os_error()));
+    }
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    let ours = unsafe { libc::fstat(fd, &mut st) } == 0
+        && st.st_mode & libc::S_IFMT == libc::S_IFDIR
+        && st.st_uid == unsafe { libc::geteuid() };
+    let mode = unsafe { libc::fchmod(fd, 0o700) } == 0;
+    fdpass::close_fd(fd);
+    if !ours || !mode {
+        return Err(format!("runtime dir: {} is not this user's 0700 directory", dir.display()));
+    }
+    Ok(())
+}
+
+/// What the start says on macOS when `PATH` has no `mix` (T29a item 7).
+#[cfg(target_os = "macos")]
+const MIX_NOT_FOUND: &str = "mix not found: put it on PATH";
+
+/// macOS (T29a item 7, option C, the coordinator's decision SLOTS b921fb9c): `mix` is found by `PATH`, as on Linux,
+/// and `posix_spawnp` searches this process's `PATH`; when it has no executable `mix`, the start refuses by name
+/// instead of failing inside the spawn. The host reads no version manager's files. How a cockpit started outside a
+/// shell (a minimal `PATH`) gets `mix` on it is T29b1's launcher.
+#[cfg(target_os = "macos")]
+fn macos_mix_on_path() -> Result<(), String> {
+    macos_mix_on_path_in(&std::env::var("PATH").unwrap_or_default())
+}
+
+/// `macos_mix_on_path`'s rule over its input, so the law can hold it without changing this process's environment.
+#[cfg(target_os = "macos")]
+fn macos_mix_on_path_in(path: &str) -> Result<(), String> {
+    let runnable = |p: &Path| std::fs::metadata(p).map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0).unwrap_or(false);
+    if path.split(':').any(|d| !d.is_empty() && runnable(&Path::new(d).join("mix"))) {
+        Ok(())
+    } else {
+        Err(MIX_NOT_FOUND.to_string())
+    }
+}
+
 impl Runtime {
     /// Spawn `ampd` holding one end of a sequenced-packet pair.
     ///
@@ -1932,13 +2231,23 @@ impl Runtime {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
 
+        #[cfg(target_os = "linux")]
         let base = std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/tmp".into());
+        #[cfg(target_os = "macos")]
+        let (base, base_fd) = macos_runtime_base()?;
 
         // Before this run adds one of its own. See `sweep_stale_runtime_dirs`.
+        #[cfg(target_os = "linux")]
         sweep_stale_runtime_dirs(Path::new(&base));
+        // Codex review 2, finding 1: on macOS the sweep and the leaf use the descriptor that was checked private.
+        #[cfg(target_os = "macos")]
+        macos_sweep_at(base_fd.fd());
 
         let dir = PathBuf::from(base).join(format!("ampd-{}-{}", std::process::id(), stamp));
+        #[cfg(target_os = "linux")]
         std::fs::create_dir_all(&dir).map_err(|e| format!("runtime dir: {e}"))?;
+        #[cfg(target_os = "macos")]
+        macos_runtime_dir_at(base_fd.fd(), &dir)?;
 
         let world_path = world.path().to_path_buf();
         std::fs::create_dir_all(&world_path).map_err(|e| format!("world dir: {e}"))?;
@@ -1991,6 +2300,7 @@ impl Runtime {
             env.push(("AMPD_BRIDGE_FD".into(), "3".into()));
             env.push(("AMPD_DATA_DIR".into(), world_path.to_string_lossy().into_owned()));
             env.push(("MIX_ENV".into(), "dev".into()));
+            macos_mix_on_path()?;
             spawn::spawn_possessing("mix", &["run", "--no-halt"], &env, Some(ampd_dir), &[(theirs_fd, 3)])
         };
         let child = match child {
@@ -2105,6 +2415,8 @@ impl Runtime {
 
     /// Send one command with `fds` in the same message, after draining any reply still owed.
     fn bridge_send_with_fds(&self, bytes: &[u8], fds: &[RawFd]) -> io::Result<()> {
+        #[cfg(target_os = "macos")]
+        macos_descriptor_command(bytes)?;
         self.bridge_drain(None)?;
         #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
         fdpass::send_bridge_with_fds(self.bridge, bytes, fds)?;
@@ -2311,6 +2623,10 @@ impl Runtime {
     /// Hand the runtime one end of a new pair, labelled. The label and the
     /// capability travel in the same message.
     pub fn bind_channel(&self, command: &str, actor: Option<&str>) -> Result<Chan, String> {
+        #[cfg(target_os = "macos")]
+        if CARRIER_FLOOR_BINDS.contains(&command) {
+            return Err(CARRIER_FLOOR_ON_MACOS.to_string());
+        }
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
             fdpass::pair_stream().map_err(|e| format!("channel socketpair: {e}"))?;
@@ -2381,6 +2697,7 @@ impl Runtime {
     /// object `super-host identity` prints — the runtime therefore learns
     /// what performs its effects from the endpoint that will perform them,
     /// instead of from a second resolution of a pathname.
+    #[cfg(target_os = "linux")]
     pub fn effect_channel(&self) -> Result<RawFd, String> {
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
@@ -2443,6 +2760,7 @@ impl Runtime {
     /// Same socketpair, same `SCM_RIGHTS`, same adoption, same disposal as
     /// `effect_channel` and `carrier_channel` above. One more bridge command
     /// and no new descriptor mechanism.
+    #[cfg(target_os = "linux")]
     pub fn terminal_endpoint(&self) -> Result<(RawFd, String), String> {
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
@@ -2500,6 +2818,7 @@ impl Runtime {
     ///
     /// Same socketpair, same `SCM_RIGHTS`, same adoption, same framing. One
     /// more bridge command and no new descriptor mechanism.
+    #[cfg(target_os = "linux")]
     pub fn carrier_channel(&self) -> Result<RawFd, String> {
         let _b = self.bridge_lock.lock().unwrap();
         let fdpass::Pair(ours, theirs) =
@@ -2695,6 +3014,7 @@ impl Runtime {
         self.child.id()
     }
 
+    #[cfg(target_os = "linux")]
     pub fn runtime_fd_count(&self) -> usize {
         self.runtime_socket_count()
     }
@@ -2706,6 +3026,7 @@ impl Runtime {
     /// count taken right after a close is a race. Returns the final count
     /// either way — a check that fails should report the number it saw,
     /// not the word "timeout".
+    #[cfg(target_os = "linux")]
     pub fn settle_sockets(&self, target: usize, limit: Duration) -> usize {
         let deadline = Instant::now() + limit;
         loop {
@@ -2721,6 +3042,7 @@ impl Runtime {
     /// nothing to do with us — epoll, eventfd, the DETS stores — and they
     /// move for their own reasons. Counting all of them measures the VM;
     /// counting sockets measures channels.
+    #[cfg(target_os = "linux")]
     pub fn runtime_socket_count(&self) -> usize {
         std::fs::read_dir(format!("/proc/{}/fd", self.child.id()))
             .map(|d| {
@@ -2764,6 +3086,7 @@ impl Runtime {
     /// a channel is bound measures our adoption and nothing else. A check
     /// that has to reason about which of the VM's descriptors to forgive
     /// is a check that will forgive one of ours.
+    #[cfg(target_os = "linux")]
     pub fn runtime_unix_fds(&self) -> std::collections::BTreeMap<String, bool> {
         const O_CLOEXEC: u32 = libc::O_CLOEXEC as u32;
         let pid = self.child.id();
@@ -2820,6 +3143,7 @@ impl Runtime {
     /// 3 before `exec`, so 3 is where it lands, and after adoption there
     /// should be nothing there.
     /// Every endpoint inode this host has handed to the runtime.
+    #[cfg(target_os = "linux")]
     pub fn adopted_channel_inodes(&self) -> Vec<u64> {
         self.channel_inodes.lock().unwrap().clone()
     }
@@ -2830,6 +3154,7 @@ impl Runtime {
     /// **Not "is it a socket".** A socket the launcher supplied as stdio is
     /// a socket and is not a channel; the difference is whether this host
     /// gave it away. Independent of how the verifier itself was started.
+    #[cfg(target_os = "linux")]
     pub fn is_adopted_channel(&self, target: &str) -> bool {
         match socket_inode(target) {
             None => false,
@@ -2837,12 +3162,14 @@ impl Runtime {
         }
     }
 
+    #[cfg(target_os = "linux")]
     pub fn runtime_fd_open(&self, n: RawFd) -> bool {
         std::fs::read_link(format!("/proc/{}/fd/{}", self.child.id(), n)).is_ok()
     }
 
     /// What the runtime has on descriptor `n`, for a failure message that
     /// says something.
+    #[cfg(target_os = "linux")]
     pub fn runtime_fd_target(&self, n: RawFd) -> String {
         std::fs::read_link(format!("/proc/{}/fd/{}", self.child.id(), n))
             .map(|p| p.to_string_lossy().to_string())
@@ -2867,6 +3194,122 @@ fn read_hello(chan: &Chan) -> Result<Value, String> {
     Err("the channel never greeted".into())
 }
 
+// ================================================= T29a: macOS refusals
+//
+// **On macOS the Carrier floor refuses by name** (T29a item 2). Carriers,
+// terminals and worktree effects stand on Landlock, seccomp,
+// PR_SET_PDEATHSIG, TIOCGPTPEER and /proc, none of which macOS has. Until M2
+// rules on a macOS floor, each entry point answers with one text instead of
+// compiling Linux semantics. The Linux items these stand for are
+// `#[cfg(target_os = "linux")]` and keep their bytes.
+
+/// The one text every Carrier-floor entry point gives on macOS.
+#[cfg(target_os = "macos")]
+pub const CARRIER_FLOOR_ON_MACOS: &str = "carriers and terminals run on a Linux node until M2";
+
+/// What `super-host verify` gives on macOS: the battery reads `/proc` and
+/// drives the Carrier floor, so it runs on Linux until M2.
+#[cfg(target_os = "macos")]
+pub const VERIFY_ON_MACOS: &str = "the acceptance battery runs on Linux until M2";
+
+/// The bridge commands that bind a Carrier-floor endpoint (Codex review 1, finding 1).
+#[cfg(target_os = "macos")]
+const CARRIER_FLOOR_BINDS: [&str; 3] = ["bind_effect_channel", "bind_terminal_endpoint", "bind_carrier_channel"];
+
+/// macOS (Codex review 1, finding 1): every send that carries a descriptor passes here first, before the drain and
+/// before any byte is written. A Carrier-floor bind needs a descriptor, and `bridge_send_with_fds` is the only sender
+/// that carries one, so this is the one place no public path gets past: `bind_channel`, `agent_channel_with_surplus`,
+/// `bridge_call_with_rights` and any later caller. Only canonical JSON (serde_json's own serialization of what it
+/// parses: a duplicate key or an escape two decoders might read differently is not) whose `command` is
+/// `bind_agent_channel` or `bind_control_channel` may carry a descriptor; anything else is refused with the floor's text.
+#[cfg(target_os = "macos")]
+fn macos_descriptor_command(bytes: &[u8]) -> io::Result<()> {
+    let ok = serde_json::from_slice::<Value>(bytes)
+        .ok()
+        .filter(|v| serde_json::to_vec(v).ok().as_deref() == Some(bytes))
+        .is_some_and(|v| matches!(v["command"].as_str(), Some("bind_agent_channel" | "bind_control_channel")));
+    if ok {
+        Ok(())
+    } else {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, CARRIER_FLOOR_ON_MACOS))
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Runtime {
+    /// macOS: refused by name, before any descriptor is made or any bridge
+    /// command is sent. Linux: `effect_channel` above.
+    pub fn effect_channel(&self) -> Result<RawFd, String> {
+        Err(CARRIER_FLOOR_ON_MACOS.to_string())
+    }
+
+    /// macOS: refused by name, as `effect_channel`. Linux: above.
+    pub fn terminal_endpoint(&self) -> Result<(RawFd, String), String> {
+        Err(CARRIER_FLOOR_ON_MACOS.to_string())
+    }
+
+    /// macOS: refused by name, as `effect_channel`. Linux: above.
+    pub fn carrier_channel(&self) -> Result<RawFd, String> {
+        Err(CARRIER_FLOOR_ON_MACOS.to_string())
+    }
+}
+
+/// macOS: every effect request is answered with the refusal, its
+/// correlation echoed as `serve_effects` echoes it on Linux. Nothing is
+/// performed.
+#[cfg(target_os = "macos")]
+pub fn serve_effects(fd: RawFd) {
+    loop {
+        let req = match read_frame(fd) {
+            Ok(v) => v,
+            Err(_) => return,
+        };
+        let obs = json!({
+            "schema": "worktree-effect-observation@1",
+            "ok": false,
+            "reason": CARRIER_FLOOR_ON_MACOS,
+            "request_id": req["request_id"].clone(),
+            "channel_epoch": req["channel_epoch"].clone(),
+        });
+        if write_frame(fd, &obs).is_err() {
+            return;
+        }
+    }
+}
+
+/// macOS: every Carrier lifecycle and terminal request is refused by name,
+/// under the schema its op expects and with its correlation echoed, as
+/// `serve_carrier` answers on Linux. No process is started, so nothing is
+/// held, drained or terminated.
+#[cfg(target_os = "macos")]
+pub fn serve_carrier(fd: RawFd, _workdir: PathBuf) {
+    loop {
+        let req = match read_frame(fd) {
+            Ok(v) => v,
+            Err(_) => break,
+        };
+        let schema = match req["op"].as_str() {
+            Some("drain") => "carrier-runtime-drain-observation@1",
+            Some("stop") => "carrier-stop-observation@1",
+            Some("pty-attach") => "carrier-pty-attach-observation@1",
+            Some("pty-detach") => "carrier-pty-detach-observation@1",
+            Some("pty-resize") => "carrier-pty-resize-observation@1",
+            _ => "carrier-start-observation@1",
+        };
+        let obs = json!({
+            "schema": schema,
+            "refused": CARRIER_FLOOR_ON_MACOS,
+            "request_id": req["request_id"].clone(),
+            "channel_epoch": req["channel_epoch"].clone(),
+            "carrier_ref": req["carrier_ref"].clone(),
+            "carrier_epoch": req["carrier_epoch"].clone(),
+        });
+        if write_frame(fd, &obs).is_err() {
+            break;
+        }
+    }
+}
+
 /// The binary's whole body, in the library, so `super-host` and the
 /// cockpit are one program with two entry points rather than two programs
 /// that agree by inspection.
@@ -2881,11 +3324,20 @@ pub fn cli() -> i32 {
                 .join("ampd")
         });
 
+    // T29a: on macOS the Carrier floor's three subcommands refuse by name, at
+    // the same place their Linux arms run (before the `ampd/` requirement).
+    #[cfg(target_os = "macos")]
+    if let Some(cmd @ ("effect" | "identity" | "carrier-orphan-fixture")) = args.get(1).map(String::as_str) {
+        eprintln!("super-host {cmd}: {CARRIER_FLOOR_ON_MACOS}");
+        return 2;
+    }
+
     // **Before the `ampd/` requirement, deliberately.** `effect` performs a
     // machine operation that was already admitted; it does not start a
     // runtime, read a world, or consult anything in `ampd/`. Requiring the
     // runtime's source tree to be present would couple the performer to the
     // decider in the one direction this boundary exists to remove.
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("effect") {
         return effect::run();
     }
@@ -2893,6 +3345,7 @@ pub fn cli() -> i32 {
     // Same reason as `effect`, one step earlier: `ampd` asks what this
     // machine *is* before it decides anything, and answering requires no
     // world, no runtime and no `ampd/` tree.
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("identity") {
         return effect::identity_run();
     }
@@ -2933,6 +3386,7 @@ pub fn cli() -> i32 {
         return 0;
     }
 
+    #[cfg(target_os = "linux")]
     if args.get(1).map(String::as_str) == Some("carrier-orphan-fixture") {
         let dir = std::env::temp_dir().join("super-orphan-fixture");
         let _ = std::fs::create_dir_all(&dir);
@@ -2970,7 +3424,13 @@ pub fn cli() -> i32 {
     }
 
     let code = match args.get(1).map(String::as_str) {
+        #[cfg(target_os = "linux")]
         Some("verify") => verify::run(&ampd_dir),
+        #[cfg(target_os = "macos")]
+        Some("verify") => {
+            eprintln!("super-host verify: {VERIFY_ON_MACOS}");
+            2
+        }
         Some("run") | None => run_host(&ampd_dir, args.iter().skip(2).cloned().collect()),
         Some("world") => {
             println!("{}", WorldDir::product("default").path().display());
@@ -3116,6 +3576,7 @@ fn run_host(ampd_dir: &Path, rest: Vec<String>) -> i32 {
     0
 }
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod t27b_stream {
     //! T27b B6 and B8 on the Carrier stream (`write_frame_with_fd`, SOCK_STREAM): a short send is finished, the peer
@@ -3216,6 +3677,7 @@ mod t27b_stream {
 // T28: a SEQPACKET peer by construction (fdpass::pair_seqpacket), so not built under the test feature framed-bridge,
 // whose bridge is the frame. T27b's laws run it on the default build; the framed bridge has T28's laws and the
 // framed verify.
+#[cfg(target_os = "linux")]
 #[cfg(all(test, not(feature = "framed-bridge")))]
 mod t27b_runtime {
     //! T27b, Codex review 1, at the caller: a Runtime whose bridge is one end of a SEQPACKET pair this test holds (no
@@ -3907,6 +4369,7 @@ mod t27b_runtime {
 
 }
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod t27b_carrier_golden {
     //! T27b B8 on the Carrier stream (round 3, Codex review 2, finding 4): normal Carrier frames are, byte for byte, the
@@ -4004,7 +4467,10 @@ mod t28_bridge {
             let dir = std::env::temp_dir().join(format!("t28-rt-{}-{ours}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let lock = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+            #[cfg(target_os = "linux")]
             let child = std::process::Command::new("sleep").arg("60").spawn().unwrap();
+            #[cfg(target_os = "macos")]
+            let child = spawn::spawn_possessing("sleep", &["60"], &[], None, &[]).unwrap();
             let rt = Runtime {
                 dir: dir.clone(),
                 world: WorldDir::Ephemeral(dir.join("world")),
@@ -4043,6 +4509,277 @@ mod t28_bridge {
         }
     }
 }
+
+/// T29a's laws A2-A5 on macOS (`superlane/t29a/TASK.md`; each has a planted bug that only it catches, `t29a/laws.py`).
+#[cfg(all(test, target_os = "macos"))]
+mod t29a_macos {
+    use super::*;
+    use serde_json::{json, Value};
+
+    fn nothing_waiting(fd: RawFd) -> bool {
+        let mut b = [0u8; 1];
+        let r = unsafe { libc::recv(fd, b.as_mut_ptr().cast(), 1, libc::MSG_DONTWAIT | libc::MSG_PEEK) };
+        r < 0 && io::Error::last_os_error().kind() == io::ErrorKind::WouldBlock
+    }
+
+    /// A Runtime around a framed pair whose far end nothing serves, as T28's l10 test builds one.
+    fn fake_runtime() -> (Runtime, RawFd) {
+        let fdpass::Pair(ours, peer) = bridge::framed::pair().unwrap();
+        let dir = std::env::temp_dir().join(format!("t29a-rt-{}-{ours}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC) };
+        let child = spawn::spawn_possessing("sleep", &["60"], &[], None, &[]).unwrap();
+        let rt = Runtime {
+            dir: dir.clone(),
+            world: WorldDir::Ephemeral(dir.join("world")),
+            world_lock: lock,
+            child,
+            bridge: ours,
+            bridge_lock: Mutex::new(()),
+            bridge_owed: AtomicBool::new(false),
+            bridge_closed: AtomicBool::new(false),
+            channels: Mutex::new(Vec::new()),
+            channel_inodes: Mutex::new(Vec::new()),
+            released: false,
+        };
+        (rt, peer)
+    }
+
+    #[test]
+    fn a2_the_carrier_floor_constructors_refuse_by_name_and_send_nothing() {
+        let _s = fdpass::t27b_serial();
+        let (rt, peer) = fake_runtime();
+        assert_eq!(rt.effect_channel(), Err(CARRIER_FLOOR_ON_MACOS.to_string()));
+        assert_eq!(rt.terminal_endpoint(), Err(CARRIER_FLOOR_ON_MACOS.to_string()));
+        assert_eq!(rt.carrier_channel(), Err(CARRIER_FLOOR_ON_MACOS.to_string()));
+        assert!(nothing_waiting(peer), "a refused constructor sent a bridge command");
+        assert!(rt.channels.lock().unwrap().is_empty(), "a refused constructor kept a channel");
+        drop(rt);
+        fdpass::close_fd(peer);
+    }
+
+    fn served(serve: fn(RawFd), requests: &[Value]) -> Vec<Value> {
+        let fdpass::Pair(ours, theirs) = fdpass::pair_stream().unwrap();
+        let t = std::thread::spawn(move || serve(theirs));
+        let mut out = Vec::new();
+        for r in requests {
+            write_frame(ours, r).unwrap();
+            out.push(read_frame(ours).unwrap());
+        }
+        fdpass::close_fd(ours);
+        t.join().unwrap();
+        out
+    }
+
+    #[test]
+    fn a2_the_carrier_service_refuses_every_op_by_name_under_its_schema() {
+        let ops = [("drain", "carrier-runtime-drain-observation@1"), ("start", "carrier-start-observation@1"),
+                   ("stop", "carrier-stop-observation@1"), ("pty-attach", "carrier-pty-attach-observation@1"),
+                   ("pty-detach", "carrier-pty-detach-observation@1"), ("pty-resize", "carrier-pty-resize-observation@1"),
+                   ("no-such-op", "carrier-start-observation@1")];
+        let reqs: Vec<Value> = ops.iter().enumerate().map(|(i, (op, _))| json!({"op": op, "request_id": i,
+            "channel_epoch": "e", "carrier_ref": format!("c{i}"), "carrier_epoch": "ce", "rows": 24, "cols": 80})).collect();
+        let got = served(|fd| serve_carrier(fd, std::env::temp_dir()), &reqs);
+        for ((i, (op, schema)), o) in ops.iter().enumerate().zip(&got) {
+            assert_eq!(o["schema"], *schema, "{op}");
+            assert_eq!(o["refused"], CARRIER_FLOOR_ON_MACOS, "{op}");
+            assert_eq!((&o["request_id"], &o["channel_epoch"], &o["carrier_ref"], &o["carrier_epoch"]),
+                       (&json!(i), &json!("e"), &json!(format!("c{i}")), &json!("ce")), "{op}: the correlation is not echoed");
+        }
+    }
+
+    #[test]
+    fn a2_the_effect_service_refuses_by_name() {
+        let got = served(serve_effects, &[json!({"schema": "worktree-effect-request@1", "request_id": "r1", "channel_epoch": "e1"})]);
+        assert_eq!(got[0]["schema"], "worktree-effect-observation@1");
+        assert_eq!(got[0]["ok"], false);
+        assert_eq!(got[0]["reason"], CARRIER_FLOOR_ON_MACOS);
+        assert_eq!((&got[0]["request_id"], &got[0]["channel_epoch"]), (&json!("r1"), &json!("e1")));
+    }
+
+    #[test]
+    fn a2_a_floor_bind_by_any_other_path_is_refused_and_sends_nothing() {
+        // Codex review 1, finding 1: bind_channel and bridge_call_with_rights reach the bridge too. A bounded responder
+        // stands on the runtime's end, so a command that gets through is answered (the call returns rather than hangs)
+        // and counted.
+        let _s = fdpass::t27b_serial();
+        let (rt, peer) = fake_runtime();
+        let responder = std::thread::spawn(move || {
+            let mut seen = 0;
+            loop {
+                let mut p = libc::pollfd { fd: peer, events: libc::POLLIN, revents: 0 };
+                if unsafe { libc::poll(&mut p, 1, 2000) } != 1 {
+                    break;
+                }
+                match bridge::framed::recv(peer, 65536, false) {
+                    Ok((_body, fds)) => {
+                        seen += 1;
+                        for f in fds {
+                            fdpass::close_fd(f);
+                        }
+                        let _ = bridge::framed::send(peer, br#"{"ok":false,"refusal":{"code":"t29a-a2"}}"#, &[], 65536, false);
+                    }
+                    Err(_) => break,
+                }
+            }
+            (peer, seen)
+        });
+        for c in ["bind_effect_channel", "bind_terminal_endpoint", "bind_carrier_channel"] {
+            assert_eq!(rt.bind_channel(c, None).err(), Some(CARRIER_FLOOR_ON_MACOS.to_string()), "bind_channel({c})");
+            let raw = serde_json::to_vec(&json!({"schema": "bridge-command@1", "command": c})).unwrap();
+            let e = rt.bridge_call_with_rights(&raw, 1).err().unwrap_or_default();
+            assert!(e.contains(CARRIER_FLOOR_ON_MACOS), "bridge_call_with_rights({c}): {e}");
+        }
+        for raw in [&br#"{"command":"bind_agent_channel","command":"bind_terminal_endpoint","schema":"bridge-command@1"}"#[..],
+                    &br#"{"command":"bind_terminal_endpoint","schema":"bridge-command@1"} "#[..], &b"not json"[..]] {
+            let e = rt.bridge_call_with_rights(raw, 1).err().unwrap_or_default();
+            assert!(e.contains(CARRIER_FLOOR_ON_MACOS), "{}: {e}", String::from_utf8_lossy(raw));
+        }
+        assert!(rt.channels.lock().unwrap().is_empty(), "a refused bind kept a channel");
+        drop(rt);
+        let (peer, seen) = responder.join().unwrap();
+        assert_eq!(seen, 0, "a refused bind reached the runtime");
+        fdpass::close_fd(peer);
+    }
+
+    #[test]
+    fn a3_a_socket_end_s_identity_is_shared_by_its_dup_and_not_by_its_peer() {
+        let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
+        let d = unsafe { libc::dup(a) };
+        let (ia, ib, id) = (fd_inode(a), fd_inode(b), fd_inode(d));
+        assert!(ia.is_some() && ib.is_some(), "a socket end has no identity: {ia:?} {ib:?}");
+        assert_eq!(ia, id, "a dup is not the same socket");
+        assert_ne!(ia, ib, "the peer is the same socket");
+        let mut p = [0 as RawFd; 2];
+        assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+        let f = unsafe { libc::open(c"/dev/null".as_ptr(), libc::O_RDONLY) };
+        assert_eq!((fd_inode(p[0]), fd_inode(f)), (None, None), "a pipe or a file has a socket identity");
+        for x in [a, b, d, p[0], p[1], f] {
+            fdpass::close_fd(x);
+        }
+    }
+
+    #[test]
+    fn a4_a_live_pid_is_alive_a_reaped_one_is_gone_and_another_user_s_is_alive() {
+        assert!(pid_alive(std::process::id()), "this process is not alive");
+        let mut c = spawn::spawn_possessing("sleep", &["60"], &[], None, &[]).unwrap();
+        let pid = c.id();
+        assert!(pid_alive(pid), "a running child is not alive");
+        c.kill().unwrap();
+        c.wait().unwrap();
+        assert!(!pid_alive(pid), "a reaped child is alive");
+        assert!(pid_alive(1), "launchd (another user's process: EPERM) is not alive");
+        assert!(!pid_alive(0) && !pid_alive(u32::MAX), "a number that names no single process is alive");
+    }
+
+    #[test]
+    fn a7_mix_is_found_by_path_else_the_start_refuses_by_name() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = PathBuf::from(macos_user_temp_dir().unwrap()).join(format!("t29a-a7-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let exe = |p: &Path, mode: u32| {
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, "#!/bin/sh\n").unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        };
+        let (onpath, noexec, dir) = (root.join("onpath"), root.join("noexec"), root.join("dir"));
+        exe(&onpath.join("mix"), 0o755);
+        exe(&noexec.join("mix"), 0o644);
+        std::fs::create_dir_all(dir.join("mix")).unwrap();
+        let p = |dirs: &[&Path]| dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>().join(":");
+        assert_eq!(macos_mix_on_path_in(&p(&[Path::new("/usr/bin"), &onpath])), Ok(()));
+        assert_eq!(macos_mix_on_path_in(&p(&[&onpath, Path::new("/bin")])), Ok(()));
+        for path in ["/usr/bin:/bin".to_string(), String::new(), ":".to_string(), p(&[&noexec, Path::new("/bin")]), p(&[&dir])] {
+            assert_eq!(macos_mix_on_path_in(&path), Err(MIX_NOT_FOUND.to_string()), "PATH={path}");
+        }
+        assert_eq!(MIX_NOT_FOUND, "mix not found: put it on PATH");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn a5_the_runtime_directory_is_private_and_never_the_shared_tmp() {
+        // Codex review 1, finding 4: the base must be private (owner, mode, ACL), the leaf made relative to it.
+        use std::os::unix::fs::PermissionsExt;
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        let root = PathBuf::from(macos_user_temp_dir().unwrap()).join(format!("t29a-a5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mk = |n: &str, mode: u32| {
+            let d = root.join(n);
+            std::fs::create_dir(&d).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
+            d
+        };
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let private = mk("private", 0o700);
+        // the choice: XDG_RUNTIME_DIR first, else TMPDIR, else the system's per-user directory; canonical
+        assert_eq!(macos_runtime_base_from(Some(s(&private)), Some("/nonexistent".into())), Ok(canon(&private)));
+        assert_eq!(macos_runtime_base_from(None, Some(s(&private))), Ok(canon(&private)));
+        assert_eq!(macos_runtime_base_from(None, None), Ok(canon(Path::new(&macos_user_temp_dir().unwrap()))));
+        assert!(macos_runtime_base_from(Some("/x/xdg".into()), None).is_err(), "a missing base was accepted");
+        // never the shared /tmp, nothing open to group or other, nothing foreign-owned, no ACL
+        for shared in ["/tmp", "/private/tmp", "/tmp/"] {
+            assert!(macos_runtime_base_from(None, Some(shared.into())).is_err(), "TMPDIR={shared} was accepted");
+            assert!(macos_runtime_base_from(Some(shared.into()), Some(s(&private))).is_err(), "XDG_RUNTIME_DIR={shared} was accepted");
+        }
+        for (n, mode) in [("open", 0o777), ("sticky", 0o1777), ("group", 0o770), ("readable", 0o755)] {
+            assert!(macos_runtime_base_from(None, Some(s(&mk(n, mode)))).is_err(), "a {mode:o} base was accepted");
+        }
+        assert!(macos_runtime_base_from(None, Some("/".into())).is_err(), "a foreign-owned base was accepted");
+        let acl = mk("acl", 0o700);
+        assert!(std::process::Command::new("/bin/chmod").args(["+a", "everyone allow write"]).arg(&acl).status().unwrap().success());
+        assert!(macos_runtime_base_from(None, Some(s(&acl))).is_err(), "a base with an ACL entry was accepted");
+        // through a symlink to a private directory: accepted, as the directory it names
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        assert_eq!(macos_runtime_base_from(None, Some(s(&link))), Ok(canon(&private)));
+        // the leaf: a 0700 directory of ours; never an existing one, never a symlink, never under an open parent
+        let leaf = PathBuf::from(canon(&private)).join("ampd-1-2");
+        macos_runtime_dir(&leaf).unwrap();
+        let m = std::fs::symlink_metadata(&leaf).unwrap();
+        assert!(m.is_dir() && m.permissions().mode() & 0o7777 == 0o700, "the leaf is not a 0700 directory");
+        assert!(macos_runtime_dir(&leaf).is_err(), "an existing leaf was taken as this run's");
+        let trap = PathBuf::from(canon(&private)).join("ampd-1-3");
+        std::os::unix::fs::symlink(&root, &trap).unwrap();
+        assert!(macos_runtime_dir(&trap).is_err(), "a leaf that is a symlink was taken");
+        assert!(macos_runtime_dir(&PathBuf::from(canon(&mk("open2", 0o777))).join("ampd-1-4")).is_err(), "a leaf under an open parent was made");
+        // Codex review 2, finding 1: the sweep and the leaf act on the directory that was checked, even when another takes
+        // its path in between (each holds a stale-looking entry: an empty ampd-<pid none has>-<digits>, aged past the grace)
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let stale = |d: &Path| {
+                let e = d.join("ampd-999999-1");
+                std::fs::create_dir(&e).unwrap();
+                let c = std::ffi::CString::new(e.as_os_str().as_bytes()).unwrap();
+                let t = [libc::timeval { tv_sec: 1_000_000_000, tv_usec: 0 }; 2];
+                assert_eq!(unsafe { libc::utimes(c.as_ptr(), t.as_ptr()) }, 0);
+                e
+            };
+            let orig = mk("orig", 0o700);
+            stale(&orig);
+            let (path, fd) = macos_open_runtime_base(None, Some(s(&orig))).unwrap();
+            std::fs::rename(&orig, root.join("orig-moved")).unwrap();
+            let swapped = mk("orig", 0o700);
+            let theirs = stale(&swapped);
+            macos_sweep_at(fd.fd());
+            assert!(!root.join("orig-moved/ampd-999999-1").exists(), "the checked directory's stale entry was not swept");
+            assert!(theirs.exists(), "the sweep reached the directory that took the checked one's path");
+            assert_eq!(macos_runtime_dir_at(fd.fd(), &Path::new(&path).join("ampd-1-6")), Ok(()));
+            assert!(root.join("orig-moved/ampd-1-6").is_dir(), "the leaf is not in the checked directory");
+            assert!(!swapped.join("ampd-1-6").exists(), "the leaf was made in the directory that took the path");
+        }
+        // Codex review 2, finding 2: what the ACL calls give (aclprobe/aclfd-probe.txt), and errors refused
+        assert_eq!(macos_acl_verdict(Err(libc::ENOENT)), Ok(()));
+        assert_eq!(macos_acl_verdict(Ok((-1, libc::EINVAL))), Ok(()));
+        assert!(macos_acl_verdict(Ok((0, 0))).is_err(), "an ACL entry was accepted");
+        assert!(macos_acl_verdict(Err(libc::EBADF)).is_err(), "an unreadable ACL was accepted");
+        assert!(macos_acl_verdict(Ok((-1, libc::ENOMEM))).is_err(), "an ACL iteration error was read as empty");
+        assert!(macos_private_dir(-1, "a bad descriptor").is_err(), "a bad descriptor was found private");
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+}
+
 } // mod linux_layer
 
 #[cfg(target_os = "linux")]

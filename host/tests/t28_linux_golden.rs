@@ -9,6 +9,7 @@
 //!   records `fdpass`'s do, so a selector or a send that drifted from them shows;
 //! * the release build has `framed-bridge` off (the feature is not a default).
 #![cfg(not(feature = "framed-bridge"))]
+#![cfg(target_os = "linux")]
 
 #[path = "t28_linux_golden/capture.rs"]
 mod capture;
