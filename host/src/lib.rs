@@ -821,10 +821,26 @@ pub fn fd_inode_pub(fd: RawFd) -> Option<u64> {
     fd_inode(fd)
 }
 
+#[cfg(target_os = "linux")]
 fn fd_inode(fd: RawFd) -> Option<u64> {
     std::fs::read_link(format!("/proc/self/fd/{fd}"))
         .ok()
         .and_then(|p| socket_inode(&p.to_string_lossy()))
+}
+
+/// macOS (T29a item 3, measured on the Mac first: `superlane/t29a/fd-identity-probe.txt`): a socket's identity is
+/// `fstat`'s `st_ino`. A `dup` and a copy received by `SCM_RIGHTS` share it, the peer's differs, and a descriptor that
+/// is not a socket gives `None`, as on Linux. libproc's `vst_ino` is 0 for sockets, so it is not used.
+#[cfg(target_os = "macos")]
+fn fd_inode(fd: RawFd) -> Option<u64> {
+    let mut st: libc::stat = unsafe { std::mem::zeroed() };
+    if unsafe { libc::fstat(fd, &mut st) } != 0 {
+        return None;
+    }
+    if st.st_mode & libc::S_IFMT != libc::S_IFSOCK {
+        return None;
+    }
+    Some(st.st_ino as u64)
 }
 
 /// `pub(crate)` so `verify` can drive a Carrier channel as the runtime end
