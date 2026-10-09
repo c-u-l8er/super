@@ -4491,6 +4491,28 @@ mod t29a_macos {
     }
 
     #[test]
+    fn a2_a_floor_bind_by_any_other_path_is_refused_and_sends_nothing() {
+        // Codex review 1, finding 1: bind_channel and bridge_call_with_rights reach the bridge too.
+        let _s = fdpass::t27b_serial();
+        let (rt, peer) = fake_runtime();
+        for c in ["bind_effect_channel", "bind_terminal_endpoint", "bind_carrier_channel"] {
+            assert_eq!(rt.bind_channel(c, None).err(), Some(CARRIER_FLOOR_ON_MACOS.to_string()), "bind_channel({c})");
+            let raw = serde_json::to_vec(&json!({"schema": "bridge-command@1", "command": c})).unwrap();
+            let e = rt.bridge_call_with_rights(&raw, 1).unwrap_err();
+            assert!(e.contains(CARRIER_FLOOR_ON_MACOS), "bridge_call_with_rights({c}): {e}");
+        }
+        for raw in [&br#"{"command":"bind_agent_channel","command":"bind_terminal_endpoint","schema":"bridge-command@1"}"#[..],
+                    &br#"{"command":"bind_terminal_endpoint","schema":"bridge-command@1"} "#[..], &b"not json"[..]] {
+            let e = rt.bridge_call_with_rights(raw, 1).unwrap_err();
+            assert!(e.contains(CARRIER_FLOOR_ON_MACOS), "{}: {e}", String::from_utf8_lossy(raw));
+        }
+        assert!(nothing_waiting(peer), "a refused bind sent a bridge command");
+        assert!(rt.channels.lock().unwrap().is_empty(), "a refused bind kept a channel");
+        drop(rt);
+        fdpass::close_fd(peer);
+    }
+
+    #[test]
     fn a3_a_socket_end_s_identity_is_shared_by_its_dup_and_not_by_its_peer() {
         let fdpass::Pair(a, b) = fdpass::pair_stream().unwrap();
         let d = unsafe { libc::dup(a) };
@@ -4522,22 +4544,53 @@ mod t29a_macos {
 
     #[test]
     fn a5_the_runtime_directory_is_private_and_never_the_shared_tmp() {
-        let t = std::env::temp_dir().to_string_lossy().into_owned();
-        assert_eq!(macos_runtime_base_from(Some("/x/xdg".into()), Some(t.clone())), Err("runtime dir: /x/xdg: No such file or directory (os error 2)".into()));
-        assert_eq!(macos_runtime_base_from(None, Some(t.clone())), Ok(t.clone()));
-        let own = macos_runtime_base_from(None, None).expect("no private temporary directory");
-        let real = std::fs::canonicalize(&own).unwrap();
-        assert!(real.starts_with("/private/var/folders"), "the fallback is not the user's private directory: {own}");
+        // Codex review 1, finding 4: the base must be private (owner, mode, ACL), the leaf made relative to it.
+        use std::os::unix::fs::PermissionsExt;
+        let canon = |p: &Path| std::fs::canonicalize(p).unwrap().to_string_lossy().into_owned();
+        let root = PathBuf::from(macos_user_temp_dir().unwrap()).join(format!("t29a-a5-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir(&root).unwrap();
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mk = |n: &str, mode: u32| {
+            let d = root.join(n);
+            std::fs::create_dir(&d).unwrap();
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
+            d
+        };
+        let s = |p: &Path| p.to_string_lossy().into_owned();
+        let private = mk("private", 0o700);
+        // the choice: XDG_RUNTIME_DIR first, else TMPDIR, else the system's per-user directory; canonical
+        assert_eq!(macos_runtime_base_from(Some(s(&private)), Some("/nonexistent".into())), Ok(canon(&private)));
+        assert_eq!(macos_runtime_base_from(None, Some(s(&private))), Ok(canon(&private)));
+        assert_eq!(macos_runtime_base_from(None, None), Ok(canon(Path::new(&macos_user_temp_dir().unwrap()))));
+        assert!(macos_runtime_base_from(Some("/x/xdg".into()), None).is_err(), "a missing base was accepted");
+        // never the shared /tmp, nothing open to group or other, nothing foreign-owned, no ACL
         for shared in ["/tmp", "/private/tmp", "/tmp/"] {
-            assert!(macos_runtime_base_from(None, Some(shared.into())).is_err(), "{shared} was accepted");
-            assert!(macos_runtime_base_from(Some(shared.into()), Some(t.clone())).is_err(), "XDG_RUNTIME_DIR={shared} was accepted");
+            assert!(macos_runtime_base_from(None, Some(shared.into())).is_err(), "TMPDIR={shared} was accepted");
+            assert!(macos_runtime_base_from(Some(shared.into()), Some(s(&private))).is_err(), "XDG_RUNTIME_DIR={shared} was accepted");
         }
-        let d = PathBuf::from(&t).join(format!("t29a-a5-{}", std::process::id()));
-        let _ = std::fs::remove_dir(&d);
-        macos_runtime_dir(&d).unwrap();
-        assert_eq!(std::fs::metadata(&d).unwrap().permissions().mode() & 0o7777, 0o700);
-        assert!(macos_runtime_dir(&d).is_err(), "an existing directory was taken as this run's");
-        std::fs::remove_dir(&d).unwrap();
+        for (n, mode) in [("open", 0o777), ("sticky", 0o1777), ("group", 0o770), ("readable", 0o755)] {
+            assert!(macos_runtime_base_from(None, Some(s(&mk(n, mode)))).is_err(), "a {mode:o} base was accepted");
+        }
+        assert!(macos_runtime_base_from(None, Some("/".into())).is_err(), "a foreign-owned base was accepted");
+        let acl = mk("acl", 0o700);
+        assert!(std::process::Command::new("/bin/chmod").args(["+a", "everyone allow write"]).arg(&acl).status().unwrap().success());
+        assert!(macos_runtime_base_from(None, Some(s(&acl))).is_err(), "a base with an ACL entry was accepted");
+        // through a symlink to a private directory: accepted, as the directory it names
+        let link = root.join("link");
+        std::os::unix::fs::symlink(&private, &link).unwrap();
+        assert_eq!(macos_runtime_base_from(None, Some(s(&link))), Ok(canon(&private)));
+        // the leaf: a 0700 directory of ours; never an existing one, never a symlink, never under an open parent
+        let leaf = PathBuf::from(canon(&private)).join("ampd-1-2");
+        macos_runtime_dir(&leaf).unwrap();
+        let m = std::fs::symlink_metadata(&leaf).unwrap();
+        assert!(m.is_dir() && m.permissions().mode() & 0o7777 == 0o700, "the leaf is not a 0700 directory");
+        assert!(macos_runtime_dir(&leaf).is_err(), "an existing leaf was taken as this run's");
+        let trap = PathBuf::from(canon(&private)).join("ampd-1-3");
+        std::os::unix::fs::symlink(&root, &trap).unwrap();
+        assert!(macos_runtime_dir(&trap).is_err(), "a leaf that is a symlink was taken");
+        assert!(macos_runtime_dir(&PathBuf::from(canon(&mk("open2", 0o777))).join("ampd-1-4")).is_err(), "a leaf under an open parent was made");
+        std::fs::remove_dir_all(&root).unwrap();
     }
 }
 
