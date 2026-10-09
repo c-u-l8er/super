@@ -50,6 +50,13 @@ impl Builds {
         root: PathBuf,
         attempt: Value,
     ) -> Result<Value, String> {
+        // T29b1 item 2: the build runs inside tools/lib/proposal-test-runner.mjs's bwrap sandbox, which macOS
+        // does not have; sandboxed work on the Mac is M2's (T-13). Refused by name before anything is written.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &root, &attempt);
+            return Err("Accepted builds run on a Linux node until M2.".into());
+        }
         let mut active = self.0.lock().map_err(|_| "Build status is busy.")?;
         if !active.is_empty() {
             return Err("Finish or cancel the active build first.".into());
@@ -114,7 +121,9 @@ impl Builds {
             .stdout(output)
             .stderr(errors);
         // An app crash must stop its build launcher, which cancels the isolated compiler.
+        #[cfg(target_os = "linux")]
         let parent = unsafe { libc::getpid() };
+        #[cfg(target_os = "linux")]
         unsafe {
             command.pre_exec(move || {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {

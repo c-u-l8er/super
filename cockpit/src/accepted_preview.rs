@@ -260,6 +260,13 @@ impl Previews {
         build: String,
         attempt: Value,
     ) -> Result<Value, String> {
+        // T29b1 item 2: a preview runs what an accepted build produced, and on macOS there is none (accepted
+        // builds are M2's there). Refused by name before anything is written.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &build, &attempt);
+            return Err("Accepted builds run on a Linux node until M2.".into());
+        }
         let mut guard = self.0.lock().map_err(|_| "Preview is busy.")?;
         if let Some(t) = guard.as_mut() {
             t.poll()?;
@@ -299,7 +306,9 @@ impl Previews {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
+            #[cfg(target_os = "linux")]
             let parent = unsafe { libc::getpid() };
+            #[cfg(target_os = "linux")]
             unsafe {
                 command.pre_exec(move || {
                     if libc::setpgid(0, 0) != 0
