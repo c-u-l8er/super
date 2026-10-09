@@ -281,6 +281,7 @@ fn listing(root: &File, path: &str) -> Result<Value, String> {
     // Enumerate the already-open directory, not a re-resolved supplied path.
     let mut entries = Vec::new();
     let mut truncated = false;
+    #[cfg(target_os = "linux")]
     for entry in std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())).map_err(error)? {
         let entry = entry.map_err(error)?;
         let name = entry.file_name();
@@ -300,6 +301,24 @@ fn listing(root: &File, path: &str) -> Result<Value, String> {
         }
         entries.push(json!({"name": name, "directory": kind.is_dir()}));
     }
+    // T29b1 item 7: the same rules over the same open directory on macOS (macos_dir_entries).
+    #[cfg(target_os = "macos")]
+    for (name, is_dir, is_file) in macos_dir_entries(&dir)? {
+        if name == ".git" {
+            continue;
+        }
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_dir && !is_file {
+            continue;
+        }
+        if entries.len() == 1000 {
+            truncated = true;
+            break;
+        }
+        entries.push(json!({"name": name, "directory": is_dir}));
+    }
     entries.sort_by_key(|v| {
         (
             !v["directory"].as_bool().unwrap_or(false),
@@ -307,6 +326,76 @@ fn listing(root: &File, path: &str) -> Result<Value, String> {
         )
     });
     Ok(json!({"path":path,"entries":entries,"truncated":truncated}))
+}
+/// T29b1 item 7: the entries of the directory `dir` is open on, read through a FRESH description of that same directory
+/// (`openat(fd, ".")`, so `dir`'s own position never moves), in directory order, without `.` and `..`: each name with
+/// whether it is a directory and whether a regular file, by `d_type`, or by `fstatat` without following a symlink when
+/// the file system gives none (as std's `DirEntry::file_type`). macOS has no `/proc/self/fd`, and opendir of
+/// `/dev/fd/N` for a directory fails with ENOTDIR there (measured), so the stream is `fdopendir`'s.
+#[cfg(target_os = "macos")]
+fn macos_dir_entries(dir: &File) -> Result<Vec<(std::ffi::OsString, bool, bool)>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let fresh = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fresh < 0 {
+        return Err(error(std::io::Error::last_os_error()));
+    }
+    let stream = unsafe { libc::fdopendir(fresh) };
+    if stream.is_null() {
+        let e = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(fresh);
+        }
+        return Err(error(e));
+    }
+    let stream = Stream(stream);
+    let mut out = Vec::new();
+    loop {
+        unsafe {
+            *libc::__error() = 0;
+        }
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(0) {
+                break;
+            }
+            return Err(error(e));
+        }
+        let entry = unsafe { &*entry };
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        let (is_dir, is_file) = match entry.d_type {
+            libc::DT_DIR => (true, false),
+            libc::DT_REG => (false, true),
+            libc::DT_UNKNOWN => {
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstatat(libc::dirfd(stream.0), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+                    return Err(error(std::io::Error::last_os_error()));
+                }
+                let kind = st.st_mode & libc::S_IFMT;
+                (kind == libc::S_IFDIR, kind == libc::S_IFREG)
+            }
+            _ => (false, false),
+        };
+        out.push((std::ffi::OsStr::from_bytes(name.to_bytes()).to_os_string(), is_dir, is_file));
+    }
+    Ok(out)
 }
 fn save(
     root: &File,
