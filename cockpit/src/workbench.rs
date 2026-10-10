@@ -485,6 +485,7 @@ fn save_mode(
                 },
             )
         };
+        #[cfg(all(test, target_os = "macos"))] t29b1_laws::before_rename(&parent, &to);
         // T29b1 item 1: macOS's no-replace rename is renameatx_np with RENAME_EXCL.
         #[cfg(target_os = "macos")]
         let renamed = unsafe {
@@ -1896,10 +1897,25 @@ mod tests {
     }
 }
 
-/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B8, listing the OPENED directory by its descriptor (item 7).
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B8, listing the OPENED directory by its descriptor (item 7);
+/// B1's workbench half, a new file's save never replacing one made after its existence check (amendment 3).
 #[cfg(all(test, target_os = "macos"))]
 mod t29b1_laws {
     use super::*;
+    /// The B8 test's original absolute path: P-B8's plant lists through it, so its first listing succeeds and its
+    /// failure is the intended one, after the path is replaced (amendment 3).
+    pub(super) static ORIGIN: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+    /// B1's race: a destination name, and the bytes to create there once save_mode's existence check has passed.
+    static RACE: std::sync::Mutex<Option<(String, Vec<u8>)>> = std::sync::Mutex::new(None);
+    /// save_mode's macOS-test-only hook, just before its renameatx_np: creates the armed destination, once.
+    pub(super) fn before_rename(parent: &File, to: &CString) {
+        let mut race = RACE.lock().unwrap_or_else(|e| e.into_inner());
+        if race.as_ref().is_some_and(|(n, _)| n.as_bytes() == to.as_bytes()) {
+            let (n, bytes) = race.take().unwrap();
+            let mut f = open_at(parent, &n, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o644).unwrap();
+            f.write_all(&bytes).unwrap();
+        }
+    }
     fn by_path(p: &Path) -> Vec<(String, bool)> {
         let mut v: Vec<(String, bool)> = std::fs::read_dir(p).unwrap().filter_map(Result::ok).filter_map(|e| {
             let n = e.file_name().into_string().ok()?;
@@ -1924,6 +1940,7 @@ mod t29b1_laws {
         std::fs::write(p.join("c.txt"), "").unwrap();
         std::os::unix::fs::symlink("a", p.join("l")).unwrap();
         let root = File::open(&p).unwrap();
+        *ORIGIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
         let first = listing(&root, "").unwrap();
         assert_eq!(listed(&first), by_path(&p));
         assert_eq!(listed(&first), vec![("a".to_string(), false), ("b".to_string(), true), ("c.txt".to_string(), false)]);
@@ -1934,5 +1951,23 @@ mod t29b1_laws {
         assert_eq!(listed(&listing(&root, "").unwrap()), by_path(&moved), "the listing followed the path, not the descriptor");
         let _ = std::fs::remove_dir_all(&p);
         let _ = std::fs::remove_dir_all(&moved);
+    }
+    #[test]
+    fn b1_a_new_file_never_replaces_one_made_after_the_check() {
+        let p = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b1w", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&p).unwrap();
+        let root = File::open(&p).unwrap();
+        let name = format!("made-after-the-check-{}.txt", std::process::id());
+        *RACE.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.clone(), b"made after the check".to_vec()));
+        let r = save(&root, &name, None, "the draft".into());
+        let armed = RACE.lock().unwrap_or_else(|e| e.into_inner()).take();
+        assert!(armed.is_none(), "the hook never ran: the save stopped before its rename ({r:?})");
+        assert_eq!(std::fs::read(p.join(&name)).unwrap(), b"made after the check", "a new-file save replaced a file created after the existence check");
+        let e = r.unwrap_err();
+        assert!(e.contains("exists"), "the save failed otherwise: {e}");
+        let left: Vec<String> = std::fs::read_dir(&p).unwrap().filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(".super-save-")).collect();
+        assert!(left.is_empty(), "the temporary file was left: {left:?}");
+        let _ = std::fs::remove_dir_all(&p);
     }
 }
