@@ -321,6 +321,13 @@ impl Runs {
         profile: String,
         compare: bool,
     ) -> Result<Value, String> {
+        // T29b1 item 8: the runner (tools/proposal-test-runner.mjs) sandboxes with bwrap, which macOS does not
+        // have; required checks on the Mac are M2's (T-13). Refused by name; nothing is recorded as a run or a verdict.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &root, &attempt, &report, &profile, &compare);
+            return Err("Required checks run on a Linux node until M2.".into());
+        }
         if ![
             "super-javascript-behavior@1",
             "super-elixir-review@1",
@@ -400,6 +407,8 @@ impl Runs {
                 return Err(message);
             }
         }
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let child = Command::new("node")
             .arg(dir.join("runner.mjs"))
             .arg(root)
@@ -411,6 +420,8 @@ impl Runs {
             .stdout(output)
             .stderr(errors)
             .spawn();
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let child = match child {
             Ok(c) => Arc::new(Mutex::new(c)),
             Err(_) => {
@@ -925,6 +936,12 @@ pub fn verify_acceptance(
     attempt: &Value,
     run_id: &str,
 ) -> Result<Value, String> {
+    // T29b1 item 8: the acceptance check runs tools/lib/proposal-test-runner.mjs's sandbox too: refused by name on macOS.
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (&data, &root, &attempt, &run_id);
+        return Err("Required checks run on a Linux node until M2.".into());
+    }
     let run = &attempt["test_runs"][run_id];
     if run["state"] != "completed" || run["outcome"]["verdict"] != "pass" {
         return Err("Choose a completed passing test run.".into());
@@ -959,6 +976,8 @@ pub fn verify_acceptance(
         fs::write(dir.join("run.json"), serde_json::to_vec(run).map_err(err)?).map_err(err)?;
         let stdout = fs::File::create(dir.join("result.json")).map_err(err)?;
         let stderr = fs::File::create(dir.join("error.txt")).map_err(err)?;
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let mut child = Command::new("node")
             .arg(dir.join("check.mjs"))
             .arg(root)
@@ -969,6 +988,8 @@ pub fn verify_acceptance(
             .stderr(stderr)
             .spawn()
             .map_err(err)?;
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let started = std::time::Instant::now();
         loop {
             if let Some(status) = child.try_wait().map_err(err)? {
@@ -1259,5 +1280,31 @@ mod review_content_tests {
         m["source"]["draft_sha256"] = json!("../../../../etc/passwd");
         let e = resolve_review_bodies_in(&json!({"files": [m]}), &blobs("traversal")).expect_err("must refuse");
         assert!(e.contains("not named by a digest"), "{e}");
+    }
+}
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B9, the review run's and the acceptance check's refusals (item 8).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b9_a_review_run_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9r", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let report: Report = Arc::new(|_, v| Ok(v));
+        let r = Runs::default().start(&data, [json!("default"), json!(1), json!("w")], data.clone(), json!({}), report, "super-rust-review@1".into(), false);
+        assert_eq!(r.unwrap_err(), "Required checks run on a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
+    }
+    #[test]
+    fn b9_an_acceptance_check_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9a", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let attempt = json!({"test_runs": {"r": {"state": "completed", "outcome": {"verdict": "pass"}}}});
+        let r = verify_acceptance(&data, &data, &attempt, "r");
+        assert_eq!(r.unwrap_err(), "Required checks run on a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
     }
 }

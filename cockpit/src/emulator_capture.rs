@@ -28,7 +28,11 @@ fn devices(output: &str) -> Vec<Value> {
     }).collect()
 }
 fn run(args: &[&str], limit: usize) -> Result<Vec<u8>, String> {
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let mut child = Command::new(adb_path()?).args(args).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn().map_err(|_| "Could not start Android platform tools.")?;
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     let stdout = child.stdout.take().ok_or("Android output unavailable.")?;
     let reader = std::thread::spawn(move || { let mut bytes = Vec::new(); stdout.take((limit + 1) as u64).read_to_end(&mut bytes).map(|_| bytes) });
     let start = Instant::now();

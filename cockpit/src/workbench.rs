@@ -281,6 +281,7 @@ fn listing(root: &File, path: &str) -> Result<Value, String> {
     // Enumerate the already-open directory, not a re-resolved supplied path.
     let mut entries = Vec::new();
     let mut truncated = false;
+    #[cfg(target_os = "linux")]
     for entry in std::fs::read_dir(format!("/proc/self/fd/{}", dir.as_raw_fd())).map_err(error)? {
         let entry = entry.map_err(error)?;
         let name = entry.file_name();
@@ -300,6 +301,24 @@ fn listing(root: &File, path: &str) -> Result<Value, String> {
         }
         entries.push(json!({"name": name, "directory": kind.is_dir()}));
     }
+    // T29b1 item 7: the same rules over the same open directory on macOS (macos_dir_entries).
+    #[cfg(target_os = "macos")]
+    for (name, is_dir, is_file) in macos_dir_entries(&dir)? {
+        if name == ".git" {
+            continue;
+        }
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        if !is_dir && !is_file {
+            continue;
+        }
+        if entries.len() == 1000 {
+            truncated = true;
+            break;
+        }
+        entries.push(json!({"name": name, "directory": is_dir}));
+    }
     entries.sort_by_key(|v| {
         (
             !v["directory"].as_bool().unwrap_or(false),
@@ -307,6 +326,76 @@ fn listing(root: &File, path: &str) -> Result<Value, String> {
         )
     });
     Ok(json!({"path":path,"entries":entries,"truncated":truncated}))
+}
+/// T29b1 item 7: the entries of the directory `dir` is open on, read through a FRESH description of that same directory
+/// (`openat(fd, ".")`, so `dir`'s own position never moves), in directory order, without `.` and `..`: each name with
+/// whether it is a directory and whether a regular file, by `d_type`, or by `fstatat` without following a symlink when
+/// the file system gives none (as std's `DirEntry::file_type`). macOS has no `/proc/self/fd`, and opendir of
+/// `/dev/fd/N` for a directory fails with ENOTDIR there (measured), so the stream is `fdopendir`'s.
+#[cfg(target_os = "macos")]
+fn macos_dir_entries(dir: &File) -> Result<Vec<(std::ffi::OsString, bool, bool)>, String> {
+    use std::os::unix::ffi::OsStrExt;
+    struct Stream(*mut libc::DIR);
+    impl Drop for Stream {
+        fn drop(&mut self) {
+            unsafe {
+                libc::closedir(self.0);
+            }
+        }
+    }
+    let fresh = unsafe {
+        libc::openat(
+            dir.as_raw_fd(),
+            c".".as_ptr(),
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if fresh < 0 {
+        return Err(error(std::io::Error::last_os_error()));
+    }
+    let stream = unsafe { libc::fdopendir(fresh) };
+    if stream.is_null() {
+        let e = std::io::Error::last_os_error();
+        unsafe {
+            libc::close(fresh);
+        }
+        return Err(error(e));
+    }
+    let stream = Stream(stream);
+    let mut out = Vec::new();
+    loop {
+        unsafe {
+            *libc::__error() = 0;
+        }
+        let entry = unsafe { libc::readdir(stream.0) };
+        if entry.is_null() {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(0) {
+                break;
+            }
+            return Err(error(e));
+        }
+        let entry = unsafe { &*entry };
+        let name = unsafe { std::ffi::CStr::from_ptr(entry.d_name.as_ptr()) };
+        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+            continue;
+        }
+        let (is_dir, is_file) = match entry.d_type {
+            libc::DT_DIR => (true, false),
+            libc::DT_REG => (false, true),
+            libc::DT_UNKNOWN => {
+                let mut st: libc::stat = unsafe { std::mem::zeroed() };
+                if unsafe { libc::fstatat(libc::dirfd(stream.0), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
+                    return Err(error(std::io::Error::last_os_error()));
+                }
+                let kind = st.st_mode & libc::S_IFMT;
+                (kind == libc::S_IFDIR, kind == libc::S_IFREG)
+            }
+            _ => (false, false),
+        };
+        out.push((std::ffi::OsStr::from_bytes(name.to_bytes()).to_os_string(), is_dir, is_file));
+    }
+    Ok(out)
 }
 fn save(
     root: &File,
@@ -382,6 +471,7 @@ fn save_mode(
             .map_err(error)?;
         file.sync_all().map_err(error)?;
         // New files must not replace a file created since the initial check.
+        #[cfg(target_os = "linux")]
         let renamed = unsafe {
             libc::renameat2(
                 parent.as_raw_fd(),
@@ -393,6 +483,18 @@ fn save_mode(
                 } else {
                     0
                 },
+            )
+        };
+        #[cfg(all(test, target_os = "macos"))] t29b1_laws::before_rename(&parent, &to);
+        // T29b1 item 1: macOS's no-replace rename is renameatx_np with RENAME_EXCL.
+        #[cfg(target_os = "macos")]
+        let renamed = unsafe {
+            libc::renameatx_np(
+                parent.as_raw_fd(),
+                from.as_ptr(),
+                parent.as_raw_fd(),
+                to.as_ptr(),
+                if original.is_none() { libc::RENAME_EXCL } else { 0 },
             )
         };
         if renamed != 0 {
@@ -779,6 +881,8 @@ impl Workbench {
                     }
                 }
                 session.run = None;
+                #[cfg(target_os = "macos")]
+                let spawn_guard = super_host::fdpass::spawn_guard();
                 let mut child = Command::new("/bin/bash")
                     .args(["-c", &command])
                     .current_dir(session.root.as_ref().unwrap())
@@ -790,6 +894,8 @@ impl Workbench {
                     .process_group(0)
                     .spawn()
                     .map_err(error)?;
+                #[cfg(target_os = "macos")]
+                drop(spawn_guard);
                 let output = Arc::new(Mutex::new(Output::default()));
                 fn drain(mut pipe: impl Read + Send + 'static, output: Arc<Mutex<Output>>) {
                     std::thread::spawn(move || {
@@ -955,7 +1061,11 @@ fn git_read(root: &Path, args: &[&str]) -> Result<Vec<u8>, String> {
     ] {
         cmd.env_remove(key);
     }
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let mut child = cmd.spawn().map_err(error)?;
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     fn capture(mut stream: impl Read + Send + 'static) -> std::thread::JoinHandle<(Vec<u8>, bool)> {
         std::thread::spawn(move || {
             let mut bytes = vec![];
@@ -1014,6 +1124,7 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    #[cfg(target_os = "linux")]
     if unsafe {
         libc::openpty(
             &mut master,
@@ -1025,6 +1136,22 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
     } != 0
     {
         return Err(error(std::io::Error::last_os_error()));
+    }
+    // T29b1 item 3: Apple's openpty takes *mut termios and *mut winsize; it only reads the size.
+    #[cfg(target_os = "macos")]
+    {
+        if unsafe {
+            libc::openpty(
+                &mut master,
+                &mut slave,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &size as *const libc::winsize as *mut libc::winsize,
+            )
+        } != 0
+        {
+            return Err(error(std::io::Error::last_os_error()));
+        }
     }
     let mut reader = unsafe { File::from_raw_fd(master) };
     let slave = unsafe { File::from_raw_fd(slave) };
@@ -1046,6 +1173,7 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
         .stdin(Stdio::from(slave.try_clone().map_err(error)?))
         .stdout(Stdio::from(slave.try_clone().map_err(error)?))
         .stderr(Stdio::from(slave));
+    #[cfg(target_os = "linux")]
     unsafe {
         command.pre_exec(|| {
             if libc::setsid() < 0 {
@@ -1057,7 +1185,25 @@ fn spawn_shell(root: &Path) -> Result<Run, String> {
             Ok(())
         });
     }
+    // T29b1 item 3: the same session and controlling terminal on macOS, whose ioctl request is a c_ulong. pre_exec
+    // forks there (no posix_spawn); the fork holds the spawn guard (item 4).
+    #[cfg(target_os = "macos")]
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::ioctl(0, libc::TIOCSCTTY as libc::c_ulong, 0) < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    #[cfg(target_os = "macos")]
+    let spawn_guard = super_host::fdpass::spawn_guard();
     let child = command.spawn().map_err(error)?;
+    #[cfg(target_os = "macos")]
+    drop(spawn_guard);
     let pgid = child.id() as i32;
     let output = Arc::new(Mutex::new(Output::default()));
     let sink = output.clone();
@@ -1748,5 +1894,80 @@ mod tests {
             })
             .is_err());
         w.shutdown();
+    }
+}
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B8, listing the OPENED directory by its descriptor (item 7);
+/// B1's workbench half, a new file's save never replacing one made after its existence check (amendment 3).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    /// The B8 test's original absolute path: P-B8's plant lists through it, so its first listing succeeds and its
+    /// failure is the intended one, after the path is replaced (amendment 3).
+    pub(super) static ORIGIN: std::sync::Mutex<Option<std::path::PathBuf>> = std::sync::Mutex::new(None);
+    /// B1's race: a destination name, and the bytes to create there once save_mode's existence check has passed.
+    static RACE: std::sync::Mutex<Option<(String, Vec<u8>)>> = std::sync::Mutex::new(None);
+    /// save_mode's macOS-test-only hook, just before its renameatx_np: creates the armed destination, once.
+    pub(super) fn before_rename(parent: &File, to: &CString) {
+        let mut race = RACE.lock().unwrap_or_else(|e| e.into_inner());
+        if race.as_ref().is_some_and(|(n, _)| n.as_bytes() == to.as_bytes()) {
+            let (n, bytes) = race.take().unwrap();
+            let mut f = open_at(parent, &n, libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL, 0o644).unwrap();
+            f.write_all(&bytes).unwrap();
+        }
+    }
+    fn by_path(p: &Path) -> Vec<(String, bool)> {
+        let mut v: Vec<(String, bool)> = std::fs::read_dir(p).unwrap().filter_map(Result::ok).filter_map(|e| {
+            let n = e.file_name().into_string().ok()?;
+            let k = e.file_type().ok()?;
+            (n != ".git" && (k.is_dir() || k.is_file())).then_some((n, k.is_dir()))
+        }).collect();
+        v.sort();
+        v
+    }
+    fn listed(v: &Value) -> Vec<(String, bool)> {
+        let mut g: Vec<(String, bool)> = v["entries"].as_array().unwrap().iter()
+            .map(|e| (e["name"].as_str().unwrap().to_string(), e["directory"].as_bool().unwrap())).collect();
+        g.sort();
+        g
+    }
+    #[test]
+    fn b8_the_listing_reads_the_opened_directory() {
+        let p = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b8", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(p.join("b")).unwrap();
+        std::fs::create_dir_all(p.join(".git")).unwrap();
+        std::fs::write(p.join("a"), "").unwrap();
+        std::fs::write(p.join("c.txt"), "").unwrap();
+        std::os::unix::fs::symlink("a", p.join("l")).unwrap();
+        let root = File::open(&p).unwrap();
+        *ORIGIN.lock().unwrap_or_else(|e| e.into_inner()) = Some(p.clone());
+        let first = listing(&root, "").unwrap();
+        assert_eq!(listed(&first), by_path(&p));
+        assert_eq!(listed(&first), vec![("a".to_string(), false), ("b".to_string(), true), ("c.txt".to_string(), false)]);
+        let moved = p.with_extension("moved");
+        std::fs::rename(&p, &moved).unwrap();
+        std::fs::create_dir(&p).unwrap();
+        std::fs::write(p.join("x"), "").unwrap();
+        assert_eq!(listed(&listing(&root, "").unwrap()), by_path(&moved), "the listing followed the path, not the descriptor");
+        let _ = std::fs::remove_dir_all(&p);
+        let _ = std::fs::remove_dir_all(&moved);
+    }
+    #[test]
+    fn b1_a_new_file_never_replaces_one_made_after_the_check() {
+        let p = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b1w", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&p).unwrap();
+        let root = File::open(&p).unwrap();
+        let name = format!("made-after-the-check-{}.txt", std::process::id());
+        *RACE.lock().unwrap_or_else(|e| e.into_inner()) = Some((name.clone(), b"made after the check".to_vec()));
+        let r = save(&root, &name, None, "the draft".into());
+        let armed = RACE.lock().unwrap_or_else(|e| e.into_inner()).take();
+        assert!(armed.is_none(), "the hook never ran: the save stopped before its rename ({r:?})");
+        assert_eq!(std::fs::read(p.join(&name)).unwrap(), b"made after the check", "a new-file save replaced a file created after the existence check");
+        let e = r.unwrap_err();
+        assert!(e.contains("exists"), "the save failed otherwise: {e}");
+        let left: Vec<String> = std::fs::read_dir(&p).unwrap().filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with(".super-save-")).collect();
+        assert!(left.is_empty(), "the temporary file was left: {left:?}");
+        let _ = std::fs::remove_dir_all(&p);
     }
 }

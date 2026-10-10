@@ -179,6 +179,13 @@ impl Checks {
         revision: u64,
         worker: Option<&str>,
     ) -> Result<PathBuf, String> {
+        // T29b1 item 10 (amendment 1): every remote operation starts through util-linux's flock(1), which macOS
+        // does not have; fleet checks from the Mac are M2's (T-13). Refused by name before a request is written.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &root, &task, &revision, &worker);
+            return Err("Fleet checks run from a Linux node until M2.".into());
+        }
         let active = self.0.lock().map_err(|_| "Checks are busy.")?;
         if !active.is_empty() {
             return Err("Wait for the current remote operation.".into());
@@ -228,6 +235,7 @@ impl Checks {
             &json!({"id":id,"binding":{"world":[world[0],world[1]],"task":task,"revision":revision},"destination":{"host":cfg["host"],"guest":cfg["guest"]}}),
         )?;
         save(&dir.join("transport.json"), &cfg)?;
+        #[cfg(target_os = "linux")]
         let out = Command::new("node")
             .arg(dir.join("client.mjs"))
             .arg("prepare")
@@ -236,6 +244,22 @@ impl Checks {
             .stdin(Stdio::null())
             .output()
             .map_err(err)?;
+        // T29b1 item 4: the fork lock is held across the spawn only, never the wait (amendment 1).
+        #[cfg(target_os = "macos")]
+        let out = {
+            let spawn_guard = super_host::fdpass::spawn_guard();
+            let child = Command::new("node")
+                .arg(dir.join("client.mjs"))
+                .arg("prepare")
+                .arg(&dir)
+                .arg(root)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn();
+            drop(spawn_guard);
+            child.and_then(|c| c.wait_with_output()).map_err(err)?
+        };
         if !out.status.success() {
             return Err(String::from_utf8_lossy(&out.stderr)
                 .chars()
@@ -245,6 +269,12 @@ impl Checks {
         Ok(dir)
     }
     pub fn launch(&self, dir: PathBuf, operation: &'static str) -> Result<Value, String> {
+        // T29b1 item 10 (amendment 1): flock(1) is util-linux's; refused by name on macOS.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&dir, &operation);
+            return Err("Fleet checks run from a Linux node until M2.".into());
+        }
         let record = read(&dir.join("record.json"))?;
         let id = record["id"]
             .as_str()
@@ -256,6 +286,8 @@ impl Checks {
         }
         let out = fs::File::create(dir.join("launcher.json")).map_err(err)?;
         let error = fs::File::create(dir.join("launcher-error.txt")).map_err(err)?;
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let mut child = Command::new("/usr/bin/flock")
             .arg("-n")
             .arg(dir.join("operation.lock"))
@@ -268,6 +300,8 @@ impl Checks {
             .stderr(error)
             .spawn()
             .map_err(err)?;
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         active.insert(id.clone());
         let state = self.clone();
         std::thread::spawn(move || {
@@ -517,5 +551,30 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B9, the fleet checks' refusals (item 10).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b9_a_fleet_check_prepare_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9p", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let r = Checks::default().prepare(&data, [json!("default"), json!(1), json!("w")], &data, "dt_0001", 1, None);
+        assert_eq!(r.unwrap_err(), "Fleet checks run from a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
+    }
+    #[test]
+    fn b9_a_fleet_check_launch_refuses_by_name_and_writes_nothing() {
+        let dir = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b9l", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("record.json"), br#"{"id":"fc-1","state":"prepared"}"#).unwrap();
+        let r = Checks::default().launch(dir.clone(), "start");
+        assert_eq!(r.unwrap_err(), "Fleet checks run from a Linux node until M2.");
+        assert_eq!(fs::read_dir(&dir).unwrap().count(), 1, "something was written");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

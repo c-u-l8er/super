@@ -260,6 +260,13 @@ impl Previews {
         build: String,
         attempt: Value,
     ) -> Result<Value, String> {
+        // T29b1 item 2: a preview runs what an accepted build produced, and on macOS there is none (accepted
+        // builds are M2's there). Refused by name before anything is written.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &build, &attempt);
+            return Err("Accepted builds run on a Linux node until M2.".into());
+        }
         let mut guard = self.0.lock().map_err(|_| "Preview is busy.")?;
         if let Some(t) = guard.as_mut() {
             t.poll()?;
@@ -299,7 +306,9 @@ impl Previews {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::piped());
+            #[cfg(target_os = "linux")]
             let parent = unsafe { libc::getpid() };
+            #[cfg(target_os = "linux")]
             unsafe {
                 command.pre_exec(move || {
                     if libc::setpgid(0, 0) != 0
@@ -313,6 +322,8 @@ impl Previews {
                     Ok(())
                 });
             }
+            #[cfg(target_os = "macos")]
+            let _spawn_guard = super_host::fdpass::spawn_guard();
             command.spawn().map_err(|e| e.to_string())
         })();
         match launch {
@@ -642,5 +653,20 @@ mod tests {
         assert_eq!(previews.status(f.world.clone()).unwrap()["state"], "ready");
         previews.stop(f.world.clone(), "build-one".into()).unwrap();
         assert_eq!(previews.status(f.world.clone()).unwrap()["state"], "closed");
+    }
+}
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B2, the preview's refusal (item 2).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b2_a_preview_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b2p", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let r = Previews::default().start(&data, [json!("default"), json!(1), json!("w")], "build-1".into(), json!({}));
+        assert_eq!(r.unwrap_err(), "Accepted builds run on a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
     }
 }

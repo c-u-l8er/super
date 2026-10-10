@@ -50,6 +50,13 @@ impl Builds {
         root: PathBuf,
         attempt: Value,
     ) -> Result<Value, String> {
+        // T29b1 item 2: the build runs inside tools/lib/proposal-test-runner.mjs's bwrap sandbox, which macOS
+        // does not have; sandboxed work on the Mac is M2's (T-13). Refused by name before anything is written.
+        #[cfg(target_os = "macos")]
+        {
+            let _ = (&data, &world, &root, &attempt);
+            return Err("Accepted builds run on a Linux node until M2.".into());
+        }
         let mut active = self.0.lock().map_err(|_| "Build status is busy.")?;
         if !active.is_empty() {
             return Err("Finish or cancel the active build first.".into());
@@ -114,7 +121,9 @@ impl Builds {
             .stdout(output)
             .stderr(errors);
         // An app crash must stop its build launcher, which cancels the isolated compiler.
+        #[cfg(target_os = "linux")]
         let parent = unsafe { libc::getpid() };
+        #[cfg(target_os = "linux")]
         unsafe {
             command.pre_exec(move || {
                 if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGTERM) != 0 {
@@ -126,7 +135,11 @@ impl Builds {
                 Ok(())
             });
         }
+        #[cfg(target_os = "macos")]
+        let spawn_guard = super_host::fdpass::spawn_guard();
         let child = command.spawn();
+        #[cfg(target_os = "macos")]
+        drop(spawn_guard);
         let child = match child {
             Ok(child) => Arc::new(Mutex::new(child)),
             Err(e) => {
@@ -292,5 +305,20 @@ mod tests {
                 "../other".into()
             )
             .is_err());
+    }
+}
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B2, the accepted build's refusal (item 2).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    #[test]
+    fn b2_an_accepted_build_refuses_by_name_and_writes_nothing() {
+        let data = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b2b", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        fs::create_dir_all(&data).unwrap();
+        let r = Builds::default().start(&data, [json!("default"), json!(1), json!("w")], data.clone(), json!({}));
+        assert_eq!(r.unwrap_err(), "Accepted builds run on a Linux node until M2.");
+        assert_eq!(fs::read_dir(&data).unwrap().count(), 0, "something was written");
+        let _ = fs::remove_dir_all(&data);
     }
 }

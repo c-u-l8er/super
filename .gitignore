@@ -28,6 +28,11 @@ node_modules/
 
 # Packaged revision bundles — regenerable release freight, not history.
 and-super-rev-*.zip
+
+# T29b1 item 9: tauri-build writes a per-platform copy of the desktop schema on every build. The four schema files
+# beside it are tracked and a Mac build leaves them byte-identical; the macOS copy is new on a Mac build only, and
+# tools/release-scope.mjs already skips gen/ as build output.
+cockpit/gen/schemas/macOS-schema.json
 *.tar.gz
 
 # OS/editor

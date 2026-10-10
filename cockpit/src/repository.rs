@@ -84,12 +84,30 @@ pub fn git_root(path: &Path) -> Result<PathBuf, String> {
     if !selected.is_dir() {
         return Err("Select a repository folder.".into());
     }
+    #[cfg(target_os = "linux")]
     let result = std::process::Command::new("git")
         .arg("-C")
         .arg(&selected)
         .args(["rev-parse", "--show-toplevel"])
         .output()
         .map_err(|_| "Git is unavailable on this machine.")?;
+    // T29b1 item 4: the fork lock is held across the spawn only, never the wait (amendment 1).
+    #[cfg(target_os = "macos")]
+    let result = {
+        let spawn_guard = super_host::fdpass::spawn_guard();
+        let child = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&selected)
+            .args(["rev-parse", "--show-toplevel"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn();
+        drop(spawn_guard);
+        child
+            .and_then(|c| c.wait_with_output())
+            .map_err(|_| "Git is unavailable on this machine.")?
+    };
     if !result.status.success() {
         return Err("This folder is not a Git working tree.".into());
     }
@@ -356,4 +374,38 @@ pub fn choose_development(window: &tauri::Window) -> Result<Option<PathBuf>, Str
 #[cfg(not(target_os = "linux"))]
 pub fn choose_development(_window: &tauri::Window) -> Result<Option<PathBuf>, String> {
     Err("Local development is currently supported on Linux.".into())
+}
+
+/// T29b1's laws on macOS (superlane/t29b/LAWS-T29B1.md): B3 (c), a spawn takes the fork lock for writing (item 4).
+#[cfg(all(test, target_os = "macos"))]
+mod t29b1_laws {
+    use super::*;
+    /// Amendment 3, B3 (d): calibrated first (an unheld git_root within 250 ms, best of three, or the hold proves
+    /// nothing), then the hand-off (the worker says it is entering git_root), the fork lock held for reading 750 ms
+    /// with no return allowed, released, and the return required within 5 s.
+    #[test]
+    fn b3_git_root_waits_for_the_fork_lock() {
+        use std::time::{Duration, Instant};
+        let p = std::env::temp_dir().join(format!("t29b1-{}-{}-{}", "b3", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&p).unwrap();
+        assert!(std::process::Command::new("git").args(["init", "-q"]).arg(&p).status().unwrap().success());
+        let best = (0..3).map(|_| { let t = Instant::now(); git_root(&p).unwrap(); t.elapsed() }).min().unwrap();
+        assert!(best <= Duration::from_millis(250), "inconclusive: an unheld git_root took {best:?} at best of three, over 250 ms");
+        let held = super_host::fdpass::FD_BIRTH.read().unwrap_or_else(|e| e.into_inner());
+        let (entered, entered_rx) = std::sync::mpsc::channel();
+        let (done, done_rx) = std::sync::mpsc::channel();
+        let q = p.clone();
+        let h = std::thread::spawn(move || {
+            let _ = entered.send(());
+            let r = git_root(&q);
+            let _ = done.send(());
+            r
+        });
+        entered_rx.recv_timeout(Duration::from_secs(5)).expect("the worker never reached git_root");
+        assert!(done_rx.recv_timeout(Duration::from_millis(750)).is_err(), "git_root returned while the fork lock was held for reading");
+        drop(held);
+        assert!(done_rx.recv_timeout(Duration::from_secs(5)).is_ok(), "git_root did not return within 5 s of the fork lock's release");
+        assert_eq!(h.join().unwrap().unwrap(), p.canonicalize().unwrap());
+        let _ = std::fs::remove_dir_all(&p);
+    }
 }
