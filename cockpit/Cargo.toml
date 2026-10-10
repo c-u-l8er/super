@@ -29,6 +29,10 @@ qrcode = { version = "0.14.1", default-features = false }
 [features]
 custom-protocol = ["tauri/custom-protocol"]
 
+# T29b2 (Travis's decision 4): the macOS choosers through rfd's native panel, called from Rust only; no Tauri plugin.
+[target.'cfg(target_os = "macos")'.dependencies]
+rfd = { version = "~0.16.0", default-features = false }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18.2"
 webkit2gtk = { version = "2", features = ["v2_40"] }

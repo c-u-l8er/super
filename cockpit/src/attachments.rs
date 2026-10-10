@@ -48,7 +48,17 @@ fn choose_dialog(
     dialog.destroy();
     Ok(files)
 }
-#[cfg(not(target_os = "linux"))]
+/// T29b2: the macOS attachment chooser, rfd's NSOpenPanel on the main thread as the GTK one is; cancel is an empty list.
+#[cfg(target_os = "macos")]
+pub fn choose(window: &tauri::Window) -> Result<Vec<PathBuf>, String> {
+    Ok(rfd::FileDialog::new()
+        .set_parent(window)
+        .set_title("Attach text or code files")
+        .add_filter("Text and code files", EXTENSIONS)
+        .pick_files()
+        .unwrap_or_default())
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn choose(_window: &tauri::Window) -> Result<Vec<PathBuf>, String> {
     Err("Native attachments are currently supported on Linux.".into())
 }
