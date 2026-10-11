@@ -82,6 +82,10 @@ pub fn choose(window: &tauri::Window) -> Result<Option<PathBuf>, String> {
 /// NSOpenPanel's own accept button ("Open") stands in for GTK's label; cancel is `Ok(None)`.
 #[cfg(target_os = "macos")]
 fn pick_folder_macos(window: &tauri::Window, title: &str) -> Result<Option<PathBuf>, String> {
+    // T29b2 amendment 1 (C1): no parent, no panel; rfd's set_parent would quietly open an unparented one.
+    if window.ns_window().map_or(true, |w| w.is_null()) {
+        return Err("The app window is unavailable".into());
+    }
     Ok(rfd::FileDialog::new()
         .set_parent(window)
         .set_title(title)

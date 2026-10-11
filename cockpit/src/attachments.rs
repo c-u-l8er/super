@@ -51,6 +51,10 @@ fn choose_dialog(
 /// T29b2: the macOS attachment chooser, rfd's NSOpenPanel on the main thread as the GTK one is; cancel is an empty list.
 #[cfg(target_os = "macos")]
 pub fn choose(window: &tauri::Window) -> Result<Vec<PathBuf>, String> {
+    // T29b2 amendment 1 (C1): no parent, no panel, as the Linux arm refuses an unavailable window.
+    if window.ns_window().map_or(true, |w| w.is_null()) {
+        return Err("The app window is unavailable.".into());
+    }
     Ok(rfd::FileDialog::new()
         .set_parent(window)
         .set_title("Attach text or code files")
