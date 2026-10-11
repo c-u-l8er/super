@@ -72,28 +72,6 @@ fn choose_folder(
     Ok(selected)
 }
 
-#[cfg(target_os = "macos")]
-pub fn choose(window: &tauri::Window) -> Result<Option<PathBuf>, String> {
-    pick_folder_macos(window, "Register a local Git repository")
-}
-
-/// T29b2: the macOS folder chooser, rfd's NSOpenPanel, run on the main thread exactly where the GTK dialog runs
-/// (the commands call it through `run_on_main_thread`): a modal no script can answer; the page supplies no path.
-/// NSOpenPanel's own accept button ("Open") stands in for GTK's label; cancel is `Ok(None)`.
-#[cfg(target_os = "macos")]
-fn pick_folder_macos(window: &tauri::Window, title: &str) -> Result<Option<PathBuf>, String> {
-    // T29b2 amendment 1 (C1): no parent, no panel; rfd's set_parent would quietly open an unparented one.
-    if window.ns_window().map_or(true, |w| w.is_null()) {
-        return Err("The app window is unavailable".into());
-    }
-    Ok(rfd::FileDialog::new()
-        .set_parent(window)
-        .set_title(title)
-        .set_can_create_directories(false)
-        .set_directory(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
-        .pick_folder())
-}
-
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn choose(_window: &tauri::Window) -> Result<Option<PathBuf>, String> {
     Err("Repository selection is currently available in the Linux desktop app.".into())
@@ -393,10 +371,6 @@ pub fn choose_development(window: &tauri::Window) -> Result<Option<PathBuf>, Str
     }
     Ok(selected)
 }
-#[cfg(target_os = "macos")]
-pub fn choose_development(window: &tauri::Window) -> Result<Option<PathBuf>, String> {
-    pick_folder_macos(window, "Open repository for local development")
-}
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 pub fn choose_development(_window: &tauri::Window) -> Result<Option<PathBuf>, String> {
     Err("Local development is currently supported on Linux.".into())
@@ -434,4 +408,30 @@ mod t29b1_laws {
         assert_eq!(h.join().unwrap().unwrap(), p.canonicalize().unwrap());
         let _ = std::fs::remove_dir_all(&p);
     }
+}
+#[cfg(target_os = "macos")]
+pub fn choose(window: &tauri::Window) -> Result<Option<PathBuf>, String> {
+    pick_folder_macos(window, "Register a local Git repository")
+}
+
+/// T29b2: the macOS folder chooser, rfd's NSOpenPanel, run on the main thread exactly where the GTK dialog runs
+/// (the commands call it through `run_on_main_thread`): a modal no script can answer; the page supplies no path.
+/// NSOpenPanel's own accept button ("Open") stands in for GTK's label; cancel is `Ok(None)`.
+#[cfg(target_os = "macos")]
+fn pick_folder_macos(window: &tauri::Window, title: &str) -> Result<Option<PathBuf>, String> {
+    // T29b2 amendment 1 (C1): no parent, no panel; rfd's set_parent would quietly open an unparented one.
+    if window.ns_window().map_or(true, |w| w.is_null()) {
+        return Err("The app window is unavailable".into());
+    }
+    Ok(rfd::FileDialog::new()
+        .set_parent(window)
+        .set_title(title)
+        .set_can_create_directories(false)
+        .set_directory(std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+        .pick_folder())
+}
+
+#[cfg(target_os = "macos")]
+pub fn choose_development(window: &tauri::Window) -> Result<Option<PathBuf>, String> {
+    pick_folder_macos(window, "Open repository for local development")
 }
