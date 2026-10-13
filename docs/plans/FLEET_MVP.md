@@ -172,9 +172,12 @@ passed. Original CPU configuration and kernel are retained for rollback.
 
 The app then ran eleven tests successfully again on this configuration, request
 `fc-2bf78cdca1e3a10e9eb30e6c5bea9f31`. All three runs are advisory checks for the
-same saved task revision and committed snapshot. General worker placement,
-proposal acceptance using remote evidence, a physical network-outage drill,
-and a separate FreeBSD bhyve Linux guest remain future gates.
+same saved task revision and committed snapshot. Updated 2026-10-11: the
+cd-floor-01 bhyve Linux guest `super-worker-02` is enrolled. Its checks run
+through the root-free jump row (T49, R103, R181), and its first advisory check
+from the installed cockpit passed on 2026-10-10 (E2, 14 of 14 tests). General
+worker placement, proposal acceptance using remote evidence and a physical
+network-outage drill remain future gates.
 
 ### Standalone launch persistence
 
