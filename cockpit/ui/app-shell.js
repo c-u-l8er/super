@@ -19,7 +19,7 @@ export const screens = [
   ['evidence', 'Evidence', 'Durable records from the runtime, with their original subjects.'],
   ['runtime', 'Runtime', 'Health, connections, and unresolved work reported by the runtime.'],
   ['editor', 'Editor', 'Browse and edit files in your selected local repository.'],
-  ['terminal', 'Terminal', 'Run local commands and inspect their output.'],
+  ['terminal', 'Shells', 'Run local commands and inspect their output.'],
   ['browser', 'Browser', 'Preview the app running on your machine.'],
   ['agents', 'Agents', 'Peers connected to the runtime.'],
   ['routines', 'Routines', 'Scheduled routines are not projected by this runtime yet.'],
@@ -198,7 +198,7 @@ export function initShell() {
   });
   const nav = document.getElementById('app-navigation');
   const groups = [
-    ['WORK', [['continue-work','Continue work'],['mission','Mission'],['positions','Workspaces'],['goals','Goals'],['development-tasks','Development tasks'],['lanes','Lanes'],['repositories','Repositories'],['editor','Editor'],['terminal','Terminal'],['browser','Browser']]],
+    ['WORK', [['continue-work','Continue work'],['mission','Mission'],['positions','Workspaces'],['goals','Goals'],['development-tasks','Development tasks'],['lanes','Lanes'],['repositories','Repositories'],['editor','Editor'],['terminal','Shells'],['browser','Browser']]],
     ['SOCIETY', [['agents','Agents'],['capabilities','Capabilities'],['routines','Routines']]],
     ['COMPUTE', [['fleet','Machines']]],
     ['TRUTH', [['activity','Activity'],['evidence','Evidence'],['gates','Gates'],['rulings','Rulings']]],

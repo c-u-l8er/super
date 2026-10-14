@@ -1,7 +1,7 @@
 // Observation-only records. VM identity is scoped to its host, never its display name.
 export const machineKey=id=>'machine:'+encodeURIComponent(id);
 export const vmKey=(host,id)=>'vm:'+encodeURIComponent(host)+':'+encodeURIComponent(id);
-const workerLine=h=>{const ws=h.workers??[];if(!ws.length)return 'No worker configured';return ws.map(w=>`${w.guest}: ${w.ready?'answers':'no answer'} (${new Date(w.checkedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}${w.ready?'':' · '+(w.reason||'no answer')})`).join('; ');};
+const workerLine=h=>{const ws=h.workers??[];if(!ws.length)return 'No worker configured';return ws.map(w=>`${w.guest}: ${w.ready?'answers':"didn't answer"} (${new Date(w.checkedAt).toLocaleTimeString([],{hour:'2-digit',minute:'2-digit'})}${w.ready?'':' · '+(w.reason||'no answer')})`).join('; ');};
 const lastCheckLine=h=>{const l=(h.workers??[]).map(w=>w.lastCheck).filter(Boolean).sort((p,q)=>q.at-p.at)[0];return l?`${l.verdict??l.state} · ${new Date(l.at).toLocaleString()} · ${l.id}`:'No check has run from this device';};
 export function fleetRecords(fleet){
  if(fleet?.status!=='configured')return [];

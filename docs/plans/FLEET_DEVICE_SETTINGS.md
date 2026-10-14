@@ -40,3 +40,11 @@ Next: provision a distinct Linux guest, boot firmware, storage and an isolated
 network with a tested return path. Do not reuse Wifibox's VM or passed-through
 Wi-Fi hardware. Consult the official [FreeBSD virtualization handbook](https://docs.freebsd.org/en/books/handbook/virtualization/).
 Guest creation and a physical network-outage drill are not yet completed.
+
+*Superseded 2026-10-11:* the guest state and next step above, recorded on 2026-09-14, are out of date.
+The cd-floor-01 bhyve Linux guest `super-worker-02` is enrolled; its checks run
+through the root-free jump row (T49, R103, R181), and its first advisory check
+from the installed cockpit passed on 2026-10-10 (E2, 14 of 14 tests). Wifibox
+stays separate: preserve Wifibox, tap0 and the current management route, and do
+not reuse Wifibox's VM or passed-through Wi-Fi hardware. The physical
+network-outage drill remains open.
