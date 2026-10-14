@@ -575,7 +575,7 @@ export function render(frame) {
     const page = panel(id);
     if (id === 'agents') page.append(section('Connected peers', (p.peers ?? []).map(peer => detail(peer, `agent:${peer.peer_id ?? peer.actor}`, peer.actor ?? peer.peer_id ?? 'Peer')), 'No peers are connected.'));
     else if (id === 'authority') page.append(section('Current grants', liveGrants.map(g => detail(g, `authority:${g.id}`, `${g.capability} · ${g.actor}`)), 'No authority is currently granted.'));
-    else if (id === 'settings') page.append(node('p', 'Super runs on your machine. Use the workspace switcher to focus the work shown in Mission Control and lanes. Authority and history views cover the whole runtime.', 'overview-card'), detail({state: frame.state, runtime: p.runtime}, 'settings-runtime', 'Connection information'));
+    else if (id === 'settings') page.append(node('p', 'Super runs on your machine. Use the workspace switcher to focus the work shown in Mission Control and lanes. Authority and history views cover the whole runtime.', 'overview-card'), node('p', 'Super does not handle money. Hosting and billing belong to locu.systems; see its public status.', 'screen-description'), detail({state: frame.state, runtime: p.runtime}, 'settings-runtime', 'Connection information'));
     else page.append(node('div', 'NOT CONNECTED · This prototype page needs runtime data and actions that are not available in the desktop app yet.', 'availability-note'));
     return page;
   });
