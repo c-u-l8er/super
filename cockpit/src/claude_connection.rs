@@ -206,9 +206,13 @@ impl Drop for OwnedChild {
     }
 }
 fn command(home: &Path) -> Result<Command, String> {
+    command_with(home, std::ffi::OsStr::new("claude"))
+}
+/// T72 · the same environment for the sign-in path's own program (`SignIn::program`).
+fn command_with(home: &Path, program: &std::ffi::OsStr) -> Result<Command, String> {
     std::fs::create_dir_all(home.join("workspace"))
         .map_err(|_| "Could not create the Claude conversation folder.")?;
-    let mut c = Command::new("claude");
+    let mut c = Command::new(program);
     c.current_dir(home.join("workspace"));
     for name in [
         "ANTHROPIC_API_KEY",
@@ -337,8 +341,58 @@ fn open_login(url: &str) -> Result<(), String> {
     });
     Ok(())
 }
-fn signed_in(home: &Path) -> Result<bool, String> {
-    let mut c = command(home)?;
+/// T72 (A-79) · the browser the CLI's own sign-in page opens in, through `BROWSER`: the one `open_login` uses.
+/// That page redirects to the CLI's localhost callback, so authorizing there completes it with stdin closed.
+fn sign_in_browser(chrome_exists: bool) -> &'static str {
+    if cfg!(target_os = "macos") {
+        "/usr/bin/open"
+    } else if chrome_exists {
+        "/usr/bin/google-chrome-stable"
+    } else {
+        "xdg-open"
+    }
+}
+/// T72 · a link the cockpit may open: today's allowlist AND exactly one `redirect_uri`, a loopback `/callback`.
+/// The printed manual link redirects to a page showing a code to paste, and stdin is `/dev/null`.
+fn completable_link(url: &str) -> bool {
+    let Ok(parsed) = reqwest::Url::parse(url) else { return false };
+    if login_link(url).as_deref() != Some(parsed.as_str()) {
+        return false;
+    }
+    let redirects: Vec<String> = parsed
+        .query_pairs()
+        .filter(|(k, _)| k == "redirect_uri")
+        .map(|(_, v)| v.into_owned())
+        .collect();
+    redirects.len() == 1 && loopback_callback(&redirects[0])
+}
+fn loopback_callback(raw: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(raw) else { return false };
+    u.scheme() == "http"
+        && u.username().is_empty()
+        && u.password().is_none()
+        && matches!(u.host_str(), Some("localhost" | "127.0.0.1" | "[::1]"))
+        && u.port().is_some()
+        && u.path() == "/callback"
+        && u.fragment().is_none()
+}
+/// T72 · what the sign-in path runs and opens; `real()` is the cockpit's own.
+struct SignIn {
+    program: std::ffi::OsString,
+    browser: String,
+    open: fn(&str) -> Result<(), String>,
+}
+impl SignIn {
+    fn real() -> SignIn {
+        SignIn {
+            program: "claude".into(),
+            browser: sign_in_browser(Path::new("/usr/bin/google-chrome-stable").exists()).into(),
+            open: open_login,
+        }
+    }
+}
+fn signed_in(home: &Path, program: &std::ffi::OsStr) -> Result<bool, String> {
+    let mut c = command_with(home, program)?;
     c.args(["auth", "status", "--json"]);
     let (_, v) = run(c, None, 15)?;
     Ok(v["loggedIn"] == true && v["authMethod"] == "claude.ai")
@@ -387,6 +441,9 @@ impl Connection {
     }
 
     pub fn status(&self, home: PathBuf) -> Result<Value, String> {
+        self.status_with(home, &SignIn::real())
+    }
+    fn status_with(&self, home: PathBuf, s: &SignIn) -> Result<Value, String> {
         let mut state = self
             .0
             .lock()
@@ -398,7 +455,9 @@ impl Connection {
         if let Some(login) = state.as_mut() {
             if !login.opened {
                 if let Ok(url) = login.links.try_recv() {
-                    open_login(&url)?;
+                    if completable_link(&url) {
+                        (s.open)(&url)?;
+                    }
                     login.opened = true;
                 }
             }
@@ -409,7 +468,7 @@ impl Connection {
                 .map_err(|_| "Could not check sign-in.")?;
             if result.is_some() || Instant::now() > login.deadline {
                 if result.map(|s| s.success()).unwrap_or(false) {
-                    let now = signed_in(&home)?;
+                    let now = signed_in(&home, &s.program)?;
                     probed = Some(now);
                     if now {
                         enable(&home)?;
@@ -431,7 +490,7 @@ impl Connection {
             // Only ask the CLI when a remembered connection could be reported
             // as connected. With no `enabled` file the answer cannot change the
             // report, so an unknown CLI counts as unsigned and no process runs.
-            None if enabled => signed_in(&home)?,
+            None if enabled => signed_in(&home, &s.program)?,
             None => false,
         };
         let decision = decide(enabled, latched, is_signed_in);
@@ -445,10 +504,13 @@ impl Connection {
         )
     }
     pub fn connect(&self, home: PathBuf) -> Result<Value, String> {
+        self.connect_with(home, &SignIn::real())
+    }
+    fn connect_with(&self, home: PathBuf, s: &SignIn) -> Result<Value, String> {
         // Ask the CLI before trusting the latch. Connecting is the act of
         // remembering, so `enabled` is true by construction here; `enable()`
         // writes it and removes any stale `needs-signin`.
-        let decision = decide(true, home.join("needs-signin").exists(), signed_in(&home)?);
+        let decision = decide(true, home.join("needs-signin").exists(), signed_in(&home, &s.program)?);
         if !decision.start_login {
             enable(&home)?;
             return Ok(json!({"connected":true,"pending":false,"provider":"claude"}));
@@ -460,8 +522,9 @@ impl Connection {
         if state.is_none() {
             #[cfg(target_os = "macos")]
             let spawn_guard = super_host::fdpass::spawn_guard();
-            let mut child = command(&home)?
+            let mut child = command_with(&home, &s.program)?
                 .args(["auth", "login", "--claudeai"])
+                .env("BROWSER", &s.browser)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -487,7 +550,7 @@ impl Connection {
                     if count > 65536 {
                         break;
                     }
-                    if let Some(url) = login_link(&line) {
+                    if let Some(url) = login_link(&line).filter(|u| completable_link(u)) {
                         let _ = tx.try_send(url);
                     }
                 }
@@ -798,6 +861,82 @@ mod tests {
         // while the CLI stays signed out.
         let expired = json!({"is_error":true,"result":"Failed to authenticate: OAuth session expired"});
         assert!(decide(true, needs_signin(&expired), false).needs_sign_in);
+    }
+    #[test]
+    fn sign_in_uses_the_cockpits_browser_and_only_a_loopback_callback() {
+        let mac = cfg!(target_os = "macos");
+        let want = if mac { ("/usr/bin/open", "/usr/bin/open") } else { ("/usr/bin/google-chrome-stable", "xdg-open") };
+        assert_eq!((sign_in_browser(true), sign_in_browser(false)), want);
+        let link = |r: &str| format!("https://claude.com/cai/oauth/authorize?code=true&redirect_uri={r}&state=dummy");
+        for r in ["http%3A%2F%2Flocalhost%3A54545%2Fcallback", "http://127.0.0.1:1/callback", "http%3A%2F%2F%5B%3A%3A1%5D%3A1%2Fcallback"] {
+            assert!(completable_link(&link(r)), "{r}");
+        }
+        for r in ["https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback", "http://localhost.evil.test/callback", "https://localhost:1/callback", "http://localhost/callback", "http://127.0.0.1:1/other"] {
+            assert!(!completable_link(&link(r)), "{r}");
+        }
+        assert!(!completable_link("https://claude.com/cai/oauth/authorize?state=dummy"));
+        let good = link("http://localhost:1/callback");
+        assert!(!completable_link(&good.replace("claude.com", "claude.com.evil.test")));
+        assert!(!completable_link(&format!("{good}&redirect_uri=https://evil.test/")));
+    }
+    static OPENED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    fn record_open(_: &str) -> Result<(), String> {
+        OPENED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+    /// T72 · a stub CLI: the manual link on stdout, the localhost one through `$BROWSER`, then exit.
+    #[cfg(unix)]
+    #[test]
+    fn sign_in_completes_on_the_clis_own_page_and_opens_nothing_else() {
+        use std::os::unix::fs::PermissionsExt;
+        const LOCAL: &str = "https://claude.com/cai/oauth/authorize?code=true&redirect_uri=http%3A%2F%2Flocalhost%3A54545%2Fcallback&state=dummy";
+        for exit in ["0", "1"] {
+            let dir = std::env::temp_dir().join(format!("t72-stub-{}-{exit}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = |name: &str, body: &str| {
+                let p = dir.join(name);
+                // Written by a child; never opened for writing here, so no sibling fork can hold it (ETXTBSY).
+                let mut w = Command::new("/bin/sh").args(["-c", "cat > \"$1\"", "sh"]).arg(&p).stdin(Stdio::piped()).spawn().unwrap();
+                let mut input = w.stdin.take().unwrap();
+                input.write_all(format!("#!/bin/sh\nd=\"$(dirname \"$0\")\"\n{body}\n").as_bytes()).unwrap();
+                drop(input);
+                assert!(w.wait().unwrap().success(), "{name} was not written");
+                std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+                p
+            };
+            let claude = script("claude", &r#"if [ "$1 $2" = "auth status" ]; then
+  if [ -f "$d/done" ]; then echo '{"loggedIn":true,"authMethod":"claude.ai"}'; else echo '{"loggedIn":false}'; fi; exit 0
+fi
+echo "$BROWSER|$*" > "$d/login"; cat > "$d/stdin"
+echo 'Opening browser to sign in...'
+echo 'If the browser did not open, visit: https://claude.com/cai/oauth/authorize?code=true&redirect_uri=https%3A%2F%2Fplatform.claude.com%2Foauth%2Fcode%2Fcallback&state=dummy'
+echo 'Paste code here if prompted > '
+[ EXIT = 0 ] || exit 1
+"$BROWSER" 'LOCAL' && touch "$d/done""#.replace("EXIT", exit).replace("LOCAL", LOCAL));
+            let browser = script("browser", r#"echo "$1" >> "$d/opened""#);
+            let s = SignIn { program: claude.into_os_string(), browser: browser.to_str().unwrap().into(), open: record_open };
+            let (c, home) = (Connection::default(), dir.join("home"));
+            assert_eq!(c.connect_with(home.clone(), &s).unwrap()["pending"], true);
+            let deadline = Instant::now() + Duration::from_secs(20);
+            let v = loop {
+                let v = c.status_with(home.clone(), &s).unwrap();
+                if v["pending"] != true || Instant::now() > deadline { break v; }
+                std::thread::sleep(Duration::from_millis(50));
+            };
+            let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+            assert_eq!(read("login").trim_end(), format!("{}|auth login --claudeai", s.browser));
+            assert!(dir.join("stdin").exists() && read("stdin").is_empty(), "stdin is empty");
+            assert_eq!(OPENED.load(std::sync::atomic::Ordering::SeqCst), 0, "the cockpit opened a link itself");
+            if exit == "0" {
+                assert_eq!(v["connected"], true, "{v}");
+                assert_eq!(read("opened"), format!("{LOCAL}\n"), "only the localhost link, through BROWSER");
+            } else {
+                assert!(v["connected"] == false && v["failed"] == true, "{v}");
+                assert!(read("opened").is_empty());
+            }
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }
 
