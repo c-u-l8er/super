@@ -39,6 +39,18 @@ if config_env() == :test do
   # `test/effect_channel_test.exs` asserts the *unconfigured* default is
   # the channel precisely so that this line cannot quietly become the rule.
   config :ampd, worktree_effector: Ampd.Worktree.Effector.Host
+
+  # **The suite's restart intensity, not production's** (T73). The suite
+  # kills supervised children on purpose (67 sites, and four files that
+  # reboot all four registries at once), and under production's 100 restarts
+  # in 5 s those kills alone spent the budget: a collapse recorded with
+  # supervisor reports held 101 restarts in 1.8 s, and `Ampd.Supervisor`
+  # took the application, and every test after it, down with it. Production
+  # sets nothing and keeps `{100, 5}` (`Ampd.Application.supervisor_options/0`),
+  # pinned by `test/supervision_budget_test.exs`. A test about recovery must
+  # assert bounded restarts and a serving registry itself; the application
+  # surviving no longer proves either.
+  config :ampd, restart_intensity: {1_000, 5}
 else
   config :ampd, data_dir: "priv/data"
 end
