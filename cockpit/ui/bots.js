@@ -18,7 +18,7 @@ import { waitingText, effortWarning } from './reply-budget.js';
 import { node, selectedWorkspace, bindDisclosure, navigate } from './app-shell.js';
 import { initBotDirectory } from './bot-directory.js';
 import {initConversationSidebar} from './conversation-sidebar.js';
-import { createConversationStore, STORAGE_KEY } from './conversation-store.js';
+import { historyStore, historyKey, moveBrowserHistories, createConversationActions } from './conversation-store.js';
 import {createTurnRegistry,holdingRefusal} from './conversation-turns.js';
 export function initBots({ invoke, apply, current, runtimeBotActions, bodies = null, migration = [] }) {
   /* T24 · file bodies live in the device body store; the saved record keeps references. One service for the page,
@@ -96,7 +96,24 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
   let taskReply=null,taskReplyRefs=[],taskRecovery=null;
   let active=null, busy=false, messages=[], proposals=[], pending=false, poll=null;
   const preferences=new Map(), sessions=new Map();let selected=provider.value,catalog=[],files=[];
-  const newHistory=()=>createConversationStore({getItem:key=>localStorage.getItem(storageKey(key)),setItem:(key,value)=>localStorage.setItem(storageKey(key),value)},{bodies,key:storageKey(STORAGE_KEY)});
+  /* T70 · every bot's history is kept in files on this device through the host (`conversation-store.js` historyStore,
+   * `bodies.rs`), never in browser storage: a save never depends on WebKit's quota. One store per history for the page.
+   * Every history still in browser storage, rostered or not, is moved at start. */
+  let legacyStorage=null,deleting=false;try{legacyStorage=localStorage;}catch{}
+  const watched=new Set(),storeFor=id=>{const s=historyStore({invoke,key:historyKey(id),bodies,legacy:legacyStorage});if(!watched.has(s)){watched.add(s);s.onChange(e=>historyChanged(id,e));}return s;};
+  moveBrowserHistories({invoke,bodies,legacy:legacyStorage});
+  const newHistory=()=>storeFor(bot.id);
+  /* T70 · the phone create branches, the phone draft, every title change and both deletion controls run through these
+   * actions (`conversation-store.js` createConversationActions, the handlers the tests drive) over this page. */
+  const actions=createConversationActions({storeFor,view:{
+    botId:()=>bot.id,provider:()=>selected,conversationId:()=>conversationId,sessions,
+    saveCurrent:()=>saveCurrent(),snapshot:()=>snapshot(),
+    opened:id=>{restoreSaved(id);lastSaved=JSON.stringify(snapshot());updateHistory();refresh();workView.conversation();},
+    fresh:text=>{reset();input.value=text;},
+    adopt:id=>{conversationId=id;lastSaved=JSON.stringify(snapshot());updateHistory();refresh();},
+    setDraft:text=>{input.value=text;},
+    hold:on=>{deleting=on;busy=on;input.readOnly=on;refresh();},
+    reset:()=>reset(),status:text=>{historyStatus.textContent=text;},changed:()=>{updateHistory();refresh();}}});
   let history=newHistory();
   let conversationTaskLinks=[];
   let conversationId=null,lastSaved='',lastFailed='',restoring=false,historyNavigation=0;
@@ -134,6 +151,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
   }
   function saveCurrent(){
     if(restoring)return true;
+    if(deleting)return false;
     const data=snapshot(),encoded=JSON.stringify(data);
     if(!conversationId&&!data.messages.length&&!data.entries.length&&!data.draft&&!data.files.length){updateHistory();return true;}
     if(encoded===lastSaved)return true;
@@ -142,7 +160,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
      * that differs: without both, a refused save repainted, the repaint saved, and the page spun (found live, quota
      * phase). */
     if(encoded===lastFailed)return false;
-    try{conversationId=history.save(selected,conversationId,data);lastSaved=encoded;lastFailed='';status.classList.remove('save-refused');historyStatus.classList.remove('save-refused');historyStatus.textContent='Saved on this device · messages here, file bodies in the device body store. Provider credentials are stored separately.';updateHistory();paintPersistence();return true;}
+    try{conversationId=history.save(selected,conversationId,data);lastSaved=encoded;lastFailed='';status.classList.remove('save-refused');historyStatus.classList.remove('save-refused');historyStatus.textContent='Saving on this device…';updateHistory();paintPersistence();return true;}
     catch(error){lastFailed=encoded;historyStatus.textContent=String(error);paintPersistence(String(error?.message||error));return false;}
   }
   /* T24 · every proposal card says whether it would survive Super closing, and never says so early. The answer is
@@ -167,12 +185,13 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
     return pending===null?{state:'present'}:{state:'pending',text:pending};
   }
   function paintPersistence(failure=null){
-    const owner=conversationId?history.owner(conversationId):null,committed=conversationId?history.get(selected,conversationId):null;
-    const refused=failure??(conversationId?history.outcome(conversationId):null)?.error??null;
+    const owner=conversationId?history.owner(conversationId):null,committed=conversationId?history.committed(selected,conversationId):null;
+    const last=conversationId?history.outcome(conversationId):null,refused=failure??last?.error??null;
     for(const card of transcript.querySelectorAll('.bot-proposal[data-recovery]')){
       const c=committedState(card,committed,owner);let state,reason='';
       if(c.state==='present')state='saved';
       else if(c.state==='pending'){const s=bodies.stateOf(owner,c.text);if(s==='failed'){state='unsaved';reason=bodies.failureOf(owner,c.text)??'';}else state='saving';}
+      else if(!failure&&last?.saving)state='saving';
       else{state='unsaved';reason=refused??'It is not in the saved conversation.';}
       let line=card.querySelector('.proposal-persist');if(!line){line=node('p','','bot-status proposal-persist proposal-meta');card.append(line);}
       card.dataset.persist=state;line.classList.toggle('proposal-unsaved',state==='unsaved');
@@ -431,7 +450,7 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
       const titled=conversationReply(reply.text,wantsTitle);reply.text=titled.text;
       if(wantsTitle&&emptyFirstReply(titled,reply.actions)){
         // Measured 2026-09-18 (opus[1m]/xhigh, first reply of a new conversation): the structured text was the requested header alone — `<conversation-title>…` never closed, 78 bytes, no note, no action — and the page landed it as "Reply received." with nothing to review; the same request resent in the now-titled conversation answered in 92 s. So the title (closed or not) is kept, the turn fails like any other with the draft restored, and the resend does not ask for a title again.
-        try{storeFor(sentBot.id).update(sentProvider,sentConversation,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* The refusal below stands without the title. */}
+        actions.title(sentBot.id,sentProvider,sentConversation,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});
         throw Error(`The reply stopped at its title header and carried no answer and no proposal. Your message is restored — send it again in this conversation.`);
       }
       observeTaskActivity(activityId,{type:'finish',text:reply.text||''});
@@ -488,13 +507,13 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
       activity.finish(false);taskReply='Reply received';status.textContent='Reply received.';
       const done=turns.finish(token);clearTimeout(replyPoll);cancelReply.hidden=true;
       saveCurrent();
-      if(done?.conversationId&&wantsTitle){try{storeFor(done.botId).update(done.provider,done.conversationId,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* Reply remains usable if local title storage is full. */}}
+      if(done?.conversationId&&wantsTitle)actions.title(done.botId,done.provider,done.conversationId,titled.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});
 
     }catch(error){const turn=turns.current(),partial=turn?streamingReply(turn.text,['codex','claude'].includes(turn.provider)):'';const owned=turns.owns({botId:bot.id,provider:selected,conversationId});observeTaskActivity(activityId,{type:'finish',error:true,failure:String(error)});const done=turns.finish(token);clearTimeout(replyPoll);if(!owned){if(done)landReply(done,{error,partial,sentLabel});conversationSidebar?.render();return;}if(partial)line('result','Interrupted reply (partial):\n'+partial);taskRecovery=replyFailure(error);activity.finish(true);taskReply='Reply did not complete';messages.pop();if(!input.value)input.value=draft;files=sentFiles;showFiles();status.textContent=String(error);line('result',String(error));if(sentActive.provider==='claude'&&String(error).includes('sign-in has expired')){active=null;modelPicker.hidden=true;}}
     finally{clearTimeout(replyPoll);paintLive();saveCurrent();refresh();if(transcript.dataset.follow!=='false')transcript.scrollTop=transcript.scrollHeight;}
   });
   historyPicker.addEventListener('change',()=>{if(busy)return;historyNavigation++;const id=historyPicker.value;if(!saveCurrent()){updateHistory();return;}restoreSaved(id||null);saveCurrent();refresh();});
-  deleteConversation.addEventListener('click',()=>{if(busy||!conversationId||openTurn())return;if(!confirm('Delete this saved conversation and its locally saved attachments?'))return;try{const released=history.remove(selected,conversationId);sessions.delete(selected);reset();historyStatus.textContent='Conversation deleted from this device.';refresh();released.then(r=>{if(r)historyStatus.textContent=`Conversation deleted from this device; ${r.released} saved bod${r.released===1?'y':'ies'} released.`;},e=>{historyStatus.textContent=`Conversation deleted. Its saved bodies could not be released (${e?.message||e}); they stay on this device.`;});}catch(error){historyStatus.textContent=String(error);}});
+  deleteConversation.addEventListener('click',()=>{if(busy||!conversationId||openTurn())return;if(!confirm('Delete this saved conversation and its locally saved attachments?'))return;actions.remove(bot.id,selected,conversationId);});
   input.addEventListener('input',()=>{historyNavigation++;saveCurrent();});
   document.addEventListener('before-page-select',()=>{historyNavigation++;});
   include.addEventListener('change',saveCurrent);
@@ -568,7 +587,21 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
   document.addEventListener('runtime-view-rendered',showIdentity);
   new MutationObserver(showIdentity).observe(document.getElementById('world'),{childList:true});
   showIdentity();
-  const storeFor=id=>id===bot.id?history:createConversationStore({getItem:key=>localStorage.getItem(id==='assistant'?key:`${key}:bot:${id}`),setItem:(key,value)=>localStorage.setItem(id==='assistant'?key:`${key}:bot:${id}`,value)},{bodies,key:id==='assistant'?STORAGE_KEY:`${STORAGE_KEY}:bot:${id}`});
+  /* T70 · a history answers once the host has read it; a save is saved only when the host has answered, and a failure
+   * counts only for the save it belongs to. */
+  function historyChanged(id,event){
+    conversationSidebar?.render();
+    if(id!==bot.id)return;
+    if(event.type==='loaded'){
+      if(history.error){historyStatus.textContent=history.error;updateHistory();return;}
+      if(!conversationId&&!transcript.children.length&&!input.value&&!files.length)restoreSaved(history.selected(selected));
+      else{lastFailed='';saveCurrent();}
+      updateHistory();refresh();return;
+    }
+    if(!conversationId||!event.ids?.includes(conversationId))return;
+    if(event.type==='failed'){lastFailed=lastSaved;lastSaved='';paintPersistence(event.error);}
+    else if(history.outcome(conversationId)?.ok){lastFailed='';status.classList.remove('save-refused');historyStatus.classList.remove('save-refused');historyStatus.textContent='Saved on this device · conversations in their history files, file bodies in the device body store. Provider credentials are stored separately.';paintPersistence();}
+  }
   function landReply(turn,{reply=null,titled=null,error=null,partial='',sentLabel='',wantsTitle=false}={}){
     const store=storeFor(turn.botId),base=store.get(turn.provider,turn.conversationId);
     if(!base)throw new Error('The conversation that sent this reply is unavailable.');
@@ -585,12 +618,12 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
       data.draft=turn.sent.draft;data.files=turn.sent.files;
     }
     store.save(turn.provider,turn.conversationId,data);
-    if(reply&&wantsTitle){try{store.update(turn.provider,turn.conversationId,titled?.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});}catch{/* The reply is durable even if its optional title is not. */}}
+    if(reply&&wantsTitle)actions.title(turn.botId,turn.provider,turn.conversationId,titled?.title?{title:titled.title,titleSource:'ai'}:{titleSource:'attempted'});
     sessions.delete(turn.provider);
   }
   conversationSidebar=initConversationSidebar({root,fresh,get:()=>({bot,items:roster.list().flatMap(b=>storeFor(b.id).list().map(c=>({...c,botId:b.id}))),bots:roster.list(),active:{id:conversationId,botId:bot.id,provider:selected},turn:turnProjection(),selected:conversationId,provider:selected,busy:busy||pending}),
-    update:(b,p,id,patch)=>{storeFor(b).update(p,id,patch);updateHistory();},
-    remove:(b,p,id)=>{if(turns.owns({botId:b,provider:p,conversationId:id}))throw Error('Cancel the generating reply before deleting this conversation.');if(!confirm('Delete this conversation and its saved attachments?'))return;storeFor(b).remove(p,id).catch(e=>{historyStatus.textContent=`Conversation deleted. Its saved bodies could not be released (${e?.message||e}); they stay on this device.`;});sessions.delete(p);if(bot.id===b&&conversationId===id)reset();updateHistory();},
+    update:(b,p,id,patch)=>{actions.title(b,p,id,patch).finally(updateHistory);updateHistory();},
+    remove:(b,p,id)=>{if(turns.owns({botId:b,provider:p,conversationId:id}))throw Error('Cancel the generating reply before deleting this conversation.');if(!confirm('Delete this conversation and its saved attachments?'))return;actions.remove(b,p,id);},
     open:async(b,p,id)=>{if(busy||pending||!saveCurrent())return;if(b!==bot.id){openingConversation(()=>navigate('bot:'+b,true));for(let i=0;(loadingProvider||busy)&&i<100;i++)await new Promise(r=>setTimeout(r,100));if(bot.id!==b||busy||loadingProvider)throw Error('Connection setup is still busy. Try again shortly.');}let token=++historyNavigation;if(p!==selected){provider.value=p;provider.dispatchEvent(new Event('change'));token=historyNavigation;for(let i=0;(loadingProvider||busy)&&i<300&&token===historyNavigation;i++)await new Promise(r=>setTimeout(r,100));}if(token!==historyNavigation||selected!==p)return;if(busy||loadingProvider){status.textContent='Connection setup is still busy. Reopen this conversation when it finishes.';return;}restoreSaved(id);saveCurrent();refresh();workView.conversation();}
   });conversationSidebar.render();
 
@@ -656,18 +689,14 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
     if(request.operation==='create'){
       if(request.taskContext!==undefined){
         const data=taskDiscussion(heldProjection(current),runtimeWorld(current),request.taskContext);
-        if(!saveCurrent())throw Error('Could not save the desktop draft.');
-        const id=history.save(selected,null,data);restoreSaved(id);lastSaved=JSON.stringify(snapshot());updateHistory();refresh();workView.conversation();
-        return {message:'Task discussion prepared. Review the draft and choose a model before sending.',conversationId:id};
+        return {message:'Task discussion prepared. Review the draft and choose a model before sending.',conversationId:await actions.create(selected,{data})};
       }
-      if(!saveCurrent())throw Error('Could not save the desktop draft.');reset();input.value=typeof request.text==='string'?request.text.slice(0,8000):'';
-      if(!input.value)input.value='';
-      conversationId=history.save(selected,null,snapshot());lastSaved=JSON.stringify(snapshot());updateHistory();refresh();return {message:'Conversation created.',conversationId};
+      return {message:'Conversation created.',conversationId:await actions.create(selected,{text:typeof request.text==='string'?request.text.slice(0,8000):''})};
     }
     const record=history.list(selected).find(c=>c.id===request.conversationId);
     if(!record||record.revision!==request.revision)throw Error('This conversation changed on another screen. Refresh before editing.');
     if(request.operation==='update'){
-      history.update(selected,record.id,{...(typeof request.title==='string'?{title:request.title}:{}),...(typeof request.pinned==='boolean'?{pinned:request.pinned}:{})});updateHistory();return {message:'Conversation updated.'};
+      const failed=await actions.title(bot.id,selected,record.id,{...(typeof request.title==='string'?{title:request.title}:{}),...(typeof request.pinned==='boolean'?{pinned:request.pinned}:{})});updateHistory();if(failed)throw Error(failed);return {message:'Conversation updated.'};
     }
     if(conversationId!==request.conversationId)throw Error('Open this conversation before editing or sending.');
     if(typeof request.text!=='string'||request.text.length>8000)throw Error('Enter a message of at most 8,000 characters.');
@@ -680,10 +709,10 @@ export function initBots({ invoke, apply, current, runtimeBotActions, bodies = n
       if(files.length)throw Error('This desktop draft has attachments. Review and send them from desktop.');
       effort.value=request.effort??'';paintEffortNote();
     }
+    if(request.operation==='draft'){await actions.draft(request.text);return {message:'Draft saved on desktop.'};}
     input.value=request.text;if(!saveCurrent())throw Error('Could not save the shared draft.');
     if(request.operation==='send'){composer.requestSubmit();return {message:'Message dispatched. Follow its progress in this conversation.'};}
-    if(request.operation!=='draft')throw Error('Unsupported conversation operation.');
-    return {message:'Draft saved on desktop.'};
+    throw Error('Unsupported conversation operation.');
   }});
 
 }
