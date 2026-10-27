@@ -306,7 +306,8 @@ pub mod framed {
     }
 
     /// One read of the rest of a frame, waiting no later than `until`. A close here, or no byte by `until`, ends the
-    /// bridge for good, and every right the frame brought so far is sunk.
+    /// bridge for good, and every right the frame brought so far is sunk. T82 (A-53): a read whose receipt returns at or
+    /// after `until` is `None` too; `fdpass` has already closed that read's own rights, under the fork lock.
     fn rest(sock: RawFd, buf: &mut [u8], until: Instant, rights: &[RawFd], late: &[RawFd]) -> io::Result<fdpass::Part> {
         // Codex review 1, finding 3: the rest deadline before every continuation read, not only through poll.
         if Instant::now() >= until {
@@ -1106,6 +1107,9 @@ mod laws {
         let took = t0.elapsed();
         fdpass::RECV_PAUSE_LEN.with(|c| c.set(None));
         assert!(r.as_ref().is_err_and(super::closes_for_good), "a body read that ended after the limit was taken: {:?}", r.map(|x| x.0));
+        // T82 (K6): that read's deadline passed before its syscall, so it read nothing: the body is still queued, which
+        // the post-receipt check alone would not show.
+        assert_eq!(unread(p.1), b"zzzzzzz", "a read whose deadline passed before its syscall consumed the body");
         assert!(took <= CEILING, "the rest took {took:?}");
         close_pair(&p);
     }
@@ -1178,5 +1182,178 @@ mod laws {
         framed::send(p.0, b"usable", &[], 4096, true).unwrap();
         assert_eq!(framed::recv(p.1, 4096, false).unwrap().0, b"usable");
         close_pair(&p);
+    }
+
+    // ---- T82 (A-53) · a frame's rest that arrives after the frame limit (`superlane/t82/TASK.md` section 5)
+    //
+    // Amendment 1: a phase these laws rest on that was not observed (a pause that never fired, or fired late; a receipt
+    // that did not come after the limit; a call past the ceiling) fails with `INVALID TIMING`, and no other failure does.
+
+    /// The bytes still queued on `fd`, read without waiting (no rights may be queued: a plain read would install them).
+    fn unread(fd: RawFd) -> Vec<u8> {
+        let (mut all, mut b) = (Vec::new(), [0u8; 256]);
+        loop {
+            let n = unsafe { libc::recv(fd, b.as_mut_ptr().cast(), b.len(), libc::MSG_DONTWAIT) };
+            if n <= 0 {
+                return all;
+            }
+            all.extend_from_slice(&b[..n as usize]);
+        }
+    }
+
+    /// `n` pipes: the read ends, to send, and the write ends, kept to ask whether any copy of a read end is still open.
+    fn held_pipes(n: usize) -> (Vec<RawFd>, Vec<RawFd>) {
+        unsafe { libc::signal(libc::SIGPIPE, libc::SIG_IGN) };
+        let (mut r, mut w) = (Vec::new(), Vec::new());
+        for _ in 0..n {
+            let mut p = [0; 2];
+            assert_eq!(unsafe { libc::pipe(p.as_mut_ptr()) }, 0);
+            for fd in p {
+                fdpass::set_cloexec(fd).unwrap();
+            }
+            r.push(p[0]);
+            w.push(p[1]);
+        }
+        (r, w)
+    }
+
+    /// Whether some copy of the read end behind the write end `w` is still open, here or in flight: a write fails `EPIPE`
+    /// once none is. Asked three times 10 ms apart, so a sibling test's fork, which copies this table until its `exec`,
+    /// is not taken for a leak.
+    fn read_end_open(w: RawFd) -> bool {
+        (0..3).all(|i| {
+            if i > 0 {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            unsafe { libc::write(w, b"x".as_ptr().cast(), 1) == 1 }
+        })
+    }
+
+    /// Arm the after-check pause for the calling thread's `len`-byte read, clearing any earlier record.
+    fn after_check(len: usize, d: Duration) {
+        fdpass::RECV_AFTER_CHECK_SEEN.with(|c| c.set(None));
+        fdpass::RECV_PAUSE_AFTER_CHECK.with(|c| c.set(Some((len, d))));
+    }
+
+    /// Disarm it and take what it saw.
+    fn after_check_seen() -> Option<fdpass::AfterCheck> {
+        fdpass::RECV_PAUSE_AFTER_CHECK.with(|c| c.set(None));
+        fdpass::RECV_AFTER_CHECK_SEEN.with(|c| c.take())
+    }
+
+    /// K1 and K2's phases, or `INVALID TIMING`: the pause fired on the `len`-byte read before the limit could have passed
+    /// (`t0`, taken before the frame's first read, plus `SPEC`), that read's receipt came at least `SPEC` after the pause
+    /// began (so after the limit, which was set before it), and the call stayed within `CEILING`.
+    fn late_receipt(seen: Option<fdpass::AfterCheck>, len: usize, t0: Instant, took: Duration) -> fdpass::AfterCheck {
+        let a = seen.unwrap_or_else(|| panic!("INVALID TIMING: the after-check pause never fired"));
+        assert_eq!(a.len, len, "INVALID TIMING: the pause fired on another read");
+        assert!(a.fired < t0 + SPEC, "INVALID TIMING: the pause fired {:?} after the start", a.fired - t0);
+        let r = a.received.unwrap_or_else(|| panic!("INVALID TIMING: the paused read received nothing"));
+        assert!(r >= a.fired + SPEC, "INVALID TIMING: the paused read's receipt came {:?} after the pause began", r - a.fired);
+        assert!(took <= CEILING, "INVALID TIMING: the call took {took:?}");
+        a
+    }
+
+    #[test]
+    fn k1_a_late_final_body_read_closes_the_bridge() {
+        let _s = serial();
+        let p = pair();
+        let (r, w) = held_pipes(2);
+        // The whole frame queued, its first byte carrying 2 rights; its 7-byte body (no prefix read is 7 bytes) is read
+        // whole, paused 5.5 s after that read's final check.
+        raw(p.0, &wire(b"zzzzzzz"), &r);
+        sink(&r);
+        after_check(7, SPEC + Duration::from_millis(500));
+        let t0 = Instant::now();
+        let got = framed::recv(p.1, 4096, false);
+        let took = t0.elapsed();
+        let seen = after_check_seen();
+        let open: Vec<bool> = w.iter().map(|f| read_end_open(*f)).collect();
+        let got = got.map(|(body, fds)| {
+            sink(&fds);
+            body
+        });
+        close_pair(&p);
+        sink(&w);
+        late_receipt(seen, 7, t0, took);
+        assert!(got.as_ref().is_err_and(super::closes_for_good), "K1: a body read that returned after the limit was taken: {got:?}");
+        assert!(!open.contains(&true), "K1: a right the frame brought is still open: {open:?}");
+    }
+
+    #[test]
+    fn k2_a_late_reads_own_rights_are_closed_too() {
+        let _s = serial();
+        let p = pair();
+        let (r, w) = held_pipes(2);
+        // The prefix, then a separately queued 7-byte body whose first byte carries the rights: the prefix reads are 1
+        // and 3 bytes, so only the body's read is 7 bytes, and only it can collect the rights.
+        raw(p.0, &framed::prefix_of(7), &[]);
+        raw(p.0, b"zzzzzzz", &r);
+        sink(&r);
+        after_check(7, SPEC + Duration::from_millis(500));
+        let t0 = Instant::now();
+        let got = framed::recv(p.1, 4096, false);
+        let took = t0.elapsed();
+        let seen = after_check_seen();
+        let open: Vec<bool> = w.iter().map(|f| read_end_open(*f)).collect();
+        let got = got.map(|(body, fds)| {
+            sink(&fds);
+            body
+        });
+        close_pair(&p);
+        sink(&w);
+        let a = late_receipt(seen, 7, t0, took);
+        assert_eq!(a.fds, 2, "K2: the late read received {} of the body's 2 rights", a.fds);
+        assert!(got.as_ref().is_err_and(super::closes_for_good), "K2: a late read's frame did not close the bridge: {got:?}");
+        assert!(!open.contains(&true), "K2: a right the late read received is still open: {open:?}");
+    }
+
+    #[test]
+    fn k3_a_late_first_read_is_still_a_frame() {
+        let _s = serial();
+        let p = pair();
+        raw(p.0, &wire(b"first"), &[]);
+        // The first-byte probe (a no-wait receive: its deadline is the moment it starts), its 1-byte first read paused
+        // 300 ms after the check, so that read's receipt comes after its own deadline. No later read here is 1 byte.
+        let pause = Duration::from_millis(300);
+        after_check(1, pause);
+        let t0 = Instant::now();
+        let got = framed::recv(p.1, 4096, true).map(|(body, fds)| {
+            sink(&fds);
+            body
+        });
+        let took = t0.elapsed();
+        let seen = after_check_seen();
+        close_pair(&p);
+        let a = seen.unwrap_or_else(|| panic!("INVALID TIMING: the after-check pause never fired"));
+        let r = a.received.unwrap_or_else(|| panic!("INVALID TIMING: the paused first read received nothing"));
+        assert!(a.len == 1 && r >= a.fired + pause, "INVALID TIMING: the pause fired on a {}-byte read, its receipt {:?} after it", a.len, r - a.fired);
+        assert!(took <= CEILING, "INVALID TIMING: the call took {took:?}");
+        assert!(matches!(&got, Ok(b) if b == b"first"), "K3: a first read whose receipt came after its deadline lost the frame: {got:?}");
+    }
+
+    #[test]
+    fn k4_expiry_before_the_syscall_consumes_nothing() {
+        let _s = serial();
+        let p = pair();
+        raw(p.0, b"queued!", &[]);
+        // A 7-byte rest read whose deadline is 100 ms away, paused 300 ms right before its final check (the seam clears
+        // itself when it fires).
+        fdpass::RECV_PAUSE_LEN.with(|c| c.set(Some((7, Duration::from_millis(300)))));
+        let got = fdpass::recv_rest(p.1, &mut [0u8; 7], 4, Instant::now() + Duration::from_millis(100));
+        let fired = fdpass::RECV_PAUSE_LEN.with(|c| c.take()).is_none();
+        let got = match got {
+            Ok(None) => None,
+            Ok(Some(part)) => {
+                sink(&part.fds);
+                Some(format!("a part of {} bytes", part.n))
+            }
+            Err(e) => Some(e.to_string()),
+        };
+        let left = unread(p.1);
+        close_pair(&p);
+        assert!(fired, "INVALID TIMING: the read never reached the pause right before its final check");
+        assert!(got.is_none(), "K4: a read whose deadline passed before its syscall returned {got:?}");
+        assert_eq!(left, b"queued!", "K4: a read whose deadline passed before its syscall consumed queued bytes");
     }
 }

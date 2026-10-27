@@ -523,9 +523,30 @@ thread_local! {
     pub(crate) static SLOW_RECV: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
     // Codex review 2: a pause, once, before the calling thread's framed receive syscall whose buffer is exactly n bytes
     // (keyed on the read, not on how many reads came before it), and every poll of the calling thread from its k-th on
-    // failing EINTR.
+    // failing EINTR. T82: the pause sits right before the final deadline check, after the buffers are prepared.
     pub(crate) static RECV_PAUSE_LEN: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
     pub(crate) static POLL_EINTR_FROM: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    // T82 (A-53, item 3): a pause, once, right AFTER the final deadline check of the calling thread's framed receive
+    // whose buffer is exactly n bytes (before the fault seam), and what became of that read.
+    pub(crate) static RECV_PAUSE_AFTER_CHECK: std::cell::Cell<Option<(usize, Duration)>> = const { std::cell::Cell::new(None) };
+    pub(crate) static RECV_AFTER_CHECK_SEEN: std::cell::Cell<Option<AfterCheck>> = const { std::cell::Cell::new(None) };
+}
+
+/// What the after-check pause saw (T82, test only): the length of the read it fired on, when it began, when that read's
+/// `recvmsg` then returned bytes (`None`: it never did), and how many rights that receipt reported.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+pub(crate) struct AfterCheck {
+    pub len: usize,
+    pub fired: Instant,
+    pub received: Option<Instant>,
+    pub fds: usize,
+}
+
+// T82 (K5, test only): told once, right before `recv_msg_with_fds` begins a readiness wait.
+#[cfg(all(test, any(target_os = "macos", feature = "framed-bridge")))]
+thread_local! {
+    pub(crate) static RECV_FDS_BEFORE_WAIT: std::cell::RefCell<Option<std::sync::mpsc::Sender<Instant>>> = const { std::cell::RefCell::new(None) };
 }
 
 /// Where a test may inject a failure (T28; only test builds' `INJECT` ever names one).
@@ -784,10 +805,9 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
     // at once, under the fork lock, below.
     #[cfg(all(target_os = "linux", not(feature = "framed-bridge")))]
     let n = unsafe { recvmsg(sock, &mut msg, MSG_CMSG_CLOEXEC) };
+    // T82 (A-53; T28's backlog item 1): the lock is never held across a blocking wait.
     #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
-    let _birth = FD_BIRTH.read().unwrap_or_else(|p| p.into_inner());
-    #[cfg(any(target_os = "macos", feature = "framed-bridge"))]
-    let n = unsafe { recvmsg(sock, &mut msg, 0) };
+    let (_birth, n) = recv_fds_under_birth(sock, &mut msg, space, max)?;
     if n < 0 {
         return Err(io::Error::last_os_error());
     }
@@ -843,6 +863,47 @@ pub fn recv_msg_with_fds(sock: RawFd, max: usize, max_fds: usize) -> io::Result<
     }
 
     Ok((buf, fds))
+}
+
+/// T82 (A-53; T28's backlog item 1): [`recv_msg_with_fds`]'s receive where arrivals are marked by `fcntl`. The fork lock
+/// is never held across a blocking wait: a blocking socket waits for input with no lock, then receives `MSG_DONTWAIT`
+/// under it, and on `EAGAIN` or `EINTR` lets it go and waits again (EINTR retried on purpose; no deadline). A
+/// non-blocking socket is received at once under the lock, as before, so its `WouldBlock` is immediate. The guard is
+/// returned held: every arrival is marked, or all are closed, before a spawn can run.
+#[cfg(any(target_os = "macos", feature = "framed-bridge"))]
+fn recv_fds_under_birth(sock: RawFd, msg: &mut libc::msghdr, space: usize, len: usize) -> io::Result<(RwLockReadGuard<'static, ()>, isize)> {
+    let fl = unsafe { fcntl(sock, libc::F_GETFL) };
+    if fl == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let blocking = fl & libc::O_NONBLOCK == 0;
+    loop {
+        #[cfg(test)]
+        if blocking {
+            RECV_FDS_BEFORE_WAIT.with(|c| {
+                if let Some(tx) = c.borrow_mut().take() {
+                    let _ = tx.send(Instant::now());
+                }
+            });
+        }
+        if blocking {
+            wait_ready(sock, libc::POLLIN, None)?;
+        }
+        let birth = FD_BIRTH.read().unwrap_or_else(|p| p.into_inner());
+        // The header's capacities again: a failed receive may have rewritten them.
+        unsafe { (*msg.msg_iov).iov_len = len };
+        msg.msg_controllen = space as _;
+        msg.msg_flags = 0;
+        let n = unsafe { recvmsg(sock, &mut *msg, if blocking { libc::MSG_DONTWAIT } else { 0 }) };
+        if n >= 0 {
+            return Ok((birth, n));
+        }
+        let e = io::Error::last_os_error();
+        drop(birth);
+        if !blocking || !matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) {
+            return Err(e);
+        }
+    }
 }
 
 // ------------------------------------------------------------------ T28: the framed transport's primitives
@@ -904,9 +965,25 @@ pub(crate) fn recv_part(sock: RawFd, buf: &mut [u8], room: usize, deadline: Opti
 
 /// [`recv_part`] for a frame's rest (Codex review 2, finding 1): `until` is checked once more right before the receive
 /// syscall, after the readiness wait and the fork lock, so a read whose wait, lock or anything between ends after it
-/// reads nothing (`None`). The first-byte probe and the blocking first read use [`recv_part`].
+/// reads nothing (`None`). T82 (A-53): a receipt that returns at or after `until` is `None` too, its rights closed under
+/// the fork lock. The first-byte probe and the blocking first read use [`recv_part`].
 pub(crate) fn recv_rest(sock: RawFd, buf: &mut [u8], room: usize, until: Instant) -> io::Result<Option<Part>> {
     recv_part_by(sock, buf, room, Some(until), true)
+}
+
+/// T82 (test only): the after-check pause for the calling thread's read of exactly `len` bytes, once; true if it fired.
+#[cfg(test)]
+fn pause_after_check(len: usize) -> bool {
+    match RECV_PAUSE_AFTER_CHECK.with(|c| c.get()) {
+        Some((n, d)) if n == len => {
+            RECV_PAUSE_AFTER_CHECK.with(|c| c.set(None));
+            let fired = Instant::now();
+            RECV_AFTER_CHECK_SEEN.with(|s| s.set(Some(AfterCheck { len, fired, received: None, fds: 0 })));
+            std::thread::sleep(d);
+            true
+        }
+        _ => false,
+    }
 }
 
 fn recv_part_by(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Instant>, rest: bool) -> io::Result<Option<Part>> {
@@ -925,6 +1002,12 @@ fn recv_part_by(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Insta
         #[cfg(not(test))]
         let cap: Option<usize> = None;
         let len = cap.map_or(buf.len(), |n| n.min(buf.len()));
+        // T82 (A-53, item 1): every buffer is prepared before the final check, so nothing that allocates runs between it
+        // and the syscall: only the test-only pause after it, the fault seam and `recvmsg` follow it.
+        let mut iov = iovec(&mut buf[..len]);
+        let space = rights_space(room);
+        let mut ctrl = vec![0u8; space];
+        let mut msg = msghdr(&mut iov, ctrl.as_mut_ptr(), space);
         #[cfg(test)]
         RECV_PAUSE_LEN.with(|c| {
             if let Some((n, d)) = c.get() {
@@ -938,14 +1021,14 @@ fn recv_part_by(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Insta
         if rest && deadline.is_some_and(|d| Instant::now() >= d) {
             return Ok(None);
         }
-        let mut iov = iovec(&mut buf[..len]);
-        let space = rights_space(room);
-        let mut ctrl = vec![0u8; space];
-        let mut msg = msghdr(&mut iov, ctrl.as_mut_ptr(), space);
+        #[cfg(test)]
+        let paused = pause_after_check(len);
         if let Some(e) = injected(Fault::Recvmsg) {
             return Err(e);
         }
         let n = unsafe { recvmsg(sock, &mut msg, libc::MSG_DONTWAIT) };
+        // T82 (item 2): the receipt's own moment, read at once.
+        let received = Instant::now();
         if n < 0 {
             let e = io::Error::last_os_error();
             if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted) {
@@ -972,6 +1055,20 @@ fn recv_part_by(sock: RawFd, buf: &mut [u8], room: usize, deadline: Option<Insta
                 }
                 c = libc::CMSG_NXTHDR(&msg, c);
             }
+        }
+        #[cfg(test)]
+        if paused {
+            RECV_AFTER_CHECK_SEEN.with(|s| s.set(s.get().map(|a| AfterCheck { received: Some(received), fds: fds.len(), ..a })));
+        }
+        // T82 (A-53, item 2; T28's Codex review 3, finding 1): a rest read whose receipt returned at or after its deadline
+        // is refused, whatever delayed it after the final check. Its reported rights are closed here, once, under the
+        // fork lock, never marked, returned or given to the frame, and the caller ends the bridge (`None`). Rights a
+        // macOS truncation installed unreported are outside this guarantee, as before.
+        if rest && deadline.is_some_and(|d| received >= d) {
+            for fd in &fds {
+                close_fd(*fd);
+            }
+            return Ok(None);
         }
         // Codex review 1, finding 4: an arrival that cannot be marked is never kept; every arrival is closed.
         for fd in &fds {
@@ -1248,5 +1345,84 @@ mod t27b {
         }
         close_fd(a);
         close_fd(b);
+    }
+}
+
+// ------------------------------------------------------------------ T82's K5 (`superlane/t82/TASK.md` section 5)
+#[cfg(all(test, any(target_os = "macos", feature = "framed-bridge")))]
+mod t82 {
+    use super::*;
+
+    /// **K5** — no fork lock across a blocking receive. While `recv_msg_with_fds` waits on an empty pair, a writer told
+    /// it is about to wait tries FD_BIRTH for writing without blocking, every 20 ms for 2 s, and reports each attempt.
+    /// Only observed contention fails the law: at least 50 attempts over at least 1.5 s, every one finding it held,
+    /// before any data is sent. A missing, late or thin report is `INVALID TIMING` (amendment 1). Then the data and two
+    /// rights are received, both close-on-exec.
+    #[test]
+    fn k5_no_fork_lock_across_a_blocking_receive() {
+        let _serial = t27b_serial();
+        let Pair(a, b) = pair_stream().unwrap();
+        let (tx, told) = std::sync::mpsc::channel::<Instant>();
+        let receiver = std::thread::spawn(move || {
+            RECV_FDS_BEFORE_WAIT.with(|c| *c.borrow_mut() = Some(tx));
+            recv_msg_with_fds(b, 64, 4)
+        });
+        let writer = std::thread::spawn(move || {
+            let at = told.recv_timeout(Duration::from_secs(10)).ok()?;
+            let mut tries = Vec::new();
+            while at.elapsed() < Duration::from_secs(2) {
+                let when = Instant::now();
+                tries.push((when, matches!(FD_BIRTH.try_write(), Err(TryLockError::WouldBlock))));
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Some((at, tries))
+        });
+        let report = writer.join().ok().flatten();
+        let rights = [spare_fd().unwrap(), spare_fd().unwrap()];
+        let sent = send_with_fds(a, b"k5", &rights);
+        let t = Instant::now();
+        while !receiver.is_finished() && t.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        if !receiver.is_finished() {
+            shutdown_fd(b); // the watchdog: a receiver still blocked is woken, so it can be joined
+        }
+        let got = receiver.join().unwrap();
+        let marks: Vec<bool> = got.as_ref().map(|(_, f)| f.iter().map(|x| is_cloexec(*x)).collect()).unwrap_or_default();
+        let body = got.as_ref().map(|(m, _)| m.clone());
+        if let Ok((_, f)) = &got {
+            for x in f {
+                close_fd(*x);
+            }
+        }
+        for fd in rights.into_iter().chain([a, b]) {
+            close_fd(fd);
+        }
+        let phases = match &report {
+            None => Err("INVALID TIMING: no report: the receiver never announced its wait, or the writer failed".to_string()),
+            Some((at, tries)) => {
+                let held = tries.iter().filter(|t| t.1).count();
+                let span = match (tries.first(), tries.last()) {
+                    (Some(f), Some(l)) => l.0 - f.0,
+                    _ => Duration::ZERO,
+                };
+                let line = format!("{} attempts over {span:?}, {held} found FD_BIRTH held", tries.len());
+                eprintln!("K5 phases: {line}");
+                if tries.first().map_or(true, |f| f.0 > *at + Duration::from_millis(500)) {
+                    Err(format!("INVALID TIMING: the writer's first attempt came late or never: {line}"))
+                } else if held < tries.len() {
+                    Ok(None)
+                } else if tries.len() >= 50 && span >= Duration::from_millis(1500) {
+                    Ok(Some(line))
+                } else {
+                    Err(format!("INVALID TIMING: too thin to show contention (the writer was not scheduled): {line}"))
+                }
+            }
+        };
+        let contention = phases.unwrap_or_else(|m| panic!("{m}"));
+        assert!(contention.is_none(), "K5: FD_BIRTH was held across the empty receive: {}", contention.unwrap_or_default());
+        assert!(sent.is_ok(), "K5: the data could not be sent: {sent:?}");
+        assert_eq!(body.as_deref().ok(), Some(&b"k5"[..]), "K5: the receive after the wait: {body:?}");
+        assert_eq!(marks, [true, true], "K5: the two rights, close-on-exec: {marks:?}");
     }
 }

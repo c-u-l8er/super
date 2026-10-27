@@ -53,6 +53,7 @@ defmodule Ampd.Application do
       # to a process that is not up yet is checked for rather than assumed.
       Ampd.Subscriptions,
       Ampd.Fleet,
+      Ampd.Lab,
       # Before every registry that boots from it (`Ampd.Store.open/1`).
       Ampd.AuthorityLog,
       Ampd.Session,
@@ -138,9 +139,12 @@ defmodule Ampd.Application do
         # budgets (5 s per participant), and `recover!/0` waits 5 s: a call
         # queued behind it could time out, and end the boot, while every
         # participant was still inside its own budget. So the boot waits for
-        # completion first, for at most the whole budget plus a margin; a
-        # completion that raised refuses the start by name, as a raise inside
-        # Effects' `init/1` did before.
+        # completion first, for at most the whole budget plus a margin. The
+        # barrier observes the incarnation its call reaches: if that one dies
+        # while the call is outstanding, the start is refused by name, as a
+        # raise inside Effects' `init/1` did before. An earlier completion that
+        # raised, followed by a supervised restart that completes, may be
+        # accepted.
         Ampd.Effects.await_ready!()
         moved = Ampd.Effects.recover!()
 

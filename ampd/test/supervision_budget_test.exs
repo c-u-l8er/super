@@ -1,6 +1,7 @@
 # T73 (agenda A-93; plan dt_0237; superlane/t73/TASK.md revision 2 with amendments 1 and 2).
+# T83 (agenda A-110 with A-109; plan dt_0253; superlane/t83/TASK.md revision 2).
 #
-# Two parts, one law file:
+# Three parts, one law file:
 #
 #   1. The suite runs `Ampd.Supervisor` with its own restart intensity,
 #      `{1_000, 5}` from `config/config.exs`'s test block; unconfigured, which
@@ -10,6 +11,10 @@
 #      fences from `handle_continue/2`, with a fence budget of elapsed time,
 #      and the boot waits for that completion (`Ampd.Effects.await_ready!/0`)
 #      before `recover!/0`. L3, L4, L5, P7's law and the cold-start check.
+#   3. T83: P9's law and P12's law, each in a disposable BEAM (`:peer` with
+#      `connection: :standard_io`) on scratch storage, with I (the suite's own
+#      application and storage, compared before and after each law), and PR's
+#      law (`:ready` is a read at the participant boundary).
 #
 # Not async: every test here kills or suspends named, supervised processes,
 # and the cold-start check stops and starts the application.
@@ -241,6 +246,398 @@ defmodule Ampd.SupervisionBudgetTest do
     end
 
     reset_and_settle!()
+  end
+
+  # ------------------------------------------- P9, P12 and I (T83, A-109)
+  #
+  # P9's law and P12's law run in a disposable BEAM: a `:peer` started with
+  # `connection: :standard_io` (no distribution), given this run's code paths
+  # explicitly, its own `AMPD_DATA_DIR` and its own working directory, both
+  # under one scratch directory. Everything destructive happens in there,
+  # done by `PeerLaws` below, which is compiled here and loaded into the peer
+  # as object code (the peer cannot load this dynamically compiled test
+  # module). `PeerLaws` returns observations and never asserts; each test
+  # evaluates every one of its checks and records every failure, and the
+  # cleanup reports them in one failure together with its own and I's.
+  #
+  # I: the suite's own application is never touched. Before each law (after
+  # a passive control with nothing done) and after it, in an `on_exit`
+  # callback that runs whether or not an assertion failed, the test compares
+  # the pid of `Ampd.Supervisor`, the four registries' pids, the application
+  # environment by key, and a path-to-SHA-256 map of the suite's storage and
+  # of `priv/data`. Those directories are resolved once, before the law, to
+  # absolute paths against the directory this file was loaded in, and the
+  # same paths are read after it. A peer that cannot start fails the law:
+  # nothing here falls back to the suite's own BEAM.
+  #
+  # Before I's baseline the suite must be quiescent, read without changing
+  # anything: settled; retention with nothing to retire and no pass running;
+  # no witness lines deferred in Effects; no authority-log checkpoint
+  # running. If it is not, this file's own `reset_and_settle!/0` runs once
+  # before the baseline and all four are read again; one that still fails is
+  # reported as "I cannot be established" with what was read.
+
+  # Separate deadlines: the peer's start, one RPC, ampd's start in the peer
+  # (`await_ready!/0`'s 20 s and the rest of the boot), the peer's stop, and
+  # the wait after its controller is killed if the stop did not end it.
+  @peer_start_ms 30_000
+  @peer_rpc_ms 10_000
+  @peer_boot_ms 60_000
+  @peer_stop_ms 15_000
+  @peer_kill_ms 5_000
+
+  # P9, measured inside the peer. The 7 s window starts at the restart event:
+  # the restarted Effects first seen registered. Finding that restart has its
+  # own deadline, and so has the recovery after the law.
+  @p9_discovery_ms 5_000
+  @p9_window_ms 7_000
+  @p9_recovery_ms 20_000
+  @p9_rpc_ms @p9_recovery_ms * 2 + @p9_discovery_ms + @p9_window_ms + 10_000
+  @p12_rpc_ms 15_000
+
+  # I's passive control: the suite settled (read-only probes), then observed
+  # twice this far apart with nothing done.
+  @suite_settle_ms 15_000
+  @suite_control_ms 1_000
+
+  # The suite's working directory, read when this file is loaded, before any
+  # law runs. I resolves its relative paths against this, never against the
+  # current directory, which a law run in the suite's own BEAM (PM2) changes
+  # to a scratch directory that its cleanup then removes.
+  @suite_cwd File.cwd!()
+
+  {:module, peer_module, peer_beam, _} =
+    defmodule PeerLaws do
+      @moduledoc false
+      # Runs in the disposable peer. The suite itself calls only `tree/1`,
+      # which reads. No step raises out of a law: each one is observed.
+
+      @participants [Ampd.GrantRegistry, Ampd.Approvals, Ampd.Receipts]
+      @registries [Ampd.GrantRegistry, Ampd.Approvals, Ampd.Receipts, Ampd.Effects]
+
+      # Configure and start ampd in this BEAM. `:ampd` is loaded first, so
+      # loading cannot overwrite what is set here; it then gets `env` (the
+      # suite's), loses `deletes` and takes `puts`. Then its dependencies and
+      # the application are started.
+      def boot(cwd, env, deletes, puts) do
+        cd = File.cd(cwd)
+        quiet = safe(&quiet_logger/0)
+        loaded = Application.load(:ampd)
+        Enum.each(env, fn {key, value} -> Application.put_env(:ampd, key, value) end)
+        Enum.each(deletes, &Application.delete_env(:ampd, &1))
+        Enum.each(puts, fn {key, value} -> Application.put_env(:ampd, key, value) end)
+
+        config = %{
+          restart_intensity: Application.fetch_env(:ampd, :restart_intensity),
+          data_dir: Application.fetch_env(:ampd, :data_dir),
+          ampd_data_dir: System.get_env("AMPD_DATA_DIR"),
+          cwd: File.cwd()
+        }
+
+        default_before = tree(Path.expand("priv/data"))
+
+        started =
+          case safe(fn -> Application.ensure_all_started(:ampd) end) do
+            {:ok, _apps} -> :ok
+            other -> {:not_started, inspect(other, limit: 50)}
+          end
+
+        %{
+          cd: cd,
+          quiet: quiet,
+          loaded: loaded,
+          config: config,
+          default_before: default_before,
+          started: started,
+          scratch_used: match?({:ok, [_ | _]}, File.ls(System.get_env("AMPD_DATA_DIR") || ""))
+        }
+      end
+
+      # P12: what production's configuration selects and runs, and the
+      # default directory as it is now.
+      def p12 do
+        %{
+          selected: safe(&selected/0),
+          running: safe(&intensity/0),
+          default_after: tree(Path.expand("priv/data"))
+        }
+      end
+
+      # P9: stop `participant` through its supervisor, which does not restart
+      # it, kill Effects, and observe the restarted Effects give up on it.
+      # Whatever happened, the participant is then restarted and the tree
+      # given a bounded time to recover; both outcomes are returned with the
+      # observation, never instead of it.
+      def p9(participant, discovery_ms, window_ms, recovery_ms) do
+        before = safe(fn -> settled(mono() + recovery_ms) end)
+        child = safe(fn -> child_id(participant) end)
+
+        terminated =
+          case child do
+            {:ok, id} -> safe(fn -> Supervisor.terminate_child(Ampd.Supervisor, id) end)
+            other -> {:not_attempted, other}
+          end
+
+        fence =
+          if terminated == :ok,
+            do: safe(fn -> gone_fence(discovery_ms, window_ms) end),
+            else: :not_attempted
+
+        # Restoration: unconditional, and checked by the test.
+        restart =
+          case child do
+            {:ok, id} -> safe(fn -> restarted(Supervisor.restart_child(Ampd.Supervisor, id)) end)
+            other -> {:not_attempted, other}
+          end
+
+        recovery = safe(fn -> settled(mono() + recovery_ms) end)
+
+        %{
+          before: before,
+          child: child,
+          terminated: terminated,
+          fence: fence,
+          restart: restart,
+          recovery: recovery
+        }
+      end
+
+      # Every path under `dir` (relative to it) with its SHA-256, or its type
+      # if it is not a regular file; `:absent` if `dir` is not there.
+      def tree(dir) do
+        if File.exists?(dir) do
+          for path <- Path.wildcard(Path.join(dir, "**"), match_dot: true), into: %{} do
+            {Path.relative_to(path, dir), entry(path)}
+          end
+        else
+          :absent
+        end
+      end
+
+      defp entry(path) do
+        case File.lstat(path) do
+          {:ok, %File.Stat{type: :regular}} ->
+            case File.read(path) do
+              {:ok, bytes} -> {:sha256, Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)}
+              {:error, why} -> {:error, why}
+            end
+
+          {:ok, %File.Stat{type: type}} ->
+            type
+
+          {:error, why} ->
+            {:error, why}
+        end
+      end
+
+      defp gone_fence(discovery_ms, window_ms) do
+        old = Process.whereis(Ampd.Effects)
+
+        if is_pid(old) do
+          Process.exit(old, :kill)
+          killed_at = mono()
+
+          case new_pid(Ampd.Effects, old, killed_at + discovery_ms) do
+            nil ->
+              {:not_restarted_within, discovery_ms}
+
+            {new, restarted_at} ->
+              ref = Process.monitor(new)
+
+              receive do
+                {:DOWN, ^ref, :process, ^new, reason} ->
+                  now = mono()
+
+                  {:exited,
+                   %{
+                     since_restart: now - restarted_at,
+                     since_kill: now - killed_at,
+                     reason: summary(reason)
+                   }}
+              after
+                max(restarted_at + window_ms - mono(), 0) ->
+                  Process.demonitor(ref, [:flush])
+                  {:no_exit_within, window_ms}
+              end
+          end
+        else
+          :effects_not_running
+        end
+      end
+
+      # The restart event: the restarted process first seen registered.
+      defp new_pid(name, old, deadline) do
+        pid = Process.whereis(name)
+
+        cond do
+          is_pid(pid) and pid != old ->
+            {pid, mono()}
+
+          mono() >= deadline ->
+            nil
+
+          true ->
+            Process.sleep(1)
+            new_pid(name, old, deadline)
+        end
+      end
+
+      defp summary({%RuntimeError{message: message}, _stack}), do: {:runtime_error, message}
+      defp summary(other), do: {:other, inspect(other, limit: 20)}
+
+      defp restarted({:ok, pid}) when is_pid(pid), do: :restarted
+      defp restarted({:ok, pid, _info}) when is_pid(pid), do: :restarted
+      defp restarted(other), do: {:not_restarted, inspect(other)}
+
+      defp child_id(mod) do
+        pid = Process.whereis(mod)
+
+        case Enum.find(Supervisor.which_children(Ampd.Supervisor), fn {_id, p, _, _} ->
+               is_pid(p) and p == pid
+             end) do
+          {id, _pid, _type, _modules} -> {:ok, id}
+          nil -> {:error, {:not_a_running_child, mod}}
+        end
+      end
+
+      defp settled(deadline) do
+        case probe(deadline) do
+          {:ok, _epoch} = ok ->
+            ok
+
+          waiting ->
+            if mono() < deadline do
+              Process.sleep(10)
+              settled(deadline)
+            else
+              waiting
+            end
+        end
+      end
+
+      defp probe(deadline) do
+        case Enum.reject(@registries, &is_pid(Process.whereis(&1))) do
+          [] ->
+            case call_by(Ampd.Effects, :incarnation, deadline) do
+              %{"epoch" => epoch} ->
+                case Enum.reject(@participants, &fenced_by?(&1, epoch, deadline)) do
+                  [] -> {:ok, epoch}
+                  behind -> {:wait, {:not_fenced, epoch, behind}}
+                end
+
+              other ->
+                {:wait, {:effects, inspect(other)}}
+            end
+
+          missing ->
+            {:wait, {:not_registered, missing}}
+        end
+      end
+
+      defp fenced_by?(mod, epoch, deadline) do
+        case call_by(mod, :fence, deadline) do
+          %{"epoch" => ^epoch} -> true
+          {:refused, _} -> true
+          _ -> false
+        end
+      end
+
+      defp call_by(name, msg, deadline) do
+        case deadline - mono() do
+          left when left > 0 ->
+            try do
+              GenServer.call(name, msg, min(250, left))
+            catch
+              :exit, why -> {:exit, why}
+            end
+
+          _ ->
+            {:exit, :deadline}
+        end
+      end
+
+      defp selected do
+        opts = Ampd.Application.supervisor_options()
+        {opts[:max_restarts], opts[:max_seconds]}
+      end
+
+      # As the suite's `running_intensity/0` reads stdlib-7.1's #state record,
+      # but returning what it found instead of asserting.
+      defp intensity do
+        state = :sys.get_state(Ampd.Supervisor)
+
+        layout? =
+          is_tuple(state) and tuple_size(state) >= 7 and elem(state, 0) == :state and
+            elem(state, 1) == {:local, Ampd.Supervisor} and elem(state, 2) == :one_for_one and
+            is_integer(elem(state, 5)) and is_integer(elem(state, 6))
+
+        if layout?,
+          do: {elem(state, 5), elem(state, 6)},
+          else: {:layout_unknown, inspect(state, limit: 8)}
+      end
+
+      defp quiet_logger do
+        _ = Application.ensure_all_started(:logger)
+        :logger.set_primary_config(:level, :none)
+      end
+
+      defp safe(fun) do
+        fun.()
+      catch
+        kind, why -> {:raised, kind, inspect(why, limit: 50)}
+      end
+
+      defp mono, do: System.monotonic_time(:millisecond)
+    end
+
+  @peer_module peer_module
+  @peer_beam peer_beam
+
+  @tag timeout: 300_000
+  test "P9's law: in a disposable BEAM, a participant that is gone, not just slow, still ends a restarted Effects' fence push within 7 s" do
+    run_law!("p9", fn law ->
+      boot =
+        in_peer(
+          law.peer,
+          @peer_module,
+          :boot,
+          [law.cwd, Application.get_all_env(:ampd), [], [data_dir: law.data]],
+          @peer_boot_ms
+        )
+
+      run =
+        in_peer(
+          law.peer,
+          @peer_module,
+          :p9,
+          [Ampd.Receipts, @p9_discovery_ms, @p9_window_ms, @p9_recovery_ms],
+          @p9_rpc_ms
+        )
+
+      boot_checks(boot, law, {:ok, law.data}) ++ p9_checks(run)
+    end)
+  end
+
+  @tag timeout: 300_000
+  test "P12's law: in a disposable BEAM, a cold start under production's configuration runs Ampd.Supervisor with {100, 5}" do
+    run_law!("p12", fn law ->
+      boot =
+        in_peer(
+          law.peer,
+          @peer_module,
+          :boot,
+          [law.cwd, Application.get_all_env(:ampd), [:restart_intensity], [data_dir: "priv/data"]],
+          @peer_boot_ms
+        )
+
+      run = in_peer(law.peer, @peer_module, :p12, [], @p12_rpc_ms)
+
+      boot_checks(boot, law, {:ok, "priv/data"}) ++ p12_checks(boot, run)
+    end)
+  end
+
+  test "PR's law: `:ready` is a read at the participant boundary" do
+    assert Ampd.Effects.class(:ready) == :read
   end
 
   # -------------------------------------------------------------- helpers
@@ -612,4 +1009,444 @@ defmodule Ampd.SupervisionBudgetTest do
   defp permutations(list), do: for(x <- list, rest <- permutations(list -- [x]), do: [x | rest])
 
   defp mono, do: System.monotonic_time(:millisecond)
+
+  # ------------------------------------------- helpers for P9, P12 and I
+
+  # Observe the suite (I), then register the cleanup BEFORE acquiring
+  # anything, recording each resource in an unlinked ledger as it is
+  # acquired: the scratch directory, then the peer. The law's own checks do
+  # not fail the test here: every failed one is evaluated and recorded in
+  # the ledger, or, if the law did not reach its checks, the failure that
+  # stopped it; `finish_law!/2` then reports them in one failure together
+  # with the cleanup's and I's.
+  defp run_law!(label, law) do
+    before = observe_suite()
+    {:ok, ledger} = Agent.start(fn -> %{} end)
+    on_exit(fn -> finish_law!(ledger, before) end)
+
+    failed =
+      case guarded(fn -> law.(acquire!(ledger, label)) end) do
+        checks when is_list(checks) -> for {ok?, message} <- checks, ok? != true, do: message
+        other -> ["the law did not reach its checks: " <> describe(other)]
+      end
+
+    case guarded(fn -> Agent.update(ledger, &Map.put(&1, :failed, failed)) end) do
+      :ok ->
+        :ok
+
+      other ->
+        flunk(
+          "the law's failures could not be recorded for its cleanup (#{inspect(other)}):\n" <>
+            Enum.join(failed, "\n")
+        )
+    end
+  end
+
+  # The law's resources, each recorded in the ledger as it is acquired.
+  defp acquire!(ledger, label) do
+    scratch =
+      Path.join(System.tmp_dir!(), "ampd-t83-#{label}-#{System.unique_integer([:positive])}")
+
+    :ok = Agent.update(ledger, &Map.put(&1, :dir, scratch))
+    data = Path.join(scratch, "data")
+    cwd = Path.join(scratch, "cwd")
+    File.mkdir_p!(data)
+    File.mkdir_p!(cwd)
+
+    %{peer: start_peer!(ledger, data), dir: scratch, data: data, cwd: cwd}
+  end
+
+  # A fresh `:peer` over standard I/O, with this run's code paths and its own
+  # AMPD_DATA_DIR, and `PeerLaws`' object code loaded into it. Not linked:
+  # no exit signal of the peer's reaches this test process; a peer that dies
+  # is seen as a failed RPC, and the cleanup monitors its stop.
+  defp start_peer!(ledger, data) do
+    root = :code.root_dir()
+
+    paths =
+      for path <- :code.get_path(), path != ~c".", not List.starts_with?(path, root),
+          do: String.to_charlist(Path.expand(List.to_string(path)))
+
+    erl = Path.join([List.to_string(root), "bin", "erl"])
+
+    options = %{
+      connection: :standard_io,
+      args: [~c"-pa" | paths],
+      env: [{~c"AMPD_DATA_DIR", String.to_charlist(data)}],
+      wait_boot: @peer_start_ms
+    }
+
+    options =
+      if File.exists?(erl), do: Map.put(options, :exec, String.to_charlist(erl)), else: options
+
+    peer =
+      case guarded(fn -> :peer.start(options) end) do
+        {:ok, peer} ->
+          peer
+
+        {:ok, peer, _node} ->
+          peer
+
+        other ->
+          flunk(
+            "no disposable BEAM: :peer.start/1 returned #{inspect(other)}; " <>
+              "this law never runs in the suite's own BEAM"
+          )
+      end
+
+    :ok = Agent.update(ledger, &Map.put(&1, :peer, peer))
+
+    case in_peer(
+           peer,
+           :code,
+           :load_binary,
+           [@peer_module, ~c"supervision_budget_test.exs", @peer_beam],
+           @peer_rpc_ms
+         ) do
+      {:ok, {:module, module}} when module == @peer_module ->
+        peer
+
+      other ->
+        flunk("the law's code did not load into the disposable BEAM: #{inspect(other)}")
+    end
+  end
+
+  defp in_peer(peer, module, fun, args, timeout) do
+    {:ok, :peer.call(peer, module, fun, args, timeout)}
+  catch
+    kind, why -> {:peer_failed, kind, why}
+  end
+
+  # The cleanup, outside the test process, and the law's one report. Each
+  # step is attempted and checked on its own, so no failure before it can
+  # keep it from running: the peer's stop (bounded, its outcome collected
+  # first), the scratch directory's removal, and I. The law's own recorded
+  # failures and every one of these are then reported together, in one
+  # failure.
+  defp finish_law!(ledger, before) do
+    held = guarded(fn -> Agent.get(ledger, & &1) end)
+
+    {held, lost} =
+      if is_map(held),
+        do: {held, []},
+        else: {%{}, ["the law's resources could not be read back: #{inspect(held)}"]}
+
+    law =
+      case held do
+        %{failed: failed} -> failed
+        _ when lost != [] -> []
+        _ -> ["the law did not finish, so its own checks were never recorded"]
+      end
+
+    after_law = lost ++ stop_peer(held) ++ remove_scratch(held) ++ suite_untouched(before)
+    _ = guarded(fn -> Agent.stop(ledger) end)
+
+    failures =
+      if after_law == [],
+        do: law,
+        else: law ++ ["after the law:\n  " <> Enum.join(after_law, "\n  ")]
+
+    if failures != [],
+      do: flunk(Enum.join(failures, "\n"))
+  end
+
+  # The stop itself is bounded. `:peer.stop/1` is synchronous, so it runs in a
+  # separate, unlinked process and its outcome is collected here within
+  # `@peer_stop_ms`; a stop that has not returned by then is abandoned. If
+  # the peer's controller is still running at that deadline it is killed
+  # (which closes the peer's standard I/O connection) and waited for at most
+  # `@peer_kill_ms`, and the failure is reported either way. Only then are
+  # the scratch directory and I looked at.
+  defp stop_peer(%{peer: peer}) do
+    watch = Process.monitor(peer)
+    deadline = mono() + @peer_stop_ms
+
+    {stopper, ref} =
+      spawn_monitor(fn -> exit({:stop_returned, guarded(fn -> :peer.stop(peer) end)}) end)
+
+    stop =
+      receive do
+        {:DOWN, ^ref, :process, ^stopper, outcome} -> outcome
+      after
+        @peer_stop_ms ->
+          Process.exit(stopper, :kill)
+          Process.demonitor(ref, [:flush])
+          {:stop_not_returned_within, @peer_stop_ms}
+      end
+
+    case await_down(watch, peer, max(deadline - mono(), 0)) do
+      {:down, _reason} ->
+        []
+
+      :running ->
+        Process.exit(peer, :kill)
+
+        killed =
+          case await_down(watch, peer, @peer_kill_ms) do
+            {:down, reason} -> "its controller was then killed and exited #{inspect(reason)}"
+            :running -> "its controller is still running #{@peer_kill_ms} ms after it was killed"
+          end
+
+        ["the disposable BEAM did not stop within #{@peer_stop_ms} ms (#{inspect(stop)}); " <> killed]
+    end
+  end
+
+  defp stop_peer(_held), do: []
+
+  defp await_down(watch, peer, ms) do
+    receive do
+      {:DOWN, ^watch, :process, ^peer, reason} -> {:down, reason}
+    after
+      ms -> :running
+    end
+  end
+
+  defp remove_scratch(%{dir: dir}) do
+    removed = guarded(fn -> File.rm_rf(dir) end)
+
+    if File.exists?(dir),
+      do: ["the scratch directory #{dir} is still there: #{inspect(removed)}"],
+      else: []
+  end
+
+  defp remove_scratch(_held), do: []
+
+  defp suite_untouched(before) do
+    quiet = for what <- before.quiescence, do: "I cannot be established: " <> what
+
+    control =
+      if before.control == [],
+        do: [],
+        else: [
+          "I cannot be established: with nothing done, the suite's own application or storage " <>
+            "changed during the passive control (settled: #{inspect(before.settled)}): " <>
+            inspect(before.control)
+        ]
+
+    # The same absolute paths the baseline read, never resolved again here.
+    law =
+      case guarded(fn -> suite_snapshot(before.paths) end) do
+        now when is_map(now) ->
+          case differences(before.snapshot, now) do
+            [] -> []
+            diff -> ["I: the suite's own application or storage changed during the law: #{inspect(diff)}"]
+          end
+
+        other ->
+          ["I: the suite could not be observed after the law: #{inspect(other)}"]
+      end
+
+    quiet ++ control ++ law
+  end
+
+  # I, before: the absolute paths it compares, resolved once here
+  # (`snapshot_paths/0`) and reused after the law; then the suite quiescent
+  # (`read_quiescence/0`, reads only); if it is not, this file's own
+  # `reset_and_settle!/0` once, before the baseline, and all four conditions
+  # read again. Then the passive control: two snapshots `@suite_control_ms`
+  # apart with nothing done.
+  defp observe_suite do
+    paths = snapshot_paths()
+
+    {settled, quiet} =
+      case read_quiescence() do
+        {settled, []} ->
+          {settled, []}
+
+        {_settled, _failed} ->
+          reset_and_settle!()
+          {settled, failed} = read_quiescence()
+          {settled, Enum.map(failed, &(&1 <> " (read again after this file's reset_and_settle!/0)"))}
+      end
+
+    first = suite_snapshot(paths)
+    Process.sleep(@suite_control_ms)
+
+    %{
+      paths: paths,
+      snapshot: first,
+      settled: settled,
+      quiescence: quiet,
+      control: differences(first, suite_snapshot(paths))
+    }
+  end
+
+  # The four conditions under which no writer changes the suite's storage
+  # without a request (superlane/t83/m2/EVIDENCE.md), each read without
+  # changing, calling to write or flushing anything in the parent
+  # application: `{await_settled's result, what failed, with what was read}`.
+  defp read_quiescence do
+    settled = await_settled(%{}, mono() + @suite_settle_ms)
+    {settled, quiescence_failures(settled)}
+  end
+
+  defp quiescence_failures(settled) do
+    retention =
+      guarded(fn ->
+        cfg = Ampd.Retention.config()
+        retirable = Ampd.Effects.retirable(cfg.keep_recent, cfg.max_batch)
+        status = Ampd.Retention.status()
+
+        {length(retirable) < cfg.min_batch and status["running"] == nil,
+         %{config: cfg, retirable: length(retirable), running: status["running"]}}
+      end)
+
+    deferred =
+      guarded(fn ->
+        state = :sys.get_state(Ampd.Effects)
+        {state.inc == nil or state.inc.deferred == [], state.inc && state.inc.deferred}
+      end)
+
+    checkpoint = guarded(fn -> Ampd.AuthorityLog.status()["checkpoint_running"] end)
+
+    [
+      {match?({:ok, _}, settled),
+       "the suite did not settle within #{@suite_settle_ms} ms: #{inspect(settled)}"},
+      {match?({true, _}, retention),
+       "retention has effects to retire or a pass running, so it may write during the law: " <>
+         inspect(retention, limit: 20)},
+      {match?({true, _}, deferred),
+       "Ampd.Effects holds deferred witness lines, so a flush may write during the law: " <>
+         inspect(deferred, limit: 20)},
+      {checkpoint == nil,
+       "an authority-log checkpoint is running, so it may write during the law: " <>
+         "checkpoint_running is #{inspect(checkpoint, limit: 20)}"}
+    ]
+    |> Enum.reject(fn {held?, _what} -> held? end)
+    |> Enum.map(fn {_held?, what} -> what end)
+  end
+
+  # The absolute paths I reads, resolved once before the law against the
+  # directory this file was loaded in (`@suite_cwd`), never the current one.
+  defp snapshot_paths do
+    %{storage: suite_dirs(), default_dir: Path.expand("priv/data", @suite_cwd)}
+  end
+
+  defp suite_snapshot(paths) do
+    %{
+      supervisor: Process.whereis(Ampd.Supervisor),
+      registries: pids(),
+      env: Map.new(Application.get_all_env(:ampd)),
+      ampd_data_dir: System.get_env("AMPD_DATA_DIR"),
+      storage: Enum.reduce(paths.storage, %{}, &Map.merge(&2, files_of(&1))),
+      default_dir: files_of(paths.default_dir)
+    }
+  end
+
+  # The suite's storage: its configured data directory and, if set, the
+  # AMPD_DATA_DIR it runs with, each made absolute against `@suite_cwd`.
+  defp suite_dirs do
+    [Application.get_env(:ampd, :data_dir), System.get_env("AMPD_DATA_DIR")]
+    |> Enum.filter(&is_binary/1)
+    |> Enum.map(&Path.expand(&1, @suite_cwd))
+    |> Enum.uniq()
+  end
+
+  defp files_of(dir) do
+    case Ampd.SupervisionBudgetTest.PeerLaws.tree(dir) do
+      :absent -> %{{dir, "."} => :absent}
+      tree -> Map.new(tree, fn {path, entry} -> {{dir, path}, entry} end)
+    end
+  end
+
+  defp differences(a, b) do
+    for key <- Map.keys(a), Map.get(a, key) != Map.get(b, key),
+        do: {key, changed(Map.get(a, key), Map.get(b, key))}
+  end
+
+  defp changed(a, b) when is_map(a) and is_map(b) do
+    keys = Enum.uniq(Map.keys(a) ++ Map.keys(b))
+    Enum.take(for(k <- keys, Map.get(a, k) != Map.get(b, k), do: k), 20)
+  end
+
+  defp changed(a, b), do: {a, b}
+
+  defp guarded(fun) do
+    fun.()
+  catch
+    kind, why -> {:failed, kind, why}
+  end
+
+  # What stopped a law before its checks: an assertion's own message, or the
+  # caught term.
+  defp describe({:failed, _kind, %ExUnit.AssertionError{message: message}}), do: message
+  defp describe(other), do: inspect(other, limit: 50)
+
+  defp boot_checks({:ok, boot}, law, data_dir) do
+    [
+      {boot.loaded == :ok,
+       "the disposable BEAM did not load :ampd before configuring it: #{inspect(boot.loaded)}"},
+      {boot.cd == :ok and boot.config.cwd == {:ok, law.cwd},
+       "the disposable BEAM did not work in its own directory #{law.cwd}: " <>
+         inspect({boot.cd, boot.config.cwd})},
+      {boot.config.data_dir == data_dir,
+       "the disposable BEAM's :data_dir is #{inspect(boot.config.data_dir)}, not #{inspect(data_dir)}"},
+      {boot.config.ampd_data_dir == law.data,
+       "the disposable BEAM's AMPD_DATA_DIR is #{inspect(boot.config.ampd_data_dir)}, not #{law.data}"},
+      {boot.started == :ok, "ampd did not start in the disposable BEAM: #{inspect(boot.started)}"},
+      {boot.scratch_used,
+       "ampd in the disposable BEAM wrote nothing into its AMPD_DATA_DIR #{law.data}: " <>
+         "its storage is not the scratch storage, so this start says nothing"}
+    ]
+  end
+
+  defp boot_checks(other, _law, _data_dir),
+    do: [{false, "ampd could not be configured and started in the disposable BEAM: #{inspect(other)}"}]
+
+  defp p9_checks({:ok, run}) do
+    message =
+      case run.fence do
+        {:exited, %{reason: {:runtime_error, message}}} -> message
+        _ -> nil
+      end
+
+    elapsed =
+      case run.fence do
+        {:exited, %{since_restart: ms}} -> ms
+        _ -> nil
+      end
+
+    [
+      {match?({:ok, _}, run.before),
+       "the disposable BEAM's tree was not settled before the law: #{inspect(run.before)}"},
+      {run.terminated == :ok,
+       "Ampd.Receipts was not stopped through its supervisor: #{inspect({run.child, run.terminated})}"},
+      {is_binary(message) and message =~ "journal owner cannot fence Ampd.Receipts for epoch",
+       "a restarted Effects did not exit with the named fence error: #{inspect(run.fence)}"},
+      {is_binary(message) and message =~ "noproc",
+       "Effects gave up on Ampd.Receipts, but not after the :noproc this law arranges: " <>
+         inspect(run.fence)},
+      {is_integer(elapsed) and elapsed <= @p9_window_ms,
+       "with Ampd.Receipts stopped and not restarted, a restarted Effects did not give up within " <>
+         "7 s of its restart: the fence deadline does not hold across :noproc retries: " <>
+         inspect(run.fence)},
+      {run.restart == :restarted,
+       "restoration: Ampd.Receipts was not restarted after the law: #{inspect(run.restart)}"},
+      {match?({:ok, _}, run.recovery),
+       "restoration: the disposable BEAM's tree did not recover within #{@p9_recovery_ms} ms " <>
+         "of Ampd.Receipts' restart: #{inspect(run.recovery)}"}
+    ]
+  end
+
+  defp p9_checks(other),
+    do: [{false, "P9's law did not run in the disposable BEAM: #{inspect(other)}"}]
+
+  defp p12_checks({:ok, boot}, {:ok, run}) do
+    [
+      {boot.config.restart_intensity == :error,
+       "the production start ran with a restart intensity configured: " <>
+         inspect(boot.config.restart_intensity)},
+      {run.default_after == boot.default_before,
+       "the production start changed the default directory priv/data under the peer's working " <>
+         "directory: #{inspect(boot.default_before)} before, #{inspect(run.default_after)} after"},
+      {run.selected == @production_intensity,
+       "under production's configuration, supervisor_options/0 selects #{inspect(run.selected)}"},
+      {run.running == @production_intensity,
+       "under production's configuration, Ampd.Supervisor runs with #{inspect(run.running)}, " <>
+         "not #{inspect(@production_intensity)}"}
+    ]
+  end
+
+  defp p12_checks(boot, run),
+    do: [{false, "P12's law did not run in the disposable BEAM: #{inspect({boot, run})}"}]
 end

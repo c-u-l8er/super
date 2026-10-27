@@ -275,9 +275,12 @@ defmodule Ampd.Effects do
 
   Waits at most `timeout` (by default `ready_timeout_ms/0`: every
   participant's whole budget plus a margin). A process not registered yet is
-  waited for. A completion that raised, or one still running at the
-  deadline, raises `effects-not-ready · …`, which fails the boot as a raise
-  inside `init/1` did before.
+  waited for. It observes the incarnation its call reaches: if that one dies
+  while the call is outstanding, or is still completing at the deadline, this
+  raises `effects-not-ready · …`, which fails the boot as a raise inside
+  `init/1` did before. An earlier incarnation whose completion raised before
+  the call reached it, followed by a supervised restart that completes, may
+  be accepted.
   """
   def await_ready!(timeout \\ ready_timeout_ms()) do
     await_ready(System.monotonic_time(:millisecond) + timeout)
@@ -287,7 +290,7 @@ defmodule Ampd.Effects do
     left = max(deadline - System.monotonic_time(:millisecond), 0)
 
     try do
-      GenServer.call(__MODULE__, :ready, left)
+      ask(:ready, left)
     catch
       :exit, {:noproc, _} when left > 0 ->
         Process.sleep(min(20, left))
