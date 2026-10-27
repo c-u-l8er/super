@@ -45,9 +45,9 @@
       "bare": 0
     },
     "Ampd.Effects": {
-      "sends": 25,
+      "sends": 26,
       "mutations": 15,
-      "reads": 10,
+      "reads": 11,
       "declared_mutations": 15,
       "dead": [],
       "bare": 0
