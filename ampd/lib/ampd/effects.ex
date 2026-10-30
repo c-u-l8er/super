@@ -32,7 +32,10 @@ defmodule Ampd.Effects do
 
   * mints an **epoch** and a random **key** per incarnation, persists the
     epoch sequence in its own store, and pushes both to every participant
-    **before serving anything** (`init` and the ordered `load_state`);
+    **before serving anything**: a supervised start mints and persists in
+    `init/1` and pushes in `handle_continue/2`, which runs before any
+    message is handled, so the supervisor is never held by a participant
+    that is not there; the ordered `load_state` does both before replying;
   * issues a **lease** inside `{:claim}` (coordinator-only) and signs the
     lease token — the table is process memory, the durable fact is the
     journal record with its `branch`;
@@ -100,12 +103,26 @@ defmodule Ampd.Effects do
   def init(:ok) do
     case Ampd.Store.boot(@store, &initial/0) do
       {:ok, tab, s} ->
-        {:ok, incarnate(%{tab: tab, s: s, ix: index(s), sealed: nil, inc: nil})}
+        # Preparation only. Completion (the fence push, then the witness log)
+        # is `handle_continue/2`, so the supervisor is free again before this
+        # process waits on any participant.
+        {:ok, prepare(%{tab: tab, s: s, ix: index(s), sealed: nil, inc: nil}),
+         {:continue, :complete}}
 
+      # A sealed journal mints nothing and fences nothing.
       {:sealed, reason} ->
         {:ok, %{tab: nil, s: sealed_state(), ix: %{}, sealed: reason, inc: nil}}
     end
   end
+
+  # Completion of a supervised start, before this process handles any
+  # message: every participant acknowledges the new epoch (or refuses as
+  # sealed), then the witness log opens. Calls queue meanwhile and may time
+  # out; the boot waits for it explicitly (`await_ready!/0`). A raise here
+  # crashes a started child, which the supervisor restarts like any other:
+  # the saved sequence is spent and the next incarnation advances it.
+  @impl true
+  def handle_continue(:complete, st), do: {:noreply, complete(st)}
 
   def initial, do: %{"effects" => [], "seq" => 1}
   def sealed_state, do: %{"effects" => [], "seq" => 0}
@@ -247,6 +264,44 @@ defmodule Ampd.Effects do
   # Write the witness lines held for a committed authority transaction.
   def flush_deferred, do: ask(:flush_deferred)
 
+  @doc """
+  The boot's readiness barrier: returns `:ok` once this process has finished
+  starting. A supervised start completes in `handle_continue/2` (the fence
+  push, then the witness log), and no message is handled before it returns,
+  so `:ready` is answered exactly then; a sealed journal is ready at once.
+  `Ampd.Application.start/2` waits here before `recover!/0`, whose 5 s call
+  would otherwise queue behind a completion that may take up to about 15 s
+  inside its budgets (T73).
+
+  Waits at most `timeout` (by default `ready_timeout_ms/0`: every
+  participant's whole budget plus a margin). A process not registered yet is
+  waited for. It observes the incarnation its call reaches: if that one dies
+  while the call is outstanding, or is still completing at the deadline, this
+  raises `effects-not-ready · …`, which fails the boot as a raise inside
+  `init/1` did before. An earlier incarnation whose completion raised before
+  the call reached it, followed by a supervised restart that completes, may
+  be accepted.
+  """
+  def await_ready!(timeout \\ ready_timeout_ms()) do
+    await_ready(System.monotonic_time(:millisecond) + timeout)
+  end
+
+  defp await_ready(deadline) do
+    left = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    try do
+      ask(:ready, left)
+    catch
+      :exit, {:noproc, _} when left > 0 ->
+        Process.sleep(min(20, left))
+        await_ready(deadline)
+
+      :exit, why ->
+        raise "effects-not-ready · Ampd.Effects did not complete its start for the boot: " <>
+                inspect(why)
+    end
+  end
+
   @doc "Boot-time truth: anything still CLAIMED or ATTEMPTED is UNKNOWN."
   def recover!, do: ask(:recover)
 
@@ -311,6 +366,11 @@ defmodule Ampd.Effects do
 
   @impl true
   def handle_call(:sealed, _f, st), do: {:reply, st.sealed, st}
+
+  # The boot's readiness barrier (`await_ready!/0`). Answered only once the
+  # start has completed, because no message is handled before
+  # `handle_continue/2` returns; a sealed journal answers at once.
+  def handle_call(:ready, _f, st), do: {:reply, :ok, st}
 
   def handle_call(:close_store, _f, st) do
     if st.tab, do: Ampd.Store.close(st.tab)
@@ -832,21 +892,43 @@ defmodule Ampd.Effects do
 
   # ---------------------------------------------------------- internals
 
-  # A new incarnation: mint the epoch and key, persist the epoch sequence,
-  # open this incarnation's log, and push the fence to every participant
-  # BEFORE this process serves anything. A push that fails raises: the
-  # supervisor restarts this process, and nothing was served meanwhile.
-  defp incarnate(%{tab: tab, s: s} = st) do
+  # A new incarnation, in two phases, so that a supervised start never waits
+  # on a participant inside `init/1` (T73). While `init/1` runs, the
+  # supervisor runs nothing else: a participant whose exit it had not handled
+  # yet could not be restarted until this process gave up, which froze the
+  # whole tree for the fence budget. The ordered `load_state` still runs both
+  # phases before it replies.
+  defp incarnate(st), do: st |> prepare() |> complete()
+
+  # Preparation: mint the epoch and key and persist the epoch sequence. The
+  # sequence is durable BEFORE the push, so a crash after the push cannot
+  # mint the same sequence again; the nonce keeps the label unique across
+  # worlds whose sequences restart.
+  #
+  # The epoch and key wait under `:pending` until completion takes them. No
+  # caller of this process sees that in-between state: completion runs before
+  # this process handles any message, and `incarnation/0` answers only after
+  # it. The epoch itself is not hidden meanwhile: it and its sequence are
+  # already persisted in this store, and during completion every participant
+  # that has acknowledged already holds the epoch and key in its fence while
+  # the later ones are still pending (its public `fence/0` returns the epoch
+  # without the key).
+  defp prepare(%{tab: tab, s: s} = st) do
     seq = (s["epoch_seq"] || 0) + 1
     prev = s["epoch"]
     epoch = "e#{seq}-" <> (:crypto.strong_rand_bytes(3) |> Base.encode16(case: :lower))
     key = Fence.mint_key()
-    # The sequence is durable BEFORE the push, so a crash after the push
-    # cannot mint the same sequence again; the nonce keeps the label unique
-    # across worlds whose sequences restart. The log opens only once every
-    # participant holds the epoch, so a failed push leaves no file.
     s = s |> Map.put("epoch_seq", seq) |> Map.put("epoch", epoch)
     s = Ampd.Store.save(tab, s)
+    Map.put(%{st | s: s}, :pending, %{epoch: epoch, key: key, prev: prev})
+  end
+
+  # Completion: push the fence to every participant, and only then open this
+  # incarnation's log and record the restart, so a failed push leaves no
+  # file. A push that fails raises: the supervisor restarts this process,
+  # and nothing was served meanwhile.
+  defp complete(st) do
+    {%{epoch: epoch, key: key, prev: prev}, st} = Map.pop(st, :pending)
     push_fences!(epoch, key)
 
     inc = %{
@@ -865,7 +947,7 @@ defmodule Ampd.Effects do
       log: Witness.open(epoch)
     }
 
-    st = %{st | s: s, inc: inc}
+    st = %{st | inc: inc}
 
     if prev,
       do: log(st, %{"type" => "journal_restart", "old_epoch" => prev, "new_epoch" => epoch}),
@@ -874,24 +956,46 @@ defmodule Ampd.Effects do
 
   # Every participant must hold the new epoch before this process serves a
   # message. A participant that is absent, restarting, or closed for a
-  # world reset is retried under the SAME epoch — for up to `@fence_wait_ms`
-  # — rather than turned into a restart storm that mints an epoch per
-  # attempt. After that this process raises, and the supervisor restarts it.
+  # world reset is retried under the SAME epoch rather than turned into a
+  # restart storm that mints an epoch per attempt. Each participant gets
+  # `@fence_wait_ms` of elapsed time from its first attempt, on the monotonic
+  # clock: each call's timeout (`@fence_call_ms`) and each sleep are capped by
+  # the time left. After that this process raises, and the supervisor
+  # restarts it. (The budget used to count sleeps only, so a participant that
+  # never answered held this process for about 106 s.) Since the push runs
+  # in `handle_continue/2`, the supervisor stays free meanwhile to restart
+  # the participant this process is waiting for.
   @fence_wait_ms 5_000
+  @fence_call_ms 1_000
   @fence_retry_ms 50
+  # What the boot's barrier adds to the participants' budgets: the store work
+  # and the witness log around the pushes, and scheduling.
+  @ready_margin_ms 5_000
+
+  @doc false
+  # How long `await_ready!/0` waits by default: every participant's whole
+  # fence budget, one after another, plus the margin (20 s for three).
+  def ready_timeout_ms, do: length(Contract.participants()) * @fence_wait_ms + @ready_margin_ms
 
   defp push_fences!(epoch, key) do
     Enum.each(Contract.participants(), fn p ->
-      push_fence!(participant(p), epoch, key, @fence_wait_ms)
+      deadline = System.monotonic_time(:millisecond) + @fence_wait_ms
+      push_fence!(participant(p), epoch, key, deadline, :not_attempted)
     end)
   end
 
-  defp push_fence!(mod, epoch, key, budget) do
+  defp push_fence!(mod, epoch, key, deadline, last) do
+    left = deadline - System.monotonic_time(:millisecond)
+
     result =
-      try do
-        {:ok, GenServer.call(mod, {:fence_epoch, epoch, key}, 1_000)}
-      catch
-        :exit, why -> {:exit, why}
+      if left > 0 do
+        try do
+          {:ok, GenServer.call(mod, {:fence_epoch, epoch, key}, min(@fence_call_ms, left))}
+        catch
+          :exit, why -> {:exit, why}
+        end
+      else
+        {:deadline, last}
       end
 
     case result do
@@ -911,13 +1015,12 @@ defmodule Ampd.Effects do
         Logger.warning("ampd: #{inspect(mod)} is sealed and was not fenced for #{epoch}: #{seal}")
         :ok
 
-      other when budget > 0 ->
-        _ = other
-        Process.sleep(@fence_retry_ms)
-        push_fence!(mod, epoch, key, budget - @fence_retry_ms)
+      {:deadline, other} ->
+        raise "journal owner cannot fence #{inspect(mod)} for epoch #{epoch}: #{inspect(other)}"
 
       other ->
-        raise "journal owner cannot fence #{inspect(mod)} for epoch #{epoch}: #{inspect(other)}"
+        Process.sleep(min(@fence_retry_ms, max(deadline - System.monotonic_time(:millisecond), 0)))
+        push_fence!(mod, epoch, key, deadline, other)
     end
   end
 

@@ -150,6 +150,7 @@ defmodule Ampd.Projection do
       "peers" => Ampd.Peer.list(),
       "channels" => Ampd.Bridge.list(),
       "fleet" => Ampd.Fleet.projection(),
+      "lab" => Ampd.Lab.projection(),
 
       # --- the positions authority is held FROM -------------------------
       #

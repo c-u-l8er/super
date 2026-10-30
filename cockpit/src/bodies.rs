@@ -358,7 +358,7 @@ use std::ffi::{CStr, CString};
 use std::io;
 use std::os::unix::fs::OpenOptionsExt;
 use std::os::unix::io::{AsRawFd, FromRawFd};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// The declared bound of one history's files on disk (the page checks the same number before it asks).
 pub const HISTORY_BYTES: u64 = 256 * 1024 * 1024;
@@ -389,6 +389,9 @@ pub struct History {
     lock: Mutex<()>,
     /// Folders owed a sync because a folder was made inside them; each stays owed until a sync of it succeeds.
     owed: Mutex<BTreeSet<PathBuf>>,
+    /// T84: whether this instance has owed every folder above the app folder on its device once (a new instance
+    /// cannot know what a stopped one left unsynced).
+    chained: AtomicBool,
     hooks: Hooks,
 }
 
@@ -409,6 +412,7 @@ enum Point {
     SyncFile,
     RenameFile,
     Indexed,
+    Prune,
 }
 
 /// Test seams: `fail` fails a step once after letting the given number of its hits pass, `seen` records completed
@@ -420,6 +424,12 @@ struct Hooks {
     fail: Mutex<Vec<(Point, u32)>>,
     seen: Mutex<Vec<Point>>,
     race: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    /// T84: `fail_dir` fails the next sync of a named ancestor folder once per entry, `synced` records the ancestor
+    /// folders synced, in order (tests only), and `sizes` reports a size for a named entry in place of its own
+    /// (tests only), so sums no test folder could hold run through the production measurement.
+    fail_dir: Mutex<Vec<PathBuf>>,
+    synced: Mutex<Vec<PathBuf>>,
+    sizes: Mutex<BTreeMap<Vec<u8>, libc::off_t>>,
 }
 
 /// Where a publication may be stopped in the tests, to leave exactly what a crash there would leave.
@@ -465,6 +475,22 @@ fn over(bound: u64, which: &str, needs: u64) -> String {
     format!(
         "Saved conversations would exceed the declared bound of {bound} bytes for {which} on this device (this save needs {needs} bytes); nothing was changed. Delete an older saved conversation to make room."
     )
+}
+
+const UNMEASURED: &str = "Saved conversations on this device are too large to measure; nothing was changed.";
+
+fn unmeasured() -> String {
+    UNMEASURED.to_string()
+}
+
+/// A sum of sizes, or a refusal: a size that cannot be added never wraps and never panics.
+fn sum(a: u64, b: u64) -> Result<u64, String> {
+    a.checked_add(b).ok_or_else(unmeasured)
+}
+
+/// An entry's size as measured, or a refusal when it is not a size.
+fn file_size(st: &libc::stat) -> Result<u64, String> {
+    u64::try_from(st.st_size).map_err(|_| unmeasured())
 }
 
 fn parse_index(raw: &[u8]) -> Result<Index, String> {
@@ -545,7 +571,15 @@ unsafe fn clear_errno() {
 
 impl History {
     pub fn new(root: PathBuf, limit: u64, total: u64) -> Self {
-        History { root, limit, total, lock: Mutex::new(()), owed: Mutex::new(BTreeSet::new()), hooks: Hooks::default() }
+        History {
+            root,
+            limit,
+            total,
+            lock: Mutex::new(()),
+            owed: Mutex::new(BTreeSet::new()),
+            chained: AtomicBool::new(false),
+            hooks: Hooks::default(),
+        }
     }
 
     fn guard(&self) -> Result<std::sync::MutexGuard<'_, ()>, String> {
@@ -579,6 +613,35 @@ impl History {
             run();
         }
     }
+
+    /// Like `hit`, for one ancestor folder: its sync fails once for each time a test named it.
+    fn hit_dir(&self, p: &Path) -> Result<(), String> {
+        let mut fail = self.hooks.fail_dir.lock().map_err(|_| BUSY.to_string())?;
+        if let Some(i) = fail.iter().position(|x| x.as_path() == p) {
+            fail.remove(i);
+            return Err(format!("injected failure at {} (test)", p.display()));
+        }
+        Ok(())
+    }
+
+    #[cfg(test)]
+    fn note_dir(&self, p: &Path) {
+        if let Ok(mut synced) = self.hooks.synced.lock() {
+            synced.push(p.to_path_buf());
+        }
+    }
+    #[cfg(not(test))]
+    fn note_dir(&self, _: &Path) {}
+
+    /// Tests only: a size reported for a named entry in place of its own.
+    #[cfg(test)]
+    fn sized(&self, name: &CStr, st: &mut libc::stat) {
+        if let Some(size) = self.hooks.sizes.lock().ok().and_then(|s| s.get(name.to_bytes()).copied()) {
+            st.st_size = size;
+        }
+    }
+    #[cfg(not(test))]
+    fn sized(&self, _: &CStr, _: &mut libc::stat) {}
 
     fn sync(&self, p: Point, d: &fs::File) -> Result<(), String> {
         self.hit(p)?;
@@ -627,26 +690,32 @@ impl History {
         if unsafe { libc::fstatat(d.as_raw_fd(), name.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } != 0 {
             return Err(UNLISTED.into());
         }
+        self.sized(name, &mut st);
         Ok(st)
     }
 
-    /// Every byte in one history folder, and its index's size; a link or any entry not a plain file refuses.
-    fn bytes_in(&self, h: &fs::File) -> Result<(u64, u64), String> {
-        let (mut n, mut ix) = (0u64, 0u64);
+    /// Every byte in one history folder, its index's size and its staged index's size; a link or any entry not a
+    /// plain file refuses, and so does a size that cannot be added.
+    fn bytes_in(&self, h: &fs::File) -> Result<(u64, u64, u64), String> {
+        let (mut n, mut ix, mut staged) = (0u64, 0u64, 0u64);
         for name in self.names(h, Point::ListHistory)? {
             let st = self.stat_at(h, &name, Point::HistoryMeta)?;
             if st.st_mode & libc::S_IFMT != libc::S_IFREG {
                 return Err(NOT_PLAIN.into());
             }
-            n += st.st_size as u64;
+            let size = file_size(&st)?;
+            n = sum(n, size)?;
             if name.as_bytes() == INDEX_FILE.as_bytes() {
-                ix = st.st_size as u64;
+                ix = size;
+            } else if name.as_bytes() == MIGRATING_FILE.as_bytes() {
+                staged = size;
             }
         }
-        Ok((n, ix))
+        Ok((n, ix, staged))
     }
 
-    /// Every byte under the history root (indexes, conversations, temporaries and orphans alike), and the largest index.
+    /// Every byte under the history root (indexes, conversations, temporaries and orphans alike), and the largest
+    /// index or staged index (`migrating.json`, which a promotion makes an index without writing anything).
     fn all_bytes(&self, root: &fs::File) -> Result<(u64, u64), String> {
         let (mut n, mut ix) = (0u64, 0u64);
         for name in self.names(root, Point::ListRoot)? {
@@ -654,42 +723,104 @@ impl History {
             match st.st_mode & libc::S_IFMT {
                 libc::S_IFDIR => {
                     let h = open_at(root, &name, libc::O_RDONLY | libc::O_DIRECTORY, 0).map_err(|_| UNLISTED.to_string())?;
-                    let (b, i) = self.bytes_in(&h)?;
-                    n += b;
-                    ix = ix.max(i);
+                    let (b, i, m) = self.bytes_in(&h)?;
+                    n = sum(n, b)?;
+                    ix = ix.max(i).max(m);
                 }
-                libc::S_IFREG => n += st.st_size as u64,
+                libc::S_IFREG => n = sum(n, file_size(&st)?)?,
                 _ => return Err(NOT_PLAIN.into()),
             }
         }
         Ok((n, ix))
     }
 
-    /// The app folder, made if missing. Each folder made owes its parent a sync, and the app folder's own parent is
-    /// owed one every time; a debt stays until a sync of it succeeds, so neither a retry nor a later publication skips it.
-    fn ensure_app(&self, app: &Path) -> Result<(), String> {
-        let mut owed = self.owed.lock().map_err(|_| BUSY.to_string())?;
-        let mut d = app;
-        while matches!(fs::symlink_metadata(d), Err(e) if e.kind() == io::ErrorKind::NotFound) {
-            match d.parent() {
-                Some(p) => {
-                    owed.insert(p.to_path_buf());
-                    d = p;
+    /// The trusted anchor of an app folder: the deepest of the OS's own folders above it, the home folder (`HOME`),
+    /// the temporary folder or else the file system's root. Only the anchor is reached by its path, so the OS's
+    /// aliases at or above it (`/var` -> `/private/var`, `/tmp` -> `/private/tmp`, a linked `/home`) stand; nothing
+    /// below it is reached by path. None for a relative folder.
+    fn anchor(app: &Path) -> Option<PathBuf> {
+        [std::env::var_os("HOME").map(PathBuf::from), Some(std::env::temp_dir()), Some(PathBuf::from("/"))]
+            .into_iter()
+            .flatten()
+            .filter(|a| a.is_absolute() && app.starts_with(a))
+            .max_by_key(|a| a.components().count())
+    }
+
+    /// The app folder reached from its trusted anchor (`anchor`), by every open, whether it makes folders or not. The
+    /// anchor is opened by its path; every folder below it is then reached from the one before it: an existing one
+    /// must be a folder and not a link (`fstatat` without following, then `openat` with `O_NOFOLLOW`, any error
+    /// refusing, whatever error a platform gives a link). A missing one is made inside the one before it (`mkdirat`)
+    /// when `made` is given, the folder it is made in recorded there as owing a sync; otherwise a missing one answers
+    /// None. So a link anywhere below the anchor refuses, and nothing is made, opened, read or removed through it.
+    fn walk(app: &Path, mut made: Option<&mut BTreeSet<PathBuf>>) -> Result<Option<fs::File>, String> {
+        use std::os::unix::ffi::OsStrExt;
+        use std::path::Component;
+        let cannot = || "Cannot create conversation history storage.".to_string();
+        let anchor = Self::anchor(app).ok_or_else(cannot)?;
+        let below = app.strip_prefix(&anchor).map_err(|_| cannot())?;
+        let mut d = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY)
+            .open(&anchor)
+            .map_err(|_| NOT_FOLDER.to_string())?;
+        let mut at = anchor.clone();
+        for part in below.components() {
+            let Component::Normal(n) = part else { return Err(NOT_FOLDER.into()) };
+            let c = CString::new(n.as_bytes()).map_err(|_| cannot())?;
+            let mut st: libc::stat = unsafe { std::mem::zeroed() };
+            if unsafe { libc::fstatat(d.as_raw_fd(), c.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) } == 0 {
+                if st.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                    return Err(NOT_FOLDER.into());
                 }
-                None => break,
+            } else if io::Error::last_os_error().kind() == io::ErrorKind::NotFound {
+                let Some(owed) = made.as_deref_mut() else { return Ok(None) };
+                owed.insert(at.clone());
+                if unsafe { libc::mkdirat(d.as_raw_fd(), c.as_ptr(), 0o777) } != 0
+                    && io::Error::last_os_error().kind() != io::ErrorKind::AlreadyExists
+                {
+                    return Err(cannot());
+                }
+            } else {
+                return Err(NOT_FOLDER.into());
             }
+            d = open_at(&d, &c, libc::O_RDONLY | libc::O_DIRECTORY, 0).map_err(|_| NOT_FOLDER.to_string())?;
+            at.push(n);
         }
-        fs::create_dir_all(app).map_err(|_| "Cannot create conversation history storage.")?;
+        Ok(Some(d))
+    }
+
+    /// The app folder, made if missing, and held open, reached by `walk` with each missing folder made. Each folder
+    /// made owes its parent a sync, and the app folder's own parent is owed one every time; a new instance also owes
+    /// every folder above the app folder on the app folder's device once, so what a stopped process left unsynced is
+    /// synced again. A debt stays until a sync of it succeeds, so neither a retry, a later publication nor a restart
+    /// skips it.
+    fn ensure_app(&self, app: &Path) -> Result<fs::File, String> {
+        use std::os::unix::fs::MetadataExt;
+        let mut owed = self.owed.lock().map_err(|_| BUSY.to_string())?;
+        let d = Self::walk(app, Some(&mut *owed))?
+            .ok_or_else(|| "Cannot create conversation history storage.".to_string())?;
+        if !self.chained.load(Ordering::Relaxed) {
+            let dev = d.metadata().map_err(|_| UNDURABLE.to_string())?.dev();
+            for p in app.ancestors().skip(1).filter(|p| !p.as_os_str().is_empty()) {
+                if fs::metadata(p).map_err(|_| UNDURABLE.to_string())?.dev() != dev {
+                    break;
+                }
+                owed.insert(p.to_path_buf());
+            }
+            self.chained.store(true, Ordering::Relaxed);
+        }
         if let Some(p) = app.parent() {
             owed.insert(p.to_path_buf());
         }
         for p in owed.clone() {
             self.hit(Point::SyncAncestor)?;
+            self.hit_dir(&p)?;
             fs::File::open(&p).and_then(|f| f.sync_all()).map_err(|_| UNDURABLE.to_string())?;
             owed.remove(&p);
             self.note(Point::SyncAncestor);
+            self.note_dir(&p);
         }
-        Ok(())
+        Ok(d)
     }
 
     /// A folder inside `parent`, never through a link. When `create`, it is made if missing and `parent` is synced
@@ -719,13 +850,13 @@ impl History {
             (Some(p), Some(n)) => (p, n),
             _ => return Err("Conversation history storage has no folder.".into()),
         };
-        if create {
-            self.ensure_app(parent)?;
-        }
-        let app = match fs::OpenOptions::new().read(true).custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(parent) {
-            Ok(f) => f,
-            Err(e) if !create && e.kind() == io::ErrorKind::NotFound => return Ok(None),
-            Err(_) => return Err(NOT_FOLDER.into()),
+        let app = if create {
+            self.ensure_app(parent)?
+        } else {
+            match Self::walk(parent, None)? {
+                Some(f) => f,
+                None => return Ok(None),
+            }
         };
         self.sub(&app, name, create, Point::SyncApp)
     }
@@ -815,7 +946,6 @@ impl History {
         let _guard = self.guard()?;
         let (root, h) = self.open(key, true)?.ok_or("Cannot create conversation history storage.")?;
         let old = read_at(&h, INDEX_FILE)?;
-        let old_len = old.as_ref().map_or(0, |b| b.len() as u64);
         let previous = old.map(|b| parse_index(&b)).transpose()?;
         if stage && previous.is_some() {
             return Err("This history is already kept in files; nothing was staged.".into());
@@ -824,16 +954,16 @@ impl History {
         for (d, text) in &wants {
             match text {
                 Some(t) => {
-                    after += t.len() as u64;
+                    after = sum(after, t.len() as u64)?;
                     if !self.holds(&h, d)? && fresh.insert(d.clone()) {
-                        added += t.len() as u64;
+                        added = sum(added, t.len() as u64)?;
                     }
                 }
                 None => {
                     let held = read_at(&h, &conv_file(d))?
                         .filter(|b| digest(b) == *d)
                         .ok_or("A history publication names a saved conversation that was never written; nothing was changed.")?;
-                    after += held.len() as u64;
+                    after = sum(after, held.len() as u64)?;
                 }
             }
         }
@@ -842,24 +972,37 @@ impl History {
         let index = serde_json::to_vec(&json!({"schema": INDEX_SCHEMA, "generation": generation, "files": files, "meta": meta}))
             .map_err(|_| "Could not encode the saved conversation index.")?;
         let ix = index.len() as u64;
-        after += ix;
+        let after = sum(after, ix)?;
         if after > self.limit {
             return Err(over(self.limit, "one history", after));
         }
-        // What the folder holds during the publication: everything already there (leftovers, orphans, the files and
-        // index being replaced) and the new files and index. A publication that grows the history also keeps room for
-        // one more index (of this history, and of the largest of all), so a later deletion, which only writes a
-        // smaller index, always fits.
-        let grows = stage || added > 0 || ix > old_len;
-        let (held, _) = self.bytes_in(&h)?;
-        let peak = held + added + ix + (if grows { ix } else { 0 });
-        if peak > self.limit {
-            return Err(over(self.limit, "one history", peak));
+        // Three checks, separately, for one history and for all. The peak: what the folder holds during the
+        // publication (everything already there, leftovers, orphans and the files being replaced included) and the new
+        // files and index. What stays: the same once the replaced index is gone, with no prune credited (a prune that
+        // fails after the index is replaced removes nothing), and room for one more index (of this history, and of the
+        // largest index or staged index of all), so a later deletion, which only writes a smaller index, always fits.
+        // What a failure leaves: a publication stopped after its new files, before its index is replaced, leaves them
+        // beside the still-current history, which must still have room for its own deletion (its current index; of
+        // all, the largest). Every sum is checked, all of them before any comparison: a size that cannot be added
+        // refuses.
+        let (held, index_len, staged_len) = self.bytes_in(&h)?;
+        let replaced = if stage { staged_len } else { index_len };
+        let peak = sum(sum(held, added)?, ix)?;
+        let stays = sum(peak.checked_sub(replaced).ok_or_else(unmeasured)?, ix)?;
+        let pending = sum(sum(held, added)?, replaced)?;
+        for needs in [peak, stays, pending] {
+            if needs > self.limit {
+                return Err(over(self.limit, "one history", needs));
+            }
         }
         let (all, largest) = self.all_bytes(&root)?;
-        let total = all + added + ix + (if grows { ix.max(largest) } else { 0 });
-        if total > self.total {
-            return Err(over(self.total, "all histories", total));
+        let all_peak = sum(sum(all, added)?, ix)?;
+        let all_stays = sum(all_peak.checked_sub(replaced).ok_or_else(unmeasured)?, ix.max(largest))?;
+        let all_pending = sum(sum(all, added)?, largest)?;
+        for needs in [all_peak, all_stays, all_pending] {
+            if needs > self.total {
+                return Err(over(self.total, "all histories", needs));
+            }
         }
         self.race();
         for (d, text) in &wants {
@@ -911,6 +1054,7 @@ impl History {
     /// Remove temporaries, a staged index a published one replaced, and conversation files no index names. An
     /// unreadable index or listing refuses. A removed link is the link itself, never its target.
     fn prune(&self, h: &fs::File) -> Result<u64, String> {
+        self.hit(Point::Prune)?;
         let published = read_index(h, INDEX_FILE)?;
         let migrating = if published.is_some() { None } else { read_index(h, MIGRATING_FILE)? };
         let keep: BTreeSet<String> =
@@ -1542,5 +1686,312 @@ mod tests {
         }
         assert_eq!(count(&root, K), 51, "the replaced file was removed");
         gone(&root);
+    }
+}
+
+// T84 (A-108) · Codex code review 4 of T70: M1-M5 and L1, each with the regression its row names.
+#[cfg(test)]
+mod t84_tests {
+    use super::*;
+    use std::os::unix::fs::symlink;
+
+    const K: &str = "super-conversations-v1:bot:b8225a5d";
+    const K2: &str = "super-conversations-v1";
+
+    fn scratch(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{tag}-{}-{}",
+            std::process::id(),
+            SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_nanos()
+        ))
+    }
+    fn history(limit: u64, total: u64) -> (History, PathBuf) {
+        let root = scratch("super-t84").join("conversation-history");
+        (History::new(root.clone(), limit, total), root)
+    }
+    fn gone(root: &Path) {
+        fs::remove_dir_all(root.parent().unwrap()).ok();
+    }
+    fn op(h: &History, key: &str, mut r: Value) -> Result<Value, String> {
+        r["history"] = json!(key);
+        h.request(&r)
+    }
+    fn publish(h: &History, key: &str, meta: &str, files: Value) -> Result<Value, String> {
+        op(h, key, json!({"operation": "history_publish", "meta": meta, "files": files}))
+    }
+    fn load(h: &History, key: &str) -> Value {
+        op(h, key, json!({"operation": "history_load"})).unwrap()
+    }
+    fn texts(h: &History, key: &str) -> Value {
+        load(h, key)["published"]["texts"].clone()
+    }
+    fn fail(h: &History, p: Point) {
+        h.hooks.fail.lock().unwrap().push((p, 0));
+    }
+    fn synced(h: &History) -> Vec<PathBuf> {
+        h.hooks.synced.lock().unwrap().clone()
+    }
+
+    /// M1: a staged index counts as the largest index. Filling may be refused (or the promotion may be), the staged
+    /// copy stays, and once promoted one of its files can always be deleted.
+    #[test]
+    fn m1_a_staged_large_index_keeps_deletion_room_through_interleaved_fills_and_its_promotion() {
+        let (h, root) = history(HISTORY_BYTES, 3_000);
+        let meta = "m".repeat(800);
+        let (a, b) = ("a".repeat(10), "b".repeat(10));
+        let files = json!([{"text": a}, {"text": b}]);
+        let staged = op(&h, K, json!({"operation": "history_publish", "stage": true, "meta": meta, "files": files}));
+        let staged = staged.unwrap();
+        assert_eq!(staged["state"], "staged");
+        let mut admitted = 0;
+        for i in 0..12 {
+            match publish(&h, &format!("{K2}:bot:fill{i}"), "m", json!([{"text": format!("{i:04}")}])) {
+                Ok(_) => admitted += 1,
+                Err(e) => {
+                    assert!(e.contains("for all histories"), "fill {i}: {e}");
+                    assert_eq!(load(&h, K)["migrating"]["texts"], json!([a, b]), "fill {i}: the staged copy stays");
+                }
+            }
+        }
+        assert!(admitted > 0, "the fills interleave between staging and promotion");
+        match op(&h, K, json!({"operation": "history_promote"})) {
+            Ok(_) => {
+                let deletion = publish(&h, K, &meta, json!([{"sha256": staged["files"][0]}]));
+                assert!(deletion.is_ok(), "a promoted history can always delete one of its files: {deletion:?}");
+                assert_eq!(texts(&h, K), json!([a]));
+            }
+            Err(e) => {
+                assert!(e.contains("for all histories"), "{e}");
+                let got = load(&h, K);
+                assert!(got["published"].is_null(), "a refused promotion publishes nothing");
+                assert_eq!(got["migrating"]["texts"], json!([a, b]), "a refused promotion keeps the staged copy");
+            }
+        }
+        gone(&root);
+    }
+
+    /// M2: a process stopped before its first ancestor sync; a new instance syncs the folder holding the made `base`
+    /// (named, not counted) and refuses until that sync succeeds.
+    #[test]
+    fn m2_a_new_instance_syncs_the_folder_holding_the_first_made_one_and_refuses_until_it_is_synced() {
+        let base = scratch("super-t84-m2");
+        let above = base.parent().unwrap().to_path_buf();
+        let root = base.join("app").join("conversation-history");
+        let first = History::new(root.clone(), HISTORY_BYTES, HISTORIES_BYTES);
+        fail(&first, Point::SyncAncestor);
+        assert!(publish(&first, K, "m", json!([{"text": "one"}])).is_err());
+        assert!(base.join("app").is_dir() && !root.exists(), "both folders were made, nothing inside them");
+        assert!(synced(&first).is_empty(), "the failure came before the first ancestor sync");
+        drop(first);
+        let h = History::new(root.clone(), HISTORY_BYTES, HISTORIES_BYTES);
+        h.hooks.fail_dir.lock().unwrap().extend([above.clone(), above.clone()]);
+        for attempt in 0..2 {
+            let refused = publish(&h, K, "m", json!([{"text": "one"}])).unwrap_err();
+            assert!(refused.contains("injected failure at"), "attempt {attempt}: {refused}");
+            assert!(!synced(&h).contains(&above), "attempt {attempt}");
+            assert!(load(&h, K)["published"].is_null(), "attempt {attempt}: nothing was published");
+        }
+        publish(&h, K, "m", json!([{"text": "one"}])).unwrap();
+        let s = synced(&h);
+        assert!(s.contains(&above), "the folder holding the made base was synced: {s:?}");
+        assert!(s.contains(&base), "the folder holding the made app was synced: {s:?}");
+        assert_eq!(texts(&History::new(root.clone(), HISTORY_BYTES, HISTORIES_BYTES), K), json!(["one"]));
+        fs::remove_dir_all(base).ok();
+    }
+
+    /// M3: a link above the missing folders is refused, and nothing is made through it.
+    #[test]
+    fn m3_a_link_above_the_missing_app_folders_is_refused_and_nothing_is_made_through_it() {
+        let base = scratch("super-t84-m3");
+        let outside = base.join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        symlink(&outside, base.join("link")).unwrap();
+        let root = base.join("link").join("new").join("app").join("conversation-history");
+        let h = History::new(root.clone(), HISTORY_BYTES, HISTORIES_BYTES);
+        let published = publish(&h, K, "m", json!([{"text": "one"}]));
+        assert!(published.is_err(), "a publication through the link is refused: {published:?}");
+        let files = json!([{"text": "one"}]);
+        let staged = op(&h, K, json!({"operation": "history_publish", "stage": true, "meta": "s", "files": files}));
+        assert!(staged.is_err(), "a migration through the link is refused: {staged:?}");
+        assert!(op(&h, K, json!({"operation": "history_load"})).is_err(), "a load through the link is refused");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 0, "nothing was made through the link");
+        assert!(fs::symlink_metadata(base.join("link")).unwrap().file_type().is_symlink());
+        fs::remove_dir_all(base).ok();
+    }
+
+    /// M4 (Codex's scenario): a shrinking replacement is charged its actual peak, 1,888, and what stays plus room for
+    /// one more index, separately; neither exceeds 2,000.
+    #[test]
+    fn m4_a_shrinking_replacement_is_charged_its_actual_peak_and_what_stays_separately() {
+        let (h, root) = history(2_000, 1_000_000);
+        publish(&h, K, "m", json!([{"text": "a".repeat(1_500)}])).unwrap();
+        let small = "b".repeat(100);
+        let replaced = publish(&h, K, "m", json!([{"text": small}]));
+        assert!(replaced.is_ok(), "a save that shrinks the history fits: {replaced:?}");
+        assert_eq!(texts(&h, K), json!([small]));
+        gone(&root);
+    }
+
+    /// M4 (the brief's case): no prune is credited. 1,500 bytes replaced by three 10-byte files while the prune fails
+    /// after the index is replaced: a publication reported successful must still let a file be deleted.
+    #[test]
+    fn m4_a_publication_reported_successful_leaves_room_to_delete_even_when_its_prune_fails() {
+        let (h, root) = history(2_000, 1_000_000);
+        let first = "a".repeat(1_500);
+        publish(&h, K, "m", json!([{"text": first}])).unwrap();
+        let three = ["x", "y", "z"].map(|c| c.repeat(10));
+        fail(&h, Point::Prune);
+        match publish(&h, K, "m", json!([{"text": three[0]}, {"text": three[1]}, {"text": three[2]}])) {
+            Ok(r) => {
+                let deletion = publish(&h, K, "m", json!([{"sha256": r["files"][0]}, {"sha256": r["files"][1]}]));
+                assert!(deletion.is_ok(), "a reported publication always leaves room to delete: {deletion:?}");
+                assert_eq!(texts(&h, K), json!([three[0], three[1]]));
+            }
+            Err(e) => {
+                assert!(e.contains("for one history"), "{e}");
+                assert_eq!(texts(&h, K), json!([first]), "a refused publication changes nothing");
+            }
+        }
+        gone(&root);
+    }
+
+    /// M5 (Codex code review 4, section 3): one bounded history admits only what it can later delete from.
+    #[test]
+    fn m5_one_bounded_history_keeps_room_to_delete_from_its_first_publication() {
+        let (h, root) = history(2_000, 1_000_000);
+        let b = "b".repeat(10);
+        let (a, first) = match publish(&h, K, "m", json!([{"text": "a".repeat(1_779)}, {"text": b}])) {
+            Ok(r) => ("a".repeat(1_779), r),
+            Err(e) => {
+                assert!(e.contains("for one history"), "{e}");
+                let a = "a".repeat(1_568);
+                let r = publish(&h, K, "m", json!([{"text": a}, {"text": b}])).unwrap();
+                (a, r)
+            }
+        };
+        let deletion = publish(&h, K, "m", json!([{"sha256": first["files"][0]}]));
+        assert!(deletion.is_ok(), "deleting b fits beside the old index: {deletion:?}");
+        assert_eq!(texts(&h, K), json!([a]));
+        gone(&root);
+    }
+
+    /// L1: sizes that cannot be added refuse as storage, in the measurement and in every peak, and never wrap or
+    /// panic. The sizes are reported through the production measurement in place of the entries' own.
+    #[test]
+    fn l1_sizes_that_cannot_be_added_refuse_closed_in_the_measurement_and_in_every_peak() {
+        const M: libc::off_t = libc::off_t::MAX;
+        let cases: [(&str, bool, &[libc::off_t], bool, &str); 7] = [
+            // what overflows; padding in K's folder (else the root); its sizes; K2 published first; published into
+            ("one history's peak", true, &[M, M], false, K),
+            ("one history's room after", true, &[M, M - 244], false, K),
+            ("one history's measurement", true, &[M, M, M], false, K),
+            ("all histories' peak", true, &[M, M], false, K2),
+            ("all histories' room after", true, &[M, M - 244], false, K2),
+            ("all histories' sum of folders", true, &[M, M], true, K2),
+            ("all histories' sum of files", false, &[M, M, M], false, K2),
+        ];
+        for (what, in_history, sizes, before, into) in cases {
+            let (h, root) = history(HISTORY_BYTES, HISTORIES_BYTES);
+            if before {
+                publish(&h, K2, "m", json!([{"text": "x"}])).unwrap();
+            }
+            let dir = if in_history { root.join(hex(K)) } else { root.clone() };
+            fs::create_dir_all(&dir).unwrap();
+            for (n, size) in sizes.iter().enumerate() {
+                let name = format!("pad-{n}");
+                fs::write(dir.join(&name), "p").unwrap();
+                h.hooks.sizes.lock().unwrap().insert(name.into_bytes(), *size);
+            }
+            let got = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                publish(&h, into, "m", json!([{"text": "z"}]))
+            }));
+            match got {
+                Ok(Err(e)) => assert!(e.contains("too large to measure"), "{what}: {e}"),
+                Ok(Ok(r)) => panic!("{what}: a wrapped size admitted the publication: {r}"),
+                Err(_) => panic!("{what}: an overflow panicked instead of refusing"),
+            }
+            gone(&root);
+        }
+    }
+
+    /// M1 (Codex code review 1): a publication that fails after writing its conversations, before replacing its
+    /// index, leaves them beside the still-current history, which must still have room to delete one of its files.
+    #[test]
+    fn m1_a_publication_failing_at_its_index_write_leaves_room_to_delete_from_the_current_history() {
+        let (h, root) = history(2_000, 1_000_000);
+        let three = ["x", "y", "z"].map(|c| c.repeat(10));
+        let first = publish(&h, K, "m", json!([{"text": three[0]}, {"text": three[1]}, {"text": three[2]}])).unwrap();
+        h.hooks.fail.lock().unwrap().push((Point::WriteFile, 1));
+        let replaced = publish(&h, K, "m", json!([{"text": "r".repeat(1_500)}]));
+        let refused = replaced.expect_err("the replacement is refused or fails at its index write");
+        assert!(refused.contains("for one history") || refused.contains("at WriteFile "), "{refused}");
+        h.hooks.fail.lock().unwrap().clear();
+        assert_eq!(texts(&h, K), json!(three), "the current history stays");
+        let deletion = publish(&h, K, "m", json!([{"sha256": first["files"][0]}, {"sha256": first["files"][1]}]));
+        assert!(deletion.is_ok(), "the still-current history can always delete one of its files: {deletion:?}");
+        assert_eq!(texts(&h, K), json!([three[0], three[1]]));
+        gone(&root);
+    }
+
+    /// M2 (Codex code review 1): a link above a folder that already exists below it is refused too; only the trusted
+    /// anchor is reached by path, and nothing is made inside the link's target.
+    #[test]
+    fn m3_a_link_above_an_existing_folder_is_refused_and_nothing_is_made_inside_its_target() {
+        let base = scratch("super-t84-m3e");
+        let outside = base.join("outside");
+        fs::create_dir_all(outside.join("new")).unwrap();
+        symlink(&outside, base.join("link")).unwrap();
+        let root = base.join("link").join("new").join("app").join("conversation-history");
+        let h = History::new(root.clone(), HISTORY_BYTES, HISTORIES_BYTES);
+        let published = publish(&h, K, "m", json!([{"text": "one"}]));
+        assert!(published.is_err(), "a publication through the link is refused: {published:?}");
+        let files = json!([{"text": "one"}]);
+        let staged = op(&h, K, json!({"operation": "history_publish", "stage": true, "meta": "s", "files": files}));
+        assert!(staged.is_err(), "a migration through the link is refused: {staged:?}");
+        assert!(op(&h, K, json!({"operation": "history_load"})).is_err(), "a load through the link is refused");
+        assert_eq!(fs::read_dir(outside.join("new")).unwrap().count(), 0, "nothing was made inside the existing target");
+        assert_eq!(fs::read_dir(&outside).unwrap().count(), 1);
+        fs::remove_dir_all(base).ok();
+    }
+
+    /// M2 (Codex code review 1): the anchor is the deepest OS folder above the app folder; a relative one has none.
+    #[test]
+    fn m3_the_trusted_anchor_is_the_deepest_os_folder_above_the_app_folder() {
+        let tmp = std::env::temp_dir();
+        assert_eq!(History::anchor(&tmp.join("super-t84-anchor").join("app")), Some(tmp));
+        assert_eq!(History::anchor(Path::new("/")), Some(PathBuf::from("/")));
+        assert!(History::anchor(Path::new("relative/app")).is_none());
+    }
+
+    /// M2 (Codex code review 2): opens that make nothing walk from the anchor too. A whole store already behind a
+    /// link below the anchor is refused by the start's sweep, a load and an abandon, and its outside bytes stay.
+    #[test]
+    fn m3_a_fully_existing_store_behind_a_link_is_never_swept_loaded_or_abandoned_through_it() {
+        let base = scratch("super-t84-m3s");
+        let outside = base.join("outside");
+        let held = outside.join("new").join("app").join("conversation-history").join(hex(K));
+        fs::create_dir_all(&held).unwrap();
+        let staged = json!({"schema": INDEX_SCHEMA, "generation": 1, "files": [], "meta": "s"}).to_string();
+        let victims = [
+            ("victim.tmp", "outside temporary".to_string()),
+            ("c-orphan.json", "outside orphan".to_string()),
+            (MIGRATING_FILE, staged),
+        ];
+        for (name, text) in &victims {
+            fs::write(held.join(name), text).unwrap();
+        }
+        symlink(&outside, base.join("link")).unwrap();
+        let root = base.join("link").join("new").join("app").join("conversation-history");
+        let h = History::new(root.clone(), HISTORY_BYTES, HISTORIES_BYTES);
+        assert_eq!(h.sweep(), 0, "the start's sweep removes nothing through the link");
+        let loaded = op(&h, K, json!({"operation": "history_load"}));
+        assert!(loaded.is_err(), "a load through the link is refused: {loaded:?}");
+        let abandoned = op(&h, K, json!({"operation": "history_abandon"}));
+        assert!(abandoned.is_err(), "an abandon through the link is refused: {abandoned:?}");
+        for (name, text) in &victims {
+            assert_eq!(fs::read_to_string(held.join(name)).unwrap(), *text, "{name} outside is untouched");
+        }
+        assert_eq!(fs::read_dir(&held).unwrap().count(), victims.len(), "nothing outside was removed");
+        fs::remove_dir_all(base).ok();
     }
 }

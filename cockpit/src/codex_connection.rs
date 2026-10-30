@@ -444,16 +444,54 @@ mod tests {
     }
 }
 
+/// A-84 (T81): stub scripts are written by a child process and never opened for
+/// writing in the test process, so no sibling test's fork can hold a writable
+/// copy of the script's descriptor when a test execs it (Linux refuses that
+/// exec with ETXTBSY). When `write` returns, the writer has exited and no
+/// process holds the file open for writing.
+#[cfg(all(test, unix))]
+pub(crate) mod test_stub {
+    use std::{
+        io::Write,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        process::{Command, Stdio},
+    };
+    pub(crate) fn write(path: &Path, text: &str, mode: u32) {
+        // The shell opens the file and becomes `cat`: one writer process.
+        let mut writer = Command::new("/bin/sh")
+            .args(["-c", r#"exec cat > "$1""#, "sh"])
+            .arg(path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("start the stub writer");
+        let mut input = writer.stdin.take().expect("the stub writer's input");
+        let sent = input.write_all(text.as_bytes());
+        drop(input);
+        // Always reap the writer, even when sending failed.
+        let status = writer.wait().expect("wait for the stub writer");
+        sent.expect("send the stub text to its writer");
+        assert!(status.success(), "the stub writer failed: {status}");
+        let written = std::fs::read(path).expect("read the stub back");
+        assert!(
+            written == text.as_bytes(),
+            "the stub writer did not write the text exactly"
+        );
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .expect("set the stub's mode");
+    }
+}
+
 #[cfg(all(test, unix))]
 mod protocol_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn early_completion_events_survive_the_turn_start_response() {
         let home = std::env::temp_dir().join(format!("super-codex-rpc-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let fixture = home.join("fixture.py");
-        std::fs::write(&fixture,r#"#!/usr/bin/python3
+        super::test_stub::write(&fixture, r#"#!/usr/bin/python3
 import json,sys
 for line in sys.stdin:
  r=json.loads(line);m=r.get('method');i=r.get('id')
@@ -469,8 +507,7 @@ for line in sys.stdin:
   print(json.dumps({'method':'item/completed','params':{'threadId':'fixture-thread','item':{'type':'agentMessage','text':json.dumps({'text':'Plan ready','actions':[]})}}}),flush=True)
   print(json.dumps({'method':'turn/completed','params':{'threadId':'fixture-thread','turn':{'status':'completed'}}}),flush=True)
  print(json.dumps({'id':i,'result':result}),flush=True)
-"#).unwrap();
-        std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#, 0o700);
         let rpc = Rpc::start_program(home.clone(), fixture).unwrap();
         let connection = Connection(Arc::new(Mutex::new(Some(rpc))), Arc::default());
         let reply = connection
@@ -537,13 +574,12 @@ mod reply_deadline_tests {
 #[cfg(all(test, unix))]
 mod cancellation_tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
     #[test]
     fn cancel_interrupts_a_stream_without_waiting_for_completion_and_rejects_stale_ids() {
         let home = std::env::temp_dir().join(format!("super-reply-cancel-{}", std::process::id()));
         std::fs::create_dir_all(&home).unwrap();
         let file = home.join("fixture.py");
-        std::fs::write(&file,r#"#!/usr/bin/python3
+        super::test_stub::write(&file, r#"#!/usr/bin/python3
 import sys,json,time
 for line in sys.stdin:
  r=json.loads(line);i=r.get('id');m=r.get('method')
@@ -555,8 +591,7 @@ for line in sys.stdin:
  if m=='turn/start':
   for n in range(100):
    print(json.dumps({'method':'item/agentMessage/delta','params':{'threadId':'current','delta':'abc'}}),flush=True);time.sleep(.1)
-"#).unwrap();
-        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o700)).unwrap();
+"#, 0o700);
         let rpc = Rpc::start_program(home.clone(), file).unwrap();
         let c = Connection(Arc::new(Mutex::new(Some(rpc))), Arc::default());
         let worker = c.clone();

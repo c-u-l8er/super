@@ -4,6 +4,10 @@ defmodule Ampd.Application do
 
   @impl true
   def start(_type, _args) do
+    # First, before anything is written to disk: a malformed restart
+    # intensity refuses the start by name, not after a migration has run.
+    sup_opts = supervisor_options()
+
     # The world manifest is written before any registry opens, so a store
     # that is absent afterwards is *lost*, not new.
     #
@@ -49,6 +53,7 @@ defmodule Ampd.Application do
       # to a process that is not up yet is checked for rather than assumed.
       Ampd.Subscriptions,
       Ampd.Fleet,
+      Ampd.Lab,
       # Before every registry that boots from it (`Ampd.Store.open/1`).
       Ampd.AuthorityLog,
       Ampd.Session,
@@ -121,18 +126,26 @@ defmodule Ampd.Application do
       {Ampd.Bridge, bridge_fd: System.get_env("AMPD_BRIDGE_FD")}
     ]
 
-    result =
-      Supervisor.start_link(children,
-        strategy: :one_for_one,
-        name: Ampd.Supervisor,
-        max_restarts: 100,
-        max_seconds: 5
-      )
+    result = Supervisor.start_link(children, sup_opts)
 
     # Anything caught mid-flight by the last shutdown is UNKNOWN, not lost
     # and not committed. Queue it rather than guess.
     case result do
       {:ok, _} = ok ->
+        # **The readiness barrier** (T73). `Ampd.Effects` completes its start
+        # in `handle_continue/2`, so the supervisor is no longer held while it
+        # fences the participants, and `start_link` can return before the
+        # fences are pushed. Completion may take up to about 15 s inside its
+        # budgets (5 s per participant), and `recover!/0` waits 5 s: a call
+        # queued behind it could time out, and end the boot, while every
+        # participant was still inside its own budget. So the boot waits for
+        # completion first, for at most the whole budget plus a margin. The
+        # barrier observes the incarnation its call reaches: if that one dies
+        # while the call is outstanding, the start is refused by name, as a
+        # raise inside Effects' `init/1` did before. An earlier completion that
+        # raised, followed by a supervised restart that completes, may be
+        # accepted.
+        Ampd.Effects.await_ready!()
         moved = Ampd.Effects.recover!()
 
         if moved != [] do
@@ -186,6 +199,48 @@ defmodule Ampd.Application do
 
       other ->
         other
+    end
+  end
+
+  # Production's restart intensity: at most 100 restarts in any 5-second
+  # window, or `Ampd.Supervisor` gives up and the application ends with it.
+  @default_restart_intensity {100, 5}
+
+  @doc """
+  Every option `Supervisor.start_link/2` receives for `Ampd.Supervisor`, from
+  this one place.
+
+  The restart intensity is `:ampd, :restart_intensity`, a
+  `{max_restarts, max_seconds}` pair of positive integers, or `{100, 5}` when
+  the key is absent, which is production: nothing sets it there. The test
+  configuration sets `{1_000, 5}` (`config/config.exs`), because the suite
+  kills supervised children on purpose and those kills were spending
+  production's budget (T73). Anything else refuses the start by name.
+  """
+  def supervisor_options do
+    {max_restarts, max_seconds} = restart_intensity()
+
+    [
+      strategy: :one_for_one,
+      name: Ampd.Supervisor,
+      max_restarts: max_restarts,
+      max_seconds: max_seconds
+    ]
+  end
+
+  defp restart_intensity do
+    case Application.fetch_env(:ampd, :restart_intensity) do
+      :error ->
+        @default_restart_intensity
+
+      {:ok, {max_restarts, max_seconds} = pair}
+      when is_integer(max_restarts) and max_restarts > 0 and is_integer(max_seconds) and
+             max_seconds > 0 ->
+        pair
+
+      {:ok, other} ->
+        raise "restart-intensity-invalid · :ampd, :restart_intensity must be " <>
+                "{max_restarts, max_seconds}, two positive integers; got #{inspect(other)}"
     end
   end
 end
