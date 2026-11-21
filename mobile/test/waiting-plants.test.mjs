@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';import {join} from 'node:path';import {spawn} fro
 import {fileURLToPath} from 'node:url';
 
 const ROOT=fileURLToPath(new URL('../../',import.meta.url));
-const FEED='waiting-feed.test.mjs',PUSH='push.test.mjs',ALERTS='waiting-alerts.test.mjs',GATE='waiting-gateway.test.mjs',PHONE='phone-waiting.test.mjs';
+const FEED='waiting-feed.test.mjs',PUSH='push.test.mjs',ALERTS='waiting-alerts.test.mjs',GATE='waiting-gateway.test.mjs',PHONE='phone-waiting.test.mjs',OWNER='owner-connect.test.mjs';
 // [what is switched off, file, [[text, replacement], ...], the law file, the law that must catch it]
 export const PLANTS=[
   ['quiet hours','waiting.mjs',[["if(quiet(c,ms))return null;","if(false)return null;"]],FEED,'W6'],
@@ -60,6 +60,19 @@ export const PLANTS=[
   ['permission first, from the tap','ui/waiting.js',[["const permission=await Notification.requestPermission();","const permission='granted';"]],PHONE,'U6'],
   ['an old board is said to be old','ui/waiting.js',[["if(view.stale)root.append(","if(false)root.append("]],PHONE,'U2'],
   ['the count on Needs me','ui/waiting.js',[["if(b){b.setAttribute('data-count',n?String(n):'');","if(false){b.setAttribute('data-count',n?String(n):'');"]],PHONE,'U4'],
+  // Connecting without a code (owner-connect.test.mjs).
+  ['the front key is checked','server.mjs',[["if(!ownerSecret||!equal(req.headers['x-super-owner-key'],ownerSecret)){failures++;","if(false){failures++;"]],OWNER,'O2'],
+  ['a key is 64 hex characters','server.mjs',[["const ownerSecret=typeof ownerKey==='string'&&/^[0-9a-f]{64}$/.test(ownerKey)?ownerKey:null;","const ownerSecret=typeof ownerKey==='string'?ownerKey:null;"]],OWNER,'O2'],
+  ["the desktop's code is left as it was",'server.mjs',[["ownerMade++;const token=","ownerMade++;used=true;const token="]],OWNER,'O1'],
+  ['six a minute','server.mjs',[["if(failures>=10||ownerMade>=6)return send(429,","if(failures>=10)return send(429,"]],OWNER,'O3'],
+  ['a new key at each start','server.mjs',[["const key=randomBytes(32).toString('hex');writePrivateJson(","const key='c3'.repeat(32);writePrivateJson("]],OWNER,'O7'],
+  ['a key the phone sends goes nowhere','private-connector.mjs',[["if(isApi){if(req.headers.cookie)headers.cookie=req.headers.cookie;","if(isApi){if(req.headers['x-super-owner-key'])headers['x-super-owner-key']=req.headers['x-super-owner-key'];if(req.headers.cookie)headers.cookie=req.headers.cookie;"]],OWNER,'O4'],
+  ['only at the private address (front)','private-connector.mjs',[["if(secure&&ownerKeyFile)routes.set('/api/pair-owner',","if(ownerKeyFile)routes.set('/api/pair-owner',"]],OWNER,'O5'],
+  ['a private key file','private-file.mjs',[["if(stat.mode&0o077)throw Error('It is open to other users.');",""]],OWNER,'O5'],
+  ['connects by itself','ui/app.js',[["content.replaceChildren();void ownerConnect(false);}","content.replaceChildren();}"]],OWNER,'O8'],
+  ['no connecting by itself after Disconnect','ui/app.js',[["if(!asked&&(stayOut.get()||","if(!asked&&(false||"]],OWNER,'O9'],
+  ['30 seconds between tries by itself','ui/app.js',[["||Date.now()-ownerTried<30_000))return;","))return;"]],OWNER,'O10'],
+  ['only at the private address (page)','ui/app.js',[["const ownerPossible=()=>location.protocol==='https:';","const ownerPossible=()=>true;"]],OWNER,'O10'],
 ];
 
 function run(cwd,file){

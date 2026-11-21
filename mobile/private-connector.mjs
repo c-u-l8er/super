@@ -1,12 +1,15 @@
 import http from 'node:http';
 import {fileURLToPath} from 'node:url';
+import {join} from 'node:path';
+import {homedir} from 'node:os';
+import {readPrivateJson} from './private-file.mjs';
 // A local-only composition layer. Host access stays on the paired observer;
 // this process never receives the Super runtime's command channel.
 // Which side of the chain a request came from. The raw user agent is never
 // logged; 'app' vs 'browser' is the only distinction that matters, because the
 // two hold separate sessions and each needs its own pairing code.
 const clientKind=ua=>!ua?'unknown':/Expo|okhttp|CFNetwork/i.test(ua)?'app':/Mozilla/i.test(ua)?'browser':'other';
-export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http://localhost:3000',observerOrigin='http://127.0.0.1:4318',allowedTailscaleLogin,accessLog}={}){
+export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http://localhost:3000',observerOrigin='http://127.0.0.1:4318',allowedTailscaleLogin,ownerKeyFile=null,accessLog}={}){
  const front=new URL(origin),ui=new URL(uiOrigin),observer=new URL(observerOrigin);
  for(const endpoint of [ui,observer])if(endpoint.protocol!=='http:'||!['localhost','127.0.0.1'].includes(endpoint.hostname)||endpoint.pathname!=='/'||endpoint.search||endpoint.hash||endpoint.username||endpoint.password)throw Error('Only loopback HTTP origins are supported.');
  const secure=front.protocol==='https:';
@@ -17,6 +20,8 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
  // Waiting on you, and this phone's alert switch.
  routes.set('/api/waiting',['GET','/api/waiting']);routes.set('/api/push',['GET','/api/push']);
  for(const operation of ['subscribe','unsubscribe','status','test'])routes.set('/api/push/'+operation,['POST','/api/push/'+operation]);
+ // Connecting his phone without a code: only at the private HTTPS address, where his Tailscale login is checked.
+ if(secure&&ownerKeyFile)routes.set('/api/pair-owner',['POST','/api/pair-owner']);
  const companionAssets=new Map([['/conversation-list.js','/conversation-list.js'],['/conversation-turns.js','/conversation-turns.js'],['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js'],['/archived-record.js','/archived-record.js'],['/waiting.js','/waiting.js'],['/sw.js','/sw.js'],['/manifest.webmanifest','/manifest.webmanifest'],['/icon-512.png','/icon-512.png'],['/icon-128.png','/icon-128.png']]);
  for(const operation of ['snapshot','pair','logout'])routes.set('/api/'+operation,[operation==='snapshot'?'GET':'POST','/api/'+operation]);
  return http.createServer((req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503);res.end()})});
@@ -45,6 +50,10 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
    if(req.headers[name]!==undefined)headers[name]=req.headers[name];
   }
   if(isApi){if(req.headers.cookie)headers.cookie=req.headers.cookie;if(req.method==='POST'){headers.origin=observer.origin;headers['content-type']=req.headers['content-type']??''}}
+  // The key for connecting without a code comes from the gateway's private file, never from the phone: a
+  // header the phone sends is not copied anywhere above.
+  if(route?.[1]==='/api/pair-owner'){let key=null;try{const f=readPrivateJson(ownerKeyFile);if(f?.schema==='super-mobile-front-key@1'&&typeof f.key==='string'&&/^[0-9a-f]{64}$/.test(f.key))key=f.key;}catch{}
+   if(!key)return reject(503,'Connecting without a code is not available right now. Use a pairing code.');headers['x-super-owner-key']=key;}
   let body=Buffer.alloc(0);
   if(req.method==='POST'){for await(const chunk of req){body=Buffer.concat([body,chunk]);if(body.length>(req.url==='/api/conversation'?12000:req.url.startsWith('/api/push/')?2048:1024))return reject(413,'Request too large.')}headers['content-length']=String(body.length)}
   const upstream=http.request({hostname:target.hostname,port:target.port||80,path:route?route[1]:asset||req.url,method:req.method,headers,timeout:5000},reply=>{const outgoing={...reply.headers,'cache-control':'no-store'};if(secure&&outgoing['set-cookie'])outgoing['set-cookie']=outgoing['set-cookie'].map(value=>/;\s*Secure(?:;|$)/i.test(value)?value:value+'; Secure');delete outgoing['transfer-encoding'];res.writeHead(reply.statusCode??502,outgoing);reply.pipe(res)});
@@ -54,6 +63,7 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
  const origin=process.env.SUPER_MOBILE_PRIVATE_ORIGIN,allowedTailscaleLogin=process.env.SUPER_MOBILE_TAILSCALE_LOGIN;
+ const ownerKeyFile=process.env.SUPER_MOBILE_OWNER_KEY_FILE||join(process.env.XDG_STATE_HOME||join(homedir(),'.local/state'),'super/mobile/front-key.json');
  if(!origin||!allowedTailscaleLogin)throw Error('Configure the exact private origin and owner identity.');
- createConnector({origin,allowedTailscaleLogin}).listen(4320,'127.0.0.1',()=>console.log('Private mobile connector listening on loopback.'));
+ createConnector({origin,allowedTailscaleLogin,ownerKeyFile}).listen(4320,'127.0.0.1',()=>console.log('Private mobile connector listening on loopback.'));
 }
