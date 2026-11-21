@@ -190,8 +190,9 @@ class Page{
       tab.requests.push(`${method} ${url.pathname}`);
       // A request the network loses (`phone.failNext`): it rejects as the browser's fetch would, and never reaches the gateway.
       const lost=tab.failures.get(url.pathname);if(lost){tab.failures.delete(url.pathname);await delay(1);throw lost;}
+      if(tab.front==='unavailable'&&url.pathname==='/api/pair-owner')return new Response(JSON.stringify({error:'Connecting without a code is not available right now. Use a pairing code.'}),{status:503,headers:{'content-type':'application/json'}});
       const res=await new Promise((resolve,reject)=>{
-        const req=http.request({host:'127.0.0.1',port:tab.port,path:url.pathname+url.search,method,headers:{Host:'127.0.0.1:4318',...(method==='GET'?{}:{Origin:ORIGIN}),...(tab.cookie?{Cookie:tab.cookie}:{}),...headers,...(tab.front&&url.pathname==='/api/pair-owner'?{'x-super-owner-key':tab.front}:{})}},
+        const req=http.request({host:'127.0.0.1',port:tab.front===true&&url.pathname==='/api/pair-owner'?tab.ownerPort:tab.port,path:url.pathname+url.search,method,headers:{Host:'127.0.0.1:4318',...(method==='GET'?{}:{Origin:ORIGIN}),...(tab.cookie?{Cookie:tab.cookie}:{}),...headers}},
           r=>{let text='';r.setEncoding('utf8');r.on('data',c=>text+=c);r.on('end',()=>resolve({status:r.statusCode,headers:r.headers,text}));});
         req.on('error',reject);req.end(body);
       });
@@ -210,16 +211,18 @@ class Page{
 }
 
 /** A browser tab on a fresh gateway. `world` is the snapshot the desktop publishes; change it to redraw. */
-/* `front`: the page is at the private HTTPS address, and the harness plays the front: it adds that key to
- * /api/pair-owner, as private-connector.mjs does. `ownerKey` is the gateway's own key (the same, unless a law says). */
-export async function openPhone(t,{code=CODE,world=fixtureWorld(),url=ORIGIN+'/',conversations,conversation,waiting,alerts,front=null,ownerKey=front}={}){
+/* `front`: the page is at the private HTTPS address and the harness plays the front, as private-connector.mjs does:
+ * true sends /api/pair-owner to the gateway's own code-free listener; 'unavailable' answers as the front does when
+ * that listener is not there. */
+export async function openPhone(t,{code=CODE,world=fixtureWorld(),url=ORIGIN+'/',conversations,conversation,waiting,alerts,front=false}={}){
   hook();
   const tab={entries:[{state:null,url}],index:0,cookie:null,storage:new Storage(),front,leftPage:false,world,gatewayNow:0,page:null,requests:[],failures:new Map(),
     get url(){return this.entries[this.index].url;},resolve(u){return new URL(u,this.url).href;}};
   tab.location={get href(){return tab.url;},get hash(){return new URL(tab.url).hash;},get pathname(){return new URL(tab.url).pathname;},get origin(){return ORIGIN;},get protocol(){return tab.front?'https:':'http:';}};
-  const gateway=createGateway({origin:ORIGIN,pairingCode:code,ownerKey,now:()=>tab.gatewayNow,snapshot:async()=>structuredClone(tab.world),
+  const gateway=createGateway({origin:ORIGIN,pairingCode:code,now:()=>tab.gatewayNow,snapshot:async()=>structuredClone(tab.world),
     conversations:conversations??(async()=>({available:false})),conversation:conversation??(async()=>({error:'Conversation channel unavailable.'})),...(waiting?{waiting}:{}),...(alerts?{alerts}:{})});
   await new Promise(r=>gateway.listen(0,'127.0.0.1',r));tab.port=gateway.address().port;
+  if(front===true){await new Promise(r=>gateway.ownerServer.listen(0,'127.0.0.1',r));tab.ownerPort=gateway.ownerServer.address().port;t.after(()=>gateway.ownerServer.close());}
   t.after(()=>{if(tab.page)tab.page.closed=true;gateway.closeAllConnections();gateway.close();});
   const phone={
     tab,gateway,

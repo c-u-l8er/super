@@ -7,7 +7,7 @@ import {createInterface} from 'node:readline';
 import {dirname,join} from 'node:path';
 import {waitingView} from './waiting.mjs';
 import {gatewayAlerts} from './waiting-alerts.mjs';
-import {writePrivateJson} from './private-file.mjs';
+import {listenPrivateSocket} from './private-file.mjs';
 const assets = new Map([['/conversation-list.js',['../cockpit/ui/conversation-list.js','text/javascript']],['/conversation-turns.js',['../cockpit/ui/conversation-turns.js','text/javascript']],['/conversations.js',['ui/conversations.js','text/javascript']],['/', ['ui/index.html','text/html']], ['/app.js',['ui/app.js','text/javascript']], ['/style.css',['ui/style.css','text/css']], ['/task-progress.js',['../cockpit/ui/task-progress.js','text/javascript']], ['/references.js',['../cockpit/ui/references.js','text/javascript']], ['/review-test-coverage.js',['../cockpit/ui/review-test-coverage.js','text/javascript']],['/archived-record.js',['../cockpit/ui/archived-record.js','text/javascript']],['/waiting.js',['ui/waiting.js','text/javascript']],['/sw.js',['ui/sw.js','text/javascript']],['/manifest.webmanifest',['ui/manifest.webmanifest','application/manifest+json']],['/mobile',['ui/index.html','text/html']]]);
 // The home-screen icon: the desktop's own. Binary, so apart from the text assets above.
 const images=new Map([['/icon-512.png','../cockpit/icons/icon.png'],['/icon-128.png','../cockpit/icons/128x128.png']]);
@@ -18,11 +18,10 @@ const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength
 const kindOf=ua=>!ua?'unknown':/Expo|okhttp|CFNetwork/i.test(ua)?'app':/Mozilla/i.test(ua)?'browser':'other';
 // Distinguishes two devices without exposing either session. One way, truncated.
 const deviceId=token=>createHash('sha256').update('super-mobile-device:'+token).digest('hex').slice(0,6);
-export function createGateway({snapshot, conversations=async()=>({available:false}), conversation=async()=>({error:"Conversation channel unavailable."}), screenshots=async()=>({available:false}), waiting=async()=>({available:false,reason:'No board is set up on this Super.',lines:[],open:0}), alerts=null, pairingCode, ownerKey=null, origin, now=Date.now, onDevices, sessionFile}) {
+export function createGateway({snapshot, conversations=async()=>({available:false}), conversation=async()=>({error:"Conversation channel unavailable."}), screenshots=async()=>({available:false}), waiting=async()=>({available:false,reason:'No board is set up on this Super.',lines:[],open:0}), alerts=null, pairingCode, origin, now=Date.now, onDevices, sessionFile}) {
   const publicURL=new URL(origin);
   if(publicURL.origin!==origin || (publicURL.protocol!=='https:' && !(publicURL.protocol==='http:'&&['localhost','127.0.0.1'].includes(publicURL.hostname)))) throw Error('Use HTTPS, or loopback HTTP for development.');
   let pairUntil=now()+600_000, used=false, failures=0, windowEnd=now()+60_000, ownerMade=0, ownerWindow=now()+60_000;
-  const ownerSecret=typeof ownerKey==='string'&&/^[0-9a-f]{64}$/.test(ownerKey)?ownerKey:null;
   const persistence=sessionFile?sessionStore(sessionFile,origin,now):null;
   const sessions=new Map(persistence?.load()??[]), secure=publicURL.protocol==='https:';
   // Who is reading, for the desktop to show. Identifiers are derived from the
@@ -64,22 +63,6 @@ export function createGateway({snapshot, conversations=async()=>({available:fals
         try{persistence?.save(sessions);}catch{sessions.delete(token);used=false;throw Error('Pairing could not be retained.');}
         publish();
         return send(200,{paired:true},{'Set-Cookie':cookie(token)});
-      }
-      // Connecting without a code, through the private HTTPS front only. The front has already checked his
-      // Tailscale login, and adds the key it reads from the private file this gateway wrote (front-key.json); the
-      // phone never sees the key. What it gets is an ordinary eight-hour session, and the desktop's one-use code is
-      // left as it was. Six a minute at most, and wrong keys count with wrong codes.
-      if(req.url==='/api/pair-owner'&&req.method==='POST'){
-        if(now()>windowEnd){windowEnd=now()+60_000;failures=0;}
-        if(now()>ownerWindow){ownerWindow=now()+60_000;ownerMade=0;}
-        if(failures>=10||ownerMade>=6)return send(429,{error:'Too many attempts. Try again in a minute.'});
-        if(!ownerSecret||!equal(req.headers['x-super-owner-key'],ownerSecret)){failures++;return send(403,{error:'Connecting without a code works only at the private address.'});}
-        let size=0;for await(const chunk of req){size+=chunk.length;if(size>1024){send(413,{error:'Request too large.'});req.destroy();return;}}
-        ownerMade++;const token=randomBytes(32).toString('hex');const at=now();
-        sessions.set(token,{expires:at+28_800_000,pairedAt:at,lastSeen:at,kind:kindOf(req.headers['user-agent'])});
-        try{persistence?.save(sessions);}catch{sessions.delete(token);throw Error('Connecting could not be retained.');}
-        publish();
-        return send(200,{paired:true,by:'owner'},{'Set-Cookie':cookie(token)});
       }
       if(!sessions.has(sid))return send(401,{error:'Pair this device to view Super.'});
       sessions.get(sid).lastSeen=now();publish();
@@ -132,6 +115,27 @@ export function createGateway({snapshot, conversations=async()=>({available:fals
     }catch{return send(503,{error:'Host unavailable. Reconnect to see current state.'});}
   });
   server.maxConnections=32;server.keepAliveTimeout=3000;
+  /**
+   * Connecting his phone without a code: a second listener that does only that. Main puts it on a Unix socket in
+   * the private state folder (0600 in a 0700 folder), so only this user and root reach it; the private HTTPS front
+   * asks it after checking his Tailscale login. No TCP port, header or key can get a session without a code, and
+   * the desktop's one-use code is left as it was. What it gives is an ordinary eight-hour session. Six a minute,
+   * counted as each request arrives, so requests still sending their bodies count too.
+   */
+  server.ownerServer=http.createServer({maxHeaderSize:8192,requestTimeout:5000,headersTimeout:5000},async(req,res)=>{
+    const send=(status,data,headers={})=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store',...headers});res.end(JSON.stringify(data));};
+    try{
+      if(req.url!=='/api/pair-owner'||req.method!=='POST')return send(405,{error:'This listener only connects his phone without a code.'});
+      if(now()>ownerWindow){ownerWindow=now()+60_000;ownerMade=0;}
+      if(ownerMade>=6)return send(429,{error:'Too many attempts. Try again in a minute.'});
+      ownerMade++;let size=0;for await(const chunk of req){size+=chunk.length;if(size>1024)return send(413,{error:'Request too large.'});}
+      const token=randomBytes(32).toString('hex'),at=now();
+      sessions.set(token,{expires:at+28_800_000,pairedAt:at,lastSeen:at,kind:kindOf(req.headers['user-agent'])});
+      try{persistence?.save(sessions);}catch{sessions.delete(token);return send(503,{error:'Connecting could not be retained.'});}
+      publish();
+      return send(200,{paired:true,by:'owner'},{'Set-Cookie':cookie(token)});
+    }catch{if(!res.headersSent)send(503,{error:'Host unavailable. Reconnect to see current state.'});}
+  });
   /**
    * Replace the one-use code without restarting.
    *
@@ -194,11 +198,7 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
   // folders are found from it): ~/.local/state/super/mobile for the phones, ~/.local/state/super/waiting for the board.
   const sessionFile=process.env.SUPER_MOBILE_SESSION_FILE,mobileDir=sessionFile?.startsWith('/')?dirname(sessionFile):null;
   const waitingDir=mobileDir&&join(dirname(mobileDir),'waiting');
-  // The key the private HTTPS front shows to connect his phone without a code (/api/pair-owner). New at each start,
-  // beside the session file and private to this user; it never leaves this machine. Without it, codes only.
-  let ownerKey=null;
-  if(mobileDir){try{const key=randomBytes(32).toString('hex');writePrivateJson(join(mobileDir,'front-key.json'),{schema:'super-mobile-front-key@1',key});ownerKey=key;}catch{}}
-  const server=createGateway({snapshot,screenshots,conversations,conversation,pairingCode:code,ownerKey,origin,onDevices,sessionFile,
+  const server=createGateway({snapshot,screenshots,conversations,conversation,pairingCode:code,origin,onDevices,sessionFile,
     ...(waitingDir?{waiting:async()=>waitingView(waitingDir,Date.now()),alerts:gatewayAlerts({dir:waitingDir,mobileDir})}:{})});
   // Exclusive creation refuses old files and symlinks; never log the code.
   await writeFile(pairFile,code+'\n',{mode:0o600,flag:'wx'});
@@ -213,6 +213,10 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
       server.renewPairing(next);
     }catch{/* a code that could not be written is not a code */}
   };
-  lines.on('close',()=>{server.closeAllConnections();server.close();process.exit(0);});
+  lines.on('close',()=>{server.closeAllConnections();server.close();server.ownerServer.close();process.exit(0);});
+  // His phone without a code: the owner listener on its private socket beside the session file. Without a session
+  // file there is no private folder, and codes are the only way.
+  const ownerSocket=mobileDir&&join(mobileDir,'owner.sock');
+  if(ownerSocket)await listenPrivateSocket(server.ownerServer,ownerSocket).catch(e=>process.stderr.write(`Super mobile: no connecting without a code (${e.message})\n`));
   server.listen(port,'127.0.0.1',()=>process.stderr.write(`Super mobile observer: ${origin}; one-use pairing code in ${pairFile} (10 minutes).\n`));
 }
