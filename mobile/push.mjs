@@ -81,8 +81,11 @@ export function vapid(endpoint,{publicKey,privateKey},subject,nowSeconds){
 }
 
 /** One alert to one subscription. Outcome: sent (the push service took it), gone (the subscription ended), failed. */
-export async function sendPush(sub,message,{keys,subject,hosts=PUSH_HOSTS,now=Date.now,fetch=globalThis.fetch,ttl=43200,topic='super-waiting',urgency='normal'}){
+export async function sendPush(sub,message,{keys,subject,hosts=PUSH_HOSTS,now=Date.now,fetch=globalThis.fetch,ttl=43200,topic='superwaiting',urgency='normal'}){
   if(!allowedEndpoint(sub?.endpoint,hosts))return {outcome:'failed',detail:'endpoint not on the allowlist'};
+  // Apple's push service refuses a Topic with a hyphen (400 BadWebPushTopic, seen 21 Nov 2026), though RFC 8030
+  // allows the base64url alphabet. Letters and digits only, at most 32.
+  if(!/^[A-Za-z0-9]{1,32}$/.test(topic))return {outcome:'failed',detail:'the topic must be 1 to 32 letters or digits'};
   let body,authorization;
   try{body=encrypt(JSON.stringify(message),sub.keys);authorization=vapid(sub.endpoint,keys,subject,now()/1000);}
   catch(e){return {outcome:'failed',detail:e.message};}

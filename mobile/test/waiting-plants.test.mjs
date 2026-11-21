@@ -39,6 +39,8 @@ export const PLANTS=[
   ['the host allowlist','push.mjs',[["return hosts.some(x=>x.startsWith('.')?h.endsWith(x)&&h.length>x.length:h===x);","return true;"]],PUSH,'P4'],
   ['a loose host match','push.mjs',[["x.startsWith('.')?h.endsWith(x)&&h.length>x.length:h===x","h.endsWith(x.replace(/^\\./,''))"]],PUSH,'P4'],
   ['no redirects','push.mjs',[["redirect:'error'","redirect:'follow'"]],PUSH,'P6'],
+  ['a topic Apple takes','push.mjs',[["topic='superwaiting',","topic='super-waiting',"]],PUSH,'P6'],
+  ['topics are letters and digits','push.mjs',[["if(!/^[A-Za-z0-9]{1,32}$/.test(topic))return {outcome:'failed',","if(false)return {outcome:'failed',"]],PUSH,'P6'],
   ['the allowlist when sending','push.mjs',[["if(!allowedEndpoint(sub?.endpoint,hosts))return {outcome:'failed',detail:'endpoint not on the allowlist'};",""]],PUSH,'P6'],
   ['the RFC 8291 key info','push.mjs',[["Buffer.from('WebPush: info\\0')","Buffer.from('WebPush: info')"]],PUSH,'P1'],
   ['a one-hour token','push.mjs',[["exp:Math.floor(nowSeconds)+3600","exp:Math.floor(nowSeconds)+172800"]],PUSH,'P3'],

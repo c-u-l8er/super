@@ -58,12 +58,14 @@ test('P6 · the push request: encrypted, signed, a TTL and one topic, no redirec
   const {r,calls}=await send(201);
   assert.equal(r.outcome,'sent');assert.equal(calls.length,1);
   const {url,init}=calls[0];assert.equal(url,p.sub.endpoint);assert.equal(init.method,'POST');assert.equal(init.redirect,'error');
-  assert.equal(init.headers['Content-Encoding'],'aes128gcm');assert.equal(init.headers.TTL,'43200');assert.equal(init.headers.Topic,'super-waiting');assert.equal(init.headers.Urgency,'normal');
+  assert.equal(init.headers['Content-Encoding'],'aes128gcm');assert.equal(init.headers.TTL,'43200');assert.equal(init.headers.Topic,'superwaiting');assert.match(init.headers.Topic,/^[A-Za-z0-9]{1,32}$/,'letters and digits only: Apple refuses a hyphen (BadWebPushTopic)');assert.equal(init.headers.Urgency,'normal');
   assert.deepEqual(open(p,init.body),{title:'x',body:'y'});assert.equal(readVapid(init.headers.Authorization).signed,true);
   for(const [status,outcome] of [[200,'sent'],[202,'sent'],[404,'gone'],[410,'gone'],[400,'failed'],[403,'failed'],[429,'failed'],[500,'failed'],['throw','failed']])
     assert.equal((await send(status)).r.outcome,outcome,String(status));
   const s=pushService();assert.equal((await sendPush({...p.sub,endpoint:'https://evil.example/x'},{},{keys,subject:'https://a.example',fetch:s.fetch})).outcome,'failed');
   assert.equal(s.calls.length,0,'an endpoint off the list is never contacted');
+  for(const topic of ['super-waiting','super_waiting','','x'.repeat(33)])assert.equal((await sendPush(p.sub,{},{keys,subject:'https://a.example',fetch:s.fetch,topic})).outcome,'failed',`topic ${JSON.stringify(topic)}`);
+  assert.equal(s.calls.length,0,'a topic Apple refuses is never sent');
 });
 
 test('P7 · an alert too long for one record is refused, never cut',()=>{
