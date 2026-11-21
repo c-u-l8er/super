@@ -14,6 +14,8 @@ import {listenPrivateSocket} from '../private-file.mjs';
 import {CODE,openPhone} from './phone.mjs';
 
 const ORIGIN='http://127.0.0.1:4318',FRONT='https://super-mobile.example.ts.net',OWNER='owner@example.com';
+// His phone's tailnet addresses, and the PX13's own: serve gives a program on the PX13 his login too.
+const PHONE='100.64.0.7',PHONE6='fd7a:115c:a1e0::7',SELF='100.64.0.1';
 const WORLD=async()=>({available:true,projection:{development_tasks:{}}});
 // Short folders: a Unix socket path must stay under about 100 bytes.
 const temp=t=>{const d=mkdtempSync(join(tmpdir(),'so-'));t.after(()=>rmSync(d,{recursive:true,force:true}));return d;};
@@ -29,7 +31,7 @@ const call=(where,host,origin,path,{method='GET',login,headers={},body}={})=>new
 const cookieOf=r=>r.headers['set-cookie']?.[0]?.split(';')[0];
 /** A request as tailscale serve sends it to a Unix socket: Host: localhost, the phone's own host in X-Forwarded-Host
  * (Tailscale 1.102.3, ipn/ipnlocal/serve.go), the phone's Origin, and his login. */
-const viaServe=(sock,path,{headers={},...o}={})=>call(sock,'localhost',FRONT,path,{login:OWNER,...o,headers:{'X-Forwarded-Host':new URL(FRONT).host,...headers}});
+const viaServe=(sock,path,{headers={},from=PHONE,...o}={})=>call(sock,'localhost',FRONT,path,{login:OWNER,...o,headers:{'X-Forwarded-Host':new URL(FRONT).host,...(from?{'X-Forwarded-For':from}:{}),...headers}});
 
 /** A gateway on TCP, with its code-free listener on a private socket in a fresh folder. */
 async function gateway(t){
@@ -41,18 +43,19 @@ async function gateway(t){
   return {tcp,owner,socket,time,port};
 }
 /** A front on its own private socket, in front of a stub gateway (TCP) and a stub code-free listener (socket). */
-async function front(t,{origin=FRONT,ownerSocket='stub'}={}){
+async function front(t,{origin=FRONT,ownerSocket='stub',ownerDevices=[PHONE,PHONE6]}={}){
   const seen=[],dir=temp(t);
   const record=(req,res)=>{seen.push({line:req.method+' '+req.url,headers:req.headers});res.writeHead(200,{'Content-Type':'application/json','Set-Cookie':'super_mobile=x; HttpOnly'});res.end('{}');};
   const observerPort=await listen(t,http.createServer(record));
   let socket=ownerSocket;
   if(ownerSocket==='stub'){socket=join(dir,'g','owner.sock');const stub=http.createServer((req,res)=>{req.via='owner-socket';seen.push({line:'owner-socket '+req.method+' '+req.url,headers:req.headers});res.writeHead(200,{'Content-Type':'application/json','Set-Cookie':'super_mobile=y; HttpOnly'});res.end('{"paired":true}');});await listenPrivateSocket(stub,socket);closing(t,stub);}
   const serve=origin.startsWith('https:');
-  const connector=createConnector({origin,observerOrigin:`http://127.0.0.1:${observerPort}`,allowedTailscaleLogin:OWNER,ownerSocket:socket,behindServe:serve});
+  const refused=[];
+  const connector=createConnector({origin,observerOrigin:`http://127.0.0.1:${observerPort}`,allowedTailscaleLogin:OWNER,ownerSocket:socket,behindServe:serve,ownerDevices,ownerRefused:a=>refused.push(a)});
   const frontSocket=join(dir,'f','front.sock');await listenPrivateSocket(connector,frontSocket);closing(t,connector);
   // At the private address the front is reached as tailscale serve reaches it; plain HTTP keeps its own host.
-  const ask=(path,{login=OWNER,headers={},...o}={})=>serve?call(frontSocket,'localhost',origin,path,{login,...o,headers:{'X-Forwarded-Host':new URL(origin).host,...headers}}):call(frontSocket,new URL(origin).host,origin,path,{login,headers,...o});
-  return {seen,frontSocket,ask};
+  const ask=(path,{login=OWNER,headers={},from=PHONE,...o}={})=>serve?call(frontSocket,'localhost',origin,path,{login,...o,headers:{'X-Forwarded-Host':new URL(origin).host,...(from?{'X-Forwarded-For':from}:{}),...headers}}):call(frontSocket,new URL(origin).host,origin,path,{login,headers,...o});
+  return {seen,frontSocket,ask,refused};
 }
 
 test("O1 · the code-free listener gives an ordinary eight-hour session; the gateway's TCP port gives none; the desktop's code still pairs",async t=>{
@@ -89,7 +92,7 @@ test('O3 · six sessions a minute, counted as requests arrive, so seven at once 
 
 test('O4 · the front sends code-free sign-in only to the code-free socket, only for his login, and passes on none of the phone’s own headers',async t=>{
   const {seen,ask}=await front(t);
-  const r=await ask('/api/pair-owner',{method:'POST',body:'{}',headers:{'x-super-owner-key':'z','X-Forwarded-For':'1.2.3.4'}});
+  const r=await ask('/api/pair-owner',{method:'POST',body:'{}',headers:{'x-super-owner-key':'z','X-Real-IP':'1.2.3.4','Forwarded':'for=1.2.3.4'}});
   assert.equal(r.status,200);assert.match(r.headers['set-cookie'][0],/; Secure/);
   const last=seen.at(-1);assert.equal(last.line,'owner-socket POST /api/pair-owner');
   assert.deepEqual(Object.keys(last.headers).filter(k=>!['host','origin','content-type','content-length','connection'].includes(k)),[],'only what the front sets itself');
@@ -116,7 +119,7 @@ test('O6 · through the front, his phone connects with no code and reads Super',
   const port=await freePort(),origin=`http://127.0.0.1:${port}`,dir=temp(t);
   const server=createGateway({origin,pairingCode:CODE,snapshot:WORLD});await listen(t,server,port);
   const ownerSocket=join(dir,'m','owner.sock');await listenPrivateSocket(server.ownerServer,ownerSocket);closing(t,server.ownerServer);
-  const connector=createConnector({origin:FRONT,observerOrigin:origin,allowedTailscaleLogin:OWNER,ownerSocket,behindServe:true});
+  const connector=createConnector({origin:FRONT,observerOrigin:origin,allowedTailscaleLogin:OWNER,ownerSocket,behindServe:true,ownerDevices:[PHONE]});
   const frontSocket=join(dir,'f','front.sock');await listenPrivateSocket(connector,frontSocket);closing(t,connector);
   const ask=(path,o={})=>viaServe(frontSocket,path,o);
   const r=await ask('/api/pair-owner',{method:'POST',body:'{}'});
@@ -144,7 +147,7 @@ test('O7 · started, the gateway puts its code-free listener on a 0600 socket be
   assert.ok(s.isSocket());assert.equal(s.mode&0o777,0o600);assert.equal(existsSync(join(mobile,'front-key.json')),false,'no key file');
   const r=await call(sock,'127.0.0.1:4318',ORIGIN,'/api/pair-owner',{method:'POST',body:{}});assert.equal(r.status,200);
   await g.stop();
-  const f=await started(t,'../private-connector.mjs',{SUPER_MOBILE_PRIVATE_ORIGIN:FRONT,SUPER_MOBILE_TAILSCALE_LOGIN:OWNER,SUPER_MOBILE_FRONT_SOCKET:join(d,'f','front.sock'),SUPER_MOBILE_OWNER_SOCKET:sock},/listening on /);
+  const f=await started(t,'../private-connector.mjs',{SUPER_MOBILE_PRIVATE_ORIGIN:FRONT,SUPER_MOBILE_TAILSCALE_LOGIN:OWNER,SUPER_MOBILE_FRONT_SOCKET:join(d,'f','front.sock'),SUPER_MOBILE_OWNER_SOCKET:sock,SUPER_MOBILE_OWNER_DEVICES:` ${PHONE} , ${PHONE6}`,SUPER_MOBILE_ACCESS_LOG:'1'},/listening on /);
   assert.match(f.out(),new RegExp(`listening on ${join(d,'f','front.sock').replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\.`));
   const fs=lstatSync(join(d,'f','front.sock'));assert.ok(fs.isSocket());assert.equal(fs.mode&0o777,0o600);assert.equal(lstatSync(join(d,'f')).mode&0o777,0o700);
   const fsock=join(d,'f','front.sock');
@@ -154,7 +157,21 @@ test('O7 · started, the gateway puts its code-free listener on a 0600 socket be
   const r2=await viaServe(fsock,'/api/pair-owner',{method:'POST',body:{}});
   assert.equal(r2.status,503,'tailscale serve gets through');assert.match(r2.json.error,/Use a pairing code/);
   assert.equal((await call(fsock,new URL(FRONT).host,FRONT,'/api/pair-owner',{method:'POST',body:{},login:OWNER})).status,403,'but not a request that did not come through serve');
+  assert.equal((await viaServe(fsock,'/api/pair-owner',{method:'POST',body:{},from:PHONE6})).status,503,'his phone by either address');
+  assert.equal((await viaServe(fsock,'/api/pair-owner',{method:'POST',body:{},from:SELF})).status,403,'not the PX13 itself');
+  const noted=new RegExp(`refused for ${SELF.replace(/\./g,'\\.')}: not his phone`);for(let i=0;i<100&&!noted.test(f.out());i++)await delay(20);
+  assert.match(f.out(),/2 address\(es\) of his phone/);assert.match(f.out(),noted,'the refusal is noted in its log');
+  // The request log, when asked for: path and status, and only whether a login came, never the login or a cookie.
+  const logged=/request \{[^\n]*"path":"\/api\/pair-owner","status":403[^\n]*"identity":"present"/;
+  for(let i=0;i<100&&!logged.test(f.out());i++)await delay(20);
+  assert.match(f.out(),logged);
+  assert.doesNotMatch(f.out(),new RegExp(OWNER.replace(/\./g,'\\.')),'his login never reaches the log');
   await f.stop();
+  // Started with no phone address, the front connects nothing without a code.
+  const off=await started(t,'../private-connector.mjs',{SUPER_MOBILE_PRIVATE_ORIGIN:FRONT,SUPER_MOBILE_TAILSCALE_LOGIN:OWNER,SUPER_MOBILE_FRONT_SOCKET:join(d,'f2','front.sock'),SUPER_MOBILE_OWNER_SOCKET:sock},/listening on /);
+  assert.match(off.out(),/without a code: off/);
+  assert.equal((await viaServe(join(d,'f2','front.sock'),'/api/pair-owner',{method:'POST',body:{}})).status,405,'no phone address, no route');
+  await off.stop();
 });
 
 test('O12 · behind tailscale serve, the front takes Host: localhost and only his exact name in X-Forwarded-Host',async t=>{
@@ -186,6 +203,27 @@ test('O13 · sessions that have ended do not stop his phone connecting with no c
   assert.equal((await owner()).status,503,'64 live sessions fill the store');
   time.now+=28_800_000;
   assert.equal((await owner()).status,200,'once they have ended, his phone connects');
+});
+
+test('O14 · only his phone connects without a code: serve gives every program on the PX13 his login too',async t=>{
+  const {seen,ask,refused}=await front(t);
+  const owner=from=>ask('/api/pair-owner',{method:'POST',body:'{}',from});
+  assert.equal((await owner(PHONE)).status,200,'his phone');
+  assert.equal((await owner(PHONE6)).status,200,'his phone by its IPv6 address');
+  assert.equal((await owner('::ffff:'+PHONE)).status,200,'his phone, written as a mapped address');
+  const n=seen.length;
+  const r=await owner(SELF);assert.equal(r.status,403,'a program on the PX13 itself');
+  assert.equal(r.json.error,'Only his phone connects without a code. Use a pairing code on this device.');
+  assert.equal((await owner(null)).status,403,'no address');
+  assert.equal((await owner('100.64.0.70')).status,403,'a longer address');
+  assert.equal((await owner(PHONE+', '+SELF)).status,403,'two addresses');
+  assert.equal((await owner([PHONE,PHONE])).status,403,'two such headers');
+  assert.equal(seen.length,n,'nothing refused reaches the gateway');
+  assert.deepEqual(refused,[SELF,'','100.64.0.70',PHONE+', '+SELF,PHONE+', '+PHONE],'each refusal is noted');
+  assert.equal((await ask('/api/waiting',{from:SELF})).status,200,'other devices still reach Super, with a code');
+  const none=await front(t,{ownerDevices:[]});
+  assert.equal((await none.ask('/api/pair-owner',{method:'POST',body:'{}'})).status,405,'no phone given, no connecting without a code');
+  assert.throws(()=>createConnector({origin:FRONT,allowedTailscaleLogin:OWNER,behindServe:true,ownerSocket:'/x',ownerDevices:['iphone-12-mini']}),/Tailscale address/);
 });
 
 test('O11 · a private socket: a 0700 folder of ours, a 0600 socket, only our own old socket replaced',async t=>{
