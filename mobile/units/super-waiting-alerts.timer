@@ -1,0 +1,10 @@
+[Unit]
+Description=Super Mobile: an alert pass every 10 minutes, the backstop to the path unit
+
+[Timer]
+OnCalendar=*:0/10
+RandomizedDelaySec=30
+Unit=super-waiting-alerts.service
+
+[Install]
+WantedBy=timers.target

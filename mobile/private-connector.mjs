@@ -14,7 +14,10 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
  if(secure&&(!front.hostname.endsWith('.ts.net')||!allowedTailscaleLogin))throw Error('Private HTTPS requires an exact Tailscale origin and owner login.');
  const routes=new Map([['/api/observer/snapshot',['GET','/api/snapshot']],['/api/observer/pair',['POST','/api/pair']],['/api/observer/logout',['POST','/api/logout']]]);
  routes.set('/api/conversations',['GET','/api/conversations']);routes.set('/api/conversation',['POST','/api/conversation']);
- const companionAssets=new Map([['/conversation-list.js','/conversation-list.js'],['/conversation-turns.js','/conversation-turns.js'],['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js'],['/archived-record.js','/archived-record.js']]);
+ // Waiting on you, and this phone's alert switch.
+ routes.set('/api/waiting',['GET','/api/waiting']);routes.set('/api/push',['GET','/api/push']);
+ for(const operation of ['subscribe','unsubscribe','status','test'])routes.set('/api/push/'+operation,['POST','/api/push/'+operation]);
+ const companionAssets=new Map([['/conversation-list.js','/conversation-list.js'],['/conversation-turns.js','/conversation-turns.js'],['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js'],['/archived-record.js','/archived-record.js'],['/waiting.js','/waiting.js'],['/sw.js','/sw.js'],['/manifest.webmanifest','/manifest.webmanifest'],['/icon-512.png','/icon-512.png'],['/icon-128.png','/icon-128.png']]);
  for(const operation of ['snapshot','pair','logout'])routes.set('/api/'+operation,[operation==='snapshot'?'GET':'POST','/api/'+operation]);
  return http.createServer((req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503);res.end()})});
  async function handle(req,res){
@@ -43,7 +46,7 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
   }
   if(isApi){if(req.headers.cookie)headers.cookie=req.headers.cookie;if(req.method==='POST'){headers.origin=observer.origin;headers['content-type']=req.headers['content-type']??''}}
   let body=Buffer.alloc(0);
-  if(req.method==='POST'){for await(const chunk of req){body=Buffer.concat([body,chunk]);if(body.length>(req.url==='/api/conversation'?12000:1024))return reject(413,'Request too large.')}headers['content-length']=String(body.length)}
+  if(req.method==='POST'){for await(const chunk of req){body=Buffer.concat([body,chunk]);if(body.length>(req.url==='/api/conversation'?12000:req.url.startsWith('/api/push/')?2048:1024))return reject(413,'Request too large.')}headers['content-length']=String(body.length)}
   const upstream=http.request({hostname:target.hostname,port:target.port||80,path:route?route[1]:asset||req.url,method:req.method,headers,timeout:5000},reply=>{const outgoing={...reply.headers,'cache-control':'no-store'};if(secure&&outgoing['set-cookie'])outgoing['set-cookie']=outgoing['set-cookie'].map(value=>/;\s*Secure(?:;|$)/i.test(value)?value:value+'; Secure');delete outgoing['transfer-encoding'];res.writeHead(reply.statusCode??502,outgoing);reply.pipe(res)});
   upstream.on('timeout',()=>upstream.destroy());upstream.on('error',()=>{if(!res.headersSent)reject(503,'Local host connection unavailable.');else res.destroy()});
   upstream.end(body);

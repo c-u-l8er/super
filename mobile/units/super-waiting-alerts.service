@@ -1,0 +1,11 @@
+[Unit]
+Description=Super Mobile: one "Waiting on you" alert pass (reads the Mac's board, alerts the phone)
+Documentation=file://%h/build/super-review-content/mobile/README.md
+
+[Service]
+Type=oneshot
+ExecStart=%h/build/super-review-content/mobile/waiting-alerts.sh
+TimeoutStartSec=120
+NoNewPrivileges=yes
+PrivateTmp=yes
+UMask=0077

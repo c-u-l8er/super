@@ -210,13 +210,13 @@ class Page{
 }
 
 /** A browser tab on a fresh gateway. `world` is the snapshot the desktop publishes; change it to redraw. */
-export async function openPhone(t,{code=CODE,world=fixtureWorld(),url=ORIGIN+'/',conversations,conversation}={}){
+export async function openPhone(t,{code=CODE,world=fixtureWorld(),url=ORIGIN+'/',conversations,conversation,waiting,alerts}={}){
   hook();
   const tab={entries:[{state:null,url}],index:0,cookie:null,storage:new Storage(),leftPage:false,world,gatewayNow:0,page:null,requests:[],failures:new Map(),
     get url(){return this.entries[this.index].url;},resolve(u){return new URL(u,this.url).href;}};
   tab.location={get href(){return tab.url;},get hash(){return new URL(tab.url).hash;},get pathname(){return new URL(tab.url).pathname;},get origin(){return ORIGIN;}};
   const gateway=createGateway({origin:ORIGIN,pairingCode:code,now:()=>tab.gatewayNow,snapshot:async()=>structuredClone(tab.world),
-    conversations:conversations??(async()=>({available:false})),conversation:conversation??(async()=>({error:'Conversation channel unavailable.'}))});
+    conversations:conversations??(async()=>({available:false})),conversation:conversation??(async()=>({error:'Conversation channel unavailable.'})),...(waiting?{waiting}:{}),...(alerts?{alerts}:{})});
   await new Promise(r=>gateway.listen(0,'127.0.0.1',r));tab.port=gateway.address().port;
   t.after(()=>{if(tab.page)tab.page.closed=true;gateway.closeAllConnections();gateway.close();});
   const phone={

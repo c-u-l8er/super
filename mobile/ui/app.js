@@ -1,4 +1,5 @@
 import {initConversations} from '/conversations.js';
+import {initWaiting} from '/waiting.js';
 import {taskProgress} from '/task-progress.js';
 import {withheldAttemptsNote} from '/archived-record.js';
 import {referenceText,setReferenceFrame,setReferenceRouting} from './references.js';
@@ -55,12 +56,15 @@ const api=async(path,body)=>{const r=await fetch('/api/'+path,{method:body?'POST
 function withdraw(message){current=null;setReferenceFrame(null);$('#status').textContent=message;render();}
 const linkedTask=link=>current?.available&&JSON.stringify([current.world?.world_incarnation,current.world?.world_generation])===link.lineage&&current.projection?.development_tasks?.[link.taskId]?.revision===link.revision?current.projection.development_tasks[link.taskId]:null;
 const chat=initConversations(document.querySelector('#conversations'),()=>view==='chat'&&paired,{taskInfo:linkedTask,onTask:link=>{if(!linkedTask(link))return;go({view:'tasks',plan:link.taskId});}});
+/* Waiting on you sits above the plans in Needs me, from its own source (ui/waiting.js). */
+const waiting=initWaiting(document.querySelector('#waiting'),{shown:()=>paired&&view==='attention'&&!selected,paired:()=>paired});
 function render(){
   draw();
   const key=placeHash(place());if(key!==shown){shown=key;if(view!=='chat')window.scrollTo(0,restore??0);}restore=null;
 }
 function draw(){
   document.body.classList.toggle('chat-mode',view==='chat');
+  waiting.update();
   document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));content.hidden=view==='chat';$('#conversations').hidden=view!=='chat';if(view==='chat')return;
   content.replaceChildren();document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));
   if(!current?.available){content.append(node('h1','Host unavailable'),node('p','Reconnect to see current tasks. No saved state is being shown as live.','empty'));return;}
@@ -127,7 +131,7 @@ function reveal(){
   if(spare<over){askRoom+=Math.ceil(over-spare);card.style.marginBottom=askRoom+'px';}
   window.scrollBy(0,over);
 }
-async function disconnect(){serial++;try{await api('logout',{});asking=false;paired=false;current=null;selected=null;lastWorld=null;content.replaceChildren();$('#app').hidden=true;$('#pair').hidden=false;notice.textContent='Device disconnected. In desktop Super, open Mobile device and choose New pairing code to connect again.';}catch{asking=false;withdraw('Disconnect not confirmed');notice.textContent='Could not confirm disconnection. Restore the connection and try again, or restart the desktop observer to end all device sessions.';}}
+async function disconnect(){serial++;try{await api('logout',{});asking=false;paired=false;current=null;selected=null;lastWorld=null;waiting.reset();content.replaceChildren();$('#app').hidden=true;$('#pair').hidden=false;notice.textContent='Device disconnected. In desktop Super, open Mobile device and choose New pairing code to connect again.';}catch{asking=false;withdraw('Disconnect not confirmed');notice.textContent='Could not confirm disconnection. Restore the connection and try again, or restart the desktop observer to end all device sessions.';}}
 async function refresh(){if(busy)return;busy=true;const request=serial;try{const next=await api('snapshot');if(request!==serial||document.hidden)return;paired=true;$('#pair').hidden=true;$('#app').hidden=false;const identity=w=>JSON.stringify([w?.world_incarnation,w?.world_generation,w?.projection_epoch]);const nextWorld=next.available?identity(next.world):null;const changed=lastWorld&&nextWorld&&lastWorld!==nextWorld;if(nextWorld)lastWorld=nextWorld;const redraw=JSON.stringify(current)!==JSON.stringify(next);current=next;setReferenceFrame(next.available?next:null);lastSuccess=Date.now();$('#status').textContent=next.available?'● Connected':'Host reconnecting';if(next.available)notice.textContent='';if(changed&&selected){selected=null;settle();}if(redraw)render();}catch(e){if(request!==serial)return;if(e.status===401){if(paired)notice.textContent='This session ended. Ask desktop Super for a new pairing code.';paired=false;$('#app').hidden=true;$('#pair').hidden=false;current=null;selected=null;settle();lastWorld=null;content.replaceChildren();}else{withdraw('Disconnected');if(paired)notice.textContent='The connection was interrupted. We’ll retry while this page is open.';}}finally{busy=false;}}
 /* T31 N1: one pair request at a time. Return and then a tap on Connect sent two, and the browser's "Fetch is aborted"
  * reached the notice. Connect is disabled while one is in flight; a failure with no answer from the gateway (aborted,

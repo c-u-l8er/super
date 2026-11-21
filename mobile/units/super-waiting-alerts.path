@@ -1,0 +1,9 @@
+[Unit]
+Description=Super Mobile: run an alert pass when the Mac's board arrives
+
+[Path]
+PathChanged=%h/.local/state/super/waiting/feed.json
+Unit=super-waiting-alerts.service
+
+[Install]
+WantedBy=default.target
