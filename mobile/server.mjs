@@ -129,6 +129,7 @@ export function createGateway({snapshot, conversations=async()=>({available:fals
       if(now()>ownerWindow){ownerWindow=now()+60_000;ownerMade=0;}
       if(ownerMade>=6)return send(429,{error:'Too many attempts. Try again in a minute.'});
       ownerMade++;let size=0;for await(const chunk of req){size+=chunk.length;if(size>1024)return send(413,{error:'Request too large.'});}
+      for(const [id,s]of sessions)if(s.expires<=now())sessions.delete(id);
       const token=randomBytes(32).toString('hex'),at=now();
       sessions.set(token,{expires:at+28_800_000,pairedAt:at,lastSeen:at,kind:kindOf(req.headers['user-agent'])});
       try{persistence?.save(sessions);}catch{sessions.delete(token);return send(503,{error:'Connecting could not be retained.'});}

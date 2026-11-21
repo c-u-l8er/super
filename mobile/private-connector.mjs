@@ -9,12 +9,17 @@ import {listenPrivateSocket} from './private-file.mjs';
 // logged; 'app' vs 'browser' is the only distinction that matters, because the
 // two hold separate sessions and each needs its own pairing code.
 const clientKind=ua=>!ua?'unknown':/Expo|okhttp|CFNetwork/i.test(ua)?'app':/Mozilla/i.test(ua)?'browser':'other';
-export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http://localhost:3000',observerOrigin='http://127.0.0.1:4318',allowedTailscaleLogin,ownerSocket=null,accessLog}={}){
+export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http://localhost:3000',observerOrigin='http://127.0.0.1:4318',allowedTailscaleLogin,ownerSocket=null,behindServe=false,accessLog}={}){
  const front=new URL(origin),ui=new URL(uiOrigin),observer=new URL(observerOrigin);
  for(const endpoint of [ui,observer])if(endpoint.protocol!=='http:'||!['localhost','127.0.0.1'].includes(endpoint.hostname)||endpoint.pathname!=='/'||endpoint.search||endpoint.hash||endpoint.username||endpoint.password)throw Error('Only loopback HTTP origins are supported.');
  const secure=front.protocol==='https:';
  if(front.origin!==origin||front.username||front.password||(!secure&&!(front.protocol==='http:'&&['localhost','127.0.0.1'].includes(front.hostname))))throw Error('Invalid connector origin.');
  if(secure&&(!front.hostname.endsWith('.ts.net')||!allowedTailscaleLogin))throw Error('Private HTTPS requires an exact Tailscale origin and owner login.');
+ if(behindServe&&!secure)throw Error('Only the private HTTPS address is reached through tailscale serve.');
+ // tailscale serve, reaching a Unix socket, sends Host: localhost and puts the name the phone asked for in
+ // X-Forwarded-Host (Tailscale 1.102.3, ipn/ipnlocal/serve.go). Only that one exact name is accepted; two such
+ // headers arrive joined and so never match.
+ const hostRight=req=>behindServe?req.headers.host==='localhost'&&req.headers['x-forwarded-host']===front.host:req.headers.host===front.host;
  const routes=new Map([['/api/observer/snapshot',['GET','/api/snapshot']],['/api/observer/pair',['POST','/api/pair']],['/api/observer/logout',['POST','/api/logout']]]);
  routes.set('/api/conversations',['GET','/api/conversations']);routes.set('/api/conversation',['POST','/api/conversation']);
  // Waiting on you, and this phone's alert switch.
@@ -35,7 +40,7 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
    identity:secure?(req.headers['tailscale-user-login']?'present':'absent'):'n/a',
    client:clientKind(req.headers['user-agent'])})}catch{}})}
   const reject=(status,message)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({error:message}))};
-  if(req.headers.host!==front.host||(req.headers.origin&&req.headers.origin!==front.origin))return reject(403,'Origin refused.');
+  if(!hostRight(req)||(req.headers.origin&&req.headers.origin!==front.origin))return reject(403,'Origin refused.');
   if(secure&&req.headers['tailscale-user-login']!==allowedTailscaleLogin)return reject(403,'Owner access required.');
   const isApi=req.url.startsWith('/api/');const route=routes.get(req.url)??(/^\/api\/screenshots\?task=[A-Za-z0-9_-]{1,100}$/.test(req.url)?['GET',req.url]:null);
   if(isApi&&(!route||req.method!==route[0]))return reject(405,'Observation only.');
@@ -70,6 +75,6 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
  const runtime=process.env.XDG_RUNTIME_DIR,frontSocket=process.env.SUPER_MOBILE_FRONT_SOCKET||(runtime?join(runtime,'super-mobile','front.sock'):null);
  if(!frontSocket)throw Error('Set XDG_RUNTIME_DIR or SUPER_MOBILE_FRONT_SOCKET for the private socket.');
  if(!origin||!allowedTailscaleLogin)throw Error('Configure the exact private origin and owner identity.');
- await listenPrivateSocket(createConnector({origin,allowedTailscaleLogin,ownerSocket}),frontSocket);
+ await listenPrivateSocket(createConnector({origin,allowedTailscaleLogin,ownerSocket,behindServe:true}),frontSocket);
  console.log(`Private mobile connector listening on ${frontSocket}.`);
 }

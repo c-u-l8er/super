@@ -2,7 +2,8 @@
  * listener (server.mjs ownerServer), which main puts on a private Unix socket. The private HTTPS front checks his
  * Tailscale login and is itself on a private Unix socket (private-connector.mjs), so no process on the machine can
  * reach either with a made-up login over TCP (Codex review 2, findings 1 and 2). Also the socket helper
- * (private-file.mjs) and the phone page (ui/app.js in the T31 phone, phone.mjs). */
+ * (private-file.mjs) and the phone page (ui/app.js in the T31 phone, phone.mjs). At the private address the front is
+ * reached as tailscale serve reaches a Unix socket: Host: localhost, his name in X-Forwarded-Host (Codex review 3). */
 import test from 'node:test';import assert from 'node:assert/strict';import http from 'node:http';
 import {chmodSync,existsSync,lstatSync,mkdirSync,mkdtempSync,rmSync,writeFileSync} from 'node:fs';
 import {tmpdir} from 'node:os';import {join} from 'node:path';import {spawn} from 'node:child_process';
@@ -26,6 +27,9 @@ const call=(where,host,origin,path,{method='GET',login,headers={},body}={})=>new
     res=>{const c=[];res.on('data',x=>c.push(x));res.on('end',()=>{let json=null;try{json=JSON.parse(Buffer.concat(c));}catch{}resolve({status:res.statusCode,headers:res.headers,json});});});
   req.on('error',reject);req.end(body===undefined?undefined:typeof body==='string'?body:JSON.stringify(body));});
 const cookieOf=r=>r.headers['set-cookie']?.[0]?.split(';')[0];
+/** A request as tailscale serve sends it to a Unix socket: Host: localhost, the phone's own host in X-Forwarded-Host
+ * (Tailscale 1.102.3, ipn/ipnlocal/serve.go), the phone's Origin, and his login. */
+const viaServe=(sock,path,{headers={},...o}={})=>call(sock,'localhost',FRONT,path,{login:OWNER,...o,headers:{'X-Forwarded-Host':new URL(FRONT).host,...headers}});
 
 /** A gateway on TCP, with its code-free listener on a private socket in a fresh folder. */
 async function gateway(t){
@@ -43,9 +47,12 @@ async function front(t,{origin=FRONT,ownerSocket='stub'}={}){
   const observerPort=await listen(t,http.createServer(record));
   let socket=ownerSocket;
   if(ownerSocket==='stub'){socket=join(dir,'g','owner.sock');const stub=http.createServer((req,res)=>{req.via='owner-socket';seen.push({line:'owner-socket '+req.method+' '+req.url,headers:req.headers});res.writeHead(200,{'Content-Type':'application/json','Set-Cookie':'super_mobile=y; HttpOnly'});res.end('{"paired":true}');});await listenPrivateSocket(stub,socket);closing(t,stub);}
-  const connector=createConnector({origin,observerOrigin:`http://127.0.0.1:${observerPort}`,allowedTailscaleLogin:OWNER,ownerSocket:socket});
+  const serve=origin.startsWith('https:');
+  const connector=createConnector({origin,observerOrigin:`http://127.0.0.1:${observerPort}`,allowedTailscaleLogin:OWNER,ownerSocket:socket,behindServe:serve});
   const frontSocket=join(dir,'f','front.sock');await listenPrivateSocket(connector,frontSocket);closing(t,connector);
-  return {seen,frontSocket,ask:(path,{login=OWNER,...o}={})=>call(frontSocket,new URL(origin).host,origin,path,{login,...o})};
+  // At the private address the front is reached as tailscale serve reaches it; plain HTTP keeps its own host.
+  const ask=(path,{login=OWNER,headers={},...o}={})=>serve?call(frontSocket,'localhost',origin,path,{login,...o,headers:{'X-Forwarded-Host':new URL(origin).host,...headers}}):call(frontSocket,new URL(origin).host,origin,path,{login,headers,...o});
+  return {seen,frontSocket,ask};
 }
 
 test("O1 · the code-free listener gives an ordinary eight-hour session; the gateway's TCP port gives none; the desktop's code still pairs",async t=>{
@@ -109,9 +116,9 @@ test('O6 · through the front, his phone connects with no code and reads Super',
   const port=await freePort(),origin=`http://127.0.0.1:${port}`,dir=temp(t);
   const server=createGateway({origin,pairingCode:CODE,snapshot:WORLD});await listen(t,server,port);
   const ownerSocket=join(dir,'m','owner.sock');await listenPrivateSocket(server.ownerServer,ownerSocket);closing(t,server.ownerServer);
-  const connector=createConnector({origin:FRONT,observerOrigin:origin,allowedTailscaleLogin:OWNER,ownerSocket});
+  const connector=createConnector({origin:FRONT,observerOrigin:origin,allowedTailscaleLogin:OWNER,ownerSocket,behindServe:true});
   const frontSocket=join(dir,'f','front.sock');await listenPrivateSocket(connector,frontSocket);closing(t,connector);
-  const ask=(path,o={})=>call(frontSocket,new URL(FRONT).host,FRONT,path,{login:OWNER,...o});
+  const ask=(path,o={})=>viaServe(frontSocket,path,o);
   const r=await ask('/api/pair-owner',{method:'POST',body:'{}'});
   assert.equal(r.status,200);assert.match(r.headers['set-cookie'][0],/; Secure/);
   const s=await ask('/api/snapshot',{headers:{Cookie:cookieOf(r)}});assert.equal(s.status,200);assert.equal(s.json.mode,'read-only');
@@ -140,8 +147,45 @@ test('O7 · started, the gateway puts its code-free listener on a 0600 socket be
   const f=await started(t,'../private-connector.mjs',{SUPER_MOBILE_PRIVATE_ORIGIN:FRONT,SUPER_MOBILE_TAILSCALE_LOGIN:OWNER,SUPER_MOBILE_FRONT_SOCKET:join(d,'f','front.sock'),SUPER_MOBILE_OWNER_SOCKET:sock},/listening on /);
   assert.match(f.out(),new RegExp(`listening on ${join(d,'f','front.sock').replace(/[.*+?^${}()|[\]\\]/g,'\\$&')}\\.`));
   const fs=lstatSync(join(d,'f','front.sock'));assert.ok(fs.isSocket());assert.equal(fs.mode&0o777,0o600);assert.equal(lstatSync(join(d,'f')).mode&0o777,0o700);
-  assert.equal((await call(join(d,'f','front.sock'),new URL(FRONT).host,FRONT,'/api/waiting')).status,403,'no login, no way in');
+  const fsock=join(d,'f','front.sock');
+  assert.equal((await viaServe(fsock,'/api/waiting',{login:null})).status,403,'no login, no way in');
+  // As started, it takes tailscale serve's headers: past the checks, the stopped gateway's socket is gone (503).
+  // Nothing here reaches port 4318, where a real gateway may be running.
+  const r2=await viaServe(fsock,'/api/pair-owner',{method:'POST',body:{}});
+  assert.equal(r2.status,503,'tailscale serve gets through');assert.match(r2.json.error,/Use a pairing code/);
+  assert.equal((await call(fsock,new URL(FRONT).host,FRONT,'/api/pair-owner',{method:'POST',body:{},login:OWNER})).status,403,'but not a request that did not come through serve');
   await f.stop();
+});
+
+test('O12 · behind tailscale serve, the front takes Host: localhost and only his exact name in X-Forwarded-Host',async t=>{
+  const {seen,frontSocket}=await front(t);
+  const serve=(path,o)=>viaServe(frontSocket,path,o);
+  assert.equal((await serve('/api/waiting')).status,200,'as serve sends it, the list goes through');
+  assert.equal((await serve('/api/pair-owner',{method:'POST',body:'{}'})).status,200,'and so does connecting with no code');
+  assert.equal((await serve('/api/logout',{method:'POST',body:'{}'})).status,200,'and Disconnect');
+  const n=seen.length;
+  const host=new URL(FRONT).host;
+  assert.equal((await call(frontSocket,host,FRONT,'/api/waiting',{login:OWNER})).status,403,'his name as Host, not through serve');
+  assert.equal((await call(frontSocket,host,FRONT,'/api/waiting',{login:OWNER,headers:{'X-Forwarded-Host':host}})).status,403,'his name as Host, even with the forwarded name');
+  assert.equal((await serve('/api/waiting',{headers:{'X-Forwarded-Host':'evil.example.ts.net'}})).status,403,'another name');
+  assert.equal((await serve('/api/waiting',{headers:{'X-Forwarded-Host':host+':443'}})).status,403,'his name with a port');
+  assert.equal((await serve('/api/waiting',{headers:{'X-Forwarded-Host':[host,host]}})).status,403,'two forwarded names');
+  assert.equal((await call(frontSocket,'localhost',FRONT,'/api/waiting',{login:OWNER})).status,403,'no forwarded name');
+  assert.equal((await serve('/api/waiting',{login:null})).status,403,'no login');
+  assert.equal((await serve('/api/pair-owner',{method:'POST',body:'{}',headers:{Origin:'https://evil.example'}})).status,403,'another origin');
+  assert.equal(seen.length,n,'nothing refused reaches the gateway');
+  assert.throws(()=>createConnector({origin:'http://127.0.0.1:4319',behindServe:true}),/only the private https address/i);
+});
+
+test('O13 · sessions that have ended do not stop his phone connecting with no code',async t=>{
+  const time={now:1_800_000_000_000},dir=temp(t),mobile=join(dir,'m');mkdirSync(mobile,{mode:0o700});
+  const server=createGateway({origin:ORIGIN,pairingCode:CODE,now:()=>time.now,snapshot:WORLD,sessionFile:join(mobile,'sessions.json')});
+  await listen(t,server);const socket=join(mobile,'owner.sock');await listenPrivateSocket(server.ownerServer,socket);closing(t,server.ownerServer);
+  const owner=()=>call(socket,'127.0.0.1:4318',ORIGIN,'/api/pair-owner',{method:'POST',body:{}});
+  for(let made=0;made<64;){for(let i=0;i<6&&made<64;i++,made++)assert.equal((await owner()).status,200);time.now+=61_000;}
+  assert.equal((await owner()).status,503,'64 live sessions fill the store');
+  time.now+=28_800_000;
+  assert.equal((await owner()).status,200,'once they have ended, his phone connects');
 });
 
 test('O11 · a private socket: a 0700 folder of ours, a 0600 socket, only our own old socket replaced',async t=>{
