@@ -4,7 +4,13 @@ import {createHash, randomBytes, randomUUID, timingSafeEqual} from 'node:crypto'
 import {readFile, rename, writeFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import {createInterface} from 'node:readline';
-const assets = new Map([['/conversation-list.js',['../cockpit/ui/conversation-list.js','text/javascript']],['/conversation-turns.js',['../cockpit/ui/conversation-turns.js','text/javascript']],['/conversations.js',['ui/conversations.js','text/javascript']],['/', ['ui/index.html','text/html']], ['/app.js',['ui/app.js','text/javascript']], ['/style.css',['ui/style.css','text/css']], ['/task-progress.js',['../cockpit/ui/task-progress.js','text/javascript']], ['/references.js',['../cockpit/ui/references.js','text/javascript']], ['/review-test-coverage.js',['../cockpit/ui/review-test-coverage.js','text/javascript']],['/archived-record.js',['../cockpit/ui/archived-record.js','text/javascript']]]);
+import {dirname,join} from 'node:path';
+import {waitingView} from './waiting.mjs';
+import {gatewayAlerts} from './waiting-alerts.mjs';
+import {listenPrivateSocket} from './private-file.mjs';
+const assets = new Map([['/conversation-list.js',['../cockpit/ui/conversation-list.js','text/javascript']],['/conversation-turns.js',['../cockpit/ui/conversation-turns.js','text/javascript']],['/conversations.js',['ui/conversations.js','text/javascript']],['/', ['ui/index.html','text/html']], ['/app.js',['ui/app.js','text/javascript']], ['/style.css',['ui/style.css','text/css']], ['/task-progress.js',['../cockpit/ui/task-progress.js','text/javascript']], ['/references.js',['../cockpit/ui/references.js','text/javascript']], ['/review-test-coverage.js',['../cockpit/ui/review-test-coverage.js','text/javascript']],['/archived-record.js',['../cockpit/ui/archived-record.js','text/javascript']],['/waiting.js',['ui/waiting.js','text/javascript']],['/sw.js',['ui/sw.js','text/javascript']],['/manifest.webmanifest',['ui/manifest.webmanifest','application/manifest+json']],['/mobile',['ui/index.html','text/html']]]);
+// The home-screen icon: the desktop's own. Binary, so apart from the text assets above.
+const images=new Map([['/icon-512.png','../cockpit/icons/icon.png'],['/icon-128.png','../cockpit/icons/128x128.png']]);
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 // App or browser, and nothing finer. The two hold separate sessions and each
 // needs its own code, which is the only distinction worth reporting; the raw
@@ -12,10 +18,10 @@ const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength
 const kindOf=ua=>!ua?'unknown':/Expo|okhttp|CFNetwork/i.test(ua)?'app':/Mozilla/i.test(ua)?'browser':'other';
 // Distinguishes two devices without exposing either session. One way, truncated.
 const deviceId=token=>createHash('sha256').update('super-mobile-device:'+token).digest('hex').slice(0,6);
-export function createGateway({snapshot, conversations=async()=>({available:false}), conversation=async()=>({error:"Conversation channel unavailable."}), screenshots=async()=>({available:false}), pairingCode, origin, now=Date.now, onDevices, sessionFile}) {
+export function createGateway({snapshot, conversations=async()=>({available:false}), conversation=async()=>({error:"Conversation channel unavailable."}), screenshots=async()=>({available:false}), waiting=async()=>({available:false,reason:'No board is set up on this Super.',lines:[],open:0}), alerts=null, pairingCode, origin, now=Date.now, onDevices, sessionFile}) {
   const publicURL=new URL(origin);
   if(publicURL.origin!==origin || (publicURL.protocol!=='https:' && !(publicURL.protocol==='http:'&&['localhost','127.0.0.1'].includes(publicURL.hostname)))) throw Error('Use HTTPS, or loopback HTTP for development.');
-  let pairUntil=now()+600_000, used=false, failures=0, windowEnd=now()+60_000;
+  let pairUntil=now()+600_000, used=false, failures=0, windowEnd=now()+60_000, ownerMade=0, ownerWindow=now()+60_000;
   const persistence=sessionFile?sessionStore(sessionFile,origin,now):null;
   const sessions=new Map(persistence?.load()??[]), secure=publicURL.protocol==='https:';
   // Who is reading, for the desktop to show. Identifiers are derived from the
@@ -33,13 +39,14 @@ export function createGateway({snapshot, conversations=async()=>({available:fals
   };
   const cookie=(v,age=28800)=>`super_mobile=${v}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${age}${secure?'; Secure':''}`;
   const server=http.createServer({maxHeaderSize:8192,requestTimeout:5000,headersTimeout:5000},async(req,res)=>{
-    const send=(status,data,headers={})=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",...headers});res.end(typeof data==='string'?data:JSON.stringify(data));};
+    const send=(status,data,headers={})=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store','X-Content-Type-Options':'nosniff','Referrer-Policy':'no-referrer','Content-Security-Policy':"default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",...headers});res.end(typeof data==='string'||Buffer.isBuffer(data)?data:JSON.stringify(data));};
     try {
       if(req.headers.host!==publicURL.host || (req.headers.origin&&req.headers.origin!==origin))return send(403,{error:'Connection origin refused.'});
       if(req.method==='POST'&&req.headers.origin!==origin)return send(403,{error:'A same-origin request is required.'});
       if(req.method==='GET'&&assets.has(req.url)){
         const [path,type]=assets.get(req.url);return send(200,await readFile(new URL(path,import.meta.url),'utf8'),{'Content-Type':type+'; charset=utf-8'});
       }
+      if(req.method==='GET'&&images.has(req.url))return send(200,await readFile(new URL(images.get(req.url),import.meta.url)),{'Content-Type':'image/png'});
       const sid=(req.headers.cookie??'').split(';').map(x=>x.trim()).find(x=>x.startsWith('super_mobile='))?.slice(13);
       for(const [id,s]of sessions)if(s.expires<=now())sessions.delete(id);
       publish();
@@ -59,7 +66,7 @@ export function createGateway({snapshot, conversations=async()=>({available:fals
       }
       if(!sessions.has(sid))return send(401,{error:'Pair this device to view Super.'});
       sessions.get(sid).lastSeen=now();publish();
-      if(req.url==='/api/logout'&&req.method==='POST'){const previous=sessions.get(sid);sessions.delete(sid);try{persistence?.save(sessions)}catch{sessions.set(sid,previous);throw Error('Disconnect could not be retained.');}publish();return send(200,{paired:false},{'Set-Cookie':cookie('',0)});}
+      if(req.url==='/api/logout'&&req.method==='POST'){const previous=sessions.get(sid);sessions.delete(sid);try{persistence?.save(sessions)}catch{sessions.set(sid,previous);throw Error('Disconnect could not be retained.');}publish();alerts?.forget(deviceId(sid));return send(200,{paired:false},{'Set-Cookie':cookie('',0)});}
       if(req.method==='GET'&&/^\/api\/screenshots\?task=[A-Za-z0-9_-]{1,100}$/.test(req.url)){const value=await screenshots(new URL(req.url,origin).searchParams.get('task'));if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});return send(200,value);}
       if(req.url==='/api/conversations'&&req.method==='GET'){
         const value=await conversations();if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});return send(200,value);
@@ -72,6 +79,31 @@ export function createGateway({snapshot, conversations=async()=>({available:fals
         if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});
         return send(200,await conversation(request));
       }
+      // Waiting on you: the board from the Mac, read by Super as its own source (waiting.mjs). Read-only.
+      if(req.url==='/api/waiting'&&req.method==='GET'){
+        const value=await waiting();if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});
+        return send(200,{schema:'super-waiting-view@1',...value});
+      }
+      // Alerts on this phone. Turning them on hands Super the phone's push subscription; nothing here runs anything.
+      if(req.url==='/api/push'&&req.method==='GET')return send(200,alerts?alerts.info():{available:false,reason:'Alerts are not set up on this Super.'});
+      const pushRoute=/^\/api\/push\/(subscribe|unsubscribe|status|test)$/.exec(req.url);
+      if(pushRoute&&req.method==='POST'){
+        if(req.headers['content-type']!=='application/json')return send(415,{error:'JSON required.'});
+        const chunks=[];let size=0;for await(const chunk of req){size+=chunk.length;if(size>2048)return send(413,{error:'Request too large.'});chunks.push(chunk);}
+        let body;try{body=JSON.parse(Buffer.concat(chunks).toString('utf8'))}catch{return send(400,{error:'Invalid JSON.'})}
+        if(!body||typeof body!=='object'||Array.isArray(body))return send(400,{error:'A JSON object is required.'});
+        if(!alerts)return send(503,{error:'Alerts are not set up on this Super.'});
+        if(!sessions.has(sid)||sessions.get(sid).expires<=now())return send(401,{error:'Session ended.'});
+        const operation=pushRoute[1];
+        if(operation==='subscribe'){
+          if(Object.keys(body).some(k=>!['endpoint','keys','expirationTime'].includes(k)))return send(400,{error:'A push subscription has only an endpoint and keys.'});
+          try{return send(200,alerts.subscribe(deviceId(sid),{endpoint:body.endpoint,keys:body.keys}));}catch(e){return send(400,{error:e.message});}
+        }
+        if(typeof body.endpoint!=='string'||Object.keys(body).length!==1)return send(400,{error:"This phone's push endpoint is required."});
+        if(operation==='unsubscribe')return send(200,alerts.unsubscribe(body.endpoint));
+        if(operation==='status')return send(200,alerts.status(body.endpoint));
+        return send(200,await alerts.test(body.endpoint));
+      }
       if(req.url==='/api/snapshot'&&req.method==='GET'){
         let timer;try{const value=await Promise.race([snapshot(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('timeout')),2500);})]);
           // Recheck revocation and expiry after waiting for the host.
@@ -83,6 +115,28 @@ export function createGateway({snapshot, conversations=async()=>({available:fals
     }catch{return send(503,{error:'Host unavailable. Reconnect to see current state.'});}
   });
   server.maxConnections=32;server.keepAliveTimeout=3000;
+  /**
+   * Connecting his phone without a code: a second listener that does only that. Main puts it on a Unix socket in
+   * the private state folder (0600 in a 0700 folder), so only this user and root reach it; the private HTTPS front
+   * asks it after checking his Tailscale login. No TCP port, header or key can get a session without a code, and
+   * the desktop's one-use code is left as it was. What it gives is an ordinary eight-hour session. Six a minute,
+   * counted as each request arrives, so requests still sending their bodies count too.
+   */
+  server.ownerServer=http.createServer({maxHeaderSize:8192,requestTimeout:5000,headersTimeout:5000},async(req,res)=>{
+    const send=(status,data,headers={})=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store',...headers});res.end(JSON.stringify(data));};
+    try{
+      if(req.url!=='/api/pair-owner'||req.method!=='POST')return send(405,{error:'This listener only connects his phone without a code.'});
+      if(now()>ownerWindow){ownerWindow=now()+60_000;ownerMade=0;}
+      if(ownerMade>=6)return send(429,{error:'Too many attempts. Try again in a minute.'});
+      ownerMade++;let size=0;for await(const chunk of req){size+=chunk.length;if(size>1024)return send(413,{error:'Request too large.'});}
+      for(const [id,s]of sessions)if(s.expires<=now())sessions.delete(id);
+      const token=randomBytes(32).toString('hex'),at=now();
+      sessions.set(token,{expires:at+28_800_000,pairedAt:at,lastSeen:at,kind:kindOf(req.headers['user-agent'])});
+      try{persistence?.save(sessions);}catch{sessions.delete(token);return send(503,{error:'Connecting could not be retained.'});}
+      publish();
+      return send(200,{paired:true,by:'owner'},{'Set-Cookie':cookie(token)});
+    }catch{if(!res.headersSent)send(503,{error:'Host unavailable. Reconnect to see current state.'});}
+  });
   /**
    * Replace the one-use code without restarting.
    *
@@ -141,7 +195,12 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
       await rename(devicesFile+'.new',devicesFile);
     }).catch(()=>{});
   };
-  const server=createGateway({snapshot,screenshots,conversations,conversation,pairingCode:code,origin,onDevices,sessionFile:process.env.SUPER_MOBILE_SESSION_FILE});
+  // Waiting on you and its alerts: files beside the session file (the desktop passes only that path, so the
+  // folders are found from it): ~/.local/state/super/mobile for the phones, ~/.local/state/super/waiting for the board.
+  const sessionFile=process.env.SUPER_MOBILE_SESSION_FILE,mobileDir=sessionFile?.startsWith('/')?dirname(sessionFile):null;
+  const waitingDir=mobileDir&&join(dirname(mobileDir),'waiting');
+  const server=createGateway({snapshot,screenshots,conversations,conversation,pairingCode:code,origin,onDevices,sessionFile,
+    ...(waitingDir?{waiting:async()=>waitingView(waitingDir,Date.now()),alerts:gatewayAlerts({dir:waitingDir,mobileDir})}:{})});
   // Exclusive creation refuses old files and symlinks; never log the code.
   await writeFile(pairFile,code+'\n',{mode:0o600,flag:'wx'});
   // Written then renamed, like the devices file beside it, so a desktop
@@ -155,6 +214,10 @@ if(process.argv[1]===fileURLToPath(import.meta.url)){
       server.renewPairing(next);
     }catch{/* a code that could not be written is not a code */}
   };
-  lines.on('close',()=>{server.closeAllConnections();server.close();process.exit(0);});
+  lines.on('close',()=>{server.closeAllConnections();server.close();server.ownerServer.close();process.exit(0);});
+  // His phone without a code: the owner listener on its private socket beside the session file. Without a session
+  // file there is no private folder, and codes are the only way.
+  const ownerSocket=mobileDir&&join(mobileDir,'owner.sock');
+  if(ownerSocket)await listenPrivateSocket(server.ownerServer,ownerSocket).catch(e=>process.stderr.write(`Super mobile: no connecting without a code (${e.message})\n`));
   server.listen(port,'127.0.0.1',()=>process.stderr.write(`Super mobile observer: ${origin}; one-use pairing code in ${pairFile} (10 minutes).\n`));
 }

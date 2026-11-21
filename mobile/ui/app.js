@@ -1,4 +1,5 @@
 import {initConversations} from '/conversations.js';
+import {initWaiting} from '/waiting.js';
 import {taskProgress} from '/task-progress.js';
 import {withheldAttemptsNote} from '/archived-record.js';
 import {referenceText,setReferenceFrame,setReferenceRouting} from './references.js';
@@ -55,12 +56,15 @@ const api=async(path,body)=>{const r=await fetch('/api/'+path,{method:body?'POST
 function withdraw(message){current=null;setReferenceFrame(null);$('#status').textContent=message;render();}
 const linkedTask=link=>current?.available&&JSON.stringify([current.world?.world_incarnation,current.world?.world_generation])===link.lineage&&current.projection?.development_tasks?.[link.taskId]?.revision===link.revision?current.projection.development_tasks[link.taskId]:null;
 const chat=initConversations(document.querySelector('#conversations'),()=>view==='chat'&&paired,{taskInfo:linkedTask,onTask:link=>{if(!linkedTask(link))return;go({view:'tasks',plan:link.taskId});}});
+/* Waiting on you sits above the plans in Needs me, from its own source (ui/waiting.js). */
+const waiting=initWaiting(document.querySelector('#waiting'),{shown:()=>paired&&view==='attention'&&!selected,paired:()=>paired});
 function render(){
   draw();
   const key=placeHash(place());if(key!==shown){shown=key;if(view!=='chat')window.scrollTo(0,restore??0);}restore=null;
 }
 function draw(){
   document.body.classList.toggle('chat-mode',view==='chat');
+  waiting.update();
   document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));content.hidden=view==='chat';$('#conversations').hidden=view!=='chat';if(view==='chat')return;
   content.replaceChildren();document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-current',b.dataset.view===view?'page':'false'));
   if(!current?.available){content.append(node('h1','Host unavailable'),node('p','Reconnect to see current tasks. No saved state is being shown as live.','empty'));return;}
@@ -113,7 +117,7 @@ function draw(){
     // F9: one tap asks; only Disconnect ends the session. The question outlives the 2 s redraw.
     // N3: it opens at the foot of the page, so reveal() brings it clear of the tab bar as it opens (never on a redraw).
     if(!asking)content.append(button('Disconnect this device',()=>{asking=true;askRoom=0;render();reveal();requestAnimationFrame(reveal);},'danger'));
-    else{const ask=node('section',undefined,'card confirm');if(askRoom)ask.style.marginBottom=askRoom+'px';ask.append(node('h2','Disconnect this phone?'),node('p','To connect again you will need a new pairing code from desktop Super.','muted'),button('Disconnect',disconnect,'danger'),button('Cancel',()=>{asking=false;render();}));content.append(ask);}
+    else{const ask=node('section',undefined,'card confirm');if(askRoom)ask.style.marginBottom=askRoom+'px';ask.append(node('h2','Disconnect this phone?'),node('p',ownerPossible()?'To connect again, tap Connect this phone.':'To connect again you will need a new pairing code from desktop Super.','muted'),button('Disconnect',disconnect,'danger'),button('Cancel',()=>{asking=false;render();}));content.append(ask);}
   }
 }
 /* T31 N3 (second fix): the question must end above the tab bar, and the bar is MEASURED as drawn. On an iPhone, Safari's
@@ -127,13 +131,31 @@ function reveal(){
   if(spare<over){askRoom+=Math.ceil(over-spare);card.style.marginBottom=askRoom+'px';}
   window.scrollBy(0,over);
 }
-async function disconnect(){serial++;try{await api('logout',{});asking=false;paired=false;current=null;selected=null;lastWorld=null;content.replaceChildren();$('#app').hidden=true;$('#pair').hidden=false;notice.textContent='Device disconnected. In desktop Super, open Mobile device and choose New pairing code to connect again.';}catch{asking=false;withdraw('Disconnect not confirmed');notice.textContent='Could not confirm disconnection. Restore the connection and try again, or restart the desktop observer to end all device sessions.';}}
-async function refresh(){if(busy)return;busy=true;const request=serial;try{const next=await api('snapshot');if(request!==serial||document.hidden)return;paired=true;$('#pair').hidden=true;$('#app').hidden=false;const identity=w=>JSON.stringify([w?.world_incarnation,w?.world_generation,w?.projection_epoch]);const nextWorld=next.available?identity(next.world):null;const changed=lastWorld&&nextWorld&&lastWorld!==nextWorld;if(nextWorld)lastWorld=nextWorld;const redraw=JSON.stringify(current)!==JSON.stringify(next);current=next;setReferenceFrame(next.available?next:null);lastSuccess=Date.now();$('#status').textContent=next.available?'● Connected':'Host reconnecting';if(next.available)notice.textContent='';if(changed&&selected){selected=null;settle();}if(redraw)render();}catch(e){if(request!==serial)return;if(e.status===401){if(paired)notice.textContent='This session ended. Ask desktop Super for a new pairing code.';paired=false;$('#app').hidden=true;$('#pair').hidden=false;current=null;selected=null;settle();lastWorld=null;content.replaceChildren();}else{withdraw('Disconnected');if(paired)notice.textContent='The connection was interrupted. We’ll retry while this page is open.';}}finally{busy=false;}}
+async function disconnect(){serial++;try{await api('logout',{});asking=false;paired=false;current=null;selected=null;lastWorld=null;waiting.reset();content.replaceChildren();$('#app').hidden=true;$('#pair').hidden=false;stayOut.set(true);notice.textContent=ownerPossible()?'Device disconnected. Tap Connect this phone to connect again.':'Device disconnected. In desktop Super, open Mobile device and choose New pairing code to connect again.';}catch{asking=false;withdraw('Disconnect not confirmed');notice.textContent='Could not confirm disconnection. Restore the connection and try again, or restart the desktop observer to end all device sessions.';}}
+async function refresh(){if(busy)return;busy=true;const request=serial;try{const next=await api('snapshot');if(request!==serial||document.hidden)return;paired=true;$('#pair').hidden=true;$('#app').hidden=false;const identity=w=>JSON.stringify([w?.world_incarnation,w?.world_generation,w?.projection_epoch]);const nextWorld=next.available?identity(next.world):null;const changed=lastWorld&&nextWorld&&lastWorld!==nextWorld;if(nextWorld)lastWorld=nextWorld;const redraw=JSON.stringify(current)!==JSON.stringify(next);current=next;setReferenceFrame(next.available?next:null);lastSuccess=Date.now();$('#status').textContent=next.available?'● Connected':'Host reconnecting';if(next.available)notice.textContent='';if(changed&&selected){selected=null;settle();}if(redraw)render();}catch(e){if(request!==serial)return;if(e.status===401){if(paired)notice.textContent='This session ended. Ask desktop Super for a new pairing code.';paired=false;$('#app').hidden=true;$('#pair').hidden=false;current=null;selected=null;settle();lastWorld=null;content.replaceChildren();void ownerConnect(false);}else{withdraw('Disconnected');if(paired)notice.textContent='The connection was interrupted. We’ll retry while this page is open.';}}finally{busy=false;}}
 /* T31 N1: one pair request at a time. Return and then a tap on Connect sent two, and the browser's "Fetch is aborted"
  * reached the notice. Connect is disabled while one is in flight; a failure with no answer from the gateway (aborted,
  * timed out, offline) is said plainly, and the gateway's own refusals are shown as it words them. */
 let pairing=false;
 $('#pair-form').onsubmit=async e=>{e.preventDefault();if(pairing)return;pairing=true;const connect=$('#pair-form button');connect.disabled=true;serial++;try{await api('pair',{code:pairingCode($('#code').value)});$('#code').value='';notice.textContent='';paired=true;await refresh();}catch(e){notice.textContent=e.status?e.message:'Could not reach desktop Super. Check the connection, then connect again.';}finally{pairing=false;connect.disabled=false;}};
+/* Connecting without a code. At the private HTTPS address his Tailscale sign-in already shows the phone is his, so
+ * the page asks for a session by itself (POST /api/pair-owner; the front adds the gateway's key, which the phone
+ * never sees). At most once in 30 seconds by itself, and not at all after he chose Disconnect on this phone, until
+ * he taps Connect this phone. Anywhere else (plain HTTP, the Expo app) the pairing code is the only way. */
+const STAY_OUT='super-mobile-stay-out';
+const stayOut={get(){try{return localStorage.getItem(STAY_OUT)==='1';}catch{return false;}},set(on){try{if(on)localStorage.setItem(STAY_OUT,'1');else localStorage.removeItem(STAY_OUT);}catch{}}};
+const ownerPossible=()=>location.protocol==='https:';
+let ownerTried=-Infinity;
+async function ownerConnect(asked){
+  if(!ownerPossible()||pairing)return;
+  if(!asked&&(stayOut.get()||Date.now()-ownerTried<30_000))return;
+  ownerTried=Date.now();pairing=true;const connect=$('#owner-connect');connect.disabled=true;serial++;
+  try{await api('pair-owner',{});stayOut.set(false);notice.textContent='';paired=true;await refresh();}
+  catch(e){if(asked)notice.textContent=e.status?e.message:'Could not reach desktop Super. Check the connection, then connect again.';}
+  finally{pairing=false;connect.disabled=false;}
+}
+$('#owner-connect').onclick=()=>{notice.textContent='';void ownerConnect(true);};
+if(ownerPossible()){$('#owner').hidden=false;$('#pair-intro').textContent='At this private address your Tailscale sign-in shows this phone is yours, so Super connects it without a code. A pairing code from desktop Super (Runtime → Mobile device) works too.';}
 $('#refresh').onclick=()=>{notice.textContent='';refresh();};
 document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>go({view:b.dataset.view,plan:null,bot:null}));
 window.addEventListener('popstate',e=>{adopt(parsePlace(location.hash));restore=e.state?.scroll??0;render();});

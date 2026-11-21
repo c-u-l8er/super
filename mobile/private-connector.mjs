@@ -1,20 +1,40 @@
 import http from 'node:http';
+import {isIP} from 'node:net';
 import {fileURLToPath} from 'node:url';
+import {join} from 'node:path';
+import {homedir} from 'node:os';
+import {listenPrivateSocket} from './private-file.mjs';
 // A local-only composition layer. Host access stays on the paired observer;
 // this process never receives the Super runtime's command channel.
 // Which side of the chain a request came from. The raw user agent is never
 // logged; 'app' vs 'browser' is the only distinction that matters, because the
 // two hold separate sessions and each needs its own pairing code.
 const clientKind=ua=>!ua?'unknown':/Expo|okhttp|CFNetwork/i.test(ua)?'app':/Mozilla/i.test(ua)?'browser':'other';
-export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http://localhost:3000',observerOrigin='http://127.0.0.1:4318',allowedTailscaleLogin,accessLog}={}){
+export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http://localhost:3000',observerOrigin='http://127.0.0.1:4318',allowedTailscaleLogin,ownerSocket=null,behindServe=false,ownerDevices=[],ownerRefused,accessLog}={}){
  const front=new URL(origin),ui=new URL(uiOrigin),observer=new URL(observerOrigin);
  for(const endpoint of [ui,observer])if(endpoint.protocol!=='http:'||!['localhost','127.0.0.1'].includes(endpoint.hostname)||endpoint.pathname!=='/'||endpoint.search||endpoint.hash||endpoint.username||endpoint.password)throw Error('Only loopback HTTP origins are supported.');
  const secure=front.protocol==='https:';
  if(front.origin!==origin||front.username||front.password||(!secure&&!(front.protocol==='http:'&&['localhost','127.0.0.1'].includes(front.hostname))))throw Error('Invalid connector origin.');
  if(secure&&(!front.hostname.endsWith('.ts.net')||!allowedTailscaleLogin))throw Error('Private HTTPS requires an exact Tailscale origin and owner login.');
+ if(behindServe&&!secure)throw Error('Only the private HTTPS address is reached through tailscale serve.');
+ // tailscale serve, reaching a Unix socket, sends Host: localhost and puts the name the phone asked for in
+ // X-Forwarded-Host (Tailscale 1.102.3, ipn/ipnlocal/serve.go). Only that one exact name is accepted; two such
+ // headers arrive joined and so never match.
+ const hostRight=req=>behindServe?req.headers.host==='localhost'&&req.headers['x-forwarded-host']===front.host:req.headers.host===front.host;
+ // Tailscale's login header names the owner of the device a request came from, and any program on any of his devices
+ // counts as him; a program on the PX13 itself does too, whichever user runs it. So connecting without a code is only
+ // for his phone, by the tailnet address serve stamps in X-Forwarded-For. Every other device uses a pairing code.
+ const devices=new Set(ownerDevices.map(a=>String(a).toLowerCase()));
+ for(const a of devices)if(!isIP(a))throw Error('Each device that connects without a code must be given by its Tailscale address.');
+ const sourceOf=req=>{const v=String(req.headers['x-forwarded-for']??'').toLowerCase(),m=/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/.exec(v);return m?m[1]:v;};
  const routes=new Map([['/api/observer/snapshot',['GET','/api/snapshot']],['/api/observer/pair',['POST','/api/pair']],['/api/observer/logout',['POST','/api/logout']]]);
  routes.set('/api/conversations',['GET','/api/conversations']);routes.set('/api/conversation',['POST','/api/conversation']);
- const companionAssets=new Map([['/conversation-list.js','/conversation-list.js'],['/conversation-turns.js','/conversation-turns.js'],['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/review-test-coverage.js','/review-test-coverage.js'],['/archived-record.js','/archived-record.js']]);
+ // Waiting on you, and this phone's alert switch.
+ routes.set('/api/waiting',['GET','/api/waiting']);routes.set('/api/push',['GET','/api/push']);
+ for(const operation of ['subscribe','unsubscribe','status','test'])routes.set('/api/push/'+operation,['POST','/api/push/'+operation]);
+ // Connecting his phone without a code: only at the private HTTPS address, where his Tailscale login is checked.
+ if(secure&&behindServe&&ownerSocket&&devices.size)routes.set('/api/pair-owner',['POST','/api/pair-owner']);
+ const companionAssets=new Map([['/conversation-list.js','/conversation-list.js'],['/conversation-turns.js','/conversation-turns.js'],['/conversations.js','/conversations.js'],['/mobile','/'],['/mobile/','/'],['/app.js','/app.js'],['/style.css','/style.css'],['/task-progress.js','/task-progress.js'],['/references.js','/references.js'],['/review-test-coverage.js','/review-test-coverage.js'],['/archived-record.js','/archived-record.js'],['/waiting.js','/waiting.js'],['/sw.js','/sw.js'],['/manifest.webmanifest','/manifest.webmanifest'],['/icon-512.png','/icon-512.png'],['/icon-128.png','/icon-128.png']]);
  for(const operation of ['snapshot','pair','logout'])routes.set('/api/'+operation,[operation==='snapshot'?'GET':'POST','/api/'+operation]);
  return http.createServer((req,res)=>{void handle(req,res).catch(()=>{if(!res.headersSent)res.writeHead(503);res.end()})});
  async function handle(req,res){
@@ -27,7 +47,7 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
    identity:secure?(req.headers['tailscale-user-login']?'present':'absent'):'n/a',
    client:clientKind(req.headers['user-agent'])})}catch{}})}
   const reject=(status,message)=>{res.writeHead(status,{'Content-Type':'application/json','Cache-Control':'no-store'});res.end(JSON.stringify({error:message}))};
-  if(req.headers.host!==front.host||(req.headers.origin&&req.headers.origin!==front.origin))return reject(403,'Origin refused.');
+  if(!hostRight(req)||(req.headers.origin&&req.headers.origin!==front.origin))return reject(403,'Origin refused.');
   if(secure&&req.headers['tailscale-user-login']!==allowedTailscaleLogin)return reject(403,'Owner access required.');
   const isApi=req.url.startsWith('/api/');const route=routes.get(req.url)??(/^\/api\/screenshots\?task=[A-Za-z0-9_-]{1,100}$/.test(req.url)?['GET',req.url]:null);
   if(isApi&&(!route||req.method!==route[0]))return reject(405,'Observation only.');
@@ -42,15 +62,33 @@ export function createConnector({origin='http://127.0.0.1:4319',uiOrigin='http:/
    if(req.headers[name]!==undefined)headers[name]=req.headers[name];
   }
   if(isApi){if(req.headers.cookie)headers.cookie=req.headers.cookie;if(req.method==='POST'){headers.origin=observer.origin;headers['content-type']=req.headers['content-type']??''}}
+  // Connecting without a code goes to the gateway's own private socket, not its TCP port: only this front, after the
+  // owner check above, can ask it. Nothing the phone sends is copied but the cookie, origin and content type.
+  const owner=route?.[1]==='/api/pair-owner';
+  if(owner&&!devices.has(sourceOf(req))){try{ownerRefused?.(sourceOf(req));}catch{}return reject(403,'Only his phone connects without a code. Use a pairing code on this device.');}
   let body=Buffer.alloc(0);
-  if(req.method==='POST'){for await(const chunk of req){body=Buffer.concat([body,chunk]);if(body.length>(req.url==='/api/conversation'?12000:1024))return reject(413,'Request too large.')}headers['content-length']=String(body.length)}
-  const upstream=http.request({hostname:target.hostname,port:target.port||80,path:route?route[1]:asset||req.url,method:req.method,headers,timeout:5000},reply=>{const outgoing={...reply.headers,'cache-control':'no-store'};if(secure&&outgoing['set-cookie'])outgoing['set-cookie']=outgoing['set-cookie'].map(value=>/;\s*Secure(?:;|$)/i.test(value)?value:value+'; Secure');delete outgoing['transfer-encoding'];res.writeHead(reply.statusCode??502,outgoing);reply.pipe(res)});
-  upstream.on('timeout',()=>upstream.destroy());upstream.on('error',()=>{if(!res.headersSent)reject(503,'Local host connection unavailable.');else res.destroy()});
+  if(req.method==='POST'){for await(const chunk of req){body=Buffer.concat([body,chunk]);if(body.length>(req.url==='/api/conversation'?12000:req.url.startsWith('/api/push/')?2048:1024))return reject(413,'Request too large.')}headers['content-length']=String(body.length)}
+  const upstream=http.request({...(owner?{socketPath:ownerSocket}:{hostname:target.hostname,port:target.port||80}),path:route?route[1]:asset||req.url,method:req.method,headers,timeout:5000},reply=>{const outgoing={...reply.headers,'cache-control':'no-store'};if(secure&&outgoing['set-cookie'])outgoing['set-cookie']=outgoing['set-cookie'].map(value=>/;\s*Secure(?:;|$)/i.test(value)?value:value+'; Secure');delete outgoing['transfer-encoding'];res.writeHead(reply.statusCode??502,outgoing);reply.pipe(res)});
+  upstream.on('timeout',()=>upstream.destroy());upstream.on('error',()=>{if(!res.headersSent)reject(503,owner?'Connecting without a code is not available right now. Use a pairing code.':'Local host connection unavailable.');else res.destroy()});
   upstream.end(body);
  }
 }
 if(process.argv[1]===fileURLToPath(import.meta.url)){
  const origin=process.env.SUPER_MOBILE_PRIVATE_ORIGIN,allowedTailscaleLogin=process.env.SUPER_MOBILE_TAILSCALE_LOGIN;
+ // tailscale serve reaches this front on a Unix socket only this user (and root, as tailscaled) can open: on a TCP
+ // port any process on the machine could send a made-up Tailscale login header. The gateway's code-free listener
+ // is a socket beside its session file.
+ const state=process.env.XDG_STATE_HOME||join(homedir(),'.local/state');
+ const ownerSocket=process.env.SUPER_MOBILE_OWNER_SOCKET||join(state,'super/mobile/owner.sock');
+ // His phone's tailnet addresses, comma-separated (tailscale status --json). Unset: no device connects without a code.
+ const ownerDevices=(process.env.SUPER_MOBILE_OWNER_DEVICES??'').split(',').map(a=>a.trim()).filter(Boolean);
+ const runtime=process.env.XDG_RUNTIME_DIR,frontSocket=process.env.SUPER_MOBILE_FRONT_SOCKET||(runtime?join(runtime,'super-mobile','front.sock'):null);
+ if(!frontSocket)throw Error('Set XDG_RUNTIME_DIR or SUPER_MOBILE_FRONT_SOCKET for the private socket.');
  if(!origin||!allowedTailscaleLogin)throw Error('Configure the exact private origin and owner identity.');
- createConnector({origin,allowedTailscaleLogin}).listen(4320,'127.0.0.1',()=>console.log('Private mobile connector listening on loopback.'));
+ // SUPER_MOBILE_ACCESS_LOG=1: one line per request (method, path, status, time, whether a login came, app or
+ // browser) to stdout, for finding where a phone stops. Never a cookie, a body, a code or the login itself.
+ const accessLog=process.env.SUPER_MOBILE_ACCESS_LOG==='1'?e=>console.log('request '+JSON.stringify(e)):undefined;
+ const ownerRefused=a=>console.error(`Connecting without a code refused for ${String(a).slice(0,64)||'an unknown address'}: not his phone.`);
+ await listenPrivateSocket(createConnector({origin,allowedTailscaleLogin,ownerSocket,behindServe:true,ownerDevices,ownerRefused,accessLog}),frontSocket);
+ console.log(`Private mobile connector listening on ${frontSocket}.`+(ownerDevices.length?` Connecting without a code: ${ownerDevices.length} address(es) of his phone.`:' Connecting without a code: off (no phone address given).'));
 }

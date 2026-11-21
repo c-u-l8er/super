@@ -34,7 +34,7 @@ Measured on Android 15 with Chrome 124: 14 checks passed. This is Android browse
 
 `mobile/private-connector.mjs` supports the current companion at `/mobile` while retaining the older `/api/observer/snapshot|pair|logout` API paths. Current `/api/snapshot|pair|logout` paths reach the same paired gateway. Exact private origin, Tailscale owner identity, loopback backends and strict route checks remain required. UI asset requests do not forward session cookies to the UI backend; private response cookies receive Secure. The connector does not mint codes or expose a renewal/control endpoint.
 
-The private network and Serve configuration must already exist. This connector listens only on loopback port 4320 with `SUPER_MOBILE_PRIVATE_ORIGIN` and `SUPER_MOBILE_TAILSCALE_LOGIN` explicitly configured. The prototype UI remains the fallback for older non-companion routes. Verify with `node --test mobile/test/private-connector.test.mjs mobile/test/gateway.test.mjs`.
+The private network and Serve configuration must already exist. This connector listens only on a private Unix socket (`$XDG_RUNTIME_DIR/super-mobile/front.sock`, 0600 in a 0700 folder; `tailscale serve unix:<that path>`), never a TCP port, with `SUPER_MOBILE_PRIVATE_ORIGIN` and `SUPER_MOBILE_TAILSCALE_LOGIN` explicitly configured. The prototype UI remains the fallback for older non-companion routes. Verify with `node --test mobile/test/private-connector.test.mjs mobile/test/gateway.test.mjs`.
 
 ## Shared conversations (desktop must remain open)
 
