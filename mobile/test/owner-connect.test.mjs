@@ -226,6 +226,29 @@ test('O14 · only his phone connects without a code: serve gives every program o
   assert.throws(()=>createConnector({origin:FRONT,allowedTailscaleLogin:OWNER,behindServe:true,ownerSocket:'/x',ownerDevices:['iphone-12-mini']}),/Tailscale address/);
 });
 
+test('O15 · through the front, the page and every file it loads arrive: one missing import stops the whole page',async t=>{
+  const port=await freePort(),origin=`http://127.0.0.1:${port}`,dir=temp(t);
+  const server=createGateway({origin,pairingCode:CODE,snapshot:WORLD});await listen(t,server,port);
+  const ownerSocket=join(dir,'m','owner.sock');await listenPrivateSocket(server.ownerServer,ownerSocket);closing(t,server.ownerServer);
+  // Nothing listens at the UI address, so a file the front does not pass to the gateway fails, as on the PX13.
+  const connector=createConnector({origin:FRONT,observerOrigin:origin,uiOrigin:`http://127.0.0.1:${await freePort()}`,allowedTailscaleLogin:OWNER,ownerSocket,behindServe:true,ownerDevices:[PHONE]});
+  const frontSocket=join(dir,'f','front.sock');await listenPrivateSocket(connector,frontSocket);closing(t,connector);
+  const get=path=>new Promise((resolve,reject)=>{const req=http.request({socketPath:frontSocket,path,headers:{Host:'localhost','X-Forwarded-Host':new URL(FRONT).host,'X-Forwarded-For':PHONE,'Tailscale-User-Login':OWNER}},res=>{const c=[];res.on('data',x=>c.push(x));res.on('end',()=>resolve({status:res.statusCode,text:Buffer.concat(c).toString('utf8')}));});req.on('error',reject);req.end();});
+  const seen=new Map(),queue=['/mobile','/sw.js'];
+  while(queue.length){
+    const path=queue.shift();if(seen.has(path))continue;
+    const r=await get(path);seen.set(path,r.status);if(r.status!==200)continue;
+    const found=[];
+    if(path==='/mobile')for(const m of r.text.matchAll(/<(?:script|link)\b[^>]*?\b(?:src|href)="([^"]+)"/g))found.push(m[1]);
+    if(path.endsWith('.js'))for(const m of r.text.matchAll(/(?:\b(?:import|export)\b[^'"`;]*?\bfrom\s*|\bimport\s*\(?\s*)['"]([^'"]+)['"]/g))found.push(m[1]);
+    if(path.endsWith('.webmanifest'))for(const icon of JSON.parse(r.text).icons??[])found.push(icon.src);
+    for(const f of found){const u=new URL(f,'https://x'+path);if(u.origin==='https://x')queue.push(u.pathname);}
+  }
+  const failed=[...seen].filter(([,status])=>status!==200);
+  assert.deepEqual(failed,[],'every file the page loads comes through the front');
+  for(const p of ['/app.js','/references.js','/waiting.js','/style.css','/manifest.webmanifest','/icon-512.png'])assert.ok(seen.has(p),`the page loads ${p}`);
+});
+
 test('O11 · a private socket: a 0700 folder of ours, a 0600 socket, only our own old socket replaced',async t=>{
   const d=temp(t),open=join(d,'open');mkdirSync(open,{mode:0o755});chmodSync(open,0o755);
   await assert.rejects(listenPrivateSocket(http.createServer(),join(open,'s.sock')),/not private to this user/);

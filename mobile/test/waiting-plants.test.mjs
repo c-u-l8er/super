@@ -74,6 +74,9 @@ export const PLANTS=[
   ['the request log never holds the login','private-connector.mjs',[["identity:secure?(req.headers['tailscale-user-login']?'present':'absent'):'n/a',","identity:secure?(req.headers['tailscale-user-login']??'absent'):'n/a',"]],OWNER,'O7'],
   // Reached the way tailscale serve reaches a Unix socket (Codex review 3, finding 1).
   ['started behind tailscale serve','private-connector.mjs',[["ownerSocket,behindServe:true,ownerDevices,","ownerSocket,ownerDevices,"]],OWNER,'O7'],
+  // Every file the page loads comes through the front (his phone stopped on /references.js, 21 Nov 16:45).
+  ['the front passes references.js','private-connector.mjs',[["['/references.js','/references.js'],",""]],OWNER,'O15'],
+  ['the front passes waiting.js','private-connector.mjs',[["['/waiting.js','/waiting.js'],",""]],OWNER,'O15'],
   // Only his phone connects without a code (the main-side session's live check of d51cd07).
   ['only his phone','private-connector.mjs',[["if(owner&&!devices.has(sourceOf(req))){","if(false){"]],OWNER,'O14'],
   ["his phone's exact address",'private-connector.mjs',[["if(owner&&!devices.has(sourceOf(req))){","if(owner&&![...devices].some(a=>sourceOf(req).includes(a))){"]],OWNER,'O14'],
