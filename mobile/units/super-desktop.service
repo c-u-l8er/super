@@ -1,0 +1,22 @@
+[Unit]
+Description=Super desktop cockpit, which starts the mobile gateway on 127.0.0.1:4318
+Documentation=file://%h/build/super-review-content/mobile/README.md
+# A window on his GNOME desktop: it starts when he logs in there (the display and its key come from that session)
+# and stops when he logs out.
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/build/super-review-content
+Environment=SUPER_MOBILE_PANEL=0 SUPER_ROAD=0 LANG=en_US.UTF-8
+Environment=PATH=%h/.asdf/shims:%h/.cargo/bin:%h/.nvm/versions/node/v25.2.1/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=%h/build/super-review-content/mobile/start-local.sh
+# A crash, or a start in the moment before the display opens, is tried again; a clean exit (status 0) is not.
+Restart=on-failure
+RestartSec=5s
+RestartSteps=5
+RestartMaxDelaySec=2min
+
+[Install]
+WantedBy=graphical-session.target
