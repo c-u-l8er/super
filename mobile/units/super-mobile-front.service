@@ -1,0 +1,24 @@
+[Unit]
+Description=Super Mobile: private HTTPS front on a private Unix socket (for tailscale serve)
+Documentation=file://%h/build/super-review-content/mobile/README.md
+# Keep trying while Tailscale comes up after a boot: the start step refuses until it can read his phone.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+WorkingDirectory=%h/build/super-review-content
+Environment=SUPER_MOBILE_NODE=%h/.nvm/versions/node/v25.2.1/bin/node
+Environment=SUPER_MOBILE_PRIVATE_ORIGIN=https://px13.tail988e95.ts.net
+Environment=SUPER_MOBILE_FRONT_SOCKET=%t/super-mobile/front.sock
+# His phone's MagicDNS label. Its addresses and his login are read from Tailscale at each start, never written here.
+Environment=SUPER_MOBILE_OWNER_NODE=iphone-12-mini
+Environment=SUPER_MOBILE_ACCESS_LOG=1
+ExecStart=%h/build/super-review-content/mobile/start-private-front.sh
+UMask=0077
+Restart=on-failure
+RestartSec=2s
+RestartSteps=6
+RestartMaxDelaySec=2min
+
+[Install]
+WantedBy=default.target

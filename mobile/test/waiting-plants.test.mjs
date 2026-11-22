@@ -7,7 +7,7 @@ import {tmpdir} from 'node:os';import {join} from 'node:path';import {spawn} fro
 import {fileURLToPath} from 'node:url';
 
 const ROOT=fileURLToPath(new URL('../../',import.meta.url));
-const FEED='waiting-feed.test.mjs',PUSH='push.test.mjs',ALERTS='waiting-alerts.test.mjs',GATE='waiting-gateway.test.mjs',PHONE='phone-waiting.test.mjs',OWNER='owner-connect.test.mjs';
+const FEED='waiting-feed.test.mjs',PUSH='push.test.mjs',ALERTS='waiting-alerts.test.mjs',GATE='waiting-gateway.test.mjs',PHONE='phone-waiting.test.mjs',OWNER='owner-connect.test.mjs',BOOT='boot-units.test.mjs';
 // [what is switched off, file, [[text, replacement], ...], the law file, the law that must catch it]
 export const PLANTS=[
   ['quiet hours','waiting.mjs',[["if(quiet(c,ms))return null;","if(false)return null;"]],FEED,'W6'],
@@ -97,6 +97,29 @@ export const PLANTS=[
   ['no connecting by itself after Disconnect','ui/app.js',[["if(!asked&&(stayOut.get()||","if(!asked&&(false||"]],OWNER,'O9'],
   ['30 seconds between tries by itself','ui/app.js',[["||Date.now()-ownerTried<30_000))return;","))return;"]],OWNER,'O10'],
   ['only at the private address (page)','ui/app.js',[["const ownerPossible=()=>location.protocol==='https:';","const ownerPossible=()=>true;"]],OWNER,'O10'],
+  // Coming back by itself after a restart, his login and phone read at each start (boot-units.test.mjs).
+  ['only a running Tailscale','tailnet-owner.mjs',[["if(status?.BackendState!=='Running')throw","if(false)throw"]],BOOT,'B2'],
+  ['exactly one phone','tailnet-owner.mjs',[["if(found.length!==1)throw","if(!found.length)throw"]],BOOT,'B3'],
+  ["a phone in this machine's tailnet",'tailnet-owner.mjs',[["String(p?.DNSName??'').toLowerCase().replace(/\\.$/,'')===name","String(p?.DNSName??'').toLowerCase().split('.')[0]===node"]],BOOT,'B3'],
+  ['his own phone','tailnet-owner.mjs',[["if(phone.UserID!==self.UserID)throw","if(false)throw"]],BOOT,'B4'],
+  ['an untagged phone','tailnet-owner.mjs',[["if(phone.Tags?.length)throw","if(false)throw"]],BOOT,'B4'],
+  ['an untagged machine','tailnet-owner.mjs',[["if(!self||self.Tags?.length)throw","if(!self)throw"]],BOOT,'B4'],
+  ['a login name that is one address','tailnet-owner.mjs',[["||!/^[^\\s@\\p{Cc}]+@[^\\s@\\p{Cc}]+$/u.test(login)",""]],BOOT,'B4'],
+  ["never this machine's own address",'tailnet-owner.mjs',[["if(own.has(a.toLowerCase()))throw","if(false)throw"]],BOOT,'B5'],
+  ["only Tailscale's ranges",'tailnet-owner.mjs',[["if(!tailnetV4(a)&&!tailnetV6(a))throw","if(false)throw"]],BOOT,'B5'],
+  ['100.64.0.0/10, not all of 100/8','tailnet-owner.mjs',[["return x===100&&y>=64&&y<=127;","return x===100;"]],BOOT,'B5'],
+  ['IPv6 in the form serve stamps','tailnet-owner.mjs',[["/^fd7a:115c:a1e0:[0-9a-f:]*$/.test(a)","/^fd7a:115c:a1e0:/i.test(a)"]],BOOT,'B5'],
+  ['at most four addresses','tailnet-owner.mjs',[["||devices.length>4",""]],BOOT,'B5'],
+  ["the origin is this machine's name",'tailnet-owner.mjs',[["if(origin!==`https://${here}`)throw","if(false)throw"]],BOOT,'B6'],
+  ['a refusal never quotes the status','tailnet-owner.mjs',[["let status;try{status=JSON.parse(stdout);}catch{throw Error('tailscale status gave no JSON.');}","const status=JSON.parse(stdout);"]],BOOT,'B7'],
+  ['the start step passes his phone','start-private-front.sh',[['export SUPER_MOBILE_TAILSCALE_LOGIN="$login" SUPER_MOBILE_OWNER_DEVICES="$devices"','export SUPER_MOBILE_TAILSCALE_LOGIN="$login"']],BOOT,'B8'],
+  ['an absolute node','start-private-front.sh',[['[[ "$node" == /* && -x "$node" ]]','[[ -n "$node" ]]']],BOOT,'B8'],
+  ['the front starts at boot','units/super-mobile-front.service',[["WantedBy=default.target","WantedBy=graphical-session.target"]],BOOT,'B9'],
+  ['the front keeps trying after a boot','units/super-mobile-front.service',[["StartLimitIntervalSec=0","StartLimitIntervalSec=10s"]],BOOT,'B9'],
+  ['the front is private','units/super-mobile-front.service',[["UMask=0077","UMask=0022"]],BOOT,'B9'],
+  ['no login in the unit','units/super-mobile-front.service',[["Environment=SUPER_MOBILE_ACCESS_LOG=1","Environment=SUPER_MOBILE_ACCESS_LOG=1\nEnvironment=SUPER_MOBILE_TAILSCALE_LOGIN=owner@example.com"]],BOOT,'B9'],
+  ['the desktop waits for his login','units/super-desktop.service',[["WantedBy=graphical-session.target","WantedBy=default.target"]],BOOT,'B10'],
+  ['the desktop stops when he logs out','units/super-desktop.service',[["PartOf=graphical-session.target\n",""]],BOOT,'B10'],
 ];
 
 function run(cwd,file){

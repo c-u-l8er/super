@@ -36,6 +36,15 @@ Measured on Android 15 with Chrome 124: 14 checks passed. This is Android browse
 
 The private network and Serve configuration must already exist. This connector listens only on a private Unix socket (`$XDG_RUNTIME_DIR/super-mobile/front.sock`, 0600 in a 0700 folder; `tailscale serve unix:<that path>`), never a TCP port, with `SUPER_MOBILE_PRIVATE_ORIGIN` and `SUPER_MOBILE_TAILSCALE_LOGIN` explicitly configured. The prototype UI remains the fallback for older non-companion routes. Verify with `node --test mobile/test/private-connector.test.mjs mobile/test/gateway.test.mjs`.
 
+## Coming back after a restart (the PX13)
+
+Two user units in `mobile/units/`, installed in `~/.config/systemd/user/` beside the alert units:
+
+- `super-desktop.service` runs `start-local.sh`, so the desktop cockpit starts the gateway on 127.0.0.1:4318. It is a window on his GNOME desktop, so it is wanted by `graphical-session.target`: it starts when he logs in there, takes the display and its key from that session, and stops when he logs out. A failed start is tried again; a clean exit is not.
+- `super-mobile-front.service` runs `start-private-front.sh`, which reads his Tailscale login and his phone's tailnet addresses from `tailscale status --json` (`tailnet-owner.mjs`) and then starts `private-connector.mjs` on its socket. Neither value is written into the unit or any file. His phone is the one node of his own, untagged, named `SUPER_MOBILE_OWNER_NODE` in this machine's tailnet; it never shares an address with this machine. The origin must be this machine's own MagicDNS name. Anything else refuses, and the unit tries again with a growing wait (it starts at boot, as he lingers, while Tailscale may still be coming up).
+
+Install: copy both into `~/.config/systemd/user/`, `systemctl --user daemon-reload`, then `systemctl --user enable super-desktop.service super-mobile-front.service`. `tailscale serve` (443 to `unix:$XDG_RUNTIME_DIR/super-mobile/front.sock`) keeps its own setting. Verify with `node --test mobile/test/boot-units.test.mjs`.
+
 ## Shared conversations (desktop must remain open)
 
 Expo and the browser companion show the desktop’s existing bot identities and conversation history, pinned/recent lists, editable titles, shared drafts, task links in Expo, and public reply progress. Opening a conversation on the phone also selects it on desktop. This is one shared active conversation, not independent concurrent provider sessions. Choose/connect a provider on desktop; enter its exact connected model on the phone before sending. Model drift refuses the send. Attachments and proposal application remain on desktop.
